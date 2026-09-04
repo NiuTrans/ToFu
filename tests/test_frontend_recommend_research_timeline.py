@@ -196,6 +196,10 @@ def _run(reader=_READER_SRC):
             ROOT, 'frontend', 'src', 'feature-registry.ts').replace('\\', '/')
         source = source.replace(
             "from '../../feature-registry';", f'from {json.dumps(registry)};')
+        html_safety = os.path.join(
+            ROOT, 'frontend', 'src', 'html-safety.ts').replace('\\', '/')
+        source = source.replace(
+            "from '../../html-safety';", f'from {json.dumps(html_safety)};')
         # Bridge the module-private feature registry onto the jsdom window,
         # mirroring how main.ts injects the production service table. Without
         # the connection the harness cannot see any installed global owner.

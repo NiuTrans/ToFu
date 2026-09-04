@@ -31,15 +31,15 @@ logger = get_logger(__name__)
 class CacheState:
     """Tracks the state of the prompt cache for a conversation.
 
-    Stores hashes of system prompt, tools, and message count so we can
-    detect what changed between turns.  Does NOT hash message content
-    because micro-compact legitimately mutates older messages — hashing
-    content would produce false positives on every round.
+    Stores system/tool hashes and one bounded source-field fallback so we can
+    detect what changed between turns. Provider-bound wire evidence remains
+    authoritative; compaction explicitly suppresses fallback comparisons so a
+    legitimate lifecycle rewrite is never reported as an ordinary mutation.
 
     Extended in v2:
       - per_tool_hashes: per-tool hash for diffing which tool changed
-      - prefix_content_hash: hash of messages in the cache prefix
-        (only used for mutation detection, NOT for break detection)
+      - prefix_field_hashes: per-message fallback mutation evidence used only
+        when authoritative provider-bound wire capture is unavailable
       - session-level aggregate stats (total reads/writes/breaks)
     """
     __slots__ = (
@@ -50,8 +50,7 @@ class CacheState:
         'compaction_pending',
         # v2: detailed diagnostics
         'per_tool_hashes',
-        'prefix_content_hash',
-        'prefix_content_count',
+        'prefix_field_count',
         'prefix_field_hashes',
         # Authoritative post-translation wire fingerprint (see wire_fingerprint.py)
         'wire_fp', 'wire_static', 'wire_system', 'wire_markers', 'wire_bytes',
@@ -86,12 +85,13 @@ class CacheState:
         self.cold_streak: int = 0
         # v2 fields
         self.per_tool_hashes: dict[str, str] = {}  # tool_name → hash
-        self.prefix_content_hash: str = ''
-        self.prefix_content_count: int = 0
-        # Per-message, per-field prefix hashes (precise culprit attribution).
-        self.prefix_field_hashes: list[dict] = []
+        self.prefix_field_count: int = 0
+        # One compact, fixed-width process-local fallback baseline;
+        # authoritative wire evidence remains primary.
+        self.prefix_field_hashes: list[tuple[int | None, ...]] = []
         # Authoritative post-translation wire fingerprint from the PREVIOUS
-        # round (list of per-msg canonical entries) + the static-floor hash.
+        # round (list of per-msg process-local canonical entries) + the
+        # stable-format static-floor hash.
         # When present, these are the ground truth for prefix-mutation
         # attribution — they reflect the actual bytes sent, not a client-side
         # reconstruction. See lib/tasks_pkg/wire_fingerprint.py.
@@ -111,8 +111,9 @@ class CacheState:
         # wire_fingerprint.markers_regressed. Folded into detect_cache_break so
         # a dropped breakpoint can never be laundered into "server-side PROVEN".
         self.wire_markers: dict | None = None
-        # TRUE-byte per-message prefix hashes from the PREVIOUS round
-        # ([{'key','h'}]). canonical_messages (wire_fp) is LOSSY — it strips
+        # TRUE-byte per-message process-local integer fingerprints from the
+        # PREVIOUS round ([{'key','h'}]). canonical_messages (wire_fp) is
+        # LOSSY — it strips
         # cache_control, collapses str↔block, and skips reasoning_details — so
         # "wire_fp identical" does NOT prove the SERIALIZED BYTES were identical.
         # This hashes json.dumps(msg) (only cache_control stripped) so the
@@ -121,8 +122,9 @@ class CacheState:
         # (reasoning_details rebuild / same-role merge / protocol switch)
         # actually changed the wire. See wire_fingerprint.wire_byte_prefix.
         self.wire_bytes: list | None = None
-        # FIELD-GRANULAR true-byte hashes ([{'key','fields':{field:md5}}]) from
-        # the PREVIOUS round. wire_bytes names only THAT a message's bytes
+        # FIELD-GRANULAR process-local true-byte fingerprints
+        # ([{'key','fields':{field:int}}]) from the PREVIOUS round. wire_bytes
+        # names only THAT a message's bytes
         # changed; this names the EXACT top-level field (reasoning_details /
         # tool_calls / content / __order__) so a canonical-invisible <bytes>
         # divergence is logged with a proven field, not a guessed category.

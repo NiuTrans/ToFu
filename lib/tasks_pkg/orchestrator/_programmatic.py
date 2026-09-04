@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from lib.agent_core.events import EventType, build_event, now_ms
+from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event
 from lib.tools.programmatic import (
     PROGRAMMATIC_MAX_CALLS,
@@ -18,6 +19,7 @@ from lib.tools.programmatic import (
 
 _PROGRAM_ROUND_BASE = 8_800_000
 _CONTENT_UNSET = object()
+logger = get_logger(__name__)
 
 
 def _append_program_event(task: dict[str, Any], event: dict[str, Any]) -> None:
@@ -36,7 +38,14 @@ def _append_program_event(task: dict[str, Any], event: dict[str, Any]) -> None:
 
 
 def _program_call_id(item: dict[str, Any]) -> str:
-    return str(item.get('call_id') or item.get('id') or '')
+    # ``id`` is a provider item identity, while ``call_id`` correlates a
+    # program/output pair. Older adapters exposed only ``id``, so retain that
+    # fallback solely when the correlation field is absent. An explicitly
+    # blank ``call_id`` is our fail-closed marker for an orphan/ambiguous
+    # output and must never fall back to the unrelated item id.
+    if 'call_id' in item:
+        return str(item.get('call_id') or '')
+    return str(item.get('id') or '')
 
 
 def _next_round_num(rounds: list[dict[str, Any]]) -> int:
@@ -60,16 +69,45 @@ def _insert_before_children(rounds: list[dict[str, Any]], parent: dict[str, Any]
 
 def _program_runs(task: dict[str, Any]) -> list[dict[str, Any]]:
     runs = task.setdefault('programRuns', [])
-    return runs if isinstance(runs, list) else []
+    if isinstance(runs, list):
+        return runs
+    # Derived runtime metadata must remain writable even if a legacy/imported
+    # snapshot carried the wrong shape. Do not append into a detached list.
+    task['programRuns'] = []
+    return task['programRuns']
+
+
+def _is_native_program_run(run: Any) -> bool:
+    return (isinstance(run, dict)
+            and str(run.get('source') or 'openai_ptc') == 'openai_ptc')
+
+
+def _fresh_program_call_id(task: dict[str, Any], preferred: str) -> str:
+    """Return a task-unique canonical parent id for one new program."""
+    used = {
+        str(run.get('callId') or '')
+        for run in _program_runs(task) if isinstance(run, dict)
+    }
+    preferred = str(preferred or '').strip()
+    base = preferred[:80] or 'program'
+    ordinal = len(used) + 1
+    while True:
+        candidate = f'{base}__tofu_ptc_{ordinal}'
+        if candidate not in used:
+            return candidate
+        ordinal += 1
 
 
 def _ensure_program_run(task: dict[str, Any], call_id: str, *,
-                        llm_round: int | None = None) -> dict[str, Any]:
+                        llm_round: int | None = None,
+                        provider_call_id: str = '') -> dict[str, Any]:
     for run in _program_runs(task):
-        if isinstance(run, dict) and run.get('callId') == call_id:
+        if (_is_native_program_run(run)
+                and run.get('callId') == call_id):
             if llm_round is not None and run.get('llmRound') is None:
                 run['llmRound'] = llm_round
             run.setdefault('source', 'openai_ptc')
+            run.setdefault('providerCallId', provider_call_id or call_id)
             # Older checkpoints predate output-budget telemetry.  Deriving
             # defaults from measured children keeps replay idempotent.
             children = run.get('childCalls') or ()
@@ -86,6 +124,7 @@ def _ensure_program_run(task: dict[str, Any], call_id: str, *,
             return run
     run = {
         'callId': call_id,
+        'providerCallId': provider_call_id or call_id,
         'source': 'openai_ptc',
         'llmRound': llm_round,
         'code': '',
@@ -110,6 +149,136 @@ def _ensure_program_run(task: dict[str, Any], call_id: str, *,
     }
     _program_runs(task).append(run)
     return run
+
+
+def _native_runs_matching_provider_id(
+    task: dict[str, Any], provider_call_id: str,
+) -> list[dict[str, Any]]:
+    return [
+        run for run in _program_runs(task)
+        if _is_native_program_run(run)
+        and provider_call_id in {
+            str(run.get('callId') or ''),
+            str(run.get('providerCallId') or run.get('callId') or ''),
+        }
+    ]
+
+
+def _canonicalize_programmatic_ids(
+    task: dict[str, Any],
+    assistant_msg: dict[str, Any],
+    items: list[dict[str, Any]],
+    *,
+    llm_round: int,
+) -> None:
+    """Make provider-recycled program ids task-unique before dispatch.
+
+    A program ``call_id`` is an opaque correlation token. Some gateways reuse
+    positional ids in later responses, so it cannot key execution budgets or
+    durable UI parents globally. New program items claim a unique canonical
+    id; outputs resolve to the newest matching active occurrence. A child
+    caller must resolve to exactly one active occurrence or is made malformed
+    so the authorization gate rejects it instead of guessing.
+    """
+    claimed_starts: set[str] = set()
+    starts_by_provider_id: dict[str, list[str]] = {}
+
+    for item in items:
+        if item.get('type') != 'program':
+            continue
+        provider_call_id = _program_call_id(item)
+        if not provider_call_id:
+            continue
+        replay_run = next((
+            run for run in _program_runs(task)
+            if _is_native_program_run(run)
+            and str(run.get('callId') or '') == provider_call_id
+            and run.get('llmRound') == llm_round
+            and provider_call_id not in claimed_starts
+        ), None)
+        if replay_run is not None:
+            canonical_id = provider_call_id
+        else:
+            canonical_id = _fresh_program_call_id(task, provider_call_id)
+            _ensure_program_run(
+                task, canonical_id, llm_round=llm_round,
+                provider_call_id=provider_call_id)
+        item['call_id'] = canonical_id
+        claimed_starts.add(canonical_id)
+        starts_by_provider_id.setdefault(provider_call_id, []).append(
+            canonical_id)
+
+    claimed_outputs: set[str] = set()
+    for item in items:
+        if item.get('type') != 'program_output':
+            continue
+        provider_call_id = _program_call_id(item)
+        if not provider_call_id:
+            continue
+        all_matches = _native_runs_matching_provider_id(
+            task, provider_call_id)
+        matches = [
+            run for run in all_matches
+            if str(run.get('callId') or '') not in claimed_outputs
+        ]
+        active = [run for run in matches
+                  if str(run.get('status') or 'running') == 'running']
+        canonical_exact = [
+            run for run in matches
+            if str(run.get('callId') or '') == provider_call_id
+            and str(run.get('providerCallId') or '') != provider_call_id
+        ]
+        selected = (
+            canonical_exact[0] if len(canonical_exact) == 1
+            else active[0] if len(active) == 1
+            else matches[0] if len(matches) == 1
+            else None
+        )
+        if selected is not None:
+            canonical_id = str(selected.get('callId') or '')
+            item['call_id'] = canonical_id
+            claimed_outputs.add(canonical_id)
+        else:
+            # No output may manufacture its own program parent. This covers
+            # genuine orphans, ambiguous recycled provider ids, and a second
+            # output occurrence after the first already claimed the only
+            # matching run. Blank the explicit correlation field so both the
+            # reconciler and outbound replay fail closed; ``_program_call_id``
+            # deliberately will not fall back to an item's unrelated ``id``.
+            item['call_id'] = ''
+            logger.warning(
+                '[PTC] rejected unbound program output task=%s '
+                'provider_call_id=%s candidates=%d available=%d active=%d',
+                str(task.get('id') or '')[:8], provider_call_id,
+                len(all_matches), len(matches), len(active))
+
+    for tool_call in assistant_msg.get('tool_calls') or ():
+        if not isinstance(tool_call, dict):
+            continue
+        caller = tool_call.get('caller')
+        if not isinstance(caller, dict) or caller.get('type') != 'program':
+            continue
+        provider_call_id = str(caller.get('caller_id') or '')
+        candidates = starts_by_provider_id.get(provider_call_id, [])
+        if not candidates:
+            candidates = [
+                str(run.get('callId') or '')
+                for run in _native_runs_matching_provider_id(
+                    task, provider_call_id)
+                if str(run.get('status') or 'running') == 'running'
+            ]
+        # Copy before rewriting: providers may reuse one caller mapping object
+        # across several parsed calls.
+        canonical_caller = dict(caller)
+        canonical_caller['caller_id'] = (
+            candidates[0] if len(candidates) == 1 else '')
+        tool_call['caller'] = canonical_caller
+        if len(candidates) != 1:
+            logger.warning(
+                '[PTC] rejected ambiguous program caller task=%s '
+                'provider_call_id=%s candidates=%d',
+                str(task.get('id') or '')[:8], provider_call_id,
+                len(candidates))
 
 
 def _upsert_child(run: dict[str, Any], call_id: str, name: str
@@ -180,6 +349,7 @@ def project_program_run(task: dict[str, Any], run: dict[str, Any], *,
             'roundNum': _next_round_num(rounds),
             'llmRound': llm_round,
             'status': 'searching',
+            'attentionKind': 'important',
             '_programSynthetic': True,
             '_programCallId': call_id,
             'programCode': str(run.get('code') or ''),
@@ -273,12 +443,17 @@ def reject_programmatic_call(task: dict[str, Any], tc: dict[str, Any],
     caller = tc.get('caller')
     if not isinstance(caller, dict) or caller.get('type') != 'program':
         return None
-    parent_id = str(caller.get('caller_id') or '')
+    raw_parent_id = caller.get('caller_id')
+    parent_id = (
+        raw_parent_id.strip()
+        if isinstance(raw_parent_id, str) else ''
+    )
     call_id = str(tc.get('id') or '')
     if not parent_id:
         return (
             '[SYSTEM: PROGRAM TOOL CALL DID NOT RUN]\n'
-            'The program-issued tool call is missing its required caller_id. '
+            'The program-issued tool call is missing a non-empty string '
+            'caller_id. '
             'Return a structured failure; do not retry this malformed call.',
             {'kind': 'programmatic_invalid_caller',
              'attempted': tool_name, 'programCallId': ''},
@@ -426,6 +601,8 @@ def reconcile_programmatic_items(task: dict[str, Any], assistant_msg: Any,
         return 0
     items = [item for item in assistant_msg.get('_responses_items') or ()
              if isinstance(item, dict)]
+    _canonicalize_programmatic_ids(
+        task, assistant_msg, items, llm_round=llm_round)
     programs = [item for item in items if item.get('type') == 'program']
     outputs = [item for item in items if item.get('type') == 'program_output']
     if not programs and not outputs:

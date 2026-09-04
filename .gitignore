@@ -81,7 +81,7 @@ __pycache__/
 # tests/test_gitignore_covers_export_excludes.py asserts the two lists stay in
 # sync so this gap cannot silently reopen. Documented keepers stay tracked:
 #   scripts/gen_desktop_icons.py (CI icon gen), export.py, CLAUDE.md,
-#   static/provider_templates/yourprovider.json (functional internal template),
+#   static/provider_templates/meituan.json (functional internal template),
 #   scripts/package_extension.sh (builds the store upload zip; the SHIPPED
 #     docs/chrome-web-store/ kit tells the reader to run it, so a clean clone
 #     without it makes that instruction a dead end),
@@ -118,7 +118,10 @@ __pycache__/
 !/scripts/png_to_svg.py
 !/scripts/build_frontend.mjs
 !/scripts/check_i18n_usage.mjs
+!/scripts/check_lazy_runtime_bindings.mjs
+!/scripts/check_runtime_reachability.mjs
 !/scripts/compose_frontend_runtime.mjs
+!/scripts/runtime_action_analysis.mjs
 !/scripts/compose_frontend_styles.mjs
 !/scripts/frontend_budget.py
 # scripts/check_helm_render.py is the CI semantic gate for the rendered chart.
@@ -144,6 +147,7 @@ __pycache__/
 !/tests/test_frontend_browser_storage_vite.py
 !/tests/test_frontend_authoritative_composer.py
 !/tests/test_frontend_conversation_surface_vite.py
+!/tests/test_frontend_conversation_startup.py
 !/tests/test_frontend_model_catalog_vite.py
 !/tests/test_frontend_paper_podcast_runtime_vite.py
 !/tests/test_frontend_paper_report_runtime_vite.py
@@ -267,8 +271,8 @@ docs/解答260505_v2.pdf
 
 # ── CWD pollution: stray dirs created by eval/agent harnesses that wrote
 #    output to a path RELATIVE to the repo root instead of an absolute one
-#    (e.g. INS/your-username/..., mnt/dolphinfs/...; the harness stripped the
-#    leading "/" and re-created our own abs path as a nested tree). Not part
+#    (e.g. an absolute build-farm path whose leading "/" got stripped and
+#    re-created as a nested tree under the repo). Not part
 #    of the app — see the 2026-06 "unrelated folders polluting the tree" note. ──
 /INS/
 /mnt/

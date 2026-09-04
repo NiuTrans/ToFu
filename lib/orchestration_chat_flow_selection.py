@@ -7,8 +7,6 @@ nothing about threads, tasks, ``FlowExecutor`` or event translation.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable
 from typing import Final
 
 from lib.log import get_logger
@@ -27,37 +25,22 @@ CHAT_FLOW_ENTRY_NONE: Final = ''
 CHAT_FLOW_BUILTINS: Final = frozenset({'autopilot'})
 
 
-def _flag_on(name: str) -> bool:
-    value = os.environ.get(name, '0').strip().lower()
-    return value in ('1', 'true', 'yes', 'on')
-
-
-def autopilot_via_flow_enabled() -> bool:
-    """Return whether the autopilot-mode toggle uses the Flow engine."""
-    return _flag_on('TOFU_AUTOPILOT_VIA_FLOW')
-
-
 def select_chat_flow_entry(
     config: dict | None,
-    *,
-    autopilot_enabled: bool | Callable[[], bool],
 ) -> str:
     """Project chat configuration into one engine entry kind.
 
-    Explicit selections always win and are their own opt-in.  The goal-mode
-    toggle uses the Flow engine only when its rollout flag is enabled.
+    Explicit selections always win. Goal Mode has one execution owner:
+    FlowExecutor. There is no rollout branch back into the retired standalone
+    virtual-user state machine.
     """
     config = config or {}
     if (config.get('flowDefinition') or config.get('flowBuiltin')
             or config.get('flowId')):
         return CHAT_FLOW_ENTRY_SELECTED
-    if config.get('autopilot') and _enabled(autopilot_enabled):
+    if config.get('autopilot'):
         return CHAT_FLOW_ENTRY_AUTOPILOT
     return CHAT_FLOW_ENTRY_NONE
-
-
-def _enabled(value: bool | Callable[[], bool]) -> bool:
-    return bool(value() if callable(value) else value)
 
 
 def resolve_chat_flow_definition(
@@ -102,7 +85,6 @@ __all__ = [
     'CHAT_FLOW_ENTRY_AUTOPILOT',
     'CHAT_FLOW_ENTRY_NONE',
     'CHAT_FLOW_ENTRY_SELECTED',
-    'autopilot_via_flow_enabled',
     'resolve_chat_flow_definition',
     'select_chat_flow_entry',
 ]

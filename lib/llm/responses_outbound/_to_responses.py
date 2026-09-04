@@ -42,6 +42,7 @@ import re
 import uuid
 
 from lib.log import get_logger
+from lib.tool_history_pairing import adjacent_tool_call_result_pairs
 
 logger = get_logger(__name__)
 
@@ -171,10 +172,21 @@ def _response_items(msg: dict, *, allow_compaction: bool) -> list[dict]:
         allowed.add('compaction')
     out = []
     for item in msg.get('_responses_items') or ():
-        if isinstance(item, dict) and item.get('type') in allowed:
-            # Shallow-copy the envelope so adding request-local metadata later
-            # can never mutate the persisted conversation row.
-            out.append(dict(item))
+        if not isinstance(item, dict) or item.get('type') not in allowed:
+            continue
+        correlation_id = (
+            item.get('call_id') if 'call_id' in item else item.get('id')
+        )
+        if (item.get('type') in {'program', 'program_output'}
+                and not str(correlation_id or '').strip()):
+            # Reconciliation blanks orphan/ambiguous program correlations.
+            # Replaying one would either make the provider invent a parent or
+            # reject the entire next request. Keep it as local diagnostic
+            # evidence, but never put it back on the execution wire.
+            continue
+        # Shallow-copy the envelope so adding request-local metadata later can
+        # never mutate the persisted conversation row.
+        out.append(dict(item))
     return out
 
 
@@ -567,12 +579,12 @@ def openai_body_to_responses(body: dict, *, profile: str = 'default',
         if cache_key:
             out['prompt_cache_key'] = cache_key
 
-        # Local structured compaction remains the primary path.  Server-side
-        # compaction is a stateless safety net at the same user-approved
-        # economic working-set ceiling on the public Responses API; its opaque
-        # output is captured and replayed by the response translators. Codex's
-        # subscription backend owns compaction itself and does not expose this
-        # public request field, so the codex profile keeps local compaction only.
+        # Server-side rendered-token compaction is the primary L2 path for the
+        # public Responses API; its opaque output is captured and replayed by
+        # the response translators. Local L1 still prunes reconstructible tool
+        # bulk, and local L2 remains the model-window/reactive fallback. Codex's
+        # subscription backend does not expose this public request field, so
+        # the codex profile keeps local compaction authoritative.
         try:
             compact_threshold = int(body.get('_working_set_tokens') or 0)
         except (TypeError, ValueError) as e:
@@ -650,19 +662,25 @@ def _messages_to_input(messages: list, reverse: dict, *,
     items: list = []
     ptc_names = programmatic_tool_names or set()
 
-    # role='tool' carries only call_id. Recover its function name so direct and
-    # programmatic invocations of an opted-in tool share one output contract.
-    call_names: dict[str, str] = {}
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
-            continue
-        for tc in msg.get('tool_calls') or ():
-            if not isinstance(tc, dict):
-                continue
-            call_id = str(tc.get('id') or '')
-            name = str((tc.get('function') or {}).get('name') or '')
-            if call_id and name:
-                call_names[call_id] = name
+    # role='tool' carries only call_id. Recover its function name from the
+    # adjacent owning assistant batch so direct and programmatic invocations
+    # share one output contract. Provider ids are not conversation-global:
+    # positional-id models can reuse ``call_0`` in later rounds.
+    call_name_by_result_object: dict[int, str] = {}
+    call_caller_by_result_object: dict[int, dict] = {}
+    for tool_call, result in adjacent_tool_call_result_pairs(messages):
+        function = tool_call.get('function') or {}
+        name = (str(function.get('name') or '')
+                if isinstance(function, dict) else '')
+        if name:
+            call_name_by_result_object[id(result)] = name
+        caller = tool_call.get('caller')
+        if isinstance(caller, dict):
+            # ``caller`` on role=tool is a protocol-private convenience field
+            # and the generic OpenAI body cleaner removes it.  Recover from
+            # the occurrence-owning assistant call, never from a global ID
+            # map: positional IDs can be recycled in later adjacent runs.
+            call_caller_by_result_object[id(result)] = dict(caller)
 
     program_output_bytes: dict[str, int] = {}
 
@@ -688,14 +706,18 @@ def _messages_to_input(messages: list, reverse: dict, *,
                 msg, allow_compaction=allow_compaction))
 
         if role == 'tool':
-            # Tool results join their call by call_id — the stable identity
-            # (the stream-side item id is only an in-stream index).
+            # Tool results join their call by occurrence inside the adjacent
+            # assistant/result run. The stream-side item id is only an
+            # in-stream index, and call_id is only a run-local queue selector.
             output = (content if isinstance(content, str)
                       else json.dumps(content if content is not None else '',
                                       ensure_ascii=False))
+            caller_present = 'caller' in msg
             caller = msg.get('caller')
+            if not caller_present or caller is None:
+                caller = call_caller_by_result_object.get(id(msg), caller)
             call_id = str(msg.get('tool_call_id') or '')
-            tool_name = call_names.get(call_id, '')
+            tool_name = call_name_by_result_object.get(id(msg), '')
             is_program = (isinstance(caller, dict)
                           and caller.get('type') == 'program')
             if is_program or tool_name in ptc_names:
@@ -722,6 +744,12 @@ def _messages_to_input(messages: list, reverse: dict, *,
             if (isinstance(caller, dict)
                     and caller.get('type') != 'multi_agent'):
                 tool_output['caller'] = dict(caller)
+            elif (caller_present and caller is not None
+                  and not isinstance(caller, dict)):
+                # Never erase malformed attribution into an apparent root
+                # output.  The provider must reject this shape; fresh inbound
+                # calls are independently rejected by the common typed gate.
+                tool_output['caller'] = caller
             items.append(tool_output)
             continue
 
@@ -783,6 +811,10 @@ def _messages_to_input(messages: list, reverse: dict, *,
                         'agent_name': str(caller['agent_name'])}
                 else:
                     function_call['caller'] = dict(caller)
+            elif 'caller' in tc and caller is not None:
+                # Preserve invalid authority metadata instead of promoting a
+                # delegated/program call to a direct root call on replay.
+                function_call['caller'] = caller
             items.append(function_call)
     return items
 

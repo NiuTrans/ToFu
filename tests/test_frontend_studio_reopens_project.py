@@ -67,7 +67,9 @@ HARNESS = textwrap.dedent("""
     const order = [];
     const throwInApply = {throw_in_apply};
     global.projectState = {projectState_js};
-    global.openProjectModal = () => {{ openCount++; order.push('open'); }};
+    global.runtimeScope = {{
+      openProjectModal: () => {{ openCount++; order.push('open'); }},
+    }};
     global._applyChatModeUI = (m) => {{
       order.push('apply');
       if (throwInApply) throw new Error('simulated dial bookkeeping failure');
@@ -145,7 +147,7 @@ def test_NC_open_after_bookkeeping_breaks_when_bookkeeping_throws():
     opens — proving the open-first ordering is load-bearing."""
     fn = _set_chat_mode_fn()
     neutered = fn.replace(
-        "    if (typeof openProjectModal === 'function') openProjectModal();\n"
+        "    runtimeScope.openProjectModal();\n"
         "    if (hasProject) {\n"
         "      try {\n"
         "        _applyChatModeUI('studio');\n"
@@ -161,7 +163,7 @@ def test_NC_open_after_bookkeeping_breaks_when_bookkeeping_throws():
         "      captureActiveConversationSettings();\n"
         "      debugLog('Mode: Studio (project attached)', 'success');\n"
         "    }\n"
-        "    if (typeof openProjectModal === 'function') openProjectModal();\n"
+        "    runtimeScope.openProjectModal();\n"
         "    return;",
     )
     assert neutered != fn, "neuter substitution did not apply"

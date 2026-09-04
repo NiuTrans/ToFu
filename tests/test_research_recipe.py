@@ -4,10 +4,11 @@
 Proven here (pure — the R1–R3 seams are monkeypatched, so no DB / network /
 LLM; only a temp workdir is touched):
 
-  1. FOUR-STAGE GRAPH — build_research_from_direction runs harvest → survey →
-     ideate → evaluate in order, threading the pinned data contract: harvest's folder_id +
+  1. FIVE-STAGE GRAPH — build_research_from_direction runs harvest → survey →
+     ideate → evaluate → publish in order, threading the pinned data contract: harvest's folder_id +
      arxiv_ids reach survey, survey's open_gaps reaches ideate, and the final
-     result carries accepted/rejected/open_gaps/corpus_size.
+     result carries accepted/rejected/open_gaps/corpus_size. Publication makes
+     exactly two repository writes after the evaluated artifact is complete.
 
   2. STAGE DATA CONTRACT — survey receives EXACTLY the folder_id + id list
      harvest produced (asserted via captured call args); ideate receives
@@ -20,8 +21,9 @@ LLM; only a temp workdir is touched):
        ↳ NEUTER: delete the survey checkpoint entry between passes → survey
          re-runs (its seam is called again) while harvest still does not.
 
-  4. NO-REDO — a fully completed job re-invoked does zero work (all four seams
-     called zero times; result served from the checkpoint).
+  4. NO-REDO — a fully completed job re-invoked does zero work (generation,
+     evaluation, and publication seams stay untouched; result comes from the
+     checkpoint).
 
 Run standalone:  python tests/test_research_recipe.py
 Under pytest:    pytest tests/test_research_recipe.py -m unit
@@ -59,6 +61,8 @@ class _Seams:
         self.survey_calls = []
         self.ideate_calls = []
         self.evaluate_calls = []
+        self.persist_survey_calls = []
+        self.persist_ideate_calls = []
         self.harvest_ids = ['2305.11111', '2401.22222', '2402.33333', '2403.44444']
         self.open_gaps = {
             'schema_version': 1, 'open_gaps': [
@@ -69,8 +73,12 @@ class _Seams:
             'surveyed_arxiv_ids': list(self.harvest_ids),
             'stripped_ids': [], 'missing_ids': []}
 
-    def harvest(self, arxiv_ids, *, folder_id, user_id, abort_check=None, on_progress=None):
-        self.harvest_calls.append({'ids': list(arxiv_ids), 'folder_id': folder_id})
+    def harvest(self, arxiv_ids, *, folder_id, user_id, abort_check=None,
+                on_progress=None, titles_by_arxiv_id=None):
+        self.harvest_calls.append({
+            'ids': list(arxiv_ids), 'folder_id': folder_id,
+            'titles': dict(titles_by_arxiv_id or {}),
+        })
         return {'total': len(self.harvest_ids), 'parsed': len(self.harvest_ids),
                 'cache_hits': 0, 'errors': 0,
                 'results': [{'arxivId': a, 'status': 'parsed'} for a in self.harvest_ids]}
@@ -105,6 +113,22 @@ class _Seams:
             'usage': {'calls': 2, 'prompt_tokens': 100},
         }
 
+    def persist_survey(self, direction, lang, survey_md, open_gaps, usage=None,
+                       *, harvest_usage=None, user_id):
+        self.persist_survey_calls.append({
+            'direction': direction, 'lang': lang, 'survey_md': survey_md,
+            'open_gaps': open_gaps, 'usage': usage,
+            'harvest_usage': harvest_usage, 'user_id': user_id,
+        })
+        return True
+
+    def persist_ideate(self, direction, lang, artifact, *, user_id):
+        self.persist_ideate_calls.append({
+            'direction': direction, 'lang': lang, 'artifact': artifact,
+            'user_id': user_id,
+        })
+        return True
+
     def search_arxiv(self, query, max_results=20):
         return [{'arxiv_id': a, 'title': f't{a}'} for a in self.harvest_ids]
 
@@ -115,11 +139,14 @@ def _install(seams, *, fail_ideate=False):
     import lib.research.recipe as rc
     saved = {k: getattr(rc, k) for k in
              ('_harvest_batch', '_build_survey', '_generate_ideas',
-              '_evaluate_result', '_search_arxiv')}
+              '_evaluate_result', '_search_arxiv', '_persist_survey',
+              '_persist_ideate')}
     rc._harvest_batch = seams.harvest
     rc._build_survey = seams.build_survey
     rc._search_arxiv = seams.search_arxiv
     rc._evaluate_result = seams.evaluate
+    rc._persist_survey = seams.persist_survey
+    rc._persist_ideate = seams.persist_ideate
     if fail_ideate:
         def _boom(direction, open_gaps, *, lang, n_ideas, user_id, abort=None):
             seams.ideate_calls.append({'direction': direction, 'open_gaps': open_gaps})
@@ -132,7 +159,7 @@ def _install(seams, *, fail_ideate=False):
 
 # ── Test 1 + 2: graph + data contract ──────────────────────────────────────
 
-def test_four_stage_graph_and_data_contract():
+def test_five_stage_graph_and_data_contract():
     import lib.research.recipe as rc
     seams = _Seams()
     restore = _install(seams)
@@ -140,13 +167,17 @@ def test_four_stage_graph_and_data_contract():
     try:
         res = rc.build_research_from_direction('long-context KV compression', wd,
                                                lang='en', user_id=1, harvest_n=20)
-        # graph ran all four, once each
+        # All five stages ran once; publish owns two repository rows.
         assert len(seams.harvest_calls) == 1, seams.harvest_calls
         assert len(seams.survey_calls) == 1
         assert len(seams.ideate_calls) == 1
         assert len(seams.evaluate_calls) == 1
+        assert len(seams.persist_survey_calls) == 1
+        assert len(seams.persist_ideate_calls) == 1
         # data contract: survey got harvest's folder_id + id list
         folder = seams.harvest_calls[0]['folder_id']
+        assert seams.harvest_calls[0]['titles'] == {
+            arxiv_id: f't{arxiv_id}' for arxiv_id in seams.harvest_ids}
         assert seams.survey_calls[0]['folder_id'] == folder, 'folder_id not threaded'
         assert seams.survey_calls[0]['arxiv_ids'] == seams.harvest_ids, 'id list not threaded'
         # data contract: ideate got survey's open_gaps object
@@ -160,10 +191,12 @@ def test_four_stage_graph_and_data_contract():
         assert res['corpus_size'] == 4 and res['folder_id'] == folder
         assert res['evaluation']['overall_score'] == 4.0
         assert res['usage']['stages']['evaluate']['calls'] == 2
+        assert seams.persist_ideate_calls[0]['artifact']['evaluation'][
+            'overall_score'] == 4.0
     finally:
         restore()
         shutil.rmtree(wd, ignore_errors=True)
-    _ok('4-stage graph runs harvest→survey→ideate→evaluate with frozen artifacts')
+    _ok('5-stage graph publishes two complete rows after evaluated checkpoints')
 
 
 # ── Test 3: crash-resume from first unfinished stage + NEUTER ──────────────
@@ -194,6 +227,8 @@ def test_crash_resume_reruns_only_unfinished_stage():
         assert st['stages'].get('survey', {}).get('ok'), 'survey not checkpointed'
         assert 'ideate' not in st['stages'], 'ideate should NOT be committed after crash'
         assert len(seams.harvest_calls) == 1 and len(seams.survey_calls) == 1
+        assert len(seams.persist_survey_calls) == 0
+        assert len(seams.persist_ideate_calls) == 0
 
         # Pass 2: healthy → ONLY ideate re-runs; harvest+survey resumed from disk.
         seams2 = _Seams()
@@ -206,6 +241,8 @@ def test_crash_resume_reruns_only_unfinished_stage():
         assert len(seams2.survey_calls) == 0, 'survey MUST NOT re-run on resume'
         assert len(seams2.ideate_calls) == 1, 'ideate must re-run (it never finished)'
         assert len(seams2.evaluate_calls) == 1, 'evaluation follows resumed ideate'
+        assert len(seams2.persist_survey_calls) == 1
+        assert len(seams2.persist_ideate_calls) == 1
         assert len(res['accepted']) == 1, 'resumed run should complete ideate'
     finally:
         shutil.rmtree(wd, ignore_errors=True)
@@ -271,10 +308,70 @@ def test_fully_complete_job_redoes_nothing():
         assert len(seams2.harvest_calls) == 0 and len(seams2.survey_calls) == 0 \
             and len(seams2.ideate_calls) == 0 and len(seams2.evaluate_calls) == 0, \
             'completed job must redo nothing'
+        assert len(seams2.persist_survey_calls) == 0 \
+            and len(seams2.persist_ideate_calls) == 0, \
+            'confirmed publication must resume from its checkpoint'
         assert len(res['accepted']) == 1, 'result still served from checkpoint'
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     _ok('fully-complete job re-invoked redoes nothing (served from checkpoint)')
+
+
+def test_publication_failure_retries_without_repeating_model_stages():
+    """A repository outage must spend bounded writes, never another LLM pass."""
+    import lib.research.recipe as rc
+    from lib.production.stages import StageFailed
+
+    wd = tempfile.mkdtemp(prefix='research_publish_retry_')
+    seams = _Seams()
+    restore = _install(seams)
+    failed_idea_publications = []
+
+    def _refuse_ideas(*args, **kwargs):
+        failed_idea_publications.append(True)
+        return False
+
+    rc._persist_ideate = _refuse_ideas
+    try:
+        try:
+            rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
+            raise AssertionError('unconfirmed publication must fail the recipe')
+        except StageFailed as exc:
+            assert exc.stage == 'publish'
+
+        assert len(seams.harvest_calls) == 1
+        assert len(seams.survey_calls) == 1
+        assert len(seams.ideate_calls) == 1
+        assert len(seams.evaluate_calls) == 1
+        assert len(seams.persist_survey_calls) == 1, \
+            'a confirmed row must not be rewritten during the same retry loop'
+        assert len(failed_idea_publications) == 3, \
+            'the unconfirmed row must stay bounded at three attempts'
+        state = _state(wd)['stages']
+        assert all(state.get(name, {}).get('ok') for name in
+                   ('harvest', 'survey', 'ideate', 'evaluate'))
+        assert 'publish' not in state
+    finally:
+        restore()
+
+    seams2 = _Seams()
+    restore2 = _install(seams2)
+    try:
+        result = rc.build_research_from_direction(
+            'dir', wd, lang='en', user_id=1)
+        assert len(result['accepted']) == 1
+        assert len(seams2.harvest_calls) == 0
+        assert len(seams2.survey_calls) == 0
+        assert len(seams2.ideate_calls) == 0
+        assert len(seams2.evaluate_calls) == 0
+        assert len(seams2.persist_survey_calls) == 1
+        assert len(seams2.persist_ideate_calls) == 1
+        assert _state(wd)['stages']['publish']['artifact'] == {
+            'confirmed': True, 'rows': 2}
+    finally:
+        restore2()
+        shutil.rmtree(wd, ignore_errors=True)
+    _ok('publication retry/resume spends no additional model-backed work')
 
 
 # ── Test 5: harvest gate fails on thin corpus ──────────────────────────────
@@ -318,13 +415,14 @@ def test_survey_gate_rejects_an_empty_comparison_matrix():
     assert rc._gate_survey({}, artifact) == []
 
 
-def test_evaluation_failure_is_committed_as_degraded_without_losing_ideas(monkeypatch):
+def test_evaluation_failure_is_published_as_degraded_without_losing_ideas(monkeypatch):
     import lib.research.recipe as rc
 
     persisted = []
     monkeypatch.setattr(
         rc, '_evaluate_result',
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError('judge offline')))
+    monkeypatch.setattr(rc, '_persist_survey', lambda *a, **k: True)
     monkeypatch.setattr(rc, '_persist_ideate',
                         lambda direction, lang, art, *, user_id:
                         persisted.append((user_id, art)) or True)
@@ -340,6 +438,9 @@ def test_evaluation_failure_is_committed_as_degraded_without_losing_ideas(monkey
     }
     result = rc._run_evaluate(ctx)
     assert result['degraded'] is True and result['judge_count'] == 0
+    assert persisted == [], 'evaluation must not publish a partial terminal row'
+    ctx['artifacts']['evaluate'] = result
+    assert rc._run_publish(ctx) == {'confirmed': True, 'rows': 2}
     assert persisted[0][0] == 1
     assert persisted[0][1]['accepted'][0]['title'] == 'kept'
     assert persisted[0][1]['evaluation']['degraded'] is True
@@ -517,10 +618,11 @@ def main():
     print(_color('═══ R4 Research Recipe / Stage-Graph Tests ═══', '36'))
     print()
     tests = [
-        test_four_stage_graph_and_data_contract,
+        test_five_stage_graph_and_data_contract,
         test_crash_resume_reruns_only_unfinished_stage,
         test_delete_mid_checkpoint_reruns_that_stage_NEUTER,
         test_fully_complete_job_redoes_nothing,
+        test_publication_failure_retries_without_repeating_model_stages,
         test_harvest_gate_fails_on_thin_corpus,
         test_degraded_reaches_the_final_result_body,
         test_degraded_is_committed_to_the_checkpoint,

@@ -6,7 +6,10 @@
  * context.  The intersection remains assignable to TurnRecord so the normal
  * TurnStore selector and keyed ConversationSurface can render it.
  */
-import type { TurnRecord } from '../../api/conversation-sync.generated';
+import type {
+  TurnModelRoute,
+  TurnRecord,
+} from '../../api/conversation-sync.generated';
 
 export interface TransientTurnPresentation {
   kind: 'attempt' | 'preparation' | 'autopilot-virtual-user' | 'image-generation';
@@ -22,6 +25,7 @@ export interface TransientTurnPresentation {
   attempt?: number;
   statusCode?: number;
   model?: string;
+  modelRoute?: TurnModelRoute;
   thinkingLength?: number;
 }
 

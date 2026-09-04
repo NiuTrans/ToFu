@@ -134,6 +134,7 @@ class TestConsecutive429NeverDisables:
 
         disp = object.__new__(LLMDispatcher)
         disp._lock = threading.Lock()
+        disp._contention_strikes = {}
         disp.slots = [Slot(key_name=KEY, api_key='sk-test',
                            model='claude-opus-5', capabilities={'text'},
                            provider_id=PROV)]
@@ -202,9 +203,11 @@ class TestNoAutoExhaustPathSurvives:
     def test_dispatcher_has_no_429_exclusion_probe(self):
         """Both dispatch loops (stream + non-stream) had a post-429 probe
         that excluded the freshly-exhausted key mid-loop. Gone."""
-        src = self._stripped('lib/llm_dispatch/api.py', 'python')
-        assert 'note_auto_exhausted_key' not in src
-        assert 'auto-exhausted after' not in src
+        for relpath in ('lib/llm_dispatch/_api_chat.py',
+                        'lib/llm_dispatch/_api_stream.py'):
+            src = self._stripped(relpath, 'python')
+            assert 'note_auto_exhausted_key' not in src
+            assert 'auto-exhausted after' not in src
 
     def test_retry_reason_token_gone(self):
         """The HUD token 'Key auto-exhausted (consecutive 429s)' has no
@@ -225,8 +228,6 @@ class TestNoAutoExhaustPathSurvives:
             src = self._stripped(relpath, 'python')
             assert 'MAX_CONSECUTIVE_429' not in src, (
                 f'{relpath} still references the removed kill threshold')
-        js = self._stripped('frontend/src/features/settings/key-stats.ts', 'js')
-        assert 'max_consecutive_429' not in js
 
 
 if __name__ == '__main__':

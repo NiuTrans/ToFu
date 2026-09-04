@@ -1458,6 +1458,51 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   font-style: italic;
 }
 
+/* ── Tag editor (model aliases / wire pool) — same recessed screen ──
+ * Base chrome is the square brutalist frame, and the generic modal input
+ * rule above outranks the base .stg-tag-input reset (0,3,1 vs 0,3,0) —
+ * without these rules the editor renders as a square black box holding a
+ * rounded beige input. Give the EDITOR the recessed chrome and strip the
+ * inner input's own. */
+[data-theme="tofu"] .stg-modal .stg-tag-editor {
+  background: #F5F3ED;
+  border: 2.5px solid #B8AD94;
+  border-top-color: #9A9070;
+  border-left-color: #9A9070;
+  border-right-color: #D8D2C0;
+  border-bottom-color: #D8D2C0;
+  border-radius: 8px;
+  box-shadow: inset 0 2px 4px rgba(74, 63, 47, 0.08);
+  padding: 8px 10px;
+}
+[data-theme="tofu"] .stg-modal .stg-tag-editor:focus-within {
+  transform: none;
+  background: #FFFEF8;
+  border-color: #C4956A;
+  border-top-color: #A07850;
+  border-left-color: #A07850;
+  border-right-color: #DEB890;
+  border-bottom-color: #DEB890;
+  box-shadow:
+    inset 0 2px 4px rgba(74, 63, 47, 0.06),
+    0 0 0 3px rgba(196, 149, 106, 0.15);
+}
+[data-theme="tofu"] .stg-modal .stg-field .stg-tag-editor .stg-tag-input,
+[data-theme="tofu"] .stg-modal .stg-field .stg-tag-editor .stg-tag-input:focus {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 4px 2px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+[data-theme="tofu"] .stg-modal .stg-tag-chip {
+  border-color: #B8AD94;
+  border-radius: 6px;
+  background: #FFFEF8;
+  box-shadow: none;
+}
+
 /* ── Hint text ── */
 [data-theme="tofu"] .stg-modal .stg-hint {
   font-size: 10px;

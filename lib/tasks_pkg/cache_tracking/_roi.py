@@ -15,9 +15,11 @@ from typing import Any
 from lib.cost import normalize_usage, split_input_tokens
 from lib.log import audit_log, get_logger
 from lib.tasks_pkg.cache_tracking._state import (
+    CacheState,
     _cache_lock,
     _cache_states,
     _state_key,
+    get_prev_turn_cache_read,
 )
 
 logger = get_logger(__name__)
@@ -28,6 +30,43 @@ logger = get_logger(__name__)
 # carries no signal and logging it would be pure noise. At or above it, a miss
 # is real money and is always logged.
 _MIN_CACHEABLE_PROMPT = 4096
+
+
+def _claim_compaction_state_locked(
+    conv_id: str,
+    *,
+    user_id: int,
+    cross_thread_cache_read: int,
+) -> tuple[CacheState | None, int]:
+    """Return the current thread's state and mark its next round compacted.
+
+    Caller holds ``_cache_lock``. A new task thread can compact inherited
+    conversation history *before* its first provider response, which means its
+    normal post-response ``CacheState`` does not exist yet. Materialize a
+    lightweight state only when a sibling/durable warm-read baseline proves
+    there is cached history to invalidate; a truly cold conversation remains
+    allocation-free. The timestamp ties an unconsumed placeholder to the
+    existing one-hour stale-state lifecycle.
+
+    Returns the cache read invalidated by this compaction. Current-thread
+    evidence wins, including an explicit zero after a verified cold call;
+    otherwise the cross-thread baseline supplies the pre-first-call value.
+    """
+    key = _state_key(conv_id, user_id=user_id)
+    state = _cache_states.get(key)
+    if state is None:
+        if cross_thread_cache_read <= 0:
+            return None, 0
+        state = CacheState()
+        _cache_states[key] = state
+    state.compaction_pending = True
+    state.last_update_time = time.time()
+    invalidated_read = (
+        int(state.last_cache_read_tokens)
+        if state.call_count > 0
+        else max(0, int(cross_thread_cache_read))
+    )
+    return state, invalidated_read
 
 
 def get_session_cache_stats(
@@ -69,14 +108,32 @@ def notify_compaction(conv_id: str, *, user_id: int) -> None:
     so that detect_cache_break doesn't false-positive on the resulting
     cache_read token drop.
 
+    This also bridges a new task thread's pre-first-call gap: when the previous
+    turn left a warm sibling/durable baseline, create the current thread's
+    guarded placeholder so the expected post-summary read drop cannot be
+    misclassified as a cross-turn re-bill.
+
     Inspired by Claude Code's notifyCompaction() which resets the baseline.
     """
     if not conv_id:
         return
+    key = _state_key(conv_id, user_id=user_id)
+    # Normal intra-thread compaction already has a state. Preserve its former
+    # O(1) path and avoid a needless sibling scan / durable settings lookup.
     with _cache_lock:
-        state = _cache_states.get(_state_key(conv_id, user_id=user_id))
-        if state:
+        state = _cache_states.get(key)
+        if state is not None:
             state.compaction_pending = True
+            state.last_update_time = time.time()
+            return
+    # Read before taking _cache_lock: get_prev_turn_cache_read takes the same
+    # lock while scanning sibling states and may fall back to durable storage.
+    cross_thread_cache_read = get_prev_turn_cache_read(
+        conv_id, user_id=user_id)
+    with _cache_lock:
+        _claim_compaction_state_locked(
+            conv_id, user_id=user_id,
+            cross_thread_cache_read=cross_thread_cache_read)
 
 
 def _emit_l2_roi(conv_id: str, roi: dict, *, user_id: int,
@@ -149,13 +206,20 @@ def record_l2_compaction(
     Stashes the saved half on ``CacheState.pending_l2_roi``; the next
     ``detect_cache_break`` pairs it with the re-billed half and emits ONE
     ``audit_log('l2_cache_roi', ...)`` with BOTH sides populated. No-op when no
-    cache state exists yet (cold conv — nothing was cached to bust, so ROI is
-    trivially the saved tokens with zero re-bill).
+    current state or cross-thread/durable warm evidence exists (cold conv —
+    nothing was cached to bust, so ROI is trivially the saved tokens with zero
+    re-bill). A warm sibling baseline materializes the current thread's state,
+    preserving both suppression and ROI pairing when L2 runs before round 1.
     """
     if not conv_id:
         return
+    # Must happen outside _cache_lock; see notify_compaction above.
+    cross_thread_cache_read = get_prev_turn_cache_read(
+        conv_id, user_id=user_id)
     with _cache_lock:
-        state = _cache_states.get(_state_key(conv_id, user_id=user_id))
+        state, invalidated_read = _claim_compaction_state_locked(
+            conv_id, user_id=user_id,
+            cross_thread_cache_read=cross_thread_cache_read)
         if state is None:
             return
         # A second L2 event in the same round-gap would clobber the first's
@@ -174,7 +238,7 @@ def record_l2_compaction(
             'msgs_after': int(msgs_after),
             # The cached prefix that was in flight and is now busted by the
             # summary — this read will NOT recur next round.
-            'cache_read_at_event': int(state.last_cache_read_tokens),
+            'cache_read_at_event': invalidated_read,
             'event_time': time.time(),
         }
 

@@ -25,6 +25,21 @@ import unittest
 
 import pytest
 
+from tests.support.model_routing import (
+    allow_native_test_endpoint,
+    install_native_test_model_route,
+    native_test_model,
+)
+
+
+pytestmark = pytest.mark.api
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _native_test_endpoint_policy():
+    with allow_native_test_endpoint():
+        yield
+
 
 def _free_port() -> int:
     s = socket.socket()
@@ -36,7 +51,7 @@ def _free_port() -> int:
 
 _STATE = {'app': None, 'admin_token': None, 'user_token': None,
            'port': None, 'thread': None, 'shutdown': None,
-           'tmp': None}
+           'loop': None, 'tmp': None}
 
 
 def _boot_real_server():
@@ -92,6 +107,7 @@ def _boot_real_server():
         name='sdk-user',
         scopes=['chat', 'tasks', 'capabilities', 'usage'],
         rate_limit_rpm=120)
+    install_native_test_model_route(owner_user_id=1)
 
     # Boot Hypercorn on a free port.
     port = _free_port()
@@ -104,14 +120,12 @@ def _boot_real_server():
     cfg.accesslog = None
     cfg.errorlog = None
 
-    shutdown_evt = asyncio.Event()
-    _STATE['shutdown'] = shutdown_evt
-
     def _runner():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         # Re-bind shutdown event to this loop.
         evt = asyncio.Event()
+        _STATE['loop'] = loop
         _STATE['shutdown'] = evt
         try:
             loop.run_until_complete(
@@ -131,6 +145,10 @@ def _boot_real_server():
                 break
         except OSError:
             time.sleep(0.05)
+    else:
+        _shutdown_real_server()
+        raise RuntimeError(
+            f'SDK test server did not listen on 127.0.0.1:{port} within 5s')
     return _STATE
 
 
@@ -138,18 +156,22 @@ def _shutdown_real_server():
     if _STATE['app'] is None:
         return
     evt = _STATE.get('shutdown')
-    if evt is not None:
+    loop = _STATE.get('loop')
+    if evt is not None and loop is not None:
         try:
-            # Set the event from the worker thread's loop.
-            import asyncio as _a
-            for loop in [t for t in threading.enumerate()]:
-                pass
-            # Best-effort: fire from a fresh loop via call_soon_threadsafe.
-            evt._loop.call_soon_threadsafe(evt.set)  # type: ignore
-        except Exception:
+            loop.call_soon_threadsafe(evt.set)
+        except RuntimeError:
+            # A failed boot may already have closed the worker loop.
             pass
-    _STATE['thread'].join(timeout=3)
+    thread = _STATE.get('thread')
+    if thread is not None:
+        thread.join(timeout=3)
+        if thread.is_alive():
+            raise RuntimeError('SDK test server did not stop within 3s')
     _STATE['app'] = None
+    _STATE['loop'] = None
+    _STATE['shutdown'] = None
+    _STATE['thread'] = None
     # Restore the real spawn_task: the stub above is a RAW global assignment
     # (not a monkeypatch), so without this it leaks into every other test the
     # xdist worker runs afterwards (tests/test_spawn_serving_loop.py saw the
@@ -213,7 +235,7 @@ class SDKE2ETest(unittest.TestCase):
         client = self._client()
         resp = client.chat(
             messages=[{'role': 'user', 'content': 'SDK_PING'}],
-            model='m', timeout_s=5)
+            model=native_test_model(), timeout_s=5)
         self.assertEqual(resp['object'], 'chat.completion')
         self.assertIn('SDK_PING', resp['choices'][0]['message']['content'])
 
@@ -221,7 +243,7 @@ class SDKE2ETest(unittest.TestCase):
         client = self._client()
         chunks = list(client.stream(
             messages=[{'role': 'user', 'content': 'SDK_STREAM_TOK'}],
-            model='m'))
+            model=native_test_model()))
         self.assertGreater(len(chunks), 0)
         # Some chunk should carry the user prompt back via the stub
         joined = ''.join(
@@ -233,6 +255,7 @@ class SDKE2ETest(unittest.TestCase):
         client = self._client()
         resp = client.chat(
             messages=[{'role': 'user', 'content': 'task-lookup'}],
+            model=native_test_model(),
             timeout_s=5)
         tid = resp['task_id']
         t = client.tasks.get(tid)

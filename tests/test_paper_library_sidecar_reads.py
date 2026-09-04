@@ -60,5 +60,72 @@ def test_self_identity_queries_sidecar(monkeypatch):
         '2608.00002', 'Current paper')
     assert client.calls == [
         ('paper.library.identity', {
-            'user_id': 7, 'paper_hash': 'current-hash'}),
+            'user_id': 7, 'paper_hash': 'current-hash',
+            'max_text_chars': 0}),
     ]
+
+
+def test_podcast_fallback_requests_only_its_prompt_source_ceiling(monkeypatch):
+    import lib.paper.artifact_repository as artifacts
+    import lib.paper.podcast_engine.worker as worker
+
+    class _Artifacts:
+        def __init__(self, owner):
+            assert owner == 7
+
+        def get_report(self, *_args):
+            return None
+
+        def get_translation(self, *_args):
+            return None
+
+    client = _Client()
+    monkeypatch.setattr(artifacts, 'PaperArtifactRepository', _Artifacts)
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda *, write=False: client)
+
+    text, source_kind = worker.load_source_text(
+        'current-hash', 'en', user_id=7)
+
+    assert (text, source_kind) == ('body', 'parsed_text')
+    assert client.calls == [
+        ('paper.library.identity', {
+            'user_id': 7, 'paper_hash': 'current-hash',
+            'max_text_chars': 40_000,
+        }),
+    ]
+
+
+def test_existence_projection_does_not_scan_or_select_paper_text():
+    from lib.storage_sidecar.operations_pkg._papers import (
+        _paper_library_identity,
+    )
+
+    class _Session:
+        def __init__(self):
+            self.sql = ''
+            self.args = ()
+
+        def fetch_one(self, sql, args):
+            self.sql = sql
+            self.args = args
+            return {
+                'title': 'Paper',
+                'arxiv_id': '',
+                'parsed_text': '',
+                'parsed_text_length': 0,
+            }
+
+    session = _Session()
+    result = _paper_library_identity(session, {
+        'user_id': 7,
+        'paper_hash': 'a' * 32,
+        'max_text_chars': 0,
+        'include_text_length': False,
+    })
+
+    assert result['parsed_text'] == ''
+    assert result['parsed_text_length'] == 0
+    assert 'substr(' not in session.sql.lower()
+    assert 'length(' not in session.sql.lower()
+    assert session.args == (7, 'a' * 32)

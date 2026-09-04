@@ -9,16 +9,57 @@ simple count-based metric and persist it back to the action log.  The
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
 from lib.log import get_logger
 
 from lib.optimizer import analyzer as _facade
-from ._domains import _count_irrelevant_dropped_for_domain
-from ._signals import _count_tool_errors
+from ._logs import _parse_app_log_ts, _safe_tail_lines
 
 logger = get_logger(__name__)
+
+
+def _summarize_block_search_log_metrics(
+    domains: Sequence[str],
+    cutoff_local: datetime,
+    *,
+    log_lines: Sequence[str] | None = None,
+) -> tuple[dict[str, int], int]:
+    """Count every tracked domain and tool failure in one app-log pass."""
+    unique_domains = tuple(dict.fromkeys(domain for domain in domains if domain))
+    domain_patterns = {
+        domain: re.compile(
+            r'\[Search\].*?IRRELEVANT.*?' + re.escape(domain),
+            re.IGNORECASE,
+        )
+        for domain in unique_domains
+    }
+    domain_counts = dict.fromkeys(unique_domains, 0)
+    tool_failure_pattern = re.compile(r'\[Tool:[^\]]+\] failed')
+    tool_failure_count = 0
+    lines = log_lines
+    if lines is None:
+        lines = _safe_tail_lines(_facade.APP_LOG)
+    for line in lines:
+        has_tool_failure = tool_failure_pattern.search(line) is not None
+        lower_line = line.lower()
+        may_match_domain = (
+            '[search]' in lower_line and 'irrelevant' in lower_line)
+        if not has_tool_failure and not may_match_domain:
+            continue
+        timestamp = _parse_app_log_ts(line)
+        if timestamp is None or timestamp < cutoff_local:
+            continue
+        if has_tool_failure:
+            tool_failure_count += 1
+        if may_match_domain:
+            for domain, pattern in domain_patterns.items():
+                if pattern.search(line):
+                    domain_counts[domain] += 1
+    return domain_counts, tool_failure_count
 
 
 def _compute_post_apply_metrics(
@@ -26,6 +67,7 @@ def _compute_post_apply_metrics(
     *,
     owner_user_id: int,
     allow_unowned_observability: bool,
+    app_log_lines: Sequence[str] | None = None,
 ) -> list[dict]:
     """For each still-active applied action without a recorded outcome,
     compute a simple count-based metric and persist it."""
@@ -40,6 +82,8 @@ def _compute_post_apply_metrics(
         logger.warning('[Optimizer.analyzer] could not list prior actions: %s', e)
         return summaries
 
+    prepared_actions: list[tuple[dict, dict, bool]] = []
+    block_search_domains: list[str] = []
     for row in actions:
         action_type = row.get('p_action_type') or ''
         args_raw = row.get('p_action_args') or '{}'
@@ -52,15 +96,32 @@ def _compute_post_apply_metrics(
 
         outcome_raw = row.get('outcome_metric') or ''
         has_outcome = bool(outcome_raw and outcome_raw not in ('{}', 'null'))
+        prepared_actions.append((row, args, has_outcome))
+        if action_type == 'block_search_domain':
+            block_search_domains.append(
+                str(args.get('domain') or '').lower())
+
+    dropped_by_domain: dict[str, int] = {}
+    tool_error_count = 0
+    if allow_unowned_observability and block_search_domains:
+        dropped_by_domain, tool_error_count = (
+            _summarize_block_search_log_metrics(
+                block_search_domains,
+                cutoff_local,
+                log_lines=app_log_lines,
+            )
+        )
+
+    for row, args, has_outcome in prepared_actions:
+        action_type = row.get('p_action_type') or ''
         log_id = row['id']
         metric: dict[str, Any] = {}
 
         if action_type == 'block_search_domain':
             domain = str(args.get('domain') or '').lower()
             if allow_unowned_observability:
-                dropped = _count_irrelevant_dropped_for_domain(
-                    domain, cutoff_local)
-                tool_errs = _count_tool_errors(cutoff_local)
+                dropped = dropped_by_domain.get(domain, 0)
+                tool_errs = tool_error_count
             else:
                 dropped = 0
                 tool_errs = 0

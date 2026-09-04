@@ -239,7 +239,7 @@ def dispatch_command(user_id: str, text: str) -> str | None:
                     '[FeishuBot] Command %s failed: %s',
                     prefix, e, exc_info=True,
                 )
-                return f'❌ 命令执行失败: {e}'
+                return '❌ 命令执行失败，请稍后重试'
     return None
 
 

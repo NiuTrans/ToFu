@@ -27,7 +27,16 @@ from lib.log_redaction import redact_text
 from lib.tasks_pkg.manager._delta_coalescer import TaskTextDeltaCoalescer
 from lib.tasks_pkg.manager._events import append_event
 from lib.tasks_pkg.manager._floor_retry_stream import apply_floor_retry
-from lib.tasks_pkg.manager._registry import make_task_abort_check
+from lib.tasks_pkg.manager._provider_ingress_guard import (
+    begin_provider_ingress,
+    defer_provider_ingress_checkpoint,
+    end_provider_ingress,
+    release_provider_ingress_guard,
+)
+from lib.tasks_pkg.manager._registry import (
+    make_provider_abort_check,
+    task_user_id,
+)
 from lib.tasks_pkg.manager._sync import checkpoint_task_partial
 
 logger = get_logger(__name__)
@@ -40,7 +49,38 @@ def dispatch_stream(*args, **kwargs):
     """
     from lib.llm_dispatch.api import dispatch_stream as _dispatch_stream
 
-    return _dispatch_stream(*args, **kwargs)
+    return ensure_provider_stream_result(_dispatch_stream(*args, **kwargs))
+
+
+def _opaque_reasoning_replay_tokens(
+    assistant_message,
+    normalized_usage,
+) -> int:
+    """Reserve hidden reasoning tokens that the next request will replay.
+
+    Provider input usage describes the request that just completed. Opaque
+    reasoning is generated afterwards, so it is absent from that number even
+    though persisted-reasoning protocols append it to the next request.
+    """
+    if not isinstance(assistant_message, dict):
+        return 0
+    has_opaque = any(
+        isinstance(item, dict)
+        and item.get('type') == 'reasoning'
+        and item.get('encrypted_content')
+        for item in assistant_message.get('_responses_items') or ()
+    ) or any(
+        isinstance(block, dict)
+        and block.get('type') == 'redacted_thinking'
+        and block.get('data')
+        for block in assistant_message.get('_anthropic_content_blocks') or ()
+    )
+    if not has_opaque:
+        return 0
+    try:
+        return max(0, int((normalized_usage or {}).get('thinking') or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 # ``_GATEWAY_PREFIXES`` / ``_display_model_name`` / the retry-reason mapping
@@ -56,8 +96,9 @@ def dispatch_stream(*args, **kwargs):
 # so the frontend localizes the cause; unknown tokens fall back to the raw
 # reason (same ruling as an unknown detailKey).
 # ── Streaming checkpoint interval (seconds) ──
-# During LLM token streaming, we periodically persist partial content to
-# the DB so data survives server crashes even when there are no tool rounds.
+# Provider callbacks sample a checkpoint request at this cadence.  The actual
+# DB/presence work is deferred until the provider boundary so storage can never
+# stall upstream socket consumption.
 _STREAM_CHECKPOINT_INTERVAL = 5
 
 _RETRY_REASON_CLASSES = frozenset({
@@ -187,6 +228,9 @@ def _model_request_complete_fields(
         fields['errorKind'] = type(error).__name__[:160]
         fields['errorDetail'] = ' '.join(
             redact_text(error, max_chars=400).split())[:400]
+        error_url = str(getattr(error, 'url', '') or '')[:400]
+        if error_url:
+            fields['errorUrl'] = error_url
         try:
             status_code = int(getattr(error, 'status_code', 0) or 0)
         except (TypeError, ValueError, OverflowError):
@@ -245,9 +289,97 @@ def _log_stream_completion(task, *, prefix, model, finish_reason, message):
     )
 
 
+def _record_stream_prompt_usage(task, body, usage, message, *, model, prefix):
+    """Record the provider-accepted prompt and return its full token count.
+
+    Anthropic-style usage reports cache hits outside ``input_tokens`` while
+    OpenAI includes them. This normalization is shared by usage-cache updates
+    and context-limit learning so neither can regress to recording only the
+    warm-round residual.
+    """
+    total_prompt_tokens = 0
+    opaque_replay_tokens = 0
+    try:
+        conv_id = task.get('convId', '') or ''
+        prompt_tokens = 0
+        if isinstance(usage, dict):
+            normalized = normalize_usage(usage)
+            prompt_tokens = normalized['input']
+            opaque_replay_tokens = _opaque_reasoning_replay_tokens(
+                message, normalized)
+            try:
+                effective_prompt_tokens = max(
+                    0, int(usage.get('effective_prompt_tokens') or 0))
+            except (TypeError, ValueError, OverflowError):
+                effective_prompt_tokens = 0
+            cache_write = normalized['cache_write']
+            cache_read = normalized['cache_read']
+            if effective_prompt_tokens > 0:
+                total_prompt_tokens = effective_prompt_tokens
+            elif ((cache_write or cache_read)
+                  and prompt_tokens <= cache_write + cache_read):
+                total_prompt_tokens = prompt_tokens + cache_write + cache_read
+            else:
+                total_prompt_tokens = prompt_tokens
+        if conv_id and total_prompt_tokens > 0:
+            from lib.token_counter import record_usage
+            record_usage(
+                conv_id,
+                prompt_tokens=total_prompt_tokens,
+                model=model,
+                message_count=len(body.get('messages') or []),
+                messages=body.get('messages'),
+                opaque_replay_tokens=opaque_replay_tokens,
+            )
+    except Exception as exc:
+        # Usage accounting is an optimization; a corrupt observation cannot
+        # turn an otherwise successful provider response into a failed turn.
+        logger.debug('%s record_usage failed (non-fatal): %s', prefix, exc,
+                     exc_info=True)
+    return total_prompt_tokens
+
+
+def _learn_expanded_context_limit(task, *, model, prefix,
+                                  total_prompt_tokens):
+    """Learn and surface a larger context window from one accepted prompt."""
+    if total_prompt_tokens <= 0:
+        return
+    try:
+        from lib.context_limits import learn_expand_from_success
+        from lib.tasks_pkg.compaction._tokens import _get_context_limit
+
+        prior_limit = _get_context_limit(task)
+        expand_info = learn_expand_from_success(
+            task.get('provider_id') or '',
+            model,
+            total_prompt_tokens,
+            preset_limit=prior_limit,
+        )
+        if not expand_info:
+            return
+        append_event(task, build_phase(
+            Phase.WORKING,
+            detail=(
+                f'⚙️ Auto-detected larger context window for {model}: '
+                f'{expand_info["new_limit"]:,} tokens '
+                f'(was {expand_info["old_limit"]:,})'
+            ),
+        ))
+        logger.info(
+            '%s ⚙️ Context limit expanded: %s %d → %d (observed prompt=%d)',
+            prefix, model, expand_info['old_limit'], expand_info['new_limit'],
+            total_prompt_tokens,
+        )
+    except Exception as exc:
+        logger.debug('%s context_limits expand-learn failed: %s', prefix, exc,
+                     exc_info=True)
+
+
 def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                         *, pool_wide=False,
-                        exclude_models=None) -> ProviderStreamResult:
+                        pool_prefer_model=None,
+                        exclude_models=None,
+                        max_429_attempts=None) -> ProviderStreamResult:
     """Stream an LLM response, wiring deltas into the task's event system.
 
     Delegates all key selection, retry, 429/401/403 failover to the
@@ -259,15 +391,21 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             to start executing read-only tools while the model is still
             generating the next tool call (streaming tool execution).
         pool_wide: last-resort mode (llm_fallback pool rescue, owner
-            directive 2026-08-03): dispatch NON-strict with no preferred
-            model, so the picker may land on ANY healthy (key, model) in
-            the pool instead of dying when the requested model's keys are
-            all unavailable. ``body['model']`` is still the fallback wire
-            value — ``_adapt_stream_body_for_slot`` rewrites it per slot.
+            directive 2026-08-03): dispatch NON-strict so the picker may land
+            on any healthy (key, model) instead of dying when the requested
+            model's keys are all unavailable. ``body['model']`` is still the
+            fallback wire value — ``_adapt_stream_body_for_slot`` rewrites it
+            per slot.
+        pool_prefer_model: optional soft first choice in pool-wide mode. It
+            never makes rescue strict; dispatch widens when it is unavailable.
         exclude_models: models the rescue must NOT re-try (they already
             failed hard earlier in this fallback chain). Forwarded to
             ``dispatch_stream`` (caller-provided exclusions are permanent
             for the dispatch call).
+        max_429_attempts: optional caller-owned ceiling on actual upstream
+            rate-limit-class responses. Capacity polling does not count. Main
+            user-selected generation leaves this unset; fallback/rescue paths
+            set a small bound so the task can settle a terminal error.
 
     Crash-recovery: periodically checkpoints to DB every ~5s during
     streaming so that even pure-LLM responses (no tool calls) survive
@@ -290,6 +428,9 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     _activity_round_num = int(_tag_digits) if _tag_digits else None
     _model_request_started_ms = int(time.time() * 1000)
     _model_request_settled = False
+    _provider_dispatch_ordinal = 0
+    _provider_observer_deferred_events = 0
+    _provider_observer_deferred_checkpoints = 0
 
     def _clear_request_activity_state():
         if task.get('_activeModelRequestSpan') == _model_request_span:
@@ -317,6 +458,14 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             tag=tag,
             round_num=_activity_round_num,
         )
+        if _provider_dispatch_ordinal > 0:
+            fields['observerIsolation'] = {
+                'contract': 'tofu.provider-ingress-isolation/v1',
+                'providerDispatches': _provider_dispatch_ordinal,
+                'deferredEvents': _provider_observer_deferred_events,
+                'deferredCheckpoints': (
+                    _provider_observer_deferred_checkpoints),
+            }
         try:
             append_event(
                 task,
@@ -324,6 +473,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             )
         finally:
             _clear_request_activity_state()
+            release_provider_ingress_guard(task)
 
     def _on_request_diagnostic(diagnostic):
         """Persist bounded provider projection/isolation diagnostics."""
@@ -462,36 +612,43 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         except Exception as _metrics_err:
             logger.debug('%s TTFT metric skipped: %s', pfx, _metrics_err)
 
+    def _checkpoint_and_heartbeat_after_provider_boundary():
+        """Converge one sampled checkpoint after upstream consumption ends."""
+        try:
+            checkpoint_task_partial(task)
+        except Exception as e:
+            logger.debug('%s streaming checkpoint failed (non-fatal): %s', pfx, e)
+        # Presence is an observer too.  It intentionally runs only outside the
+        # provider-ingress guard; a shared-store stall may delay convergence but
+        # can no longer pause the model socket.
+        _cfg = task.get('config') or {}
+        _pp = _cfg.get('projectPath') or ''
+        _cid = task.get('convId') or ''
+        if _pp and _cid:
+            try:
+                from lib.presence import heartbeat as _presence_heartbeat
+                from lib.tasks_pkg.manager._registry import task_user_id
+                _presence_heartbeat(
+                    _pp,
+                    _cid,
+                    user_id=int(task_user_id(task)),
+                    phase='generating',
+                )
+            except Exception as e:
+                logger.debug('%s presence heartbeat failed (non-fatal): %s', pfx, e)
+
     def _maybe_checkpoint_during_stream():
-        """Called on every content/thinking delta — checkpoint if interval elapsed."""
+        """Sample recovery work without touching storage on provider ingress."""
         nonlocal _last_stream_ckpt
         now = time.time()
-        if now - _last_stream_ckpt >= _STREAM_CHECKPOINT_INTERVAL:
-            _last_stream_ckpt = now
-            try:
-                checkpoint_task_partial(task)
-            except Exception as e:
-                logger.debug('%s streaming checkpoint failed (non-fatal): %s', pfx, e)
-            # ── Presence heartbeat (throttled, rides the checkpoint cadence).
-            #    Token flow IS work — a long single-LLM turn with no tool rounds
-            #    must keep the peer ACTIVE, not flap to idle. One bump per
-            #    checkpoint interval (~5s), inside the ACTIVE_TTL window, so no
-            #    per-token writes. Best-effort.
-            _cfg = task.get('config') or {}
-            _pp = _cfg.get('projectPath') or ''
-            _cid = task.get('convId') or ''
-            if _pp and _cid:
-                try:
-                    from lib.presence import heartbeat as _presence_heartbeat
-                    from lib.tasks_pkg.manager._registry import task_user_id
-                    _presence_heartbeat(
-                        _pp,
-                        _cid,
-                        user_id=int(task_user_id(task)),
-                        phase='generating',
-                    )
-                except Exception as e:
-                    logger.debug('%s presence heartbeat failed (non-fatal): %s', pfx, e)
+        if now - _last_stream_ckpt < _STREAM_CHECKPOINT_INTERVAL:
+            return
+        _last_stream_ckpt = now
+        if defer_provider_ingress_checkpoint(task):
+            return
+        # Defensive adopter path: callbacks outside a guarded dispatch retain
+        # the historical synchronous checkpoint instead of silently losing it.
+        _checkpoint_and_heartbeat_after_provider_boundary()
 
     _text_deltas = TaskTextDeltaCoalescer(
         task, append_event, on_first_delta=_log_ttft_once,
@@ -507,6 +664,15 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         Deliberately NOT passed to the FloorRetry resend call — during resends
         the first attempt's text is still the fallback content and must
         survive unless a resend is adopted."""
+        # Tool callbacks own execution-bearing state too. A discarded provider
+        # response must retire its early rows and quarantine its prefetch
+        # futures even when it emitted no prose (tool-only responses are common).
+        callback_owner = getattr(on_tool_call_ready, '__self__', None)
+        retire_tool_attempt = getattr(
+            callback_owner, 'on_provider_attempt_restart', None)
+        if callable(retire_tool_attempt):
+            retire_tool_attempt(reason=reason)
+
         with task['content_lock']:
             _c, _t = task['content'], task['thinking']
             if _c == _round_base_content and _t == _round_base_thinking:
@@ -660,39 +826,74 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         _clear_request_activity_state()
         raise
 
-    #  ③-3: the abort_check now ALSO consumes the tombstone
-    #   channel (in-memory set + throttled DB mark), so an abort that arrived
-    #   while this task was missing from the registry still reaches the loop.
-    _abort_check = make_task_abort_check(task)
+    # The normal in-memory Stop/tombstone channels remain immediate.  The
+    # cross-process DB probe is asynchronous in this closure so a degraded
+    # Sidecar cannot become an upstream transport pause.
+    _abort_check = make_provider_abort_check(task)
+    _provider_boundary_checkpoint_pending = False
+
+    def _dispatch_with_ingress_isolation(*args, **kwargs):
+        """Drain one provider dispatch with storage/delivery observers muted."""
+        nonlocal _provider_dispatch_ordinal
+        nonlocal _provider_boundary_checkpoint_pending
+        nonlocal _provider_observer_deferred_events
+        nonlocal _provider_observer_deferred_checkpoints
+        _provider_dispatch_ordinal += 1
+        token = begin_provider_ingress(
+            task,
+            span_id=f'{_model_request_span}:wire:{_provider_dispatch_ordinal}',
+        )
+        try:
+            return ensure_provider_stream_result(
+                dispatch_stream(*args, **kwargs))
+        finally:
+            receipt = end_provider_ingress(task, token=token)
+            _provider_observer_deferred_events += int(
+                receipt.get('deferredEvents') or 0)
+            _provider_observer_deferred_checkpoints += int(
+                receipt.get('deferredCheckpoints') or 0)
+            if int(receipt.get('deferredCheckpoints') or 0) > 0:
+                _provider_boundary_checkpoint_pending = True
+
     try:
-        stream_result = ensure_provider_stream_result(dispatch_stream(
-            body,
-            on_thinking=_text_deltas.on_thinking,
-            on_content=_text_deltas.on_content,
-            on_tool_call_ready=on_tool_call_ready,
-            on_before_tool_call_ready=_text_deltas.flush,
-            abort_check=_abort_check,
-            prefer_model=None if pool_wide else model,
-            log_prefix=pfx,
-            # User-facing request: the user explicitly chose this model in
-            #   the frontend preset selector.  429 retries must stay within
-            #   this model's slots (different keys / alias group) — never
-            #   silently fall back to a cheaper/different model.  The pool-wide
-            #   rescue is the ONE sanctioned exception: the requested model's
-            #   keys are already proven unavailable, so holding the pin would
-            #   mean dying while healthy slots sit idle.
-            strict_model=not pool_wide,
-            exclude_models=exclude_models,
-            on_retry=_text_deltas.wrap_boundary(_on_retry),
-            avoid_pairs=_avoid_pairs,
-            on_attempt_restart=_text_deltas.wrap_boundary(_on_attempt_restart),
-            on_waiting=_text_deltas.wrap_boundary(_on_waiting),
-        ))
+        stream_result = ensure_provider_stream_result(
+            _dispatch_with_ingress_isolation(
+                body,
+                on_thinking=_text_deltas.on_thinking,
+                on_content=_text_deltas.on_content,
+                on_tool_call_ready=on_tool_call_ready,
+                on_before_tool_call_ready=_text_deltas.flush,
+                abort_check=_abort_check,
+                owner_user_id=task_user_id(task),
+                prefer_model=(pool_prefer_model if pool_wide else model),
+                log_prefix=pfx,
+                # User-facing request: the user explicitly chose this model in
+                #   the frontend preset selector.  429 retries must stay within
+                #   this model's slots (different keys / alias group) — never
+                #   silently fall back to a cheaper/different model.  The pool-wide
+                #   rescue is the ONE sanctioned exception: the requested model's
+                #   keys are already proven unavailable, so holding the pin would
+                #   mean dying while healthy slots sit idle.
+                strict_model=not pool_wide,
+                exclude_models=exclude_models,
+                max_429_attempts=max_429_attempts,
+                on_retry=_text_deltas.wrap_boundary(_on_retry),
+                avoid_pairs=_avoid_pairs,
+                on_attempt_restart=_text_deltas.wrap_boundary(
+                    _on_attempt_restart),
+                on_waiting=_text_deltas.wrap_boundary(_on_waiting),
+            ))
         msg, finish_reason, usage = stream_result
         # Final flush shares the request failure/span-cleanup path.
         _text_deltas.close()
+        if _provider_boundary_checkpoint_pending:
+            _provider_boundary_checkpoint_pending = False
+            _checkpoint_and_heartbeat_after_provider_boundary()
     except Exception as error:
         _text_deltas.close_after_error(error)
+        if _provider_boundary_checkpoint_pending:
+            _provider_boundary_checkpoint_pending = False
+            _checkpoint_and_heartbeat_after_provider_boundary()
         request_status = (
             'aborted' if type(error).__name__ == 'AbortedError' else 'failed'
         )
@@ -705,7 +906,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     stream_result = apply_floor_retry(
         task, body, msg, finish_reason, usage,
         model=model, pool_wide=pool_wide, pfx=pfx, tag=tag,
-        dispatch_stream_fn=dispatch_stream, abort_check=_abort_check,
+        dispatch_stream_fn=_dispatch_with_ingress_isolation,
+        abort_check=_abort_check,
         on_retry=_on_retry, avoid_pairs=_avoid_pairs,
         on_waiting=_on_waiting,
         round_base_content=_round_base_content,
@@ -718,6 +920,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     _dispatch = (usage or {}).get('_dispatch', {})
     if _dispatch.get('provider_id'):
         task['provider_id'] = _dispatch['provider_id']
+    if isinstance(_dispatch.get('route_snapshot'), dict):
+        task['_route_snapshot'] = dict(_dispatch['route_snapshot'])
 
     # Notify user if a model token limit was auto-learned during this request
     _limit_info = (usage or {}).get('_model_limit_learned')
@@ -738,84 +942,14 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         finish_reason=finish_reason, message=msg,
     )
 
-    # Feed authoritative prompt_tokens into the usage cache so the NEXT
-    #   round's compaction check returns a bit-exact number instead of
-    #   falling back to the CJK-aware heuristic. Inspired by OpenCode's
-    #   MessageV2.Assistant.tokens — the provider already told us the
-    #   truth, so trust it instead of re-estimating.
-    _total_prompt_tokens = 0
-    try:
-        conv_id = task.get('convId', '') or ''
-        # prompt_tokens is OpenAI-shape; Anthropic returns input_tokens.
-        _prompt_tokens = 0
-        if isinstance(usage, dict):
-            _nu = normalize_usage(usage)
-            _prompt_tokens = _nu['input']
-            # Anthropic excludes cache from input_tokens; add it back so
-            # _total_prompt_tokens reflects the FULL prompt the provider
-            # accepted (which is what we use for context-limit expansion).
-            _cw = _nu['cache_write']
-            _cr = _nu['cache_read']
-            if (_cw or _cr) and _prompt_tokens <= (_cw + _cr):
-                _total_prompt_tokens = _prompt_tokens + _cw + _cr
-            else:
-                _total_prompt_tokens = _prompt_tokens
-        if conv_id and _total_prompt_tokens > 0:
-            from lib.token_counter import record_usage
-            # ``body['messages']`` is the exact list we sent. Recording it
-            # lets the cache detect edit/regenerate (prefix changed →
-            # invalidate) vs append-only (reuse + delta).
-            # Record the FULL normalized prompt, NOT the raw input figure:
-            #   on Anthropic-convention wires input_tokens EXCLUDES the cache
-            #   (a 99%-hit warm round reports only the ~2K residual), so
-            #   recording ``_prompt_tokens`` left the usage_cache tier — and
-            #   with it the proactive compaction gate — reading ~2K forever
-            #   on exactly the warm conversations that need it (the
-            #   "context ball at 100% yet compaction never fires" class).
-            #   ``_total_prompt_tokens`` is the same normalization the cost
-            #   engine and the context-ball already agree on.
-            record_usage(
-                conv_id,
-                prompt_tokens=_total_prompt_tokens,
-                model=model,
-                message_count=len(body.get('messages') or []),
-                messages=body.get('messages'),
-            )
-    except Exception as e:
-        # Usage-cache is a best-effort optimisation — never let a bug
-        # here break the LLM return path.
-        logger.debug('%s record_usage failed (non-fatal): %s', pfx, e)
-
-    # Auto-learn an EXPANDED context limit when this provider just
-    #   accepted a prompt larger than our presumed ceiling. Mirrors the
-    #   shrink-on-overflow path in llm_fallback.py.
-    if _total_prompt_tokens > 0:
-        try:
-            from lib.context_limits import learn_expand_from_success
-            from lib.tasks_pkg.compaction._tokens import _get_context_limit
-            _prior_limit = _get_context_limit(task)
-            _expand_info = learn_expand_from_success(
-                task.get('provider_id') or '',
-                model,
-                _total_prompt_tokens,
-                preset_limit=_prior_limit,
-            )
-            if _expand_info:
-                append_event(task, build_phase(
-                    Phase.WORKING,
-                    detail=(
-                        f'⚙️ Auto-detected larger context window for '
-                        f'{model}: '
-                        f'{_expand_info["new_limit"]:,} tokens '
-                        f'(was {_expand_info["old_limit"]:,})'
-                    ),
-                ))
-                logger.info('%s ⚙️ Context limit expanded: %s %d → %d '
-                            '(observed prompt=%d)',
-                            pfx, model, _expand_info['old_limit'],
-                            _expand_info['new_limit'], _total_prompt_tokens)
-        except Exception as e:
-            logger.debug('%s context_limits expand-learn failed: %s', pfx, e)
+    total_prompt_tokens = _record_stream_prompt_usage(
+        task, body, usage, msg, model=model, prefix=pfx)
+    _learn_expanded_context_limit(
+        task,
+        model=model,
+        prefix=pfx,
+        total_prompt_tokens=total_prompt_tokens,
+    )
 
     _emit_model_request_complete(
         'succeeded' if stream_result.is_verified_complete else 'failed',

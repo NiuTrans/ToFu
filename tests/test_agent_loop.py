@@ -136,6 +136,123 @@ def test_loop_runs_tools_then_completes():
     _ok('loop executes one tool round then completes; on_tool_round fired once')
 
 
+def test_sequential_loop_preserves_equal_calls_as_distinct_occurrences():
+    """Different response positions are actions, even with equal payloads."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    twins = [
+        {'id': 'first', 'function': {
+            'name': 'write_file',
+            'arguments': '{"path":"a.txt","content":"x"}',
+        }},
+        {'id': 'second', 'function': {
+            'name': 'write_file',
+            'arguments': '{ "content": "x", "path": "a.txt" }',
+        }},
+    ]
+    sequence = iter([_mk_msg(twins), _mk_msg(None)])
+    executed = []
+    persisted_batches = []
+
+    outcome = run_agent_loop(
+        abort=AbortSignal.never(),
+        round_tools=['T'],
+        dispatch=lambda _rnd, _tools: next(sequence),
+        execute_tool=lambda _rnd, call: executed.append(call['id']),
+        on_tool_round=lambda _rnd, msg: persisted_batches.append(
+            list(msg['tool_calls'])),
+    )
+
+    assert outcome.completed
+    assert executed == ['first', 'second']
+    assert [[call['id'] for call in batch]
+            for batch in persisted_batches] == [['first', 'second']]
+
+
+def test_sequential_loop_keeps_distinct_arguments_and_callers_independent():
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    calls = [
+        {'id': 'a', 'caller': {'type': 'multi_agent', 'agent_name': '/root'},
+         'function': {'name': 'write_file', 'arguments': '{"path":"a"}'}},
+        {'id': 'b', 'caller': {'type': 'multi_agent', 'agent_name': '/peer'},
+         'function': {'name': 'write_file', 'arguments': '{"path":"a"}'}},
+        {'id': 'c', 'caller': {'type': 'multi_agent', 'agent_name': '/root'},
+         'function': {'name': 'write_file', 'arguments': '{"path":"b"}'}},
+    ]
+    sequence = iter([_mk_msg(calls), _mk_msg(None)])
+    executed = []
+
+    outcome = run_agent_loop(
+        abort=AbortSignal.never(), round_tools=['T'],
+        dispatch=lambda _rnd, _tools: next(sequence),
+        execute_tool=lambda _rnd, call: executed.append(call['id']),
+    )
+
+    assert outcome.completed
+    assert executed == ['a', 'b', 'c']
+
+
+def test_sequential_loop_keeps_malformed_argument_diagnostics_independent():
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    calls = [
+        {'id': 'bad-a', 'function': {
+            'name': 'write_file', 'arguments': '{"path":'}},
+        {'id': 'bad-b', 'function': {
+            'name': 'write_file', 'arguments': '{"path":'}},
+    ]
+    sequence = iter([_mk_msg(calls), _mk_msg(None)])
+    executed = []
+
+    outcome = run_agent_loop(
+        abort=AbortSignal.never(), round_tools=['T'],
+        dispatch=lambda _rnd, _tools: next(sequence),
+        execute_tool=lambda _rnd, call: executed.append(call['id']),
+    )
+
+    assert outcome.completed
+    assert executed == ['bad-a', 'bad-b']
+
+
+def test_sequential_loop_repairs_recycled_ids_across_rounds_before_callbacks():
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    first = {'id': 'positional_0', 'function': {
+        'name': 'read_files', 'arguments': '{"path":"a"}'}}
+    second = {'id': 'positional_0', 'function': {
+        'name': 'read_files', 'arguments': '{"path":"b"}'}}
+    sequence = iter([_mk_msg([first]), _mk_msg([second]), _mk_msg(None)])
+    executed = []
+
+    outcome = run_agent_loop(
+        abort=AbortSignal.never(), round_tools=['T'],
+        dispatch=lambda _rnd, _tools: next(sequence),
+        execute_tool=lambda _rnd, call: executed.append(call['id']),
+    )
+
+    assert outcome.completed
+    assert first['id'] == 'positional_0'
+    assert second['id'] != first['id']
+    assert executed == [first['id'], second['id']]
+
+
+def test_sequential_loop_halts_on_an_all_non_object_tool_batch():
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    executed = []
+    outcome = run_agent_loop(
+        abort=AbortSignal.never(), round_tools=['T'],
+        dispatch=lambda _rnd, _tools: _mk_msg(['corrupt-entry']),
+        execute_tool=lambda _rnd, call: executed.append(call),
+    )
+
+    assert outcome.halted
+    assert outcome.exit_reason == 'malformed_tool_batch'
+    assert outcome.rounds == 1
+    assert executed == []
+
+
 def test_tools_stay_available_until_natural_completion():
     """Tool schemas stay available across arbitrarily many productive rounds."""
     from lib.agent_loop import AbortSignal, run_agent_loop

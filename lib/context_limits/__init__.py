@@ -18,7 +18,9 @@ real traffic:
     smaller backend behind the same model id) must not permanently collapse a
     genuine 1M window, an inferred shrink that drops the limit by more than
     ``_BIG_DROP_FACTOR`` requires ``_REQUIRED_STRIKES`` consecutive overflow
-    events (within ``_STRIKE_WINDOW_SEC``) before it is persisted.
+    events (within ``_STRIKE_WINDOW_SEC``) before the smaller limit is learned.
+    The first strike itself is persisted so a process restart cannot silently
+    reset corroboration.
 
 * **Expand** — when an LLM call succeeds, look at the actual ``prompt_tokens``
   it accepted. If the call sent more tokens than our currently-known limit,
@@ -30,8 +32,8 @@ real traffic:
   true one forever (the compaction gate caps prompts below the pin, so no
   observation can ever climb out — the expand-side mirror of the
   shrink-starvation deadlock below, with no TTL escape since expand
-  entries are permanent). Live instance: sankuai::kimi-k3 pinned at
-  383,727 while kimi-k3's real window is 1M (2026-07-26).
+  entries are permanent). Live instance: one internal gateway's kimi-k3
+  slot pinned at 383,727 while kimi-k3's real window is 1M (2026-07-26).
 
 **TTL self-heal.** Shrink entries are inherently uncertain (the rejection may
 have been a transient gateway/route hiccup, and once a limit shrinks our own
@@ -55,7 +57,13 @@ Both paths persist to ``data/config/server_config.json``:
   - ``model_context_limits``      → ``{"<provider_id>::<model>": int, ...}`` —
     the plain int map (public surface read by ``routes/config.py`` + frontend).
   - ``model_context_limits_meta`` → ``{"<key>": {"ts": float, "source": str,
-    "strikes": int}}`` — sidecar metadata driving TTL + the strike gate.
+    "strikes": int, "pending"?: int, "pending_ts"?: float}}`` — sidecar
+    metadata driving TTL + the strike gate. A pending-only row may exist before
+    its key has a learned value.
+
+Both maps share a hard 2,048-key budget and bounded key components. Newest
+evidence wins when that budget is reached, keeping a long-lived personal
+installation's config file and resident state finite.
 
 A single ``_context_limit_learned`` blob is surfaced inside ``usage`` so the
 orchestrator can show a one-line SSE notice to the user.

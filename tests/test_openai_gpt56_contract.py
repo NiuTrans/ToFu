@@ -290,12 +290,14 @@ def test_multi_agent_only_exposes_root_final_answer_in_stream_and_json():
 def test_frontend_defaults_expose_auto_gates_and_no_fake_pro_model():
     root = Path(__file__).resolve().parents[1]
     panel = (root / 'static/settings_panels/advanced.html').read_text()
-    runtime = (root / 'frontend/src/runtime/app-runtime.js').read_text()
+    sections = root / 'frontend' / 'src' / 'runtime' / 'sections'
+    other_tabs = (sections / 'settings/other_tabs.js').read_text()
+    tool_rounds = (sections / 'ui/tool_rounds.js').read_text()
     assert 'id="settingResponsesPromptProfile"' in panel
     assert '<option value="auto">auto</option>' in panel
-    assert "responsesCfg.promptProfile, 'auto'" in runtime
-    assert "orchestrationCfg.multiAgent : responsesCfg.multiAgent" in runtime
-    assert 'config.orchestration = Object.assign' in runtime
-    assert 'Native multi-agent worker:' in runtime
-    assert "toolsCfg.programmaticCalling, 'on'" in runtime
-    assert "model_id: 'gpt-5.6-pro'" not in runtime
+    assert "responsesCfg.promptProfile, 'auto'" in other_tabs
+    assert "orchestrationCfg.multiAgent : responsesCfg.multiAgent" in other_tabs
+    assert 'config.orchestration = Object.assign' in other_tabs
+    assert 'Native multi-agent worker:' in tool_rounds
+    assert "toolsCfg.programmaticCalling, 'on'" in other_tabs
+    assert "model_id: 'gpt-5.6-pro'" not in other_tabs + tool_rounds

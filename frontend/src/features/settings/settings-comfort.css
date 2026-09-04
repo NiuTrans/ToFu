@@ -1,0 +1,320 @@
+/* ══════════════════════════════════════════════════════════════════
+   Settings comfort pass — progressive disclosure + quieter surfaces
+
+   Keep the complete no-code editor, but make uncommon groups opt-in and
+   reduce the number of hard borders competing for attention. This block is
+   deliberately scoped to the settings modal so the rest of the app keeps its
+   existing visual language.
+   ══════════════════════════════════════════════════════════════════ */
+.settings-disclosure {
+  margin: 8px 0;
+  overflow: clip;
+  background: var(--s-white);
+  border: 1px solid rgba(26, 24, 20, 0.16);
+  border-radius: 9px;
+}
+.settings-disclosure > summary {
+  min-height: 48px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 13px;
+  color: var(--s-ink);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  font-size: 12.5px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+.settings-disclosure > summary::-webkit-details-marker { display: none; }
+.settings-disclosure > summary::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid var(--s-ink-soft);
+  border-bottom: 1.5px solid var(--s-ink-soft);
+  transform: rotate(-45deg);
+  transition: transform .16s ease;
+}
+.settings-disclosure[open] > summary::before { transform: rotate(45deg) translate(-1px, -1px); }
+.settings-disclosure[open] > summary { border-bottom: 1px solid rgba(26, 24, 20, 0.10); }
+.settings-disclosure > summary:hover { background: rgba(201, 153, 63, 0.055); }
+.settings-disclosure > .settings-disclosure-body {
+  padding: 12px 13px 13px;
+  margin: 0;
+  background: rgba(250, 247, 242, 0.45);
+}
+.settings-disclosure > .settings-disclosure-body > :last-child { margin-bottom: 0; }
+.search-advanced-sub { min-width: 0; }
+
+/* Preferences are editable accordions. The count keeps collapsed sections
+   informative without forcing every learned item onto the screen at once. */
+.prefs-list { gap: 8px; margin-top: 10px; }
+.pref-section {
+  display: block;
+  overflow: clip;
+  border: 1px solid rgba(26, 24, 20, 0.16);
+  border-radius: 9px;
+  background: var(--s-white);
+}
+.pref-section:not([open]) > .pref-section-body { display: none; }
+.pref-section-head {
+  min-height: 48px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 10px 13px;
+  margin: 0;
+  border: 0;
+  cursor: pointer;
+  list-style: none;
+}
+.pref-section-head::-webkit-details-marker { display: none; }
+.pref-section-head::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid var(--s-ink-soft);
+  border-bottom: 1.5px solid var(--s-ink-soft);
+  transform: rotate(-45deg);
+  transition: transform .16s ease;
+}
+.pref-section[open] > .pref-section-head::before { transform: rotate(45deg) translate(-1px, -1px); }
+.pref-section[open] > .pref-section-head { border-bottom: 1px solid rgba(26, 24, 20, 0.10); }
+.pref-section-title {
+  flex: 1;
+  color: var(--s-ink);
+  font-size: 12.5px;
+  font-weight: 750;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.pref-section-count {
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(26, 24, 20, 0.06);
+  color: var(--s-ink-soft);
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+.pref-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 12px;
+  background: rgba(250, 247, 242, 0.45);
+}
+.pref-add-btn { align-self: flex-end; margin-bottom: 2px; }
+.pref-item-row { padding: 6px 9px; border-radius: 7px; background: var(--s-white); }
+
+/* The modal chrome previously used a hard outline and offset shadow on nearly
+   every control. Preserve the warm tofu palette while reserving emphasis for
+   selected/primary actions. */
+.settings-panel .settings-section-title {
+  font-size: 12px;
+  letter-spacing: .045em;
+  text-transform: none;
+}
+.settings-panel .settings-divider { height: 1px; margin: 18px 0; background: rgba(26, 24, 20, .14); opacity: 1; }
+.settings-panel .settings-field label { letter-spacing: .035em; text-transform: none; }
+.settings-panel .settings-field input,
+.settings-panel .settings-field select,
+.settings-panel .settings-textarea,
+.settings-panel .mcp-search {
+  border: 1px solid rgba(26, 24, 20, .24);
+  border-radius: 7px;
+  box-shadow: none;
+  transform: none;
+}
+.settings-panel .settings-field input:focus,
+.settings-panel .settings-field select:focus,
+.settings-panel .settings-textarea:focus,
+.settings-panel .mcp-search:focus {
+  border-color: var(--s-gold-dim);
+  box-shadow: 0 0 0 3px rgba(201, 153, 63, .12);
+  transform: none;
+  background: var(--s-white);
+}
+.settings-panel .settings-toggle-row,
+.settings-panel .stg-update-row,
+.settings-panel .oauth-provider-card,
+.settings-panel .oauth-step,
+.settings-panel .search-pipeline-card,
+.settings-panel .mt-provider-card,
+.settings-panel .stg-dropdown-visibility,
+.settings-panel .stg-table,
+.settings-panel .stg-provider-card,
+.settings-panel .stg-key-card,
+.settings-panel .stg-mcard {
+  border: 1px solid rgba(26, 24, 20, .17);
+  border-radius: 9px;
+  box-shadow: none;
+  transform: none;
+}
+.settings-panel .settings-toggle-row:hover,
+.settings-panel .stg-update-row:hover,
+.settings-panel .mt-provider-card:hover,
+.settings-panel .stg-provider-card:hover,
+.settings-panel .stg-key-card:hover,
+.settings-panel .stg-mcard:hover {
+  border-color: rgba(201, 153, 63, .42);
+  box-shadow: none;
+  transform: none;
+}
+.settings-panel .stg-toggle-track {
+  border: 1px solid rgba(26, 24, 20, .34);
+  border-radius: 999px;
+  box-shadow: inset 0 1px 2px rgba(26, 24, 20, .1);
+}
+.settings-panel .stg-toggle-thumb { border: 0; border-radius: 50%; }
+.settings-panel .stg-provider-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-panel .stg-provider-body { border-top: 1px solid rgba(26, 24, 20, .13); }
+/* Deep-link highlight for provider-management entry points. */
+.settings-panel .stg-provider-card.stg-flash {
+  animation: stg-provider-flash 2.1s ease-out 1;
+}
+@keyframes stg-provider-flash {
+  0%, 100% { border-color: rgba(26, 24, 20, .17); box-shadow: none; }
+  20%, 55% { border-color: var(--s-gold-dim); box-shadow: 0 0 0 3px rgba(201, 153, 63, .22); }
+}
+.settings-panel .stg-models-section { border-top-width: 1px; }
+.settings-panel .stg-field label { letter-spacing: .035em; text-transform: none; }
+.settings-panel .stg-field input,
+.settings-panel .stg-field textarea,
+.settings-panel .stg-field select,
+.settings-panel .stg-key-card-edit > input.stg-keys-input {
+  border: 1px solid rgba(26, 24, 20, .24);
+  border-radius: 7px;
+  box-shadow: none;
+  transform: none;
+}
+.settings-panel .stg-field input:focus,
+.settings-panel .stg-field textarea:focus,
+.settings-panel .stg-field select:focus,
+.settings-panel .stg-key-card-edit > input.stg-keys-input:focus {
+  border-color: var(--s-gold-dim);
+  box-shadow: 0 0 0 3px rgba(201, 153, 63, .12);
+  transform: none;
+  background: var(--s-white);
+}
+.settings-panel .stg-keys-btn,
+.settings-panel .stg-keys-info,
+.settings-panel .stg-keys-idx,
+.settings-panel .stg-badge { border-width: 1px; box-shadow: none; }
+.settings-panel .stg-keys-btn:hover { box-shadow: none; transform: none; }
+.settings-panel .skills-scope-tabs {
+  border: 1px solid rgba(26, 24, 20, .19);
+  border-radius: 8px;
+  box-shadow: none;
+}
+.settings-panel .skills-scope-tab { border-width: 1px; border-radius: 6px; }
+.settings-panel .skills-scope-tab.active { box-shadow: none; }
+.settings-panel .theme-option,
+.settings-panel .lang-option {
+  border: 1px solid rgba(26, 24, 20, .20);
+  border-radius: 8px;
+  box-shadow: none;
+  transform: none;
+}
+.settings-panel .theme-option:hover,
+.settings-panel .lang-option:hover { border-color: rgba(201, 153, 63, .55); box-shadow: none; transform: none; }
+.settings-panel .theme-option.active,
+.settings-panel .lang-option.active {
+  border-color: var(--s-gold-dim);
+  box-shadow: 0 0 0 2px rgba(201, 153, 63, .13);
+  transform: none;
+}
+.settings-panel .stg-btn-add,
+.settings-panel .stg-btn-balance,
+.settings-panel .stg-update-btn,
+.settings-panel .btn-xs,
+.settings-panel .btn.btn-sm {
+  border-width: 1px;
+  border-radius: 7px;
+  box-shadow: none;
+  transform: none;
+  white-space: nowrap;
+  word-break: normal;
+}
+.settings-panel .stg-btn-add:hover,
+.settings-panel .stg-btn-balance:hover,
+.settings-panel .stg-update-btn:hover,
+.settings-panel .btn-xs:hover,
+.settings-panel .btn.btn-sm:hover { box-shadow: none; transform: none; }
+.settings-panel .mcp-store-header .mcp-connect-all-btn {
+  border-width: 1px !important;
+  box-shadow: none !important;
+}
+.settings-panel .stg-section-actions > button { min-height: 34px; }
+
+@media (max-width: 768px) {
+  .settings-content { padding: 17px 15px 20px; }
+  .settings-panel .settings-row.two-col { flex-direction: column; gap: 3px; width: 100%; }
+  .settings-panel .settings-row.two-col > .settings-field { flex: none; width: 100%; min-width: 0; }
+  .settings-panel .settings-field input,
+  .settings-panel .settings-field select { width: 100%; max-width: none !important; }
+  .settings-panel .settings-toggle-row { padding: 10px 11px; gap: 12px; }
+  .settings-panel .settings-toggle-row > :first-child { min-width: 0; }
+  .settings-disclosure > summary,
+  .pref-section-head { min-height: 46px; padding: 9px 11px; }
+  .settings-disclosure > .settings-disclosure-body { padding: 10px 11px 12px; }
+
+  .settings-panel .stg-section-head { align-items: stretch; flex-direction: column; gap: 9px; }
+  .settings-panel .stg-section-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+  .settings-panel .stg-section-actions > button {
+    width: 100%;
+    min-width: 0;
+    min-height: 34px;
+    padding-inline: 8px;
+    justify-content: center;
+    white-space: nowrap;
+    font-size: 10.5px;
+  }
+
+  .settings-panel .mcp-store-header { align-items: center; gap: 8px; }
+  .settings-panel .mcp-store-header-spacer { display: none; }
+  .settings-panel .mcp-store-header-title { flex: 1 1 auto; min-width: 0; }
+  .settings-panel .mcp-store-header .skills-scope-tabs {
+    order: 2;
+    flex: 1 1 100%;
+    width: 100%;
+  }
+  .settings-panel .mcp-store-header > .btn {
+    flex: 0 0 auto !important;
+    min-width: max-content !important;
+    min-height: 34px;
+    padding-inline: 10px;
+    white-space: nowrap;
+    word-break: keep-all;
+  }
+  .settings-panel .mcp-store-header .mcp-search {
+    order: 5;
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+
+  .settings-panel .oauth-steps { display: grid; grid-template-columns: 1fr; gap: 6px; }
+  .settings-panel .oauth-step { min-width: 0; }
+  .settings-panel .oauth-step-arrow { display: none; }
+  .settings-panel .oauth-manual-fallback > div { min-width: 0; }
+  .settings-panel .oauth-manual-input { min-width: 0; }
+}

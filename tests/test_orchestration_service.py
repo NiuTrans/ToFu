@@ -1001,6 +1001,7 @@ def test_runtime_flow_pipeline_unifies_live_and_durable_projection(monkeypatch):
     durable = Durable()
     outcome = execute_runtime_flow(
         runtime, 'task-1', _linear_definition(),
+        owner_user_id=1,
         initial_context='go', abort_check=lambda: False,
         subflow_resolver=lambda name: {'name': name},
         durable_runs=durable, durable_run_id='run-1',
@@ -1063,6 +1064,7 @@ def test_runtime_flow_turns_durable_event_loss_into_typed_failure(monkeypatch):
     durable = Durable()
     outcome = execute_runtime_flow(
         runtime, 'task-loss', _linear_definition(),
+        owner_user_id=1,
         durable_runs=durable, durable_run_id='run-loss',
     )
 
@@ -1120,6 +1122,7 @@ def test_runtime_flow_fails_closed_when_live_event_has_no_sequence(monkeypatch):
         runtime,
         'task-no-seq',
         _linear_definition(),
+        owner_user_id=1,
         durable_runs=durable,
         durable_run_id='run-no-seq',
     )
@@ -1174,6 +1177,7 @@ def test_runtime_flow_fails_closed_when_terminal_projection_is_rejected(
 
     outcome = execute_runtime_flow(
         runtime, 'task-finalize', _linear_definition(),
+        owner_user_id=1,
         durable_runs=durable, durable_run_id='run-finalize',
     )
 
@@ -1225,6 +1229,7 @@ def test_runtime_flow_aligns_with_persisted_abort_that_wins_terminal_race(
 
     outcome = execute_runtime_flow(
         runtime, 'task-race', _linear_definition(),
+        owner_user_id=1,
         durable_runs=Durable(), durable_run_id='run-race',
     )
 

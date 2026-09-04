@@ -25,17 +25,298 @@ import pytest
 pytestmark = pytest.mark.unit
 
 from lib.tasks_pkg.wire_fingerprint import (
+    capture_wire_message_evidence,
     canonical_messages,
     diff_canonical,
     first_changed_byte_index,
     first_changed_index,
     static_prefix_hash,
+    wire_byte_field_prefix,
     wire_byte_prefix,
 )
 
 
 def _diff(a, b):
     return diff_canonical(canonical_messages(a), canonical_messages(b))
+
+
+def test_combined_capture_matches_all_standalone_message_fingerprints():
+    """Live one-pass capture preserves every established fingerprint byte."""
+    messages = [
+        {'role': 'system', 'content': [
+            {'type': 'text', 'text': 'policy',
+             'cache_control': {'type': 'ephemeral'}}]},
+        {'role': 'assistant', 'content': 'answer',
+         'reasoning_details': [{'type': 'reasoning.text', 'text': 'thought'}],
+         'tool_calls': [{
+             'id': 'call-1', 'type': 'function',
+             'function': {'name': 'read_file',
+                          'arguments': '{"path":"a.py"}'},
+         }]},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': 'result'},
+        'ignored-non-message',
+    ]
+    before = copy.deepcopy(messages)
+
+    evidence = capture_wire_message_evidence(messages)
+
+    assert evidence.canonical == canonical_messages(messages)
+    assert evidence.message_bytes == wire_byte_prefix(messages)
+    assert evidence.field_bytes == wire_byte_field_prefix(messages)
+    assert messages == before
+
+
+def test_combined_capture_strips_only_marker_bearing_messages(monkeypatch):
+    """The shared owner does not traverse every marker-free message twice."""
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+
+    messages = [
+        {'role': 'system', 'content': 'policy'},
+        {'role': 'user', 'content': 'question'},
+        {'role': 'assistant', 'content': [
+            {'type': 'text', 'text': 'answer',
+             'cache_control': {'type': 'ephemeral'}}]},
+    ]
+    stripped = []
+    canonical_reads = []
+    real_canonical_parts = fingerprint_module._canonical_fields_and_tool_key
+    real_strip = fingerprint_module._strip_cache_control
+
+    def _strip_once(message):
+        if any(message is candidate for candidate in messages):
+            stripped.append(message)
+        return real_strip(message)
+
+    def _canonical_parts_once(message):
+        canonical_reads.append(message)
+        return real_canonical_parts(message)
+
+    monkeypatch.setattr(
+        fingerprint_module, '_strip_cache_control', _strip_once)
+    monkeypatch.setattr(
+        fingerprint_module,
+        '_canonical_fields_and_tool_key',
+        _canonical_parts_once,
+    )
+
+    capture_wire_message_evidence(messages)
+
+    assert stripped == [messages[-1]]
+    assert canonical_reads == messages
+
+
+def test_marker_like_text_does_not_trigger_recursive_strip(monkeypatch):
+    """Only an encoded JSON key, not user text mentioning it, is a marker."""
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+
+    def _unexpected_strip(_message):
+        raise AssertionError('marker-like user text caused a deep traversal')
+
+    monkeypatch.setattr(
+        fingerprint_module, '_strip_cache_control', _unexpected_strip)
+
+    capture_wire_message_evidence([{
+        'role': 'user',
+        'content': 'literal JSON: {"cache_control": {"type": "ephemeral"}}',
+    }])
+
+
+def test_canonical_capture_retains_only_consumed_evidence():
+    """Per-message state excludes construction-only role/preview duplicates."""
+    evidence = capture_wire_message_evidence([
+        {'role': 'user', 'content': 'question'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [{
+            'id': 'call-1', 'type': 'function',
+            'function': {'name': 'read_file', 'arguments': '{}'},
+        }]},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': 'result'},
+    ])
+
+    assert all(set(entry) == {'key', 'fields'}
+               for entry in evidence.canonical)
+    assert evidence.canonical[1]['key'] == 'assistant/tool_call(read_file)'
+    assert evidence.canonical[2]['key'] == 'tool_result(call-1)'
+
+
+def test_common_text_shapes_skip_generic_recursive_normalization(monkeypatch):
+    """Known string/text-block lanes do not pay for generic shape dispatch."""
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+
+    def _unexpected_generic_text(_content):
+        raise AssertionError('known text shape used generic normalization')
+
+    monkeypatch.setattr(
+        fingerprint_module, '_text_of', _unexpected_generic_text)
+
+    messages = [
+        {'type': 'function_call_output', 'call_id': 'call-0',
+         'output': 'function result'},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': 'tool result'},
+        {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'call-2',
+             'content': 'anthropic result'}]},
+        {'role': 'user', 'content': [
+            {'type': 'text', 'text': 'question'},
+            {'type': 'input_text', 'text': 'continued'}]},
+        {'role': 'assistant', 'content': 'answer'},
+    ]
+
+    for message in messages:
+        fields, _tool_key = (
+            fingerprint_module._canonical_fields_and_tool_key(message))
+        assert fields
+
+
+def test_combined_capture_serializes_each_top_level_value_once(monkeypatch):
+    """Whole-message evidence reuses each complex field JSON exactly once."""
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+
+    message = {
+        'role': 'tool',
+        'tool_call_id': 'call-1',
+        'content': 'result',
+        'extra_content': {'provider': 'kept'},
+    }
+    real_encode = fingerprint_module._WIRE_JSON_ENCODER.encode
+    encoded = []
+
+    def _counted_encode(value):
+        encoded.append(value)
+        return real_encode(value)
+
+    monkeypatch.setattr(
+        fingerprint_module._WIRE_JSON_ENCODER, 'encode', _counted_encode)
+
+    evidence = capture_wire_message_evidence([message])
+
+    assert encoded == [message['extra_content']]
+    assert all(type(value) is int
+               for value in evidence.canonical[0]['fields'].values())
+    assert type(evidence.message_bytes[0]['h']) is int
+    assert all(type(value) is int
+               for value in evidence.field_bytes[0]['fields'].values())
+
+
+def test_combined_capture_joins_serialized_fields_without_preconcat(monkeypatch):
+    """Large raw values stay as references until the one whole-message join."""
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+
+    real_encode = fingerprint_module.json.encoder.encode_basestring
+
+    class _JoinOnlyString(str):
+        def __add__(self, _other):
+            raise AssertionError('serialized field was copied before join')
+
+        def __radd__(self, _other):
+            raise AssertionError('serialized field was copied before join')
+
+    monkeypatch.setattr(
+        fingerprint_module.json.encoder,
+        'encode_basestring',
+        lambda value: _JoinOnlyString(real_encode(value)),
+    )
+
+    evidence = capture_wire_message_evidence([{
+        'role': 'user',
+        'content': 'large payload placeholder',
+        'metadata': {'source': 'research'},
+    }])
+
+    assert evidence.message_bytes and evidence.field_bytes
+
+
+@pytest.mark.parametrize('value', [
+    'quoted " unicode \u67e5\u770b\n',
+    None,
+    True,
+    False,
+    42,
+    3.25,
+    ['nested', {'value': 1}],
+])
+def test_wire_value_fast_path_matches_stdlib_json(value):
+    """Primitive shortcuts must preserve the exact raw-byte comparison."""
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+
+    assert fingerprint_module._dump_wire_json_value(value) == json.dumps(
+        value, ensure_ascii=False, sort_keys=False)
+
+
+def test_shared_wire_json_encoder_is_parallel_reentrant():
+    """The process-owned encoder keeps no payload state between callers."""
+    from concurrent.futures import ThreadPoolExecutor
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+
+    values = [
+        ['nested', {'value': index, 'unicode': '查看'}]
+        for index in range(64)
+    ]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        actual = list(pool.map(
+            fingerprint_module._WIRE_JSON_ENCODER.encode, values))
+
+    expected = [json.dumps(
+        value, ensure_ascii=False, sort_keys=False) for value in values]
+    assert actual == expected
+
+
+def test_combined_capture_invalid_json_keeps_standalone_fallback_parity():
+    """One malformed extension must not split combined/standalone evidence."""
+    messages = [{
+        'role': 'tool',
+        'tool_call_id': 'call-1',
+        'content': 'result',
+        'invalid_extension': {'not-json'},
+    }]
+
+    evidence = capture_wire_message_evidence(messages)
+
+    assert evidence.message_bytes == wire_byte_prefix(messages)
+    assert evidence.field_bytes == wire_byte_field_prefix(messages)
+
+
+def test_prepare_request_uses_one_combined_message_capture(monkeypatch):
+    """The live transport boundary does not restore three history scans."""
+    import lib.tasks_pkg.wire_fingerprint as fingerprint_module
+    from lib.llm._sse_core import prepare_request
+
+    real_capture = fingerprint_module.capture_wire_message_evidence
+    captured = []
+
+    def _capture(messages):
+        captured.append(messages)
+        return real_capture(messages)
+
+    monkeypatch.setattr(
+        fingerprint_module, 'capture_wire_message_evidence', _capture)
+    monkeypatch.setattr(
+        fingerprint_module, 'canonical_messages',
+        lambda *_args, **_kwargs: pytest.fail(
+            'prepare_request must use combined capture'))
+    monkeypatch.setattr(
+        fingerprint_module, 'wire_byte_prefix',
+        lambda *_args, **_kwargs: pytest.fail(
+            'prepare_request must use combined capture'))
+    monkeypatch.setattr(
+        fingerprint_module, 'wire_byte_field_prefix',
+        lambda *_args, **_kwargs: pytest.fail(
+            'prepare_request must use combined capture'))
+
+    plan = prepare_request(
+        {'model': 'gpt-4o', 'messages': [
+            {'role': 'system', 'content': 'policy'},
+            {'role': 'user', 'content': 'hello'},
+        ]},
+        log_prefix='[wire-evidence-test]',
+        base_url='https://gateway.invalid/v1',
+        api_protocol='openai',
+    )
+
+    assert len(captured) == 1
+    expected = real_capture(captured[0])
+    assert plan.raw_dumper.wire_fp == expected.canonical
+    assert plan.raw_dumper.wire_bytes == expected.message_bytes
+    assert plan.raw_dumper.wire_field_bytes == expected.field_bytes
 
 
 # ── ERASE: benign transforms produce NO culprit ──

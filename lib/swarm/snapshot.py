@@ -25,6 +25,7 @@ import json
 from typing import Any
 
 from lib.log import get_logger
+from lib.tools.result_envelope import sparse_result_items
 
 logger = get_logger(__name__)
 
@@ -35,21 +36,26 @@ _MAX_CAS = 6
 
 
 def _unwrap_result_payload(payload: Any) -> Any:
-    """Descend into the ``tofu.tool-result/v2`` envelope (payload at items[0]).
+    """Accept the spawn handle in every persisted recording shape.
 
-    Tool results persist wrapped in the bounded provider-neutral envelope
-    (``lib/tools/result_envelope.py``): the spawn handle's ``agents`` list
-    lives at ``items[0].agents``, not top level. Rounds persisted before the
-    envelope store the handle bare — both shapes must match.
+    Rounds persist the sparse ``summary_items`` model projection
+    (``{"summary": ..., "items": [handle]}`` — ``_model_projection`` in
+    lib/tools/result_envelope.py intentionally drops ``contractVersion``
+    from that projection), a full ``tofu.tool-result/v2`` envelope, or the
+    bare handle directly. All three shapes match; gating on the marker
+    alone recovered zero agents and left the reloaded panel empty.
     """
-    if (isinstance(payload, dict)
-            and payload.get('contractVersion') == 'tofu.tool-result/v2'
-            and isinstance(payload.get('items'), list)):
-        for item in payload['items']:
-            if isinstance(item, dict) and isinstance(item.get('agents'), list):
-                return item
-        if payload['items'] and isinstance(payload['items'][0], dict):
-            return payload['items'][0]
+    items = sparse_result_items(payload)
+    if items is None:
+        return payload
+    for item in items:
+        if isinstance(item, dict) and (
+                item.get('agent_id')
+                or any(isinstance(item.get(key), list)
+                       for key in ('agents', 'completed', 'results'))):
+            return item
+    if items and isinstance(items[0], dict):
+        return items[0]
     return payload
 
 
@@ -78,30 +84,6 @@ def _round_handle_ids(round_entry: dict) -> set[str]:
         return set()
     return {a.get('id') for a in agents
             if isinstance(a, dict) and a.get('id')}
-
-
-def find_spawn_round(messages: list, agent_ids) -> dict | None:
-    """Find the spawn round whose handle overlaps *agent_ids*.
-
-    Scans assistant messages newest-first; returns the first ``spawn_agents``
-    tool round whose handle's agent ids intersect *agent_ids*. The intersection
-    match disambiguates between multiple swarm waves / panels in one
-    conversation. Returns ``None`` when no matching round is found (e.g. the
-    spawning turn hasn't been persisted yet).
-    """
-    wanted = {str(x) for x in (agent_ids or [])}
-    if not wanted or not isinstance(messages, list):
-        return None
-    for msg in reversed(messages):
-        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
-            continue
-        rounds = msg.get('toolRounds')
-        if not isinstance(rounds, list):
-            continue
-        for r in rounds:
-            if _round_handle_ids(r) & wanted:
-                return r
-    return None
 
 
 def _snapshot_version(snap) -> int:
@@ -187,6 +169,65 @@ def stamp_round(round_entry: dict, snapshot: dict) -> bool:
         round_entry['_swarm'] = True
         changed = True
     return changed
+
+
+def reconcile_spawn_round_from_active_session(
+    task: dict,
+    round_entry: dict,
+) -> bool:
+    """Stamp the active session's latest snapshot once its handle is readable.
+
+    A fast sub-agent may start and finish before ``spawn_agents`` returns its
+    handle.  Both completion-time persistence paths then see no match: the
+    live round has no ``toolContent`` yet, and the turn projection has not been
+    checkpointed yet.  There is no later agent transition to retry the write,
+    so history falls back to an empty/non-expandable panel.
+
+    Tool settlement is the first boundary at which the handle is guaranteed to
+    be present on the authoritative round.  Re-read the live session here and
+    stamp its current snapshot directly onto that exact round.  ``stamp_round``
+    is monotonic and equality-aware, making this compensation safe when an
+    ordinary agent callback already won the race or when settlement is replayed.
+    """
+    if not isinstance(task, dict) or not isinstance(round_entry, dict):
+        return False
+    handle_ids = _round_handle_ids(round_entry)
+    if not handle_ids:
+        return False
+    try:
+        from lib.swarm.integration._config import swarm_key_for
+        from lib.swarm.integration._state import _get_session
+
+        session = _get_session(swarm_key_for(task))
+        if session is None:
+            # The spawning task id remains a supported alias for standalone
+            # tasks and for the narrow interval before a conversation alias is
+            # visible to every caller.
+            session = _get_session(str(task.get('id') or ''))
+        if session is None:
+            return False
+        snapshot = session._build_agent_snapshot()
+        scoped_ids = handle_ids & {
+            str(agent.get('id'))
+            for agent in (snapshot.get('agents') or [])
+            if isinstance(agent, dict) and agent.get('id')
+        }
+        if not scoped_ids:
+            logger.warning(
+                '[SwarmSnapshot] active session has no agents matching the '
+                'settled spawn handle (task=%s)',
+                str(task.get('id') or '')[:8],
+            )
+            return False
+        return stamp_round(round_entry, filter_snapshot(snapshot, scoped_ids))
+    except Exception as e:
+        # Snapshot persistence is diagnostic projection enrichment; it must
+        # never turn a successfully launched swarm tool into a failed tool.
+        logger.warning(
+            '[SwarmSnapshot] spawn-settlement compensation failed task=%s: %s',
+            str(task.get('id') or '')[:8], e, exc_info=True,
+        )
+        return False
 
 
 def _persist_snapshot_to_turns(conv_id: str, agent_ids, snapshot: dict, *,

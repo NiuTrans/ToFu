@@ -37,7 +37,7 @@ PANELS_DIR = os.path.join(PROJECT_ROOT, 'static', 'settings_panels')
 # running in an opensource build (same build-awareness contract as
 # tests/test_mcp_catalog_internal_only.py).
 _EXPECTED_TABS = frozenset({
-    'general', 'models', 'api', 'preset', 'search', 'translate', 'speech',
+    'general', 'api', 'models', 'preset', 'search', 'translate', 'speech',
     'network', 'devices', 'feishu', 'oauth', 'mcp', 'skills', 'tools',
     'preferences', 'advanced', 'experiments',
 })
@@ -264,21 +264,16 @@ _SETTINGS_ONLY_CSS_PREFIXES = (
     r'\.feishu-',                           # feishu     (batch A)
     r'\.mcp-',                              # mcp        (batch B)
     r'\.skills-',                           # skills     (batch B)
-    r'\.stg-matrix', r'\.stg-mx-',          # api / access-matrix widget (batch C)
     r'\.sysprompt',                         # general / system-prompt editor (batch C)
     r'\.stg-dropdown-visibility',           # preset / display (batch C)
     r'\.chip\b', r'\.auth-src',             # search / network (batch D)
     r'\.two-col',                           # settings row layout (batch D)
-    # devices — the agents table / token rows / load-failure state, plus the
-    # SAME feature's remote-device picker in the project folder browser. Added
-    # when the page got styles AT ALL: every one of these classes was used by
-    # the shipped markup with zero rules behind it, so the panel rendered as
-    # browser defaults (see tests/test_devices_panel_and_platform_download.py).
-    # The shared chrome it sits on (.stg-table / .stg-row / .stg-desc /
-    # .stg-dim / bare .stg-btn) stays in styles.css and is NOT listed here.
-    r'\.devices-', r'\.remote-agent', r'\.remote-root', r'\.remote-devices',
-    # tools inventory panel (Settings → 工具, 2026-08-06)
-    r'\.tools-inv',
+    # The project-folder remote-device picker remains available before
+    # Settings loads. Settings-tab `.devices-*` rules now live beside the lazy
+    # typed owner and are enforced by test_devices_panel_and_platform_download.
+    r'\.remote-agent', r'\.remote-root', r'\.remote-devices',
+    # Tools inventory styles now live beside its lazy typed owner and are
+    # enforced by test_frontend_tools_panel.py.
 )
 
 # Documented cascade-safety exceptions: rules that MUST stay in styles.css even

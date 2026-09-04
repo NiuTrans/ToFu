@@ -20,6 +20,11 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
         # surface on every round that has a reviewed read-only tool;
         # ``auto`` keeps the legacy bounded-reduction text/fan-out gate.
         'programmaticCalling': 'on',
+        # Keep direct tools visible while adding the local gateway.  The
+        # ``serial_gateway`` one-request trial remains available for explicit
+        # experiments, but live long-task calibration increased cost and is
+        # therefore not a shipped default.
+        'programmaticExposure': 'additive',
         # Public GPT-5.6 Responses requests automatically defer only the
         # non-pinned portion of a large tool catalog.  Frontend/caller-selected
         # tools are carried separately as an immutable direct-exposure set.
@@ -57,6 +62,7 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
 _VALID_BREAKPOINT_MODES = frozenset({'implicit', 'explicit'})
 _VALID_NATIVE_EXPOSURE = frozenset({'full', 'routed'})
 _VALID_PROGRAMMATIC_CALLING = frozenset({'off', 'auto', 'on'})
+_VALID_PROGRAMMATIC_EXPOSURE = frozenset({'additive', 'serial_gateway'})
 _VALID_TOOL_SEARCH = frozenset({'off', 'auto', 'native', 'local'})
 _VALID_TOOL_EXECUTION_SCOPE = frozenset({'available', 'selected_only'})
 _VALID_RESPONSES_TRANSPORT = frozenset({'sse', 'websocket'})
@@ -101,6 +107,9 @@ def normalize_context_experiment_flags(
         'nativeExposure', cfg.get('tools.nativeExposure', 'routed'))
     programmatic = tools.get(
         'programmaticCalling', cfg.get('tools.programmaticCalling', 'on'))
+    programmatic_exposure = tools.get(
+        'programmaticExposure',
+        cfg.get('tools.programmaticExposure', 'additive'))
     tool_search = tools.get(
         'toolSearch', cfg.get('tools.toolSearch', 'auto'))
     execution_scope = tools.get(
@@ -144,6 +153,8 @@ def normalize_context_experiment_flags(
          _VALID_NATIVE_EXPOSURE, 'routed'),
         ('tools.programmaticCalling', programmatic,
          _VALID_PROGRAMMATIC_CALLING, 'on'),
+        ('tools.programmaticExposure', programmatic_exposure,
+         _VALID_PROGRAMMATIC_EXPOSURE, 'additive'),
         ('tools.toolSearch', tool_search, _VALID_TOOL_SEARCH, 'auto'),
         ('tools.executionScope', execution_scope,
          _VALID_TOOL_EXECUTION_SCOPE, 'available'),
@@ -219,6 +230,8 @@ def normalize_context_experiment_flags(
             'nativeExposure': normalized['tools.nativeExposure'],
             'programmaticCalling': normalized[
                 'tools.programmaticCalling'],
+            'programmaticExposure': normalized[
+                'tools.programmaticExposure'],
             'toolSearch': normalized['tools.toolSearch'],
             'executionScope': normalized['tools.executionScope'],
             'schemaBudgetTokens': schema_budget,
@@ -252,6 +265,7 @@ def context_experiment_arm(request_config: Any) -> dict:
         'nativeExposure': flags['tools']['nativeExposure'],
         'evidenceLedger': flags['compaction']['evidenceLedger'],
         'programmaticCalling': flags['tools']['programmaticCalling'],
+        'programmaticExposure': flags['tools']['programmaticExposure'],
         'toolSearch': flags['tools']['toolSearch'],
         'executionScope': flags['tools']['executionScope'],
         'schemaBudgetTokens': flags['tools']['schemaBudgetTokens'],

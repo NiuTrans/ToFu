@@ -13,6 +13,11 @@ import os
 import sys
 import unittest
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 _SDK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          '..', 'clients', 'python')
@@ -34,6 +39,42 @@ class ParseSSETest(unittest.TestCase):
     def setUp(self):
         from tofu_sdk import _parse_sse
         self.parse = _parse_sse
+
+    def test_native_model_selection_is_structured_and_copied(self):
+        from tofu_sdk import _native_model_payload
+
+        source = {'creator_id': 'anthropic', 'model_id': 'claude'}
+        payload = _native_model_payload(source)
+        source['model_id'] = 'mutated-after-call'
+        self.assertEqual(payload, {
+            'creator_id': 'anthropic',
+            'model_id': 'claude',
+        })
+        with self.assertRaises(TypeError):
+            _native_model_payload('claude')
+        with self.assertRaises(ValueError):
+            _native_model_payload({'creator_id': 'anthropic'})
+
+    def test_sync_and_async_agents_share_native_payload_builder(self):
+        from tofu_sdk import _native_agent_payload
+
+        model = {'creator_id': 'anthropic', 'model_id': 'claude'}
+        routing = {'preferred_provider_id': 'provider-a'}
+        payload = _native_agent_payload(
+            messages=[{'role': 'user', 'content': 'hi'}],
+            model=model,
+            routing=routing,
+        )
+        model['model_id'] = 'mutated'
+        routing['preferred_provider_id'] = 'mutated'
+        self.assertEqual(payload['model']['model_id'], 'claude')
+        self.assertEqual(
+            payload['routing']['preferred_provider_id'], 'provider-a')
+        with self.assertRaisesRegex(ValueError, 'inline provider blocks'):
+            _native_agent_payload(
+                messages=[{'role': 'user', 'content': 'hi'}],
+                provider={'api_key': 'secret'},
+            )
 
     def test_openai_simple(self):
         resp = _FakeResp([

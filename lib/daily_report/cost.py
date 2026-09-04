@@ -6,11 +6,10 @@ always live-computed; the calendar endpoint wraps the whole thing in a
 """
 
 import datetime as _dt
-import re
 import time
 import uuid
 
-from lib.cost import normalize_usage
+from lib.cost import compute_cost, normalize_usage
 from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.utils import safe_json
@@ -23,9 +22,15 @@ logger = get_logger(__name__)
 # Shared with storage._save_report / invalidate_day_cost_cache /
 # routes.daily_report.get_calendar_month — they all pop / clear the
 # entry for a month when a report is saved or cost data invalidated.
-_calendar_cache: dict = {}
-# (owner_user_id, year, month) → {'data': dict, 'ts': monotonic, ...}
+from lib.ttl_cache import TTLCache
+
+# (owner_user_id, year, month) → {'days': dict, 'conv_days': set, 'cost_days': dict, ...}
 _CALENDAR_CACHE_TTL = 30  # seconds
+_calendar_cache = TTLCache(
+    ttl=_CALENDAR_CACHE_TTL,
+    max_size=256,
+    name='daily_report_calendar',
+)
 
 
 # Legacy preset → model_id migration table (mirrors core.js _LEGACY_PRESET_TO_MODEL)
@@ -86,64 +91,15 @@ def _calc_msg_cost_cny(usage, model_or_preset='', provider_id='', at=None):
     if not usage:
         return 0.0
 
-    from lib import DEFAULT_USD_CNY_RATE
-    from lib.pricing import get_pricing_data, lookup_pricing
-
-    # Resolve legacy preset
-    model_id = model_or_preset or ''
-    model_id = _LEGACY_PRESET_TO_MODEL.get(model_id, model_id)
-
-    _u = normalize_usage(usage)
-    inp = _u['input']
-    out = _u['output']
-    cache_write = _u['cache_write']
-    cache_read = _u['cache_read']
-    think_tok = _u['thinking']
-    if think_tok > 0 and out == 0:
-        out = think_tok
-    if inp == 0 and out == 0 and cache_write == 0 and cache_read == 0:
-        return 0.0
-
-    # Get live exchange rate from pricing module
-    pricing_data = get_pricing_data()
-    rate = pricing_data.get('usdToCny') or DEFAULT_USD_CNY_RATE
-
-    # ── Qwen tiered pricing (CNY-native) ──
-    if re.search(r'qwen', model_id, re.IGNORECASE):
-        inp_cny = _qwen_cny(inp, 'input', model_id)
-        out_cny = _qwen_cny(out, 'output', model_id)
-        return round(inp_cny + out_cny, 4)
-
-    # ── Generic USD pricing from MODEL_PRICING table ──
-    base_in = pricing_data.get('inputPrice', 15.0)
-    out_p = pricing_data.get('outputPrice', 75.0)
-    cw_mul = 1.25
-    cr_mul = 0.10
-
-    mp = lookup_pricing(model_id, provider_id=provider_id, at=at)
-    if mp:
-        base_in = mp.get('input', 0)
-        out_p = mp.get('output', 0)
-        if 'cacheWriteMul' in mp:
-            cw_mul = mp['cacheWriteMul']
-        if 'cacheReadMul' in mp:
-            cr_mul = mp['cacheReadMul']
-
-    input_cost_usd = 0.0
-    cw_cost_usd = 0.0
-    cr_cost_usd = 0.0
-    output_cost_usd = out * out_p / 1e6
-
-    if cache_write > 0 or cache_read > 0:
-        standard_inp = max(0, inp - cache_write - cache_read)
-        input_cost_usd = standard_inp * base_in / 1e6
-        cw_cost_usd = cache_write * base_in * cw_mul / 1e6
-        cr_cost_usd = cache_read * base_in * cr_mul / 1e6
-    else:
-        input_cost_usd = inp * base_in / 1e6
-
-    cost_usd = input_cost_usd + cw_cost_usd + cr_cost_usd + output_cost_usd
-    return round(cost_usd * rate, 4)
+    model_id = _LEGACY_PRESET_TO_MODEL.get(
+        model_or_preset or '', model_or_preset or '')
+    result = compute_cost(
+        usage,
+        model_id=model_id,
+        provider_id=provider_id or None,
+        at=at,
+    )
+    return float((result or {}).get('costCny') or 0.0)
 
 
 
@@ -372,9 +328,9 @@ def invalidate_day_cost_cache(date_str=None, *, owner_user_id):
             logger.info('[DailyReport] Invalidated ALL day-cost cache entries')
         # Also drop the in-process calendar TTL cache so the next request
         # picks up the change.
-        for key in list(_calendar_cache):
+        for key in list(_calendar_cache._data):
             if key[0] == owner_id:
-                _calendar_cache.pop(key, None)
+                _calendar_cache.invalidate(key)
     except Exception as e:
         logger.warning('[DailyReport] invalidate_day_cost_cache(%s) failed: %s',
                        date_str, e)

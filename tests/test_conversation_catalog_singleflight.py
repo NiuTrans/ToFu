@@ -9,7 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from lib.conversations.catalog import ConversationMetadataQuery
-from lib.conversations.repository import ConversationSnapshot
+from lib.conversations.repository import (
+    ConversationCatalogPage,
+    ConversationSnapshot,
+)
 from runtime_guards import resolve_resource_budget
 
 
@@ -52,6 +55,18 @@ class _RecordingRepository:
         return [_snapshot(payload["user_id"], setting)]
 
 
+class _PageRecordingRepository(_RecordingRepository):
+    def list_catalog_page(self, **payload):
+        with self._lock:
+            self.calls.append(dict(payload))
+        setting = (payload.get("settings_keys") or ["projectPath"])[0]
+        return ConversationCatalogPage(
+            items=(_snapshot(payload["user_id"], setting),),
+            total_count=17,
+            has_more=True,
+        )
+
+
 def test_four_arrivals_share_one_backing_query_and_receive_independent_copies():
     repository = _RecordingRepository()
     release_gather = threading.Event()
@@ -79,6 +94,45 @@ def test_four_arrivals_share_one_backing_query_and_receive_independent_copies():
     }
     results[0][0]["settings"]["projectPath"].append("/mutated")
     assert results[1][0]["settings"]["projectPath"] == ["/owner/7"]
+
+
+def test_catalog_page_arrivals_share_one_bounded_query_and_independent_copies():
+    repository = _PageRecordingRepository()
+    release_gather = threading.Event()
+    query = ConversationMetadataQuery(
+        lambda: repository,
+        max_active_gathers=4,
+        wait_for_arrivals=lambda _seconds: release_gather.wait(2.0),
+    )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(
+                query.list_metadata_page,
+                user_id=7,
+                limit=500,
+                folder_id="folder-a",
+                settings_keys=["folderId"],
+            )
+            for _ in range(4)
+        ]
+        _eventually(lambda: query.snapshot()["joined"] == 3)
+        release_gather.set()
+        pages = [future.result(timeout=2.0) for future in futures]
+
+    assert len(repository.calls) == 1
+    assert repository.calls[0] == {
+        "user_id": 7,
+        "limit": 500,
+        "folder_id": "folder-a",
+        "before_updated_at": None,
+        "before_id": "",
+        "settings_keys": ("folderId",),
+    }
+    assert pages[0].total_count == 17
+    assert pages[0].has_more is True
+    pages[0].items[0]["settings"]["folderId"].append("mutated")
+    assert pages[1].items[0]["settings"]["folderId"] == ["/owner/7"]
 
 
 def test_owner_and_projection_shape_are_part_of_the_coalescing_key():

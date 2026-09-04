@@ -95,3 +95,4 @@ def test_typed_runtime_recognizes_queue_and_attempt_command_owners() -> None:
     assert json.loads(completed.stdout.strip().splitlines()[-1]) == {
         'attempt': True, 'queue': True, 'missing': False,
     }
+

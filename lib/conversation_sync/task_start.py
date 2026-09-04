@@ -70,7 +70,7 @@ def _prepare_unbound_task_dispatch(
 
     This boundary deliberately contains every operation that can run after
     registry creation but before binding. The caller owns rollback for any
-    exception raised here, so an unbound ``running`` carrier cannot survive.
+    exception raised here, so an unbound ``pending`` carrier cannot survive.
     """
     task_id = task['id']
 
@@ -168,7 +168,7 @@ def start_conversation_attempt_executor(
     # Turn-native dispatch is a three-stage handshake: register the in-memory
     # task, durably bind that exact id to the accepted attempt, only then
     # launch billable work. Preparation and binding share one rollback fence:
-    # no exception can strand an unbound ``running`` registry carrier.
+    # no exception can strand an unbound ``pending`` registry carrier.
     try:
         config, _flow_entry, _flow_selected = (
             _prepare_unbound_task_dispatch(
@@ -193,6 +193,11 @@ def start_conversation_attempt_executor(
         # The canonical flow task marker set is shared by every
         # FlowExecutor-backed chat run.
         task['flow_mode'] = True
+        # This task is owned end-to-end by FlowExecutor.  The marker is also
+        # consumed by legacy task hooks, preventing a tool/finalize path from
+        # entering the retired standalone autopilot loop and creating a
+        # second lifecycle owner.
+        task['_flow_managed'] = True
         # Seed the FIRST SSE state without reading a stored definition twice.
         # A selected flow starts in the neutral working lane so a plannerless
         # graph cannot create a phantom Planner bubble. The worker resolves
@@ -202,17 +207,18 @@ def start_conversation_attempt_executor(
         task['_flow_iteration'] = 0
         if _flow_selected:
             task['_flow_projection'] = 'flow'
-        logger.info('[Chat] Starting FLOW task %s for conv %s model=%s via=%s',
+        logger.info('[Chat] Queueing FLOW task %s for conv %s model=%s via=%s',
                     task_id[:8], conv_id[:8], _cfg_model, _flow_entry.__name__)
         try:
-            threading.Thread(target=_flow_entry, args=(task,), daemon=True).start()
+            from lib.tasks_pkg.spawn import spawn_task
+            spawn_task(task, runner=_flow_entry)
         except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start flow thread for task %s conv=%s',
                              task_id[:8], conv_id[:8])
             _discard_unstarted_task(task_id, conv_id)
             return None, 'executor_start_failed'
     else:
-        logger.info('[Chat] Starting task %s for conv %s model=%s',
+        logger.info('[Chat] Queueing task %s for conv %s model=%s',
                     task_id[:8], conv_id[:8], _cfg_model)
         try:
             from lib.tasks_pkg.spawn import spawn_task

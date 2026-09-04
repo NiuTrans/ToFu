@@ -14,10 +14,12 @@ Scope: run_task's Content-Prefix + Resume-Prefill + Checkpoint-stash block
      to ``messages`` **iff** ``model_supports_assistant_prefill(model)``
      is truthy (Claude → False, so Claude never reaches the append). Also
      stashes ``task['_resumePrefill']`` for merge-into-done accounting.
-  3. Four checkpoint stashes (``checkpointToolRounds`` /
+  3. ``checkpointToolRounds`` are canonically replayed onto the model wire,
+     then all checkpoint authorities are stashed (``checkpointToolRounds`` /
      ``checkpointUsage`` / ``checkpointApiRounds`` / ``checkpointModifiedFiles``
-     / ``checkpointModifiedFileList``) copied verbatim from cfg onto
-     the task, so post-loop DB persistence merges them.
+     / ``checkpointModifiedFileList``) copied verbatim from cfg onto the task,
+     so post-loop DB persistence merges them. The replay is byte-identical to
+     the settled-history reconstructor, keeping the following turn cacheable.
 
 Extract to ``lib/tasks_pkg/orchestrator/_resume_state.py::
 apply_resume_state``.
@@ -31,8 +33,8 @@ Contract:
   Mutates ``task`` (``content`` under lock, ``_resumePrefill``,
   ``_checkpointToolRounds`` / ``_checkpointUsage`` / ``_checkpointApiRounds``
   / ``_checkpointModifiedFiles`` / ``_checkpointModifiedFileList``) and,
-  when the resume prefill is present + the model accepts it, ``messages``
-  (single append). ``tid`` is the 8-char task-id prefix used in log lines
+  ``messages`` (checkpoint replay, followed by a supported resume prefill).
+  ``tid`` is the 8-char task-id prefix used in log lines
   — carried in so the extracted logs stay grep-identical to the pre-slice
   form. Never raises.
 

@@ -1,7 +1,7 @@
 # Authentication, providers, and billing
 
 This security/money boundary owns principals, credentials, OAuth, owner-scoped
-BYO providers, safe egress, charging, and rate limits. Identity lives in
+ProviderAccess resources, safe egress, charging, and rate limits. Identity lives in
 [`../IDENTITY.md`](../IDENTITY.md); HTTP rules in [`../API_CONTRACT.md`](../API_CONTRACT.md).
 
 ## Ownership
@@ -11,8 +11,8 @@ BYO providers, safe egress, charging, and rate limits. Identity lives in
 | Request authentication boundary | `routes/api_v1/auth.py`, `lib/auth_mode.py` |
 | Principal and ownership types | `lib/identity.py` |
 | API credential verification/CRUD | `lib/api_keys/` |
-| BYO provider repository | `lib/byo_providers.py` |
-| BYO model resolution/lifecycle | `lib/byo_resolve.py`, `lib/llm_dispatch/ephemeral.py` |
+| Model/provider authority | `lib/model_routing/repository.py`, `domain.py` |
+| Request route resolution/lifecycle | `lib/model_routing/routing.py`, `dispatch_adapter.py` |
 | Caller-controlled egress policy | `lib/byo_egress.py` |
 | Subscription OAuth | `lib/oauth/` |
 | Codex account usage / earned resets | `lib/oauth/codex_usage.py` |
@@ -34,12 +34,17 @@ and headless adapters cross the production auth or capability boundary.
 
 ## Secret storage
 
-Credentials, OAuth tokens, and BYO keys use owner-scoped Sidecar operations.
-BYO keys are authenticated ciphertext via `lib/secret_envelope.py`; only
-internal outbound lookup decrypts them, and HTTP projections expose hints.
+Credential and OAuth secrets use owner-scoped Sidecar operations. Model-routing
+secrets are authenticated ciphertext via `lib/secret_envelope.py`; only
+request route materialization decrypts them, and HTTP projections expose hints.
+Importing provider metadata or the secret-envelope contract does not initialize
+Fernet or touch the personal key file. Cryptography and the deployment key load
+only at an explicit seal/open/bound-payload operation; binding validation and
+failure behavior remain identical there.
 
-Provider rows are owner/tenant keyed; public `prov_*` IDs are locators, not
-authorization. Mutations are atomic Sidecar commands, never plaintext JSON.
+ProviderAccess aggregates and credential references are owner/tenant keyed;
+Provider IDs are locators, not authorization. Aggregate mutations use revision
+CAS and secret writes use a separate encrypted operation, never plaintext JSON.
 
 `sanitise_extra_headers` rejects injected authorization, cookies, host/proxy
 selection, and framing headers.
@@ -62,82 +67,52 @@ a security defect.
 
 ## Provider dispatch flow
 
-1. The route resolves the authenticated repository owner.
-2. `byo_providers.resolve_model_string` interprets `<model>@<provider>` within
-   that owner boundary.
-3. Plain global models return without initializing the dispatcher.
-4. Inline or registered BYO loads/decrypts its provider, validates egress, and activates a request-scoped `llm_dispatch.ephemeral` slot.
-5. The shared LLM transport performs the request.
-6. The ephemeral slot is disposed at request completion.
+1. The route resolves the authenticated owner/tenant boundary.
+2. `lib.model_routing` parses a structured official ModelRef or an explicit
+   Provider+Offering pending identity; `model@provider` is rejected.
+3. The candidate compiler hard-filters authorization, capability, context,
+   health, and price budget before ranking ProviderAccess routes.
+4. `dispatch_adapter` decrypts only selected Credential references, validates
+   egress, and mints at most 64 request-scoped ephemeral slots.
+5. The shared LLM transport performs the request and records factual health
+   against Deployment, Connection, Credential, or Credential×Deployment.
+6. The route group is disposed at terminal settlement and a redacted bounded
+   RouteSnapshot is persisted with the turn.
 
-Subscription OAuth follows a separate token lifecycle but converges on the
-same LLM transport. `lib/oauth/outbound.py` remains the sole owner of upstream
-identity headers; control-plane and request routes must not copy those rules.
+The native direct-stream relay follows the same steps without persisting a
+Turn: its server-minted request record owns billing idempotency, terminal usage,
+route disposal, and admission release. Provider binding uses an execution
+`ContextVar`, so concurrent asyncio Tasks on one event-loop thread cannot see
+one another's request-scoped route group.
+
+Subscription OAuth follows a separate token lifecycle but converges on the same LLM transport. `lib/oauth/outbound.py` remains the sole owner of upstream identity headers; control-plane and request routes must not copy those rules.
+Codex refresh tokens rejected with a terminal OAuth code are cleared atomically while the current access token is retained only until its recorded expiry. The rejection is not retried; later requests require a fresh project sign-in instead of replaying a revoked refresh token or sending an expired access token.
+The browser accepts a relayed `oauth_callback` only from the loopback relay origin of a pending flow echoing that flow's state nonce (login records the marker; a mid-flow reload re-arms it from the status projection). `exchange_code` requires an exact state match whenever the flow recorded one — a stateless non-manual callback is rejected without touching the pending flow; the manual-paste path (`manual: true`, implied by `callback_url`) is the one state-fallback exception, and a pasted state still must match.
+Optional Deployment probes use one launch-probed, provider-fair finite lane;
+aggregate cell calls stay inside the shared read-only tool budget (hard maximum
+eight), queued closures are finite, idle workers retire, and construction is
+bounded at 4,096 cells. Probe results are diagnostic evidence used to update a
+Deployment through its owner CAS aggregate; they never recreate alias pools or
+mutate configured enablement from transient health.
+
+Daily key health distinguishes temporary 429 backpressure from a recorded billing stop. HTTP 402 stops the provider account key; ambiguous `insufficient_quota` 429 stops only the observing key/model pair so one vendor behind an aggregate gateway cannot poison its siblings. Settings manual ON continues to win for attended interactive dispatch. Optional background work may instead enter a request-local strict admission context: recorded key/model billing stops then win over a stale manual ON and over last-resort promotion, while healthy sibling models and providers remain eligible. A pool rejected entirely by that policy raises `DispatchNoAdmissibleSlot` before transport and without cooldown polling or direct-LLM fallback; translation projects it as retryable `no_slot`/503. Stops remain day-scoped; explicit re-enable clears the old stop, and the next fresh stop is still recorded for both UI diagnosis and strict optional-work admission.
 
 ### Codex model catalogue lifecycle
 
 `lib/oauth/codex_catalog.py` keeps a private, reconstructible last-good personal
 catalogue: normalized rows, account fingerprint, and ETag, never a token. Login
-or real row change resets to three minutes; stable 200/304 responses and errors
-back off 6→12→24→48→60 minutes, matching cache freshness. Logout ends the
-worker; unauthenticated launch creates none.
-
-Distributed startup never attaches the legacy global token to a tenant.
-`TODO(enterprise)`: enumerate eligible owners through an owner-scoped catalogue
-repository; until then request-time resolution retains static/last-good fallback.
+or row changes reset to three minutes; stable 200/304 responses and errors back
+off 6→12→24→48→60 minutes. Logout ends it; unauthenticated launch creates none.
+Distributed startup never attaches the legacy global token to a tenant;
+`TODO(enterprise)`: enumerate eligible owners via an owner-scoped repository.
 
 ## Codex account usage and earned resets
 
-Codex exposes two different reset concepts and they must never be conflated:
-
-- quota-window `resets_at` / `reset_at` means scheduled rolling-window
-  rollover;
-- `rate_limit_reset_credits.available_count` from the authenticated Codex
-  account-usage response means the account owns an earned, manually redeemable
-  reset credit.
-
-`lib/subscription_quota.py` continues to project coarse primary/secondary
-window percentages observed on successful model responses.
-`lib/oauth/codex_usage.py` separately reads the structured account entitlement
-from `GET /backend-api/wham/usage`; a positive count may be enriched from the
-bounded details response. The underlying `/wham/*` routes are private upstream
-APIs, so their paths and parser live in one module and fixture tests pin the
-currently verified shape. UI code never scrapes Codex TUI strings.
-
-`GET /api/v1/oauth/status` is non-blocking. For an authenticated Codex account
-its `reset_offer` projection has an explicit `state` of `available`, `none`, or
-`unknown`, plus `available_count`, freshness, and a stable opaque
-`notification_key` when available. Missing fields, HTTP failures, decoding
-failures, and account-switch races are `unknown`, never zero. A stale read
-starts one daemon refresh scoped by the authenticated `owner_user_id` and a
-hash of the ChatGPT account ID; the request returns the last projection
-immediately.
-
-The reconstructible cache is mode 0600, contains no token or raw account ID,
-keeps at most 16 owner/account rows, uses a 30-minute success TTL, permits at
-most two process-local refresh threads, and applies a bounded failure retry.
-Network I/O is singleflight per owner/account on 16 bounded identity-hashed
-lock stripes, but never holds the shared cache write lock; unrelated owners can
-refresh concurrently and logout is not blocked by an upstream timeout, while
-historical account churn cannot create unbounded lock sidecars. Logout in `lib/oauth/manager/_exchange.py` is
-the lifecycle authority: only after credential deletion succeeds does it clear
-passive quota and the identified account's reset-credit projection; an absent
-account identity never broad-clears the cache.
-
-There is no ownerless periodic server worker. The proactive notice performs one
-lazy startup check, a 30-minute visible-page check, and at most six short
-re-polls while a refresh is running. The Settings panel separately permits at
-most eight two-second re-polls while it remains open, covering the bounded
-usage-plus-details reads without creating a permanent timer.
-
-A fresh positive offer appears persistently in Settings and once as a global
-notification. Browser deduplication retains at most 16 opaque notification
-keys, so reloads, tabs, and account switches do not turn one credit into
-repeated noise. Tofu never redeems a reset automatically; consuming a one-time
-entitlement requires a separate explicitly confirmed, idempotent command.
+Quota-window rollover and manually redeemable reset credits are distinct.
+Their owner-scoped cache, refresh, Push, logout, and notification lifecycle is
+specified in [`../CODEX_ACCOUNT_USAGE.md`](../CODEX_ACCOUNT_USAGE.md).
 
 ## Billing flow
-
 `lib.cost.compute_cost` is the rate engine used by charging and user-visible
 cost projection. Model rates come from `lib/pricing/`; do not add a second live
 rate table under billing. Static pricing import does not initialize the shared
@@ -163,7 +138,6 @@ be disabled for private/BYO-only deployments, but reserve and settle must use
 the same enablement decision for a request.
 
 ## Failure semantics
-
 - Missing/invalid credentials: `401`.
 - Authenticated principal without required scope: `403`.
 - Unknown owner-scoped provider: `404`, without revealing another owner's row.
@@ -184,8 +158,7 @@ the same enablement decision for a request.
 - Caller-controlled egress has one use-time SSRF guard.
 - Cost math has one engine; ledger append and wallet update are atomic.
 - Reservation and settlement are idempotent and crash-recoverable.
-- Rate limiting is shared-store capable; process-local counters are not an
-  authority for multi-worker deployments.
+- Rate limiting is shared-store capable; process-local counters are not an authority for multi-worker deployments. The memory backend keys dynamic paths by route template, retains only launch-probed finite LRU buckets, API-key token pairs, and exact timestamps, and cleans each bucket against its own window; capacity eviction preserves fail-open availability. Sidecar events carry exact expiries and prune an age-indexed bounded batch on every check, including across one-shot identities.
 - Routes only parse/project; storage and business decisions live below them.
 - Quota reset timestamps never imply an earned reset credit.
 - Earned reset checks and prompt histories are owner/account scoped and bounded.
@@ -197,10 +170,11 @@ the same enablement decision for a request.
 |---|---|---|
 | Principal/scope semantics | `lib/identity.py`, auth middleware | `contracts/identity_v1.yaml`, API contract |
 | API-key lifecycle | `lib/api_keys/` | Sidecar identity operations, redaction tests |
-| BYO provider field | `lib/byo_providers.py` | Sidecar provider schema/operations, route schema |
+| Model-routing entity/policy | `lib/model_routing/` | v2 contract, Sidecar operation, API and migration tests |
 | New provider network call | `lib/byo_egress.py` | use-time guard tests and failure redaction |
 | OAuth wire behavior | focused `lib/oauth/` module | `outbound.py`, provider integration tests |
 | Codex earned-reset signal | `lib/oauth/codex_usage.py` | OAuth status projection, logout lifecycle, typed notification tests |
+| Daily key health/admission | `lib/key_stats/` | dispatcher picker and optional-work policy tests |
 | Model rate | `lib/pricing/` | `lib/cost.py` tests and billing settlement |
 | Wallet/ledger mutation | `lib/billing/` | idempotency, rollback, janitor tests |
 | Rate policy | `lib/rate_limit_api.py` | shared store and response headers |
@@ -209,12 +183,14 @@ the same enablement decision for a request.
 
 ```bash
 pytest -q tests/test_identity_contract.py tests/test_api_keys.py
-pytest -q tests/test_byo_providers.py tests/test_byo_egress.py
+pytest -q tests/test_model_routing_contract.py tests/test_byo_egress.py \
+  tests/test_secret_envelope_startup_boundary.py
 pytest -m unit -q tests/test_oauth_outbound.py tests/test_oauth_exchange_errors.py
 pytest -m unit -q tests/test_codex_usage_reset.py tests/test_codex_usage_reset_notice.py
-pytest -q tests/test_cost.py tests/test_cost_estimator.py
+pytest -m unit -q tests/test_key_stats_model_exhaustion.py tests/test_key_stats_no_429_auto_disable.py
+pytest -q tests/test_cost.py
 pytest -q tests/test_billing.py tests/test_rate_limit_store.py
 ```
 
-Use `rg --files tests | rg '(identity|api_key|byo|oauth|billing|cost|rate_limit)'`
+Use `rg --files tests | rg '(identity|api_key|model_routing|oauth|billing|cost|rate_limit)'`
 to locate renamed focused suites before broadening the gate.

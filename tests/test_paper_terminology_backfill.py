@@ -30,10 +30,15 @@ Offline: the LLM is a stub ``dispatch`` injected into ``build_backfill_addendum`
 import json
 import os
 import sys
+import threading
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+import pytest  # noqa: E402
+
+pytestmark = pytest.mark.unit
 
 TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
@@ -178,6 +183,57 @@ def test_flag_and_key_helpers():
     _ok('env is a kill switch (default not-disabled); termfill:<ui> key helper')
 
 
+def test_gap_batches_are_finite_cache_friendly_and_resource_bounded(
+        monkeypatch):
+    import lib.paper.terminology_backfill as tb
+
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_FANOUT', '2')
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', '3')
+    monkeypatch.setattr(
+        tb, '_keep_gap_closing_rows',
+        lambda _report, offered, _audit_payload: offered)
+    terms = [f'T{index:03d}' for index in range(80)]
+    audit = {'missing': [{'term': term} for term in terms], 'dangling': []}
+    lock = threading.Lock()
+    first_parallel_pair = threading.Barrier(2)
+    calls = []
+    concurrency = {'active': 0, 'peak': 0}
+
+    def dispatch(messages, **kwargs):
+        assert kwargs['max_retries'] == 2
+        assert kwargs['max_429_attempts'] == 3
+        with lock:
+            calls.append(messages)
+            call_number = len(calls)
+            concurrency['active'] += 1
+            concurrency['peak'] = max(
+                concurrency['peak'], concurrency['active'])
+        try:
+            if call_number in (2, 3):
+                first_parallel_pair.wait(timeout=2)
+            requested = messages[-1]['content'].split(':', 1)[1]
+            chunk = [term.strip() for term in requested.split(',')]
+            return json.dumps({term: 'plain definition' for term in chunk}), {
+                'prompt_tokens': 10, 'completion_tokens': len(chunk),
+            }
+        finally:
+            with lock:
+                concurrency['active'] -= 1
+
+    usage = []
+    addendum = tb.build_backfill_addendum(
+        'bounded report body', audit, 'en', dispatch=dispatch,
+        usage_sink=usage)
+
+    assert len(calls) == 4, '60 admitted gaps at 15/call must spend four calls'
+    assert concurrency['peak'] == 2
+    assert len(usage) == 4
+    assert all(call[:2] == calls[0][:2] for call in calls), \
+        'the large system+report prefix must be identical for prompt caching'
+    assert len({call[-1]['content'] for call in calls}) == 4
+    assert 'T059' in addendum and 'T060' not in addendum
+
+
 def test_termfill_persistence_uses_semantic_sidecar(monkeypatch):
     import lib.paper.terminology_backfill as tb
 
@@ -242,6 +298,7 @@ def _patch_dispatch_stream(body):
 
 def _run_engine(tid, body, lang='en'):
     import lib.paper.report_engine.worker as re_mod
+    from lib.paper.artifact_repository import PaperArtifactRepository
     from lib.paper.report_runtime import _new_report_task
     _patch_dispatch_stream(body)
     task = _new_report_task(tid, 'phashbackfill000000000000000000', lang, None,
@@ -251,10 +308,11 @@ def _run_engine(tid, body, lang='en'):
                                 'paperInsightEnabled': False,
                                 'paperCheckpointsEnabled': False,
                             }, user_id=TEST_OWNER_USER_ID)
-    re_mod.run_report_task(task, [
-        {'role': 'system', 'content': 'sys'},
-        {'role': 'user', 'content': 'paper'},
-    ], [])
+    with patch.object(PaperArtifactRepository, 'put_report', return_value=True):
+        re_mod.run_report_task(task, [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'paper'},
+        ], [])
     return task
 
 

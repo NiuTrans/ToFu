@@ -41,8 +41,8 @@ DEFAULT_SIZE = (1280, 720)                    # 16:9, 1px = 1pt
 ELEMENT_TYPES = ('text', 'shape', 'line', 'image', 'icon', 'table',
                  'chart')
 
-#: v1 chart element subset (bar/column/line/pie, category data).
-CHART_TYPES = ('bar', 'column', 'line', 'pie')
+#: Editable category-chart subset shared by preview and PPTX export.
+CHART_TYPES = ('bar', 'column', 'line', 'pie', 'area', 'doughnut', 'radar')
 
 #: Built-in shapes the renderer/exporter know (OOXML preset names; the full
 #: 177-name list is the upstream spec's — these are the ones v1 ships).
@@ -165,9 +165,16 @@ def parse_deck(manifest_path: str) -> Deck:
         if not os.path.isfile(page_path):
             raise PPTDError(f'missing page file: {entry}')
         pdata = _load_yaml(page_path)
-        elements = pdata.get('elements')
-        if not isinstance(elements, list):
+        if not isinstance(pdata.get('elements') or [], list):
             raise PPTDError(f'page elements must be an array: {entry}')
+        try:
+            from lib.slides.components import expand_page_components
+            elements = expand_page_components(pdata)
+        except ValueError as exc:
+            raise PPTDError(f'invalid page component in {entry}: {exc}') from exc
+        raw = dict(pdata)
+        raw.pop('components', None)
+        raw['elements'] = elements
         pages.append(Page(
             path=str(entry),
             page_type=str(pdata.get('pageType') or 'content'),
@@ -175,7 +182,7 @@ def parse_deck(manifest_path: str) -> Deck:
                        or {'type': 'solid', 'color': '#FFFFFF'},
             elements=elements,
             notes=str(pdata.get('notes') or ''),
-            raw=pdata,
+            raw=raw,
         ))
     return Deck(
         title=str(data.get('title')

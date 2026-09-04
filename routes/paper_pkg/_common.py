@@ -10,7 +10,13 @@ from quart import Blueprint
 
 from lib.log import get_logger
 from lib.paper.artifact_repository import PaperArtifactRepository, PaperReport
-from lib.paper.review import is_review_lang, parse_report_lang
+from lib.paper.report_artifact_keys import (
+    checkpoints_lang_key,
+    insight_lang_key,
+    report_reopen_sibling_langs,
+    termfill_lang_key,
+)
+from lib.paper.review import is_review_family, parse_report_lang
 
 logger = get_logger(__name__)
 
@@ -173,6 +179,90 @@ def _parse_insight_row_meta(row):
     return _parse_report_meta(row)
 
 
+def _report_reopen_sibling_groups(lang, fallback_lang=None):
+    """Map every selectable plain base language to its persisted companions."""
+    sibling_groups = {}
+    for candidate in (lang, fallback_lang):
+        if not candidate or is_review_family(candidate):
+            continue
+        sibling_groups[candidate] = report_reopen_sibling_langs(
+            parse_report_lang(candidate)["ui_lang"])
+    return sibling_groups
+
+
+async def _cached_insight_row(phash, lang, *, user_id: int):
+    """Read the one sibling insight row used by both reopen projections."""
+    if is_review_family(lang):
+        return None, "", ""
+    ui_lang = parse_report_lang(lang)["ui_lang"]
+    try:
+        cache_key = insight_lang_key(ui_lang)
+        row = await asyncio.to_thread(
+            PaperArtifactRepository(user_id).get_report,
+            phash,
+            cache_key,
+        )
+    except Exception as e:
+        logger.warning(
+            "[Paper:Report] Cached-insight lookup failed hash=%s: %s", phash, e
+        )
+        return None, ui_lang, ""
+    return row, ui_lang, cache_key
+
+
+def _structured_insight_payload(row, ui_lang):
+    if not row or not row.report:
+        return None
+    meta = _parse_insight_row_meta(row)
+    if not isinstance(meta, dict) or not isinstance(meta.get("items"), dict):
+        return None
+    return {
+        "items": meta["items"],
+        "baseline": meta.get("baseline"),
+        "usage": meta.get("usage"),
+        "markdown": row.report,
+        "lang": ui_lang,
+    }
+
+
+def _append_legacy_insight(body, row, *, phash, cache_key):
+    if not row or not row.report:
+        return body
+    section = row.report.strip()
+    if not section:
+        return body
+    header_line = section.splitlines()[0].strip()
+    if header_line and header_line in body:
+        return body
+    logger.info(
+        "[Paper:Report] Merged cached insight into reopened report — "
+        "hash=%s key=%s (+%d chars)",
+        phash,
+        cache_key,
+        len(section),
+    )
+    return body.rstrip() + "\n\n" + section + "\n"
+
+
+def _project_cached_insight(body, row, *, phash, ui_lang):
+    """Project one prefetched Insight row without another storage read."""
+    payload = _structured_insight_payload(row, ui_lang)
+    if payload:
+        return body, payload
+    return _append_legacy_insight(
+        body, row, phash=phash, cache_key=insight_lang_key(ui_lang)), None
+
+
+async def _enrich_cached_insight(body, phash, lang, *, user_id: int):
+    """Return ``(body, structured_payload)`` from one sibling-row read."""
+    row, ui_lang, cache_key = await _cached_insight_row(
+        phash, lang, user_id=user_id)
+    if cache_key:
+        return _project_cached_insight(
+            body, row, phash=phash, ui_lang=ui_lang)
+    return body, None
+
+
 async def _load_cached_insight_payload(phash, lang, *, user_id: int):
     """Load the STRUCTURED insight payload for a v2 row, else None.
 
@@ -182,34 +272,9 @@ async def _load_cached_insight_payload(phash, lang, *, user_id: int):
     rows (legacy, meta without items) return None here and keep the merged
     read path in ``_append_cached_insight``.
     """
-    if is_review_lang(lang):
-        return None
-    ui_lang = parse_report_lang(lang)["ui_lang"]
-    try:
-        from lib.paper.insight_engine._config import insight_lang_key
-
-        ins_row = await asyncio.to_thread(
-            PaperArtifactRepository(user_id).get_report,
-            phash,
-            insight_lang_key(ui_lang),
-        )
-    except Exception as e:
-        logger.warning(
-            "[Paper:Report] Cached-insight payload lookup failed hash=%s: %s", phash, e
-        )
-        return None
-    if not ins_row or not ins_row.report:
-        return None
-    meta = _parse_insight_row_meta(ins_row)
-    if not isinstance(meta, dict) or not isinstance(meta.get("items"), dict):
-        return None
-    return {
-        "items": meta["items"],
-        "baseline": meta.get("baseline"),
-        "usage": meta.get("usage"),
-        "markdown": ins_row.report,
-        "lang": ui_lang,
-    }
+    row, ui_lang, _cache_key = await _cached_insight_row(
+        phash, lang, user_id=user_id)
+    return _structured_insight_payload(row, ui_lang)
 
 
 async def _load_cached_checkpoints_payload(phash, lang, *, user_id: int):
@@ -218,12 +283,10 @@ async def _load_cached_checkpoints_payload(phash, lang, *, user_id: int):
     Read-path only — never regenerates. The frontend distributes flip cards
     from the structured items; nothing merges into the report body.
     """
-    if is_review_lang(lang):
+    if is_review_family(lang):
         return None
     ui_lang = parse_report_lang(lang)["ui_lang"]
     try:
-        from lib.paper.checkpoint_engine import checkpoints_lang_key
-
         row = await asyncio.to_thread(
             PaperArtifactRepository(user_id).get_report,
             phash,
@@ -234,6 +297,11 @@ async def _load_cached_checkpoints_payload(phash, lang, *, user_id: int):
             "[Paper:Report] Cached-checkpoints lookup failed hash=%s: %s", phash, e
         )
         return None
+    return _project_cached_checkpoints(row, ui_lang=ui_lang)
+
+
+def _project_cached_checkpoints(row, *, ui_lang):
+    """Project one prefetched checkpoint row without another storage read."""
     meta = _parse_insight_row_meta(row) if row else None
     if not isinstance(meta, dict) or not isinstance(meta.get("items"), list):
         return None
@@ -258,80 +326,23 @@ async def _append_cached_insight(body, phash, lang, *, user_id: int):
         them via ``_load_cached_insight_payload`` and distributes anchored
         cards client-side.
     """
-    if is_review_lang(lang):
-        return body
-    parsed = parse_report_lang(lang)
-    ui_lang = parsed["ui_lang"]
-    try:
-        from lib.paper.insight_engine._config import insight_lang_key
-
-        ins_row = await asyncio.to_thread(
-            PaperArtifactRepository(user_id).get_report,
-            phash,
-            insight_lang_key(ui_lang),
-        )
-    except Exception as e:
-        logger.warning(
-            "[Paper:Report] Cached-insight lookup failed hash=%s: %s", phash, e
-        )
-        return body
-    if not ins_row or not ins_row.report:
-        return body
+    ins_row, _ui_lang, cache_key = await _cached_insight_row(
+        phash, lang, user_id=user_id)
     # v2 row → served as structured payload, never merged (see above).
     _meta = _parse_insight_row_meta(ins_row)
     if isinstance(_meta, dict) and isinstance(_meta.get("items"), dict):
         return body
-    section = ins_row.report.strip()
-    if not section:
-        return body
-    # Idempotency: if the body already carries the section (baked-in cache row
-    # / prior append), do not duplicate. Match the section's exact HEADER LINE —
-    # NOT a bare '## 💡' substring: real reports legitimately contain '## 💡
-    # Method — How It Works', which the old bare-marker clause mistook for an
-    # already-merged insight section, silently suppressing the merge for any
-    # report with a 💡 Method heading (caught by the P0 suite's v1-merge case).
-    header_line = section.splitlines()[0].strip() if section else ""
-    if header_line and header_line in body:
-        return body
-    logger.info(
-        "[Paper:Report] Merged cached insight into reopened report — "
-        "hash=%s key=%s (+%d chars)",
-        phash,
-        insight_lang_key(ui_lang),
-        len(section),
-    )
-    return body.rstrip() + "\n\n" + section + "\n"
+    # Match the exact header line, not a bare emoji/prefix that can occur in a
+    # normal report heading (the P0 fixture covers that historical collision).
+    return _append_legacy_insight(
+        body, ins_row, phash=phash, cache_key=cache_key)
 
 
-async def _merge_cached_termfill(body, meta, phash, lang, *, user_id: int):
-    """Merge the sibling persisted ``termfill:<ui>`` addendum into a reopened
-    report, and — since the addendum was only persisted after a re-audit proved
-    it closes the gaps — downgrade the meta's terminology warning card.
-
-    Read-path only; never regenerates. Returns ``(body, meta)``. Byte-identical
-    to today for papers without a backfill row: skips Review Mode, no-ops when no
-    row exists, and never double-appends (idempotent on the addendum header).
-    """
-    if is_review_lang(lang):
+def _merge_prefetched_termfill(body, meta, row, *, phash, ui_lang):
+    """Merge one prefetched termfill row without another storage read."""
+    if not row or not row.report:
         return body, meta
-    parsed = parse_report_lang(lang)
-    ui_lang = parsed["ui_lang"]
-    try:
-        from lib.paper.terminology_backfill import termfill_lang_key
-
-        tf_row = await asyncio.to_thread(
-            PaperArtifactRepository(user_id).get_report,
-            phash,
-            termfill_lang_key(ui_lang),
-        )
-    except Exception as e:
-        logger.warning(
-            "[Paper:Report] Cached-termfill lookup failed hash=%s: %s", phash, e
-        )
-        return body, meta
-    if not tf_row or not tf_row.report:
-        return body, meta
-    addendum = tf_row.report.strip()
+    addendum = row.report.strip()
     if not addendum:
         return body, meta
     # The addendum's persistence is proof the glossary is now complete — drop the
@@ -350,3 +361,28 @@ async def _merge_cached_termfill(body, meta, phash, lang, *, user_id: int):
         len(addendum),
     )
     return body.rstrip() + "\n\n" + addendum + "\n", meta
+
+
+def _project_prefetched_report_siblings(body, meta, phash, lang, siblings):
+    """Project all prefetched additive rows without further repository I/O."""
+    if is_review_family(lang):
+        return body, meta, None, None
+    ui_lang = parse_report_lang(lang)["ui_lang"]
+    body, insight = _project_cached_insight(
+        body,
+        siblings.get(insight_lang_key(ui_lang)),
+        phash=phash,
+        ui_lang=ui_lang,
+    )
+    body, meta = _merge_prefetched_termfill(
+        body,
+        meta,
+        siblings.get(termfill_lang_key(ui_lang)),
+        phash=phash,
+        ui_lang=ui_lang,
+    )
+    checkpoints = _project_cached_checkpoints(
+        siblings.get(checkpoints_lang_key(ui_lang)),
+        ui_lang=ui_lang,
+    )
+    return body, meta, insight, checkpoints

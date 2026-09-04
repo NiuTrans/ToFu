@@ -34,12 +34,19 @@ def _transform_messages(
     config: dict,
     *,
     exclude_last: bool = False,
+    user_id: int | None = None,
 ) -> list[dict]:
     """Transform raw conversation messages into API-ready format.
 
     This is the server-side equivalent of the frontend's buildApiMessages().
     """
     messages = []
+    if user_id is None:
+        try:
+            configured_user_id = int(config.get('userId') or 0)
+            user_id = configured_user_id if configured_user_id > 0 else None
+        except (AttributeError, TypeError, ValueError):
+            user_id = None
 
     # 1. System prompt from user settings
     sys_prompt = (config.get('systemPrompt') or '').strip()
@@ -98,6 +105,20 @@ def _transform_messages(
     # for the skip-filter below.
     src = _collapse_historical_flow_sessions(src)
 
+    attachment_projection_budget = None
+    if user_id and any(message.get('attachments') for message in src):
+        from lib.media_attachments import (
+            MediaProjectionBudget,
+            document_text_request_cap,
+        )
+
+        attachment_count = sum(
+            len(message.get('attachments') or []) for message in src
+            if isinstance(message.get('attachments'), list))
+        attachment_projection_budget = MediaProjectionBudget(
+            text_chars_remaining=document_text_request_cap(model),
+            attachments_remaining=max(1, attachment_count))
+
     for msg in src:
         # 2. Skip Flow display-only messages
         #    Only the trailing (current in-progress) Flow session survives
@@ -130,7 +151,9 @@ def _transform_messages(
                 }
             else:
                 built_user = _build_user_message(
-                    msg, model=model, image_budget=_remaining_budget())
+                    msg, model=model, image_budget=_remaining_budget(),
+                    user_id=user_id,
+                    attachment_projection_budget=attachment_projection_budget)
             messages.append(built_user)
             _images_used += _count_image_blocks(built_user)
 
@@ -243,7 +266,9 @@ def _append_video_blocks(content_blocks: list, videos: list, *, model: str,
 
 
 def _build_user_message(msg: dict, *, model: str = '',
-                        image_budget: int | None = None) -> dict:
+                        image_budget: int | None = None,
+                        user_id: int | None = None,
+                        attachment_projection_budget=None) -> dict:
     """Build a single user message for the API.
 
     ``model`` / ``image_budget`` drive the model-aware video-frame clamp
@@ -328,7 +353,15 @@ def _build_user_message(msg: dict, *, model: str = '',
     has_videos = any(isinstance(v, dict) and (v.get('frames') or v.get('transcript'))
                      for v in videos)
 
-    if has_images or has_videos:
+    attachment_blocks: list[dict] = []
+    attachments = msg.get('attachments') or []
+    if attachments and not user_id:
+        attachment_blocks = [{
+            'type': 'text',
+            'text': '[Attached media references require an owner-scoped live projection.]',
+        }]
+
+    if has_images or has_videos or attachments:
         content_blocks = []
         for img in images:
             img_url = ''
@@ -413,6 +446,32 @@ def _build_user_message(msg: dict, *, model: str = '',
             logger.debug('[Context] inject block=videos count=%d frames=%d',
                          len(videos), _added)
 
+        if attachments and user_id:
+            try:
+                from lib.media_attachments import project_for_model
+                _used = sum(1 for block in content_blocks
+                            if block.get('type') == 'image_url')
+                _remaining = (None if image_budget is None
+                              else max(0, image_budget - _used))
+                attachment_projection = project_for_model(
+                    attachments, user_id=user_id,
+                    query=str(msg.get('content') or ''), model=model,
+                    image_budget=_remaining,
+                    projection_budget=attachment_projection_budget)
+                attachment_blocks = list(
+                    attachment_projection.get('blocks') or [])
+            except Exception as exc:
+                logger.warning('[Context] attachment projection failed: %s', exc)
+                attachment_blocks = [{
+                    'type': 'text',
+                    'text': '[Attached media could not be loaded for this request.]',
+                }]
+
+        if attachment_blocks:
+            content_blocks.extend(attachment_blocks)
+            logger.debug('[Context] inject block=attachments count=%d blocks=%d',
+                         len(attachments), len(attachment_blocks))
+
         if text_content:
             content_blocks.append({'type': 'text', 'text': text_content})
         _n_img = sum(1 for b in content_blocks if b.get('type') == 'image_url')
@@ -435,23 +494,29 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
         ...
         assistant(content=final_text)               # final answer text
 
-    A "batch" is a contiguous group of rounds sharing the same ``llmRound``
-    (or, for legacy data without ``llmRound``, separated by a gap of more
-    than 1 in ``roundNum``).  This mirrors how the live orchestrator
-    emits tool calls — and how ``inject_tool_history`` restores them on
-    Continue requests.
+    A "batch" is a contiguous, attempt-scoped provider response. Executor-local
+    ``llmRound`` is used only inside its owning ``attemptId``/``taskId`` scope;
+    legacy rows use ordered occurrence boundaries. This mirrors how the live
+    orchestrator emits tool calls and how Continue restores them.
 
-    Fallback: if a round is missing the data needed to reconstruct a
-    proper tool_call (``toolCallId`` + ``toolContent`` + ``status=='done'``
-    + parsable ``toolArgs``), the whole message is collapsed to the
-    legacy ``toolSummary`` JSON placeholder — which is lossy but keeps
-    parity with older conversations that predate the checkpoint schema.
+    Malformed/incomplete individual rounds are isolated; valid siblings still
+    reconstruct. The lossy ``toolSummary`` fallback is used only when no round
+    can form a legal call/result pair.
     """
-    rounds = msg.get('toolRounds') or []
-    final_content = msg.get('content') or ''
-    final_thinking = msg.get('thinking') or ''
-    final_responses_items = msg.get('_responsesItems') or []
-    final_anthropic_blocks = msg.get('_anthropicContentBlocks') or []
+    raw_rounds = msg.get('toolRounds')
+    rounds = raw_rounds if isinstance(raw_rounds, (list, tuple)) else []
+    raw_content = msg.get('content')
+    final_content = raw_content if isinstance(raw_content, str) else ''
+    raw_thinking = msg.get('thinking')
+    final_thinking = raw_thinking if isinstance(raw_thinking, str) else ''
+    raw_responses_items = msg.get('_responsesItems')
+    final_responses_items = (
+        [item for item in raw_responses_items if isinstance(item, dict)]
+        if isinstance(raw_responses_items, (list, tuple)) else [])
+    raw_anthropic_blocks = msg.get('_anthropicContentBlocks')
+    final_anthropic_blocks = (
+        [item for item in raw_anthropic_blocks if isinstance(item, dict)]
+        if isinstance(raw_anthropic_blocks, (list, tuple)) else [])
 
     # ── Short-circuit: no tool rounds → single plain assistant message ──
     if not rounds:
@@ -465,7 +530,7 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
         # No rounds, no content — but a legacy `toolSummary` placeholder
         # may still describe what the assistant did. Use it as the body
         # so the model sees something instead of an empty turn.
-        if msg.get('toolSummary'):
+        if isinstance(msg.get('toolSummary'), str) and msg['toolSummary']:
             return [{'role': 'assistant', 'content': msg['toolSummary']}]
         # Empty assistant with nothing at all — almost always an ERROR GHOST:
         # a failed task persisted content=0 + an error envelope so the UI has
@@ -491,7 +556,7 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     # no segments, or if the segment path can't reconstruct (→ None).
     structured = None
     seg_list = msg.get('segments')
-    if seg_list:
+    if isinstance(seg_list, (list, tuple)) and seg_list:
         try:
             from lib.tasks_pkg.segments import (
                 reconstruct_tool_messages_from_segments,
@@ -526,11 +591,13 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     # ── Fallback: legacy / incomplete rounds → summary JSON placeholder ──
     # This path is LOSSY (no tool_call_id/tool role messages) but keeps
     # old conversations working when they lack the required metadata.
-    if msg.get('toolSummary'):
+    if isinstance(msg.get('toolSummary'), str) and msg['toolSummary']:
         tool_ctx = msg['toolSummary']
     else:
         calls = []
         for r in rounds:
+            if not isinstance(r, dict):
+                continue
             call = {'name': r.get('toolName', 'unknown')}
             args = r.get('toolArgs')
             if isinstance(args, str):

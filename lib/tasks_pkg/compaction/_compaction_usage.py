@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import threading
 
+from lib.cost import canonicalize_usage_cache_keys, merge_usage_totals
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -38,12 +39,7 @@ _lock = threading.Lock()
 # total_tokens / cache_read_tokens / cache_write_tokens / n_calls)
 _usage: dict[str, dict] = {}
 
-# The keys we accumulate. Mirrors the usage dict shape dispatch_chat returns.
-_NUMERIC_KEYS = (
-    'prompt_tokens', 'completion_tokens', 'total_tokens',
-    'input_tokens', 'output_tokens',
-    'cache_read_tokens', 'cache_write_tokens', 'cached_tokens',
-)
+_MAX_CALL_ROWS = 16
 
 
 def record_compaction_usage(conv_id: str, usage: dict | None,
@@ -58,12 +54,27 @@ def record_compaction_usage(conv_id: str, usage: dict | None,
     if not conv_id or not isinstance(usage, dict):
         return
     with _lock:
-        acc = _usage.setdefault(conv_id, {'n_calls': 0})
+        canonicalize_usage_cache_keys(usage)
+        acc = _usage.setdefault(conv_id, {'n_calls': 0, 'calls': []})
         acc['n_calls'] += 1
-        for k in _NUMERIC_KEYS:
-            v = usage.get(k)
-            if isinstance(v, (int, float)):
-                acc[k] = acc.get(k, 0) + v
+        merged = merge_usage_totals(acc, usage)
+        for key, value in merged.items():
+            if key not in {'n_calls', 'calls', 'timing'}:
+                acc[key] = value
+        dispatch = usage.get('_dispatch')
+        call_row = {
+            'kind': str(kind or 'summary'),
+            'usage': dict(usage),
+        }
+        if isinstance(dispatch, dict):
+            if dispatch.get('model'):
+                call_row['model'] = str(dispatch['model'])
+            if dispatch.get('provider_id'):
+                call_row['provider_id'] = str(dispatch['provider_id'])
+        calls = acc.setdefault('calls', [])
+        calls.append(call_row)
+        if len(calls) > _MAX_CALL_ROWS:
+            del calls[:-_MAX_CALL_ROWS]
         dispatch = usage.get('_dispatch')
         if isinstance(dispatch, dict):
             timing = acc.setdefault('timing', {})
@@ -96,6 +107,18 @@ def record_compaction_usage(conv_id: str, usage: dict | None,
                 conv_id[:8] if conv_id else '?', kind,
                 usage.get('prompt_tokens') or usage.get('input_tokens'),
                 usage.get('completion_tokens') or usage.get('output_tokens'))
+
+
+def merge_compaction_usage_into_total(
+    main_usage: dict | None,
+    compaction_usage: dict | None,
+) -> dict:
+    """Return one settled bill without mutating either source ledger."""
+    public_compaction_usage = {
+        key: value for key, value in (compaction_usage or {}).items()
+        if key not in {'n_calls', 'calls', 'timing'}
+    }
+    return merge_usage_totals(main_usage, public_compaction_usage)
 
 
 def get_compaction_usage(conv_id: str) -> dict:

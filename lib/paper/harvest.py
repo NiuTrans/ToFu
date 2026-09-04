@@ -55,11 +55,17 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import time
 import uuid
 from typing import Callable, Iterable, Optional
 
 from lib.log import get_logger
+from lib.paper.contracts import (
+    PAPER_FANIN_MAX_PAPERS,
+    PAPER_TITLE_BATCH_MAX_IDS,
+    PAPER_TITLE_HINT_MAX_CHARS,
+)
 
 logger = get_logger(__name__)
 
@@ -80,6 +86,8 @@ _HARVEST_ID_PREFIX = 'harvest_'
 # permanent failure (invalid PDF, empty text) is not retried.
 _HARVEST_FETCH_ATTEMPTS = 2
 _HARVEST_RETRY_SLEEP = 3.0
+_HARVEST_MAX_PAPERS = PAPER_FANIN_MAX_PAPERS
+_HARVEST_PDF_SPOOL_MEMORY_BYTES = 1024 * 1024
 
 
 def _harvest_paper_id(arxiv_id: str) -> str:
@@ -128,6 +136,16 @@ class HarvestResult:
         }
 
 
+class HarvestPDFTooLargeError(ValueError):
+    """A deterministic PDF byte-budget rejection that must not be retried."""
+
+
+def _harvest_pdf_byte_limit() -> int:
+    """Request-loaded parser byte ceiling; patchable in focused tests."""
+    from lib.pdf_parser._common import MAX_PDF_BYTES
+    return MAX_PDF_BYTES
+
+
 # ── Seams (monkeypatchable, same pattern as the recipe modules) ───────────
 #
 # Resolved lazily/through this module so a test can patch ``harvest._paper_hash``
@@ -151,63 +169,119 @@ def parse_pdf(pdf_bytes: bytes, **kw) -> dict:
     return _pp(pdf_bytes, max_text_chars=0, max_images=0, text_mode='rich', **kw)
 
 
+def http_get(*args, **kwargs):
+    """Request-loaded HTTP seam for bounded harvest transport tests."""
+    from lib.http_client import http_get as _http_get
+    return _http_get(*args, **kwargs)
+
+
 def _download_pdf_bytes(arxiv_id: str, *, timeout: int = 60) -> bytes:
     """Download an arXiv PDF to memory. Raises on network / validity failure.
 
     Mirrors the reading-mode arXiv download: same URL shape, same UA, same
     ``validate_pdf_bytes`` gate so a truncated download is rejected rather than
     parsed into garbage (which would mint a garbage phash)."""
-    from lib.http_client import http_get
     from lib.pdf_parser.text import validate_pdf_bytes
 
     pdf_url = f'https://arxiv.org/pdf/{arxiv_id}.pdf'
-    resp = http_get(pdf_url, timeout=timeout, stream=True,
-                    headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
-    resp.raise_for_status()
-    chunks = []
-    for chunk in resp.iter_content(chunk_size=8192):
-        if chunk:
-            chunks.append(chunk)
-    data = b''.join(chunks)
-    ok, _pages, verr = validate_pdf_bytes(data)
-    if not ok:
-        raise ValueError(f'downloaded file is not a readable PDF: {verr}')
-    return data
+    response = http_get(
+        pdf_url, timeout=timeout, stream=True,
+        headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+    limit = _harvest_pdf_byte_limit()
+    try:
+        response.raise_for_status()
+        try:
+            declared = int(
+                (getattr(response, 'headers', {}) or {}).get(
+                    'Content-Length') or 0)
+        except (TypeError, ValueError) as error:
+            logger.debug(
+                '[Paper:Harvest] invalid PDF Content-Length ignored: %s',
+                error)
+            declared = 0
+        if declared > limit:
+            raise HarvestPDFTooLargeError(
+                f'PDF exceeds the {limit // 1048576} MiB limit')
+
+        total = 0
+        with tempfile.SpooledTemporaryFile(
+                max_size=_HARVEST_PDF_SPOOL_MEMORY_BYTES,
+                mode='w+b') as spool:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > limit:
+                    raise HarvestPDFTooLargeError(
+                        f'PDF exceeds the {limit // 1048576} MiB limit')
+                spool.write(chunk)
+            spool.seek(0)
+            data = spool.read(limit + 1)
+        if len(data) > limit:
+            raise HarvestPDFTooLargeError(
+                f'PDF exceeds the {limit // 1048576} MiB limit')
+        ok, _pages, verr = validate_pdf_bytes(data)
+        if not ok:
+            raise ValueError(f'downloaded file is not a readable PDF: {verr}')
+        return data
+    finally:
+        close = getattr(response, 'close', None)
+        if callable(close):
+            close()
 
 
 # ── Library lookup / persist (reuse the ingest write contract) ────────────
+
+def _existing_rows_for_arxiv_ids(arxiv_ids, user_id: int) -> Optional[dict]:
+    """Return bounded current-parser hits with one owner-scoped projection."""
+    from lib.paper.library_repository import PaperLibraryRepository
+    from lib.pdf_parser._common import expected_parser_version
+
+    try:
+        entries = PaperLibraryRepository(user_id).by_arxiv_ids(arxiv_ids)
+    except Exception as error:
+        logger.warning(
+            '[Paper:Harvest] batch cache probe failed: %s', error)
+        return None
+    parser_version = expected_parser_version()
+    hits = {}
+    for entry in entries:
+        if not entry.arxiv_id or entry.arxiv_id in hits:
+            continue
+        if (
+            entry.parsed_text_length <= 0
+            or entry.parser_version != parser_version
+        ):
+            continue
+        hits[entry.arxiv_id] = {
+            'id': entry.paper_id,
+            'paper_hash': entry.paper_hash,
+            'title': entry.title,
+            'text_length': entry.parsed_text_length,
+            'page_count': entry.page_count,
+        }
+    return hits
+
 
 def _existing_row_for_arxiv(arxiv_id: str, user_id: int) -> Optional[dict]:
     """Return a current-parser bookshelf hit without downloading the PDF."""
     if not arxiv_id:
         return None
-    from lib.paper.library_repository import PaperLibraryRepository
-    from lib.pdf_parser._common import expected_parser_version
+    hits = _existing_rows_for_arxiv_ids([arxiv_id], user_id)
+    return hits.get(arxiv_id) if hits is not None else None
 
-    try:
-        entries = PaperLibraryRepository(user_id).list_entries()
-    except Exception as error:
-        logger.warning(
-            '[Paper:Harvest] cache probe failed for %s: %s', arxiv_id, error)
-        return None
-    entry = next(
-        (
-            item for item in entries
-            if item.arxiv_id == arxiv_id
-            and item.parsed_text
-            and item.parser_version == expected_parser_version()
-        ),
-        None,
-    )
-    if entry is None:
-        return None
-    return {
-        'id': entry.paper_id,
-        'paper_hash': entry.paper_hash,
-        'title': entry.title,
-        'parsed_text': entry.parsed_text,
-        'page_count': entry.page_count,
-    }
+
+def _cache_hit_result(arxiv_id: str, hit: dict) -> HarvestResult:
+    logger.info('[Paper:Harvest] cache hit for %s — reusing row %s (hash=%s), '
+                'no reparse', arxiv_id, (hit['id'] or '')[:24],
+                (hit['paper_hash'] or '')[:12])
+    text_length = hit.get('text_length')
+    if not isinstance(text_length, int) or text_length < 0:
+        text_length = len(hit.get('parsed_text') or '')
+    return HarvestResult(
+        arxiv_id, status='cache_hit', phash=hit['paper_hash'],
+        title=hit['title'], page_count=hit['page_count'],
+        text_length=text_length, paper_id=hit['id'])
 
 
 def _persist_row(
@@ -283,7 +357,8 @@ def _persist_row(
 
 def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
                      extract_figures: bool = False,
-                     force_reparse: bool = False) -> HarvestResult:
+                     force_reparse: bool = False, title_hint: str = '',
+                     allow_title_lookup: bool = True) -> HarvestResult:
     """Harvest ONE arXiv paper into the library, parse-once.
 
     Args:
@@ -299,6 +374,11 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
             download+parse (used to refresh a stale row). The phash is still
             content-derived, so a forced reparse of unchanged bytes is a no-op
             upsert onto the same row.
+        title_hint: bounded title already returned by discovery. When present,
+            reuse it instead of issuing another arXiv request.
+        allow_title_lookup: direct single-paper calls retain robust title
+            recovery. Batch callers set this false after one bounded title
+            batch so a partial/outage cannot fan out into per-paper retries.
 
     Returns:
         A :class:`HarvestResult`. ``status='cache_hit'`` means an existing
@@ -313,18 +393,15 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
     arxiv_id = (arxiv_id or '').strip()
     if not arxiv_id:
         return HarvestResult('', status='error', error='empty arxiv_id')
+    title_hint = (
+        title_hint.strip()[:PAPER_TITLE_HINT_MAX_CHARS]
+        if isinstance(title_hint, str) else '')
 
     # ── Pre-download cache probe (arxiv_id → existing parsed row) ──
     if not force_reparse:
         hit = _existing_row_for_arxiv(arxiv_id, user_id)
         if hit:
-            logger.info('[Paper:Harvest] cache hit for %s — reusing row %s (hash=%s), '
-                        'no reparse', arxiv_id, (hit['id'] or '')[:24],
-                        (hit['paper_hash'] or '')[:12])
-            return HarvestResult(
-                arxiv_id, status='cache_hit', phash=hit['paper_hash'],
-                title=hit['title'], page_count=hit['page_count'],
-                text_length=len(hit['parsed_text']), paper_id=hit['id'])
+            return _cache_hit_result(arxiv_id, hit)
 
     # ── Download + parse (once) ──
     # A TRANSIENT download/parse failure (arXiv timeout / rate-limit / a flaky
@@ -337,6 +414,12 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
     for attempt in range(1, _HARVEST_FETCH_ATTEMPTS + 1):
         try:
             pdf_bytes = _self._download_pdf_bytes(arxiv_id)
+            break
+        except HarvestPDFTooLargeError as e:
+            last_err = e
+            logger.warning(
+                '[Paper:Harvest] permanent download rejection for %s: %s',
+                arxiv_id, e)
             break
         except Exception as e:
             last_err = e
@@ -367,12 +450,14 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
     phash = _self._paper_hash(parsed_text)
 
     # Title: prefer arXiv's canonical title (cheap, cached by the API layer).
-    title = ''
-    try:
-        from lib.paper.arxiv import fetch_arxiv_title
-        title = fetch_arxiv_title(arxiv_id) or ''
-    except Exception as e:
-        logger.debug('[Paper:Harvest] title lookup failed for %s: %s', arxiv_id, e)
+    title = title_hint
+    if not title and allow_title_lookup:
+        try:
+            from lib.paper.arxiv import fetch_arxiv_title
+            title = fetch_arxiv_title(arxiv_id) or ''
+        except Exception as e:
+            logger.debug(
+                '[Paper:Harvest] title lookup failed for %s: %s', arxiv_id, e)
     if not title:
         title = f'arXiv:{arxiv_id}'
 
@@ -439,16 +524,22 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
 def harvest_arxiv_batch(arxiv_ids: Iterable[str], *, folder_id: str = '',
                         user_id: int, extract_figures: bool = False,
                         on_progress: Optional[Callable[[dict], None]] = None,
-                        abort_check: Optional[Callable[[], bool]] = None) -> dict:
+                        abort_check: Optional[Callable[[], bool]] = None,
+                        titles_by_arxiv_id=None) -> dict:
     """Harvest a batch of arXiv papers into the library, parse-once each.
 
     Deduplicates the input id list, then harvests each id in order. Every
     paper is best-effort: a failure is recorded and the batch continues.
 
     Args:
-        arxiv_ids: iterable of arXiv ids (deduped, order preserved).
+        arxiv_ids: iterable of at most 40 arXiv ids (deduped, order preserved).
+            Oversized input is rejected after consuming at most 41 items,
+            before any storage or network work.
         folder_id / user_id / extract_figures: forwarded to
             :func:`harvest_arxiv_id`.
+        titles_by_arxiv_id: optional discovery titles keyed by exact input id;
+            only keys in this bounded batch are read and values cap at 500
+            characters.
         on_progress: optional ``fn(event_dict)`` fired per paper with a
             ``{'type': 'paper_done', 'index', 'total', 'result': <dict>}``
             event — the stage runner projects this to the production progress
@@ -474,8 +565,14 @@ def harvest_arxiv_batch(arxiv_ids: Iterable[str], *, folder_id: str = '',
     # Dedup while preserving order.
     seen: set = set()
     ids = []
-    for raw in arxiv_ids or []:
-        aid = (raw or '').strip()
+    for index, raw in enumerate(arxiv_ids or []):
+        if index >= _HARVEST_MAX_PAPERS:
+            raise ValueError(
+                'paper harvest accepts at most '
+                f'{_HARVEST_MAX_PAPERS} arxiv ids')
+        if not isinstance(raw, str):
+            raise ValueError('paper harvest arxiv ids must be strings')
+        aid = raw.strip()
         if aid and aid not in seen:
             seen.add(aid)
             ids.append(aid)
@@ -485,14 +582,63 @@ def harvest_arxiv_batch(arxiv_ids: Iterable[str], *, folder_id: str = '',
            'reparse_count': 0, 'degraded': 0, 'results': [], 'aborted': False}
     logger.info('[Paper:Harvest] batch start — %d distinct id(s), folder=%s',
                 total, folder_id or '(default)')
+    if abort_check is not None and abort_check():
+        out['aborted'] = True
+        return out
+
+    # One bounded projection replaces N full-bookshelf scans. If the storage
+    # probe itself fails, preserve the old per-paper fallback/retry behavior.
+    prefetched_hits = _existing_rows_for_arxiv_ids(ids, user_id)
+
+    title_hints = {}
+    if hasattr(titles_by_arxiv_id, 'get'):
+        for aid in ids:
+            candidate = titles_by_arxiv_id.get(aid)
+            if isinstance(candidate, str) and candidate.strip():
+                title_hints[aid] = (
+                    candidate.strip()[:PAPER_TITLE_HINT_MAX_CHARS])
+    unresolved_titles = [
+        aid for aid in ids
+        if aid not in title_hints
+        and not (prefetched_hits is not None and aid in prefetched_hits)
+    ]
+    if unresolved_titles:
+        from lib.paper.arxiv import fetch_arxiv_titles_batch
+        for offset in range(
+                0, len(unresolved_titles), PAPER_TITLE_BATCH_MAX_IDS):
+            if abort_check is not None and abort_check():
+                out['aborted'] = True
+                return out
+            title_batch = unresolved_titles[
+                offset:offset + PAPER_TITLE_BATCH_MAX_IDS]
+            try:
+                resolved = fetch_arxiv_titles_batch(title_batch)
+            except Exception as error:
+                logger.warning(
+                    '[Paper:Harvest] title batch failed for %d paper(s): %s',
+                    len(title_batch), error)
+                resolved = {}
+            if isinstance(resolved, dict):
+                for aid in title_batch:
+                    candidate = resolved.get(aid)
+                    if isinstance(candidate, str) and candidate.strip():
+                        title_hints[aid] = (
+                            candidate.strip()[:PAPER_TITLE_HINT_MAX_CHARS])
 
     for index, aid in enumerate(ids, 1):
         if abort_check is not None and abort_check():
             logger.info('[Paper:Harvest] batch aborted after %d/%d', index - 1, total)
             out['aborted'] = True
             break
-        res = harvest_arxiv_id(aid, folder_id=folder_id, user_id=user_id,
-                               extract_figures=extract_figures)
+        if prefetched_hits is not None and aid in prefetched_hits:
+            res = _cache_hit_result(aid, prefetched_hits[aid])
+        else:
+            res = harvest_arxiv_id(
+                aid, folder_id=folder_id, user_id=user_id,
+                extract_figures=extract_figures,
+                force_reparse=(prefetched_hits is not None),
+                title_hint=title_hints.get(aid, ''),
+                allow_title_lookup=False)
         out['results'].append(res.to_dict())
         if res.status == 'parsed':
             out['parsed'] += 1

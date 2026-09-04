@@ -11,11 +11,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from lib.tools.discovery_vocabulary import route_capability_aliases
+
 
 # ``swarm`` rides _ALWAYS: the parallel sub-agent tools are default tools
-# (no user-facing switch), so the router must never hide them.
+# (no user-facing switch), so the router must never hide them. Artifact
+# continuation also rides _ALWAYS; its builder returns no schemas outside V2,
+# while a V2 result may name those functions on any source-tool round.
 _ALWAYS = frozenset({'read_files', 'inspect_image', 'knowledge', 'skills',
-                     'todo', 'mcp', 'custom', 'swarm'})
+                     'todo', 'mcp', 'custom', 'swarm',
+                     'tool_result_artifacts'})
 
 _KEYWORDS: dict[str, tuple[str, ...]] = {
     'search': ('search', 'research', 'browse', 'online', 'latest', 'news',
@@ -25,10 +30,16 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
                 '修复', '实现', '构建', '命令'),
     'browser': ('browser', 'page', 'dom', 'click', 'tab', 'cookie', '浏览器',
                 '页面', '点击', '标签页'),
+    'download': (
+        'download', 'save', 'copy', 'archive', 'zip', 'install', 'unzip',
+        'export', '下载', '保存', '拷贝', '复制', '压缩包', '安装', '解压',
+        '导出', '最新版', '本地'),
     'desktop': ('desktop', 'clipboard', 'application', '桌面', '剪贴板', '应用'),
-    'image': ('image', 'picture', 'photo', 'illustration', '图片', '图像', '插画'),
-    'video': ('video', 'motion', 'animation', 'slides', 'report', 'research report',
-              '视频', '动画', '幻灯片', '报告'),
+    'image': route_capability_aliases('image'),
+    'video': (
+        'motion', 'animation', 'report', 'research report', '动画', '报告',
+    ) + route_capability_aliases('video'),
+    'page_preview': route_capability_aliases('page_preview'),
     'conversation': ('conversation', 'peer', 'project board', 'charter',
                      '会话', '对话', '协作', '看板', '章程'),
     'memory': ('remember', 'memory', 'recall', '记住', '记忆', '回忆'),
@@ -56,7 +67,7 @@ def _matches(text: str, group: str) -> bool:
     return any(term in text for term in _KEYWORDS[group])
 
 
-def routed_native_spec_keys(ctx: Any) -> set[str]:
+def routed_native_spec_keys(ctx: Any, *, specs: Any = ()) -> set[str]:
     """Return the native ``ToolSpec.key`` set selected for this request."""
     text = _latest_user_text(getattr(ctx, 'messages', None))
     selected = set(_ALWAYS)
@@ -110,6 +121,8 @@ def routed_native_spec_keys(ctx: Any) -> set[str]:
         selected.add('image_gen')
     if _matches(text, 'video'):
         selected.update({'motion_video', 'produce', 'page_preview'})
+    if _matches(text, 'page_preview'):
+        selected.add('page_preview')
     if _matches(text, 'conversation') or any(
             isinstance(message, dict)
             and (message.get('convRefs') or message.get('convRefTexts'))
@@ -122,6 +135,28 @@ def routed_native_spec_keys(ctx: Any) -> set[str]:
         selected.add('memory')
     if _matches(text, 'scheduler'):
         selected.add('scheduler')
+
+    # Cross-family companions declare their own routing dependencies on the
+    # ToolSpec. This keeps a capability such as browser-backed server download
+    # from silently disappearing merely because its schema owner is neither
+    # the generic search nor browser spec.
+    active_groups = set(selected)
+    if _matches(text, 'download'):
+        active_groups.add('download')
+    pending_specs = list(specs or ())
+    changed = True
+    while changed:
+        changed = False
+        for spec in pending_specs:
+            if not (set(getattr(spec, 'native_route_groups', ()) or ())
+                    & active_groups):
+                continue
+            key = str(getattr(spec, 'key', '') or '')
+            if key and key not in selected:
+                selected.add(key)
+                active_groups.add(key)
+                changed = True
+    selected.discard('')
 
     # A bare chat/research task still needs a way to acquire external facts.
     if not getattr(ctx, 'project_enabled', False) and not re.search(

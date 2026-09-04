@@ -143,7 +143,13 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
             self.assertTrue(body['ok'])
-            self.assertIn('models', body)
+            self.assertEqual(body['models'], [])
+            self.assertEqual(body['model_routing'], {
+                'endpoint': '/api/v1/model-routing',
+                'contract_version': 'tofu.model-routing/v2',
+            })
+            self.assertNotIn('model_catalog', body)
+            self.assertNotIn('voice_input', body['features'])
             self.assertIn('scopes', body)
             self.assertIn('config_schema', body)
             self.assertIn('admin', body['scopes'])
@@ -724,6 +730,92 @@ class IntegrationTest(unittest.TestCase):
             self.assertNotEqual(r.status_code, 500)
         _run(go())
 
+    def test_project_git_root_hint_and_recent_exists(self):
+        import tempfile
+        from lib.api_keys import create_key
+        _row, token = create_key(owner_user_id=1, name='git-root-hint', scopes=['chat'])
+        headers = {'Authorization': f'Bearer {token}'}
+        async def go():
+            client = self._client()
+            with tempfile.TemporaryDirectory() as base:
+                repo = os.path.join(base, 'repo')
+                os.makedirs(os.path.join(repo, '.git'))
+                sub = os.path.join(repo, 'sub')
+                os.makedirs(sub)
+                r = await client.post(
+                    '/api/v1/project/git-root-hint',
+                    headers=headers, json={'path': sub})
+                self.assertEqual(r.status_code, 200)
+                body = await r.get_json()
+                self.assertEqual(body.get('gitRoot'), repo)
+                # A missing directory cannot be probed.
+                r = await client.post(
+                    '/api/v1/project/git-root-hint',
+                    headers=headers, json={'path': sub + '-missing'})
+                self.assertEqual(r.status_code, 400)
+                # Recent entries are annotated with liveness, never dropped.
+                ghost = os.path.join(base, 'ghost')
+                r = await client.post(
+                    '/api/v1/project/recent', headers=headers,
+                    json={'path': ghost})
+                self.assertEqual(r.status_code, 200)
+                r = await client.get('/api/v1/project/recent', headers=headers)
+                body = await r.get_json()
+                entry = next((p for p in body.get('projects') or []
+                              if p.get('path') == ghost), None)
+                self.assertIsNotNone(entry)
+                self.assertFalse(entry.get('exists'))
+                live = os.path.join(base, 'live')
+                os.makedirs(live)
+                await client.post(
+                    '/api/v1/project/recent', headers=headers,
+                    json={'path': live})
+                r = await client.get('/api/v1/project/recent', headers=headers)
+                body = await r.get_json()
+                entry = next((p for p in body.get('projects') or []
+                              if p.get('path') == live), None)
+                self.assertIsNotNone(entry)
+                self.assertTrue(entry.get('exists'))
+        _run(go())
+
+    def test_project_recent_relink(self):
+        import tempfile
+        from lib.api_keys import create_key
+        _row, token = create_key(owner_user_id=1, name='recent-relink', scopes=['chat'])
+        headers = {'Authorization': f'Bearer {token}'}
+        async def go():
+            client = self._client()
+            with tempfile.TemporaryDirectory() as base:
+                old = os.path.join(base, 'old-name')
+                new = os.path.join(base, 'new-name')
+                os.makedirs(old)
+                os.makedirs(new)
+                # The old path must be a known recent entry.
+                r = await client.post(
+                    '/api/v1/project/recent/relink', headers=headers,
+                    json={'oldPath': old, 'newPath': new})
+                self.assertEqual(r.status_code, 404)
+                r = await client.post(
+                    '/api/v1/project/recent', headers=headers,
+                    json={'path': old})
+                self.assertEqual(r.status_code, 200)
+                r = await client.post(
+                    '/api/v1/project/recent/relink', headers=headers,
+                    json={'oldPath': old, 'newPath': new})
+                self.assertEqual(r.status_code, 200)
+                r = await client.get('/api/v1/project/recent', headers=headers)
+                body = await r.get_json()
+                paths = [p.get('path') for p in body.get('projects') or []]
+                self.assertIn(new, paths)
+                self.assertNotIn(old, paths)
+                # A relink target must resolve on disk.
+                missing = os.path.join(base, 'gone')
+                r = await client.post(
+                    '/api/v1/project/recent/relink', headers=headers,
+                    json={'oldPath': new, 'newPath': missing})
+                self.assertEqual(r.status_code, 400)
+        _run(go())
+
     def test_translate_sync_requires_auth(self):
         async def go():
             r = await self._client().post('/api/v1/translate', json={'text': 'hi'})
@@ -808,6 +900,34 @@ class IntegrationTest(unittest.TestCase):
             self.assertNotEqual(r.status_code, 401)
         _run(go())
 
+    def test_vlm_cancel_is_authenticated_and_owner_scoped(self):
+        from lib.api_keys import create_key
+        _row, token = create_key(
+            owner_user_id=1, name='vlm-cancel', scopes=['chat'])
+
+        async def go():
+            unauthorized = await self._client().delete(
+                '/api/v1/pdf/vlm-parse/task-1')
+            self.assertEqual(unauthorized.status_code, 401)
+
+            with mock.patch(
+                    'lib.pdf_parser.vlm.cancel_vlm_task',
+                    side_effect=[True, None]) as cancel:
+                cancelled = await self._client().delete(
+                    '/api/v1/pdf/vlm-parse/task-1',
+                    headers={'Authorization': f'Bearer {token}'})
+                self.assertEqual(cancelled.status_code, 200)
+                self.assertTrue((await cancelled.get_json())['cancelled'])
+                cancel.assert_any_call('task-1', user_id=1)
+
+                missing = await self._client().delete(
+                    '/api/v1/pdf/vlm-parse/foreign-task',
+                    headers={'Authorization': f'Bearer {token}'})
+                self.assertEqual(missing.status_code, 404)
+                cancel.assert_any_call('foreign-task', user_id=1)
+
+        _run(go())
+
     def test_legacy_images_generate_is_404(self):
         # /api/images/upload + /api/images/<file> stay as carve-outs;
         # /api/images/generate + /api/images/models migrated.
@@ -881,22 +1001,28 @@ class IntegrationTest(unittest.TestCase):
 
         _run(go())
 
-    def test_provider_templates_with_token(self):
-        from lib.api_keys import create_key
-        _row, token = create_key(owner_user_id=1, name='templates-v1', scopes=['chat'])
-        async def go():
-            r = await self._client().get(
-                '/api/v1/providers/templates',
-                headers={'Authorization': f'Bearer {token}'})
-            self.assertEqual(r.status_code, 200)
-        _run(go())
-
     def test_legacy_server_config_is_404(self):
         async def go():
             r = await self._client().get(
                 '/api/server-config',
                 headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
+        _run(go())
+
+    def test_server_config_rejects_legacy_model_routing_authorities(self):
+        async def go():
+            for payload in (
+                {'providers': []}, {'model_catalog': {}}, {'models': {}},
+            ):
+                response = await self._client().post(
+                    '/api/v1/server-config',
+                    headers=self.fix.auth_headers,
+                    json=payload)
+                self.assertEqual(response.status_code, 400)
+                body = await response.get_json()
+                self.assertEqual(
+                    body['error_kind'],
+                    'legacy_model_routing_state_removed')
         _run(go())
 
     def test_legacy_provider_templates_is_404(self):

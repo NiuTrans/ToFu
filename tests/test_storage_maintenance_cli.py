@@ -13,11 +13,20 @@ import sqlite3
 import pytest
 
 from lib.storage import StorageSupervisor
+from lib.storage_sidecar import cli as cli_module
 from lib.storage_sidecar.cli import main
 from lib.storage_sidecar.schema import SCHEMA_VERSION
 
 
 pytestmark = pytest.mark.unit
+
+
+def test_backup_commands_share_the_launch_probed_timeout(monkeypatch):
+    monkeypatch.setattr(
+        cli_module, 'storage_backup_timeout_seconds', lambda: 21_600)
+
+    assert cli_module._maintenance_timeout_seconds('backup') == 21_600
+    assert cli_module._maintenance_timeout_seconds('baseline') == 3600
 
 
 def test_cli_configuration_is_scoped_to_one_invocation(

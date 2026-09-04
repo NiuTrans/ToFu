@@ -20,4 +20,33 @@ class TranslationContentRefused(ValueError):
         )
 
 
-__all__ = ['TranslationContentRefused']
+class TranslationProviderQueueFull(RuntimeError):
+    """The shared provider gate cannot retain another waiting caller."""
+
+    retryable = True
+
+    def __init__(self, *, capacity: int):
+        self.capacity = int(capacity)
+        super().__init__(
+            'Translation provider queue is full; retry shortly '
+            f'(capacity={self.capacity})'
+        )
+
+
+class TranslationNoAdmissibleProvider(RuntimeError):
+    """No translation slot passed the request-local provider policy."""
+
+    retryable = True
+
+    def __init__(self):
+        super().__init__(
+            'No slot is currently admissible for optional translation; '
+            'check Keys / Providers or wait for quota reset'
+        )
+
+
+__all__ = [
+    'TranslationContentRefused',
+    'TranslationNoAdmissibleProvider',
+    'TranslationProviderQueueFull',
+]

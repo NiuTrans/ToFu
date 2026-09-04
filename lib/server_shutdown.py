@@ -190,6 +190,11 @@ async def shutdown_production_runtime(
     except Exception as exc:
         log.warning('[Server] swarm cleanup timer stop failed: %s', exc)
     try:
+        from lib.swarm.integration import stop_swarm_output_cleanup
+        await asyncio.to_thread(stop_swarm_output_cleanup, timeout=2.0)
+    except Exception as exc:
+        log.warning('[Server] swarm output cleanup stop failed: %s', exc)
+    try:
         from lib.netpath import stop_prober
         await asyncio.to_thread(stop_prober)
     except Exception as exc:
@@ -214,6 +219,11 @@ async def shutdown_production_runtime(
         await asyncio.to_thread(stop_fs_keepalive, timeout=2.0)
     except Exception as exc:
         log.warning('[Server] filesystem keepalive stop failed: %s', exc)
+    try:
+        from lib.tasks_pkg.manager._presence_keepalive import stop_keepalive
+        await asyncio.to_thread(stop_keepalive, timeout=2.0)
+    except Exception as exc:
+        log.warning('[Server] presence keepalive stop failed: %s', exc)
     try:
         from lib.presence import stop_sweeper
         await asyncio.to_thread(stop_sweeper, timeout=2.0)

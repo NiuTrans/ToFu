@@ -55,7 +55,11 @@ def dispatch_scheduled_turn(
 
     snapshot = get_storage_client().query(
         "conversation.get",
-        {"conv_id": conversation_id, "user_id": owner_id},
+        {
+            "conv_id": conversation_id,
+            "user_id": owner_id,
+            "derive_messages": False,
+        },
     )
     if snapshot is None:
         logger.error("%s Conversation %s not found", log_prefix, conversation_id)

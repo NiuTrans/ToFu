@@ -1,20 +1,15 @@
 /* ===== migrated source: main/main_conv_lifecycle.js ===== */
-/* ═══════════════════════════════════════════════════════════════════
-   main conv lifecycle — extracted from main.js (split 2026-05-28)
-
-   Conversation lifecycle: newChat, loadConversation, deleteConversation, duplicateConversation, _build* config helpers.
-
-   This file is concatenated by Vite's module graph BEFORE main.js so
-   the boot IIFE can reference these symbols. Symbols share `window`
-   scope — no imports / exports needed.
-   ═══════════════════════════════════════════════════════════════════ */
+/**
+ * Responsibility: retained conversation shell create/open/delete/clone lifecycle.
+ * Entry points: newChat, loadConversation, deleteConversation, duplicateConversation.
+ * Dependencies: precomposed runtimeScope, catalog/settings/UI adapters; runs before main.js.
+ */
 
 function newChat() {
   _purgeEmptyConvs();
   const prevConv = getActiveConv();
   if (prevConv) {
-    /* See captureActiveConversationSettings: a provisional (fallback) paint must never be
-     *   written back as the conversation's stored model. */
+    /* Never persist a provisional model paint. */
     if (!config._modelIsProvisional && config.model) prevConv.model = config.model;
     prevConv.thinkingDepth = config.thinkingDepth;
     prevConv.searchMode = searchMode || "multi";
@@ -25,15 +20,16 @@ function newChat() {
     prevConv.autopilotEnabled = !!autopilotEnabled;
     prevConv.activeFlow = activeFlow || '';
     prevConv.imageGenEnabled = !!imageGenEnabled;
+    prevConv.imageGenMode = !!imageGenMode;
     if (imageGenMode) {
+      prevConv.imageGenModel = _igSelectedModel || 'gemini-3.1-flash-image-preview';
+      prevConv.imageGenProviderId = _igSelectedProviderId || '';
+      prevConv.imageGenCount = _igSelectedCount || 1;
       prevConv.imageGenAspect = _igSelectedAspect || '1:1';
       prevConv.imageGenResolution = _igSelectedResolution || '1K';
     }
     prevConv.autoTranslate = !!autoTranslate;
-    /* FIX: Save projectPath for the previous conv so it doesn't lose its
-     * project association.  This mirrors the same sync logic in captureActiveConversationSettings
-     * — without it, prevConv.projectPath could be undefined for convs that were
-     * never explicitly set via the project modal (e.g. inherited from projectState). */
+    /* Preserve inherited project binding when leaving an unopened shell. */
     if (projectState.active && projectState.path) {
       prevConv.projectPath = projectState.path;
     }
@@ -45,6 +41,9 @@ function newChat() {
     (_pendingLogClean && _pendingLogClean.originalText);
   activeConvId = null;
   sessionStorage.removeItem('tofu_activeConvId');
+  runtimeScope.ConversationTurnStore?.reconcileConversationActivity?.(
+    prevConv?.id,
+  );
   runtimeScope.PlanDecisionPresentation?.activateConversation(null);
   /* Show folder context in topbar when creating a new chat from folder view */
   const _newChatFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
@@ -60,7 +59,7 @@ function newChat() {
     topbarEl.textContent = _newChatLabel;
   }
   renderConversationList();
-  if (typeof clearDebug === "function") clearDebug();
+  runtimeScope.DebugPresentationState?.clear();
   /* Welcome screen: show folder indicator when new chat will be assigned to a folder */
   const _folderBadgeHtml = _newChatFolder
     ? `<div class="welcome-folder-badge"><span class="welcome-folder-dot" style="color:${_newChatFolder.color || '#888'}">●</span> ${escapeHtml(_newChatFolder.name)}</div>`
@@ -111,6 +110,7 @@ function loadConversation(id) {
     prevConv.humanGuidanceEnabled = !!humanGuidanceEnabled;
     if (imageGenMode) {
       prevConv.imageGenModel = _igSelectedModel || 'gemini-3.1-flash-image-preview';
+      prevConv.imageGenProviderId = _igSelectedProviderId || '';
       prevConv.imageGenCount = _igSelectedCount || 1;
       prevConv.imageGenAspect = _igSelectedAspect || '1:1';
       prevConv.imageGenResolution = _igSelectedResolution || '1K';
@@ -134,6 +134,9 @@ function loadConversation(id) {
   }
   activeConvId = id;
   sessionStorage.setItem('tofu_activeConvId', id);
+  runtimeScope.ConversationTurnStore?.reconcileConversationActivity?.(
+    prevConv?.id, id,
+  );
   runtimeScope.PlanDecisionPresentation?.activateConversation(id);
   /* If loading a conv that doesn't belong to the active folder view, exit it */
   if (typeof getActiveFolderId === 'function' && getActiveFolderId()) {
@@ -191,20 +194,31 @@ function loadConversation(id) {
     _resumePendingTranslations(id);
   }
 
-  // Existing/static render is immediate; the authoritative Turn snapshot then
-  // replaces it through the unified reducer and reconnects live attempts.
-  if (!c._turnSnapshotRequired && typeof hydrateConversationRuntime === 'function') {
-    hydrateConversationRuntime(c.id).catch(error => {
-      console.warn('[loadConversation] turn-native hydration failed:', error?.message || error);
-    });
+  /* A warm TurnStore already owns an exact snapshot cursor. Reopen its ordered
+   * SSE suffix instead of downloading the Turn window again on every sidebar
+   * selection. The typed wake boundary owns the cold-store fallback and reset
+   * policy; this retained selection path never requests a snapshot directly. */
+  if (!c._turnSnapshotRequired) {
+    const turnStore = runtimeScope.ConversationTurnStore;
+    if (typeof turnStore?.wakeConversation === 'function') {
+      turnStore.wakeConversation(c).catch(error => {
+        console.warn('[loadConversation] turn-native wake failed:', error?.message || error);
+      });
+    } else {
+      console.warn('[loadConversation] conversation turn runtime is unavailable');
+    }
   }
 
   renderPendingQueueUI(id);
   // Refresh server queue state for this conversation
   _refreshServerQueue(id);
   updateSendButton();
-  if (typeof restoreDebugForConv === "function") restoreDebugForConv(id);
-  _restoreConvProject(c);
+  runtimeScope.DebugPresentationState?.onConversationSwitch(id);
+  /* Project binding is part of authoritative settings. Cold opens restore it
+   * after Turn hydration above; restoring the shell copy here as well raced an
+   * identical setPaths request, rotated the server undo session, and warmed
+   * the same tree index twice. Warm opens already own exact settings. */
+  if (!c._turnSnapshotRequired) _restoreConvProject(c);
   /* Restore settings only after the authoritative Turn snapshot is ready. */
   if (!c._turnSnapshotRequired) restoreConversationSettingsToComposer(c);
 
@@ -218,7 +232,7 @@ function loadConversation(id) {
        * Passing pc.id would bump updatedAt = Date.now(), which makes the
        * outgoing conversation jump to the top of the sidebar even though
        * the user only viewed it without making any changes. */
-      saveConversations(null);
+      reconcileConversationCatalogMetadata(null);
       if ((runtimeScope.ConversationTurnRead?.ordered?.(pc)?.length || 0) > 0) {
         persistConversationSettings(pc);
       }
@@ -373,7 +387,6 @@ async function duplicateConversation(id, e) {
   }
   try {
     const result = await Api.conversations.clone(id, newId, title);
-    _convMetaEtag = null;
     await loadConversationCatalog();
     let newConv = conversations.find((item) => item.id === newId);
     if (!newConv) {
@@ -384,7 +397,7 @@ async function duplicateConversation(id, e) {
         createdAt: Date.now(),
         updatedAt: Date.now(),
         rev: Number(result?.rev || 0),
-        settings: {},
+        settings: { clonedFrom: id },
       });
       conversations.unshift(newConv);
       renderConversationList();
@@ -417,7 +430,7 @@ function _applyConvTitle(conv, title) {
   conv._titleEdited = true;          // block auto-title from overwriting
   /* Pass null — a rename is a metadata-only change, NOT new activity, so we
    * don't want to bump updatedAt and reorder the sidebar. */
-  saveConversations(null);
+  reconcileConversationCatalogMetadata(null);
   if (activeConvId === conv.id) {
     const tb = document.getElementById("topbarTitle");
     if (tb) tb.textContent = title;
@@ -520,7 +533,7 @@ async function _maybeAutoGenerateTitle(convId) {
     const fresh = conversations.find(c => c.id === convId);
     if (!fresh || fresh._titleEdited) return;   // user renamed mid-flight — respect it
     fresh.title = res.title;
-    saveConversations(null);
+    reconcileConversationCatalogMetadata(null);
     if (activeConvId === convId) {
       const tb = document.getElementById("topbarTitle");
       if (tb) tb.textContent = res.title;
@@ -546,18 +559,7 @@ if (typeof window !== 'undefined') {
 //  Shared config/settings builders for /api/chat/send and /api/chat/regenerate
 // ══════════════════════════════════════════════════════
 
-// ── Conversation config + settings resolution (server-authoritative) ──
-//
-// Merge policy lives in `lib/conv_config.py`. Endpoints:
-//   POST /api/v1/conversations/config/resolve   → 32-field runtime config
-//   POST /api/v1/conversations/settings/resolve → 19-field stored settings
-//
-// JS sends only the inputs (per-conv stored fields + active overrides
-// + server defaults); server merges and returns the canonical dict.
-//
-// Both functions are async and return a Promise<dict>. All callsites
-// already live inside async functions, so adding `await` is the only
-// change needed.
+// Merge policy remains server-authoritative in lib/conv_config/.
 
 /**
  * Build the global-toolbar overrides dict — fields the user has
@@ -581,6 +583,12 @@ function _buildToolbarOverrides() {
     browserEnabled,
     desktopEnabled,
     imageGenEnabled,
+    imageGenMode,
+    imageGenModel: _igSelectedModel,
+    imageGenProviderId: _igSelectedProviderId,
+    imageGenCount: _igSelectedCount,
+    imageGenAspect: _igSelectedAspect,
+    imageGenResolution: _igSelectedResolution,
     humanGuidanceEnabled,
     autopilot: autopilotEnabled,
     activeFlow: activeFlow || '',
@@ -601,62 +609,47 @@ function _buildToolbarOverrides() {
   };
 }
 
-/**
- * Build a per-conv "stored settings" snapshot for the resolver.
- * For active convs we resolve `projectPath` via `_getConvProjectPath()`
- * so the server doesn't need to know the multi-project-path UX.
- */
 function _buildConvSnapshot(conv, isActive) {
-  return {
-    model: conv.model,
-    thinkingDepth: conv.thinkingDepth,
-    searchMode: conv.searchMode,
-    fetchEnabled: conv.fetchEnabled,
-    codeExecEnabled: conv.codeExecEnabled,
-    browserEnabled: conv.browserEnabled,
-    desktopEnabled: conv.desktopEnabled,
-    memoryEnabled: conv.memoryEnabled,
-    schedulerEnabled: conv.schedulerEnabled,
-    autopilotEnabled: conv.autopilotEnabled,
-    activeFlow: conv.activeFlow || '',
-    imageGenEnabled: conv.imageGenEnabled,
-    humanGuidanceEnabled: conv.humanGuidanceEnabled,
-    chatMode: conv.chatMode || 'chat',
-    planMode: !!conv.planMode,
-    projectPath: isActive ? _getConvProjectPath(conv) : conv.projectPath,
-    projectPaths: conv.projectPaths || [],
-    readOnlyPaths: conv.readOnlyPaths || [],
-    autoTranslate: conv.autoTranslate,
-    uiLang: conv.uiLang || (typeof _i18nLang !== 'undefined' ? _i18nLang : undefined),
-    folderId: conv.folderId,
-    autoApply: conv.autoApply,
-  };
+  return buildConversationSettingsSnapshot(
+    conv,
+    isActive ? _getConvProjectPath(conv) : conv.projectPath,
+    typeof _i18nLang !== 'undefined' ? _i18nLang : undefined,
+  );
 }
 
-function _stripEnvelope(body) {
-  // api_ok merges the dict into top-level + adds {ok:true, request_id}.
-  // Strip those wrapper keys before returning to callers.
-  const out = { ...body };
-  delete out.ok;
-  delete out.request_id;
-  return out;
-}
-
-async function _buildConvConfig(conv) {
+function _buildConvConfigInputs(conv) {
   const isActive = (conv.id === activeConvId);
-  const body = await Api.conversations.resolveConfig({
+  return {
     conv_settings: _buildConvSnapshot(conv, isActive),
     overrides: _buildToolbarOverrides(),
     server_defaults: { serverModel },
     is_active: isActive,
-  });
-  return _stripEnvelope(body);
+  };
+}
+
+async function _buildConvConfig(conv) {
+  return _conversationSettingsResolution.resolveConfig(
+    _buildConvConfigInputs(conv),
+  );
+}
+
+function _buildConvSettingsInputs(conv, overrides) {
+  return {
+    conv_settings: _buildConvSnapshot(conv, false),
+    overrides: overrides || _buildToolbarOverrides(),
+  };
 }
 
 async function _buildConvSettings(conv) {
-  const body = await Api.conversations.resolveSettings({
-    conv_settings: _buildConvSnapshot(conv, false),
-    overrides: _buildToolbarOverrides(),
-  });
-  return _stripEnvelope(body);
+  return _conversationSettingsResolution.resolveSettings(
+    _buildConvSettingsInputs(conv),
+  );
+}
+
+async function _buildConvSubmission(conv) {
+  const configInputs = _buildConvConfigInputs(conv);
+  return _conversationSettingsResolution.resolveSubmission(
+    configInputs,
+    _buildConvSettingsInputs(conv, configInputs.overrides),
+  );
 }

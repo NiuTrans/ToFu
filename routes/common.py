@@ -17,7 +17,6 @@ from quart import Blueprint, Response, current_app, request
 
 from lib.quart_sync import make_response, send_from_directory
 
-import lib as _lib  # module ref for hot-reload
 from lib.css_bundler import (
     get_styles_link_tag as _get_styles_link_tag,
     get_settings_link_tag as _get_settings_link_tag,
@@ -139,54 +138,27 @@ from routes.api_v1.auth import (  # noqa: E402
 @api_v1_common_bp.route('/api/v1/logs/compress', methods=['POST'])
 def log_compress():
     """Use a cheap LLM to intelligently compress verbose logs."""
-    from lib.llm_dispatch import smart_chat as llm_chat
-
     data = parse_body()
     text = (data.get('text') or '').strip()
     if not text:
         return api_bad_request('No text provided')
-    if len(text) > 60000:
-        text = text[:60000] + '\n... [truncated]'
-
-    system_prompt = (
-        "你是一个**日志压缩器**。你的唯一任务是把冗长的日志/终端输出压缩为更精简的版本，同时不丢失任何有意义的信息。\n\n"
-        "## 压缩规则（按优先级）\n"
-        "1. **合并重复**：同一条消息因多个 worker/rank/GPU/进程而重复多次 → 只保留一条有代表性的，在行尾标注 `  ×N`\n"
-        "   - 如果不同 rank 的值不同（如耗时、端口），保留一条代表值即可\n"
-        "2. **去除纯噪音**：以下类型的行直接删除——\n"
-        "   - 空行、纯分隔线（===、---）\n"
-        "   - 进度条、百分比下载（Downloading: 45%）\n"
-        "   - DEBUG 级别的内部调试信息（插件列表、动态维度推断等），除非其内容含 ERROR/异常\n"
-        "3. **保留所有有意义的信息**：\n"
-        "   - 所有 ERROR、WARNING 完整保留\n"
-        "   - INFO 级别的关键事件（模型加载完成、服务启动就绪、配置参数）保留\n"
-        "   - 版本号、模型名、GPU 类型等环境信息保留\n"
-        "   - 不同内容的行即使格式类似也要保留（比如 2 条不同的 WARNING）\n"
-        "4. **去掉日志前缀时间戳**：如 `INFO 03-10 17:29:39` → 去掉 `INFO 03-10 17:29:39` 前缀，只保留消息内容。"
-        "   但如果时间信息本身有意义（如计算耗时差），则保留。\n"
-        "5. **格式要求**：\n"
-        "   - 直接输出压缩后的纯文本，不要包裹在 ``` 代码块中\n"
-        "   - 不要添加任何解释、总结、标题\n"
-        "   - 保留原始行的文字内容（不改写措辞），只做删减和标注 ×N\n"
-    )
 
     try:
-        content, usage = llm_chat(
-            messages=[
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': text},
-            ],
-            max_tokens=min(len(text) // 2 + 2000, 16000),
-            temperature=0,
-            capability='cheap',
-            log_prefix='[LogCompress]',
+        from lib.log_compression import (
+            LogCompressionBusyError,
+            compress_logs,
         )
-        content = content.strip()
-        if content.startswith('```'):
-            content = re.sub(r'^```[^\n]*\n', '', content)
-            content = re.sub(r'\n```\s*$', '', content)
-            content = content.strip()
+        content, usage = compress_logs(
+            text,
+            owner_user_id=request_principal().require_owner(
+                context='log compression'),
+        )
         return api_ok({'compressed': content, 'usage': usage})
+    except LogCompressionBusyError:
+        return api_error(
+            'Server at capacity; retry shortly.', status=503,
+            error_kind='overloaded', retry_after=5,
+        )
     except Exception as e:
         logger.error('[LogCompress] Error: %s', e, exc_info=True)
         return api_internal_error('internal_error')
@@ -645,21 +617,8 @@ def admin_page():
 
 @api_v1_common_bp.route('/api/v1/features')
 def features():
-    out = {
-        'pptx_translate_enabled': getattr(_lib, 'PPTX_TRANSLATE_ENABLED', False),
-        'cache_extended_ttl': getattr(_lib, 'CACHE_EXTENDED_TTL', False),
-        'debug_mode': getattr(_lib, 'DEBUG_MODE', False),
-        'optimizer_enabled': getattr(_lib, 'OPTIMIZER_ENABLED', True),
-        'artifacts_enabled': getattr(_lib, 'ARTIFACTS_ENABLED', True),
-    }
-    # Registered plugin flags (e.g. trading_enabled) added dynamically.
-    try:
-        from lib.feature_registry import registered_flags
-        for f in registered_flags():
-            out[f.json_key] = bool(getattr(_lib, f.env_key, f.default))
-    except Exception as e:
-        logger.debug('[features] plugin flags unavailable: %s', e)
-    return api_ok(out)
+    from lib.features_store import feature_flags_snapshot
+    return api_ok(feature_flags_snapshot())
 
 
 @api_v1_common_bp.route('/api/v1/features', methods=['POST'])
@@ -786,6 +745,10 @@ def readiness_check():
     lifecycle_ready = lifecycle.get('status') == 'ready'
     ready = bool(lifecycle_ready and storage.get('ready'))
     payload = {
+        # The lifecycle manager can prove that readiness came from its locked
+        # worker without first issuing the much richer /api/health request.
+        # This is process identity only; readiness remains a separate verdict.
+        'pid': os.getpid(),
         'ready': ready,
         'state': lifecycle.get('status') or 'not_registered',
         'storage': storage,

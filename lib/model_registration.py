@@ -20,6 +20,11 @@ not a billable price, and exposing it beside input/output prices made it easy
 to register a model that could be routed but could not be costed.  Old saved
 rows may still carry ``cost``; callers can pass it separately as a legacy
 fallback to :func:`routing_cost_per_1k` while the normalized row drops it.
+
+A manual Settings add may carry ``capabilities_auto: true``: capabilities
+then follow the model ID through the same name-pattern inference auto-
+discovery uses, until the user edits the capability toggles (the frontend
+drops the marker on any explicit toggle edit).
 """
 
 from __future__ import annotations
@@ -113,11 +118,23 @@ def normalize_model_entry(entry: dict, *, reject_legacy_cost: bool = False) -> d
     out.pop('cost', None)
     out['model_id'] = model_id
 
-    caps = entry.get('capabilities', ['text'])
-    if not isinstance(caps, (list, tuple, set)):
-        raise ModelRegistrationError('capabilities must be an array')
-    out['capabilities'] = list(dict.fromkeys(
-        str(cap).strip() for cap in caps if str(cap).strip())) or ['text']
+    if entry.get('capabilities_auto'):
+        # Capabilities follow the model ID while the marker stands: a proxy
+        # alias named gpt-*/claude-*/glm-* gets vision/thinking without a
+        # hand-picked toggle set. Same inference as auto-discovery.
+        from lib.llm_dispatch.discovery import _infer_capabilities
+        inferred = _infer_capabilities(model_id)
+        out['capabilities'] = sorted(inferred)
+        out['capabilities_auto'] = True
+        if 'thinking_default' not in entry:
+            out['thinking_default'] = 'thinking' in inferred
+    else:
+        out.pop('capabilities_auto', None)
+        caps = entry.get('capabilities', ['text'])
+        if not isinstance(caps, (list, tuple, set)):
+            raise ModelRegistrationError('capabilities must be an array')
+        out['capabilities'] = list(dict.fromkeys(
+            str(cap).strip() for cap in caps if str(cap).strip())) or ['text']
 
     if 'rpm' in entry and entry.get('rpm') is not None:
         out['rpm'] = _positive_int(entry['rpm'], 'rpm')

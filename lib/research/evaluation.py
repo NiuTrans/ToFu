@@ -38,6 +38,7 @@ EVALUATION_AXES = (
 
 _DEFAULT_JUDGES = 2
 _MAX_JUDGES = 3
+_MAX_PARALLEL_JUDGES = 2
 _MAX_SURVEY_CHARS = 28_000
 _MAX_GAP_CHARS = 18_000
 _MAX_IDEA_CHARS = 28_000
@@ -65,6 +66,21 @@ def _judge_count(value=None) -> int:
         logger.debug('[ResearchEval] invalid judge count %r: %s', value, exc)
         count = _DEFAULT_JUDGES
     return max(1, min(_MAX_JUDGES, count))
+
+
+def _parallel_judge_workers(requested: int) -> int:
+    from runtime_guards import resolve_resource_budget
+    return min(
+        max(1, int(requested)),
+        resolve_resource_budget(
+            'TOFU_PRODUCTION_LLM_FANOUT', maximum=_MAX_PARALLEL_JUDGES),
+    )
+
+
+def _production_429_attempts() -> int:
+    from runtime_guards import resolve_resource_budget
+    return resolve_resource_budget(
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', maximum=64)
 
 
 def _clip(text, limit: int) -> str:
@@ -206,7 +222,8 @@ def _clean_judgement(raw, *, model: str = '') -> Optional[dict]:
 
 
 def _call_judge(messages: list[dict], *, model: str, abort,
-                usage_meter) -> tuple[Optional[dict], str]:
+                max_429_attempts: int) \
+        -> tuple[Optional[dict], str, Optional[dict]]:
     from lib.llm_json import extract_json
 
     buf = {'content': ''}
@@ -221,6 +238,8 @@ def _call_judge(messages: list[dict], *, model: str, abort,
             prefer_model=model or None, strict_model=bool(model),
             capability='text', max_tokens=_JUDGE_MAX_TOKENS,
             temperature=0.0, thinking_enabled=False,
+            max_retries=2,
+            max_429_attempts=max_429_attempts,
             log_prefix='[Research:Evaluate]'),
             context='research evaluation judge')
         msg = stream_result.message
@@ -228,8 +247,7 @@ def _call_judge(messages: list[dict], *, model: str, abort,
     except Exception as exc:
         logger.warning('[Research:Evaluate] judge dispatch failed: %s', exc,
                        exc_info=True)
-        return None, f'{type(exc).__name__}: {exc}'
-    usage_meter.record(usage)
+        return None, f'{type(exc).__name__}: {exc}', None
     content = buf['content']
     if not content and isinstance(msg, dict):
         content = msg.get('content') or ''
@@ -239,8 +257,8 @@ def _call_judge(messages: list[dict], *, model: str, abort,
                     else '') or model
     clean = _clean_judgement(raw, model=str(actual_model or ''))
     if clean is None:
-        return None, 'judge returned incomplete or invalid rubric JSON'
-    return clean, ''
+        return None, 'judge returned incomplete or invalid rubric JSON', usage
+    return clean, '', usage
 
 
 def _disagreement(judges: list[dict]) -> dict:
@@ -336,14 +354,39 @@ def evaluate_research_result(direction: str, result: dict, *, judges=None,
     valid: list[dict] = []
     errors: list[str] = []
     attempted = 0
+    max_429_attempts = _production_429_attempts()
 
-    for _ in range(requested):
+    def _primary_judge(_index: int):
         if abort is not None and abort():
-            errors.append('evaluation aborted')
-            break
+            return None, 'evaluation aborted', None, False
+        judgement, error, usage = _call_judge(
+            messages, model=preferred, abort=abort,
+            max_429_attempts=max_429_attempts)
+        return judgement, error, usage, True
+
+    primary_workers = _parallel_judge_workers(requested)
+    if primary_workers == 1:
+        primary_results = [_primary_judge(0)]
+        for index in range(1, requested):
+            primary_results.append(_primary_judge(index))
+    elif abort is not None and abort():
+        primary_results = [(None, 'evaluation aborted', None, False)]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(
+                max_workers=primary_workers,
+                thread_name_prefix='research-eval') as pool:
+            # map preserves stable judge order while the provider calls overlap.
+            primary_results = list(pool.map(_primary_judge, range(requested)))
+
+    for judgement, error, usage, was_attempted in primary_results:
+        if not was_attempted:
+            if 'evaluation aborted' not in errors:
+                errors.append('evaluation aborted')
+            continue
         attempted += 1
-        judgement, error = _call_judge(
-            messages, model=preferred, abort=abort, usage_meter=meter)
+        if usage is not None:
+            meter.record(usage)
         if judgement is not None:
             valid.append(judgement)
         else:
@@ -357,8 +400,11 @@ def evaluate_research_result(direction: str, result: dict, *, judges=None,
                        _DISAGREEMENT_DELTA))
     if needs_tiebreak and not (abort is not None and abort()):
         attempted += 1
-        judgement, error = _call_judge(
-            messages, model=preferred, abort=abort, usage_meter=meter)
+        judgement, error, usage = _call_judge(
+            messages, model=preferred, abort=abort,
+            max_429_attempts=max_429_attempts)
+        if usage is not None:
+            meter.record(usage)
         if judgement is not None:
             valid.append(judgement)
         else:

@@ -47,13 +47,15 @@ def test_persist_runs_before_autopilot_hook():
     )
 
 
-def test_heavy_release_deferred_past_hook():
+def test_heavy_release_deferred_past_hook_and_commit_capture():
     """The VU inherits task['messages'] — the heavy-state release must happen
-    AFTER the hook (and after the done event), not inside the early persist."""
+    AFTER the hook/done and after commit captures its tool-round input."""
     src = _read(FINALIZE_PATH)
     hook_pos = src.index(_HOOK_CALL)
     release_pos = src.index('_release_heavy_task_state(task)')
     done_pos = src.index('append_event(task, done_evt)')
+    commit_pos = src.rfind(
+        '_spawn_async_commit_round(task', hook_pos, release_pos)
     assert release_pos > hook_pos, (
         'heavy-state release must not run before the autopilot hook — the VU '
         'reads task[\'messages\'] (run_virtual_user: parent_messages)')
@@ -61,6 +63,9 @@ def test_heavy_release_deferred_past_hook():
         'the release should sit at the old trailing-persist site, right after '
         'append_event(done_evt), preserving the pre-fix ordering for every '
         'post-done consumer')
+    assert commit_pos > hook_pos, (
+        'commit-round admission must snapshot opaque-writer evidence before '
+        'terminal toolRounds are released')
 
 
 def test_defer_param_declared():

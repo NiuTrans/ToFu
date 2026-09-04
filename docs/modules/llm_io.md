@@ -1,6 +1,9 @@
 # LLM I/O and dispatch
 
-This domain selects a provider slot, builds one canonical request, normalizes upstream calls, and reports usage/health; model registration lives in [`../MODEL_REGISTRATION.md`](../MODEL_REGISTRATION.md). `lib.llm` and `lib.llm_dispatch` are lazy compatibility facades: focused imports and route registration do not initialize transport, provider discovery, or dispatcher state.
+This domain compiles owner-authorized v2 routes, emits canonical requests, and
+normalizes upstream results. Entity/selection rules live in
+[`../MODEL_REGISTRATION.md`](../MODEL_REGISTRATION.md); `lib.llm` and
+`lib.llm_dispatch` are lazy execution facades, not configuration authorities.
 
 ## Ownership
 
@@ -12,45 +15,42 @@ This domain selects a provider slot, builds one canonical request, normalizes up
 | Responses / Anthropic translation | `lib/llm/{responses,anthropic}_outbound/` |
 | SSE byte framing | `lib/llm/_sse_framer.py` |
 | Provider-payload normalization | `lib/llm/_sse_core.py`, provider `_sse.py` modules |
-| Provider registry and discovery | `lib/llm_dispatch/provider_registry.py`, `model_entry.py`, `discovery/` |
-| Slot selection and affinity | `lib/llm_dispatch/dispatcher.py`, `slot.py`, `conv_affinity.py` |
-| Catalog/configuration and remote sync | `lib/model_catalog/`, `lib/llm_dispatch/{config,model_catalog_sync.py}` |
-| Retry/health/caching policy | dispatch health modules, `lib/llm/cache.py` |
+| Model/provider/access authority, migration, candidate compilation, scoped health, snapshots | `lib/model_routing/` |
+| Request-owned chat/non-chat slot execution and affinity | `lib/model_routing/{dispatch_adapter,capability_adapter}.py`, `lib/llm_dispatch/{dispatcher,slot,conv_affinity}.py` |
+| Retry/caching and transport-attempt policy | dispatch health modules, `lib/llm/cache.py` |
+| Dispatch operation surface (chat/stream/multi-key/budget/contention/hygiene) | `lib/llm_dispatch/api.py` (re-export facade) + `_api_{chat,stream,stream_state,multi,budget,contention,hygiene,errors}.py` shards |
+| Managed local deployment (model path → running local provider) | `lib/local_serve/` (+ agent surface `lib/tasks_pkg/handlers/local_serve.py`, `lib/local_serve/tool_defs.py`) |
 
 ## Request flow
 
-1. Resolve a canonical model entry and provider face.
-2. Bind a managed, subscription, or request-scoped BYO slot.
-3. Build the provider-neutral request body once.
+1. Parse a structured native ModelRef or resolve one compatible string with explicit Creator/Provider hints; ambiguity is an error.
+2. Read the owner-scoped v2 aggregate, hard-filter authorization, capability, context, protocol, budget, probe, stale/pending, and health state, then bind the bounded ordered candidates as request-owned slots.
+3. Build the provider-neutral request body once; root rounds retain a validated positive full-prompt admission count as an internal-only sidecar, so same-model slot retries and same-conversation cache-settle classification reuse it while invalid, missing, or cross-model evidence recomputes locally and every provider wire strips it. The first exact wire-schema digest is reused only while the model and every ordered schema object remain identical. Per-slot adaptation deep-clones message history only for families that mutate it (cache-marker/Claude or Gemini); read-only OpenAI/Responses projection reuses the canonical list, while caller-byte immutability remains the enforced boundary. A VLM-to-text fallback projects only that derived copy: one bounded marker replaces all images in each image-bearing message at their first image position, adjacent captions/references/tool results/prior assistant descriptions remain, pixels are declared unseen, and the durable multimodal history is unchanged. Final transport diagnostics derive semantic, whole-message-byte, and field-byte fingerprints in one shared history traversal; canonical field normalization emits the temporary tool alignment key in the same message scan, takes standard strings/text blocks directly while routing images and unknown shapes through the generic normalizer, and already-required field serialization proves whether an encoded `cache_control` key exists, so only marker-bearing or malformed messages allocate a marker-free projection. Each top-level value is serialized once for both raw views and remains an independent reference until one final whole-message join; primitive fields use byte-identical direct encoding, complex fields share a stateless configured stdlib encoder, and tool arguments use sorted orjson canonicalization. Message-sized values use process-local keyed integers, canonical rows retain only their alignment key plus field map, and stable-format hoisted/static/routing digests remain separate while standalone diagnostic APIs retain identical outputs.
 4. Translate only at the provider adapter boundary.
-5. Execute with bounded connect policy and a 300s default rolling stream-idle
-   window. Every received SSE/WS transport event renews it; it is not a total
-   request wall clock.
+5. Execute with bounded connect policy and a 300s default rolling stream-idle window; every SSE/WS event renews it, so it is not a total request wall clock.
 6. Normalize stream events and terminal usage into the internal vocabulary.
-7. Record slot health, cost/usage, cache observations, and retry outcome.
+7. Settle health on the factual Deployment, Connection, Credential, or Credential×Deployment scope; record cost/usage, cache observations, retry outcome, and the final redacted RouteSnapshot.
 
-Continuation rounds retain the original provider binding unless the retry
-policy explicitly declares a failover. Conversation metadata stores canonical
-model/provider identity, not a display label.
+Non-chat surfaces enter at step 2 through the capability adapter. Listings emit only enabled, authorized, probe-passed model/provider pairs. Execution pins and disposes a request group; strict logical matching includes later-injected slots. Missing routes fail closed without legacy provider/global-key fallback.
+
+Continuation rounds retain Provider preference and candidate ordering unless typed failure policy declares failover. Failover never rewrites conversation preference; metadata stores structured requested and actual v2 identities, not display labels.
 
 ## Provider adapters
 
-Provider adapters translate wire vocabulary; they do not own task policy,
-context compaction, billing, or tool execution. OpenAI-compatible,
-Responses-based, Anthropic, subscription, and BYO paths converge before task
-code consumes deltas.
+Provider adapters translate wire vocabulary; they do not own task policy, context compaction, billing, or tool execution.
+OpenAI-compatible, Responses-based, Anthropic, subscription, and owner
+ProviderAccess paths converge before task code consumes deltas.
 
-A translator preserves text/reasoning/tool work, finish and truncation meaning,
-provider cache/reasoning usage, stable tool-call IDs, and typed upstream errors
-without leaking credentials.
+A translator preserves text/reasoning/tool work, finish/truncation meaning, cache/reasoning usage, ordered tool-call occurrences, and typed errors without leaking credentials. Streaming tool assembly continues an index-less active slot only while ID/name evidence remains compatible.
+A different ID opens a new slot even when its name arrives later; same-name/no-ID ambiguity or an invalid index makes the stream malformed instead of merging executable calls. Exact complete-frame retransmission at the same stable slot is ignored, but equal payloads at different positions remain distinct.
 
-Unknown provider payloads fail explicitly. Do not add `.get()` chains that turn
-a malformed response into an empty successful answer.
+Responses adapters use `output_index` as the primary occurrence identity and use an item ID only while it is unambiguous. Recycled item IDs at distinct positions remain separate; a later delta carrying only an ambiguous ID fails closed.
+A terminal `response.output` array is the ordered authority and replaces provisional opaque items position-for-position, preserving even byte-identical entries. The WebSocket incremental-input ledger counts occurrences rather than set membership, and advances state only after a verified terminal response; malformed or interrupted streams retire the socket.
+Unknown provider payloads fail explicitly: do not add `.get()` chains that turn a malformed response into an empty successful answer.
 
 ## SSE framing and stream-activity watchdog
 
-All byte-stream transports use `lib/llm/_sse_framer.py`. It incrementally
-decodes strict UTF-8 and frames SSE events across arbitrary byte boundaries,
+All byte-stream transports use `lib/llm/_sse_framer.py`. It incrementally decodes strict UTF-8 and frames SSE events across arbitrary byte boundaries,
 including CR/LF/CRLF, comments, a leading BOM, repeated `data:` fields, multiple
 events in one read and a split `[DONE]`. One event is capped at 1 MiB. Invalid
 UTF-8, invalid JSON, an oversized event, or an unterminated EOF frame closes as
@@ -91,29 +91,48 @@ malformed-frame diagnostics. Legacy usage flags are projections of that evidence
 
 ## Dispatch policy
 
-`llm_dispatch` owns slot eligibility, provider pinning, health, rate/capacity
-signals, and bounded retry. A route may request a model or provider but may not
-reimplement slot selection. BYO slots are request-scoped and owner-authorized;
-managed slots are configured at composition.
+`lib/model_routing` owns eligibility and route ordering;
+`llm_dispatch` executes the resulting request-scoped slots and owns bounded
+attempt/retry mechanics. No caller, provider adapter, OAuth bridge, or local
+engine may create a second ProviderConfig/BYO/alias selector. Ordinary calls
+may prefer a Provider but cannot hard-lock a Connection or Deployment.
+Pricing-tier tags describe cost only and never establish protocol support.
+Chat eligibility removes those managed tags before classifying operational
+capabilities, and catalogue pricing refresh actively strips stale tier tags
+from embedding/image/audio-only models.
+
+Configured enablement and runtime health are distinct. A route-missing verdict
+excludes only its Deployment, network failure its Connection, 401/402 its
+Credential, and 403 the Credential×Deployment authorization. Pending identity
+is reachable only through its explicit Provider+Offering reference; stale and
+unprobed Deployments are excluded from automatic selection. Once every route
+for an official Model is exhausted, compatible-model fallback remains subject
+to the same capability, context, protocol, and explicit price limits.
 
 Health penalties and retry decisions must be reasoned from typed failures.
-Cancellation, user abort, and deterministic request errors are not provider
-health failures. Deterministic HTTP 400/404/422 request rejections surface on
-the selected model and may not trigger configured fallback or pool-wide rescue.
-A retry may not duplicate a completed tool side effect.
+Cancellation, user abort, and deterministic request errors are not provider health failures.
+Deterministic HTTP 400/404/422 rejections surface on the selected model — no configured fallback, pool-wide rescue, or caller-level translation replay. An explicit 400 denying any route for a wire model ID is catalogue/routing evidence, not a payload rejection: dispatch excludes that ID durably for the call and process-locally until dispatcher rebuild/config or catalogue refresh, so the 60-second transient reset cannot resurrect it. Route-missing catalogue noise never replaces an actionable error from a provider-reaching route; among different payload 400s, exhaustion still re-raises the first, not the last fallback's.
+A retry may not duplicate a completed tool side effect. A 401/403 body claiming a missing API key or authorization header while the final outbound headers contain a non-empty credential is a credential-delivery contradiction: it is gateway-class, never a permission exclusion/key-health failure, and sync/async/non-stream dispatch stops it after four actual responses.
+After its one forced refresh opportunity, a typed HTTP 401 on an OAuth slot excludes that credential's whole provider key for the dispatch call because every sibling model shares the same bearer token; HTTP 403 remains pair-scoped because model entitlement can differ. Pool rescue is still non-strict, but softly prefers the configured default model before score-ranked catalogue alternatives and widens only when that default is unavailable or already failed.
 
-A typed shared-project TPM 429 is external contention, not key/model failure;
-the first rejection arms a process-local `(provider_id, model)` gate. Every
-later sync/async task reserves after local cache gates: starts are one second
-apart and deep queues recheck in abortable three-second slices. Slots/fallback
-stay eligible; waits are metered, two drained successes clear, and quiet entries expire from a 256-family table.
+A typed shared-project TPM or app/model RPM 429 is external contention, not a
+key/model failure; the first rejection arms a process-local family gate. Every
+later sync/async task reserves after local cache gates: a continuing rejection streak spaces provider/model probes
+at 1, 2, 4, 8, then at most 15 seconds; deep queues recheck in abortable three-second slices. Automatic unpinned
+work selects the eligible family whose probe is due first; explicit provider/model boundaries remain authoritative.
+Reconstructible callers may opt into immediate-only admission: a due probe reserves atomically, while a still-blocked family returns typed `request_not_dispatched` without advancing the clock; durable/user-facing sync and async calls keep waiting by default. Slots stay healthy and eligible without evicting warm keys; waits are metered, two drained successes
+clear the gate, quiet entries expire from a 256-family table, and live bounded gate state is exposed in dispatch status.
 
-Retry execution and observability have separate budgets. Dispatch may rotate
-through transient 429/cooldown states until recovery or abort; each LLM round
-persists power-of-two samples for at most eight coarse signatures (16 each,
-128 frames total). Suppressed samples still refresh the non-durable heartbeat,
-keeping the HUD truthful without unbounded `storage_events` or
-`storage_attempt_events` growth.
+The Codex subscription settle profile follows OpenAI's [documented overflow routing above 15 requests/minute](https://developers.openai.com/api/docs/guides/prompt-caching): starts for one `prompt_cache_key` stay 4.2 seconds apart.
+Cold cacheable requests and warm uncached tails of at least 8,192 tokens arm the extra five-second visibility window; smaller warm tails proceed after the send interval, with continued growth eventually restoring the hold.
+`TOFU_CACHE_SETTLE_CODEX_WARM_WRITE_TOKENS` tunes the threshold; values below the 1,024-token cacheability floor use the safe default. Codex cache-health diagnostics retain only the prior wire message count plus a process-local digest inside the existing one-hour/4,096-entry bound; each new observation hashes its prior-length prefix to prove append-only growth, and one legacy rich entry migrates without losing evidence. Anthropic policy is independent. Auxiliary local-L2 summary prompts bind a separate opaque owner/conversation affinity to slot selection and their stream body: they neither inherit nor update the parent settle clock, repeated summaries keep a stable Codex session/cache route, and both identities remain inside the existing TTL/capacity bounds. The generic settle profile arms its 1.5-second visibility window only when the completed round proves a metered cache creation, has cold/missing cache telemetry, or has an unmetered warm suffix of at least 4,096 tokens. An explicit Anthropic `cache_creation_input_tokens=0` proves there is no new entry to settle. A smaller automatic-cache suffix can reuse the older visible prefix and proceeds immediately, bounding any extra reprocessing to 4,095 tokens instead of holding every fast tool-loop round; `TOFU_CACHE_SETTLE_WARM_WRITE_TOKENS` tunes that independent threshold. Missing or malformed usage remains conservative, and positive/cold writes retain the existing wait.
+
+Retry execution and observability have separate budgets. Primary attended dispatch may rotate
+through ordinary transient 429/cooldown states until recovery or abort; configured fallback and
+pool rescue instead own a finite actual-response budget (default 3, task override clamped 1–16),
+so their failure can settle rather than leave the client in `retrying`. Each LLM round persists
+power-of-two samples for at most eight coarse signatures (16 each, 128 frames total); suppressed
+samples still refresh liveness without unbounded `storage_events` or `storage_attempt_events` growth.
 
 An all-slots-cooling callback carries a typed current-wait status; pool polling
 is not an upstream request attempt and never increments a retry count. A real
@@ -149,48 +168,31 @@ The smaller semantic-stall retry bucket exists only to render/recover legacy
 attempt records; no live transport can enter it. Manual Retry remains
 available, and other truncation signatures retain their own caps.
 
-## Paired Kimi benchmark paths
-
-`evaluations/codex_kimi_proxy/` is a benchmark-only, one-request/one-Kimi-call
-Responses adapter, not a provider. It pins the Codex binary, keeps compaction
-client-local, normalizes tools, rejects unknown native types, and records raw
-wall, total proxy CPU, and pure translation CPU separately; compact requests
-invalidate a trial. The formal launcher strips Kimi secrets from Harbor,
-restricts the guest to a same-UID private relay, re-verifies the binary, binds
-provider/binary identity, and re-projects raw JSONL/metrics instead of trusting
-non-empty output. Immutable task claims and identical release locks govern
-resume/export; outer failures retain usage, artifacts, wall time, and terminals.
-
-The paired `tofu-kimi` profile instead uses public production `AgentRuntime`.
-Secrets stay host-side; the guest exposes only run/submit tools while Tofu owns
-dispatch, context, compaction, settlement, and orchestration. Native events,
-sanitized evidence, raw/visible tool audit, and ATIF-v1.7 must reconcile without
-prompt/runtime/schema drift, call/usage mismatch, fallback, secret persistence,
-missing compaction evidence, or an unverified final claim. Candidate wall time
-is never proxy-adjusted, and failed outer attempts remain in the same ledger.
-
 ## Invariants
 
 - One canonical body builder and one transport policy.
 - Provider differences stop at focused translation modules.
 - Streaming and non-streaming paths project the same terminal meaning.
-- Provider/model identity is canonical and survives every round.
+- Requested ModelRef, Provider preference, and actual ProviderAccess/Offering/
+  Deployment/Connection identity survive every round in RouteSnapshot.
 - Secrets stay in outbound headers and redacted diagnostics.
+- Chat and non-chat HTTP execution carry an explicit owner to v2; process-global environment credentials are a direct-library compatibility seam only.
 - Every network loop is cancellable/bounded; local health/discovery share one monitor with empty-result backoff.
-- Caller deadlines propagate through dispatch rotation; an expired background
-  request cannot fall through to a fresh direct-provider call.
-- Retry/wait phase telemetry is hard-bounded per LLM round independently of
-  the user-abortable retry loop; liveness updates are never sampled out.
+- A started task-owned chat or `/api/v1/chat/stream-direct` dispatch is execution-owned: frontend/SSE, Sidecar, push/webhooks, presence and DB abort polling cannot block/cancel ingress; explicit Stop, upstream verdicts/deadlines and runtime/process failure remain termination boundaries. Direct relay work has a 600-second default/900-second hard request deadline and a finite launch-profiled production 429 allowance, so a detached observer can never retain admission indefinitely.
+- Sync and async dispatch both fence every discarded transport or slot attempt. Task-backed projections may retract through their attempt-aware event state; OpenAI-compatible direct SSE retries only before the first visible delta and otherwise terminates honestly because that protocol cannot retract bytes.
+- Caller deadlines propagate through dispatch rotation; an expired background request cannot fall through to a fresh direct-provider call.
+- Dispatch remains indefinitely user-cancellable by default. Optional callers and every configured fallback/rescue may cap upstream 429 attempts; only provider-reaching requests count, exhaustion is typed and terminal, and `smart_chat` cannot bypass the budget through direct fallback. The synchronous language micro-classifier uses one attempt plus a 512-entry, process-keyed opaque-digest LRU; it caches only valid language codes and retains no prompt text.
+- Retry/wait telemetry is hard-bounded per LLM round independently of the user-abortable loop; liveness updates are never sampled out.
 - Each task-owned model request has one correlated start/complete diagnostic
   span, and every allowed model fallback has an explicit decision event.
-- Usage and cache fields are preserved through normalization.
+- Usage/cache fields survive normalization; Codex cold writes, material warm tails, and per-key routing pressure retain separate controls, so skipping a small-tail hold cannot disable the send interval.
 - Retries are bounded, observable, and do not reinterpret programmer errors.
 - Locally derived payload pressure is recovered locally: compact first, retry
   the same model, and never treat cgroup headroom as a model-fallback signal.
-- Registered entries own capability/pricing; remote `/models` sync has a
-  persisted 6h floor, 12h unchanged and 48h failure ceilings, plus forced Save.
-- Benchmark translation cannot introduce an extra model call or hide a native
-  tool/compaction mismatch.
+- Official Model facts and Provider Offering facts remain separate; a missing
+  remote directory row marks an Offering stale rather than deleting it.
+- One Provider-scoped wire ID names exactly one Deployment; aliases and
+  request-ID pools are migration input only.
 
 ## Change routing
 
@@ -199,12 +201,11 @@ is never proxy-adjusted, and failed outer attempts remain in the same ledger.
 | Canonical request field | `lib/llm/body/` | all provider translators |
 | Responses behavior | `responses_outbound/` | stream/non-stream parity |
 | Anthropic behavior | `anthropic_outbound/` | tool/reasoning/usage parity |
-| New provider | provider registry + focused adapter | registration contract, discovery, dispatch |
-| Catalog shape / projection | `lib/model_catalog/`, `routes/api_v1/model_catalog.py` | model-catalog contract + config/capabilities tests |
+| Model/provider/access entity or selection | `contracts/model_routing_v2.schema.json`, `lib/model_routing/` | model-routing contract, migration, API, dispatch, snapshot tests |
+| New provider protocol | v2 Connection protocol + focused wire adapter | model-routing contract, translator parity, dispatch |
 | Retry/health | `llm_dispatch/dispatcher.py`, health owner | cancellation, exhaustion, metadata |
 | Connection/timeout | `lib/llm/_transport.py` | reuse and idle-stream tests |
-| Paired Codex benchmark adapter | `evaluations/codex_kimi_proxy/` | real CLI command, stream translation, single-upstream-call metrics |
-| Paired production-Tofu candidate | `evaluations/swebench/tofu_kimi_runtime.py`, `evaluations/long_agent_release/tofu_projection.py` | native/runtime/tool/ATIF reconciliation and release export |
+| Managed local engine/flag policy | `lib/local_serve/_plan.py` (+ sibling stages) | local_serve probe/plan/env/process/tool pins + preset parity |
 
 ## Test map
 
@@ -214,7 +215,6 @@ pytest -q tests/test_stream_anomaly_retry_widening.py tests/test_retry_budget_en
 pytest -q tests/test_responses_outbound.py tests/test_responses_websocket.py
 pytest -q tests/test_anthropic_outbound.py
 pytest -q tests/test_dispatch_stream.py tests/test_dispatch_model_health.py tests/test_provider_pin.py
-pytest -q tests/test_model_registration_contract.py tests/test_model_entry_contract.py
-pytest -q tests/test_codex_kimi_proxy_cli_contract.py tests/test_codex_kimi_formal_runtime.py tests/test_harbor_codex_kimi_agent.py tests/test_codex_long_agent_projection.py
-pytest -q tests/test_tofu_kimi_formal_runtime.py tests/test_harbor_tofu_runtime_agent.py tests/test_tofu_long_agent_projection.py tests/test_harbor_tofu_release_export.py && pytest -q tests/test_long_agent_v2_contracts.py -k codex_proxy
+pytest -q tests/test_model_routing_contract.py tests/test_model_routing_capability_adapter.py tests/test_model_routing_bootstrap.py tests/test_turn_serving_route.py
+pytest -q tests/test_local_serve_probe.py tests/test_local_serve_plan.py tests/test_local_serve_process.py tests/test_local_serve_env_store_register.py tests/test_local_serve_tools.py tests/test_local_autodiscover.py
 ```

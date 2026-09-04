@@ -4,10 +4,10 @@
 **Machine contract:** `contracts/provider_offering_recipe_v1.schema.json`
 **Bundled sources:** `static/provider_templates/*.json`
 
-Provider templates are onboarding recipes for provider accounts. They are not
-an authority for logical-model definitions. The normalized model catalog owns
-logical models, provider offerings, and routes; applying a provider template
-merely contributes offerings to that catalog.
+Provider templates are first-run hints for provider accounts. They are not an
+authority for logical models or runnable routes. The owner-scoped
+`tofu.model-routing/v2` aggregate owns Providers, ProviderAccess resources,
+Offerings, Deployments, and credentials.
 
 ## Authored shape
 
@@ -33,44 +33,54 @@ merely contributes offerings to that catalog.
 }
 ```
 
-`model_id` is the exact logical identity. A provider-specific spelling belongs
-in `request_ids`. This is what lets strict routing move from one provider to
-another for the same logical model without silently changing model identity.
-No name folding, alias heuristic, or case normalization may create that link.
-If an operator or bundled recipe has not explicitly mapped two spellings, they
-remain distinct logical models.
+`model_id` is the requested identity suggested during setup. A
+provider-specific spelling belongs in `request_ids`. The authenticated probe
+remains authoritative for what the account actually serves; unconfirmed names
+enter v2 as provider-scoped pending identities and cannot be fuzzy-merged into
+an official logical model.
 
 A provider can have at most one offering recipe for a logical `model_id`.
 Multiple wire deployments for that offering belong in its ordered
 `request_ids` pool.
 
-## Compatibility projection
+## Bootstrap projection
 
-`normalize_provider_template()` reads the v1 authority. It also accepts the old
-top-level `models` array at import boundaries so older user files remain
-usable. New bundled files must author only `offering_recipes`.
+`normalize_provider_template()` reads the v1 recipe and accepts old top-level
+`models` only at the import boundary. New bundled files author
+`offering_recipes` exclusively. The stdlib-only repair launcher derives a
+temporary in-memory `models` view because it cannot import application code.
+It never persists that view as `server_config.providers`.
 
-For an older browser bundle, the templates endpoint may include a derived
-`models` alias beside `offering_recipes`. The alias is transport compatibility,
-not a second editable source. Applying a recipe projects its offerings into a
-provider row's legacy `models` field; the normalized model-catalog compiler
-then materializes the logical model, provider offering, and score route.
+After the user saves setup, bootstrap writes the credential to the existing
+`.env` boundary and atomically stages a secret-free
+`tofu.bootstrap-provider-stage/v1` draft. Once the storage sidecar is ready,
+startup imports the draft into the explicit personal-owner v2 repository,
+stores the credential through the repository secret channel, and consumes the
+draft. This works both before and after v2 has already been activated.
 
 The recipe compiler uses `lib.model_registration.normalize_model_entry`, so it
 removes the obsolete blended `cost` hint, validates capabilities, context and
 billable pricing, preserves unknown canonical registration fields, and never
 activates process-global pricing or dispatch registries.
 
+The settings UI reads the same catalog through
+`GET /api/v1/providers/templates` and asks
+`POST /api/v1/providers/templates/compile` for a selected, secret-free v2
+bundle. Compilation is non-writing. The client stages the bundle under the
+current revision and sends API-key material only through the encrypted
+credential-secret envelope when the user explicitly saves.
+
 ## Lifecycle
 
-1. The template loader validates and normalizes the authored recipe.
-2. Settings creates a provider shell (URL, credentials, protocol/faces).
-3. Recipe entries become provider-scoped offerings for that shell.
-4. Saving passes through the model-catalog authority and derives provider
-   `models` for legacy dispatcher/config consumers.
-5. Discovery may add or retire provider offerings, but it must not fuzzy-merge
-   logical identities or overwrite a newer catalog revision from a stale
-   Settings snapshot.
+1. The stdlib loader projects a bounded recipe list and performs authenticated
+   model discovery when possible.
+2. Bootstrap atomically stages transport facts without credential material.
+3. Startup activates an empty owner v2 authority when no legacy route exists,
+   or completes the one-way legacy import when it does.
+4. The staged provider replaces only its deterministic Provider-owned v2
+   resources through bounded CAS; user policy fields survive refresh.
+5. Successful import deletes the stage. A missing credential leaves it intact
+   for an idempotent retry.
 
 ## Migration guardrails
 
@@ -78,7 +88,7 @@ activates process-global pricing or dispatch registries.
 - Do not author both `offering_recipes` and `models`.
 - Do not use `cost`; register `pricing.input` and `pricing.output` per million
   tokens with an explicit USD/CNY authority currency.
-- Preserve provider wire faces and provider-level protocol fields; they belong
-  to the provider shell, not the logical model.
+- Preserve the provider protocol and exact wire IDs; they belong to v2
+  Connections and Deployments, not the logical model.
 - Verify changes with `tests/test_provider_template_recipes.py` and the model
-  catalog round-trip/strict-failover tests.
+  routing bootstrap/strict-failover tests.

@@ -5,7 +5,7 @@
    fire N parallel generation requests, render the slot grid, save partial
    results incrementally. Plain window-scope concatenation (NOT an IIFE) —
    called at runtime from generateImageDirect; shares _igGenerating /
-   _igAbortControllers / _IG_ALL_MODELS with image-gen.js. Load order is free
+   _igAbortControllers / _IG_ALL_ROUTES with image-gen.js. Load order is free
    (both before main.js).
    ════════════════════════════════════ */
 
@@ -15,16 +15,19 @@
 
 /**
  * Determine which models to use for each batch slot.
- * - All Models: cycle through _IG_ALL_MODELS
+ * - All Models: cycle through owner-scoped model/provider Offering pairs
  * - Specific model: repeat it `count` times
  */
 function _igBatchModels(count) {
-  if (_igSelectedModel === '__all__') {
+  if (ImageGenerationComposerState.selectedModel === '__all__') {
     const models = [];
-    for (let i = 0; i < count; i++) models.push(_IG_ALL_MODELS[i % _IG_ALL_MODELS.length]);
+    for (let i = 0; i < count; i++) models.push(_IG_ALL_ROUTES[i % _IG_ALL_ROUTES.length]);
     return models;
   }
-  return Array(count).fill(_igSelectedModel);
+  return Array(count).fill({
+    model: ImageGenerationComposerState.selectedModel,
+    providerId: ImageGenerationComposerState.selectedProviderId,
+  });
 }
 
 /**
@@ -44,8 +47,8 @@ async function _igGenerateBatch(prompt, count) {
       conv = { id: 'conv-' + now + '-' + Math.random().toString(36).slice(2,8),
                title: 'New Chat', createdAt: now, updatedAt: now,
                _localOnly: true };
-      conversations.unshift(conv);
-      activeConvId = conv.id;
+      ImageGenerationComposerState.conversations.unshift(conv);
+      ImageGenerationComposerState.activeConversationId = conv.id;
       sessionStorage.setItem('tofu_activeConvId', conv.id);
       captureActiveConversationSettings();
     }
@@ -70,12 +73,12 @@ async function _igGenerateBatch(prompt, count) {
     if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; }
 
     const models = _igBatchModels(count);
-    const results = models.map(model => ({
+    const results = models.map(route => ({
       ok: false,
       prompt,
-      model,
-      aspectRatio: _igSelectedAspect,
-      resolution: _igSelectedResolution,
+      model: route.model,
+      aspectRatio: ImageGenerationComposerState.selectedAspect,
+      resolution: ImageGenerationComposerState.selectedResolution,
       error: 'pending',
     }));
     let revision = 1;
@@ -88,14 +91,16 @@ async function _igGenerateBatch(prompt, count) {
 
     const startedAt = Date.now();
     _igAbortControllers = models.map(() => new AbortController());
-    await Promise.all(models.map(async (model, index) => {
+    await Promise.all(models.map(async (route, index) => {
+      const model = route.model;
       const body = {
         prompt,
         model,
-        aspect_ratio: _igSelectedAspect,
-        resolution: _igSelectedResolution,
+        aspect_ratio: ImageGenerationComposerState.selectedAspect,
+        resolution: ImageGenerationComposerState.selectedResolution,
         ...(history.length ? { history } : {}),
       };
+      if (route.providerId) body.provider_id = route.providerId;
       try {
         const data = await Api.images.generate(body, {
           signal: _igAbortControllers[index]?.signal,
@@ -104,15 +109,15 @@ async function _igGenerateBatch(prompt, count) {
           const imageUrl = data.image_url ||
             `data:${data.mime_type || 'image/png'};base64,${data.image_b64}`;
           results[index] = _igTypedResult(data, {
-            prompt, model, aspectRatio: _igSelectedAspect,
-            resolution: _igSelectedResolution, imageUrl,
+            prompt, model, aspectRatio: ImageGenerationComposerState.selectedAspect,
+            resolution: ImageGenerationComposerState.selectedResolution, imageUrl,
             elapsedSeconds: (Date.now() - startedAt) / 1000,
           });
         } else {
           const error = _igClassifyError(data, data._status);
           results[index] = _igTypedResult(data, {
-            prompt, model, aspectRatio: _igSelectedAspect,
-            resolution: _igSelectedResolution,
+            prompt, model, aspectRatio: ImageGenerationComposerState.selectedAspect,
+            resolution: ImageGenerationComposerState.selectedResolution,
             elapsedSeconds: (Date.now() - startedAt) / 1000,
             error: error.text, errorType: error.errorType,
           });
@@ -122,8 +127,8 @@ async function _igGenerateBatch(prompt, count) {
       } catch (error) {
         const cancelled = error?.name === 'AbortError';
         results[index] = _igTypedResult({}, {
-          prompt, model, aspectRatio: _igSelectedAspect,
-          resolution: _igSelectedResolution,
+          prompt, model, aspectRatio: ImageGenerationComposerState.selectedAspect,
+          resolution: ImageGenerationComposerState.selectedResolution,
           elapsedSeconds: (Date.now() - startedAt) / 1000,
           error: cancelled ? 'Cancelled' : (error?.message || 'Request failed'),
           errorType: cancelled ? 'cancelled' : 'network',

@@ -8,16 +8,189 @@ tests that need their own lifetime opt into a focused Sidecar plugin fixture.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import threading
 
 import pytest
+
+_conftest_logger = logging.getLogger('tests.conftest')
+
+# Pytest is frequently launched from a terminal created by the running Tofu
+# server. Never let that production process identity, port, manager address,
+# or storage credential become an implicit test input. Focused tests explicitly
+# set the values they own after collection.
+_INHERITED_LIFECYCLE_ENV_NAMES = (
+    'PYTEST_CURRENT_TEST',
+    'PORT',
+    '_TOFU_RUNTIME_PORT',
+    '_TOFU_REEXEC_PORT',
+    'TOFU_DATA_DIR',
+    'TOFU_PROJECT_ROOT',
+    'TOFU_PROJECT_PATH',
+    'TOFU_MANAGED_BY',
+    'TOFU_SERVER_WORKER',
+    'TOFU_RESTART_GATE_PASSED',
+    'TOFU_LIFECYCLE_GATE_PASSED',
+    'TOFU_ALLOW_LIFECYCLE_TEST',
+    'TOFU_LIFECYCLE_TEST_ROOT',
+    'TOFU_LIFECYCLE_TEST_PORT',
+    'TOFU_LIFECYCLE_TEST_TARGET_PID',
+    'TOFU_TESTING',
+    'TOFU_EXTERNAL_CONSOLE_LOG',
+    'TOFU_EXTERNAL_CONSOLE_STREAM',
+    'TOFU_STORAGE_CONNECTION_FILE',
+    'TOFU_STORAGE_TOKEN',
+    'TOFU_STORAGE_PARENT_PID',
+    'TOFU_STORAGE_PROJECT_ROOT',
+    'TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE',
+    # Resource-budget provenance is written by the running server into every
+    # child it spawns. A pytest process launched from a tofu shell inherits a
+    # stale policy marker that makes install_process_resource_defaults discard
+    # explicit test/project overrides (TOFU_MALLOC_ARENA_MAX,
+    # TOFU_PROCESS_RSS_RECYCLE_MB, TOFU_STORAGE_RPC_CAPACITY, ...) and re-probe
+    # host-dependent defaults. Scrub it so tests start hermetic, exactly like
+    # the other lifecycle authority knobs above.
+    'TOFU_RESOURCE_BUDGET_POLICY_VERSION',
+    'TOFU_RESOURCE_BUDGET_AUTOMATIC_DEFAULTS',
+    'TOFU_SUPERVISOR_CONF',
+    'TOFU_SUPERVISOR_CONF_DIR',
+    'TOFU_SUPERVISOR_HOME',
+    'TOFU_SUPERVISOR_HOST',
+    'TOFU_SUPERVISOR_PORT',
+    'TOFU_SUPERVISOR_PROJECTS',
+    'TOFU_SUPERVISOR_PYTHON',
+    'TOFU_SUPERVISOR_USER',
+    'TOFU_HEARTBEAT_DIR',
+    'TOFU_PYTEST_RUN_ROOT',
+)
+
+
+def _clear_inherited_lifecycle_environment(environment) -> tuple[str, ...]:
+    """Remove production lifecycle authority from a pytest process."""
+    removed = []
+    for name in _INHERITED_LIFECYCLE_ENV_NAMES:
+        if name in environment:
+            environment.pop(name, None)
+            removed.append(name)
+    return tuple(removed)
+
+
+_CLEARED_INHERITED_LIFECYCLE_ENV_NAMES = (
+    _clear_inherited_lifecycle_environment(os.environ))
+
+# A normal session fixture removes its roots below. SIGKILL/OOM cannot run
+# Python finalizers, so every new-format root also carries its creating PID and
+# the next pytest process reclaims only exact-format roots whose owner is dead.
+# Both traversal and deletion are bounded: a hostile/shared /tmp must never
+# turn test startup into an unbounded filesystem sweep.
+_PYTEST_ROOT_PATTERN = re.compile(
+    r'^tofu-test-(?:data|storage)(?:-[A-Za-z0-9_-]+)?-pid-'
+    r'(?P<pid>[1-9][0-9]*)-[A-Za-z0-9_]+$')
+_PYTEST_ROOT_SCAN_LIMIT = 4096
+_PYTEST_ROOT_RECLAIM_LIMIT = 128
+_PYTEST_ROOT_UID = str(os.getuid()) if hasattr(os, 'getuid') else 'user'
+_PYTEST_ROOT_PARENT = (
+    Path(tempfile.gettempdir()).resolve()
+    / f'tofu-pytest-runs-{_PYTEST_ROOT_UID}'
+)
+try:
+    _PYTEST_ROOT_PARENT.mkdir(mode=0o700, parents=True, exist_ok=True)
+except OSError as exc:
+    raise pytest.UsageError(
+        f'cannot create isolated pytest root parent: {exc}') from exc
+if _PYTEST_ROOT_PARENT.is_symlink() or not _PYTEST_ROOT_PARENT.is_dir():
+    raise pytest.UsageError(
+        f'pytest root parent is not a safe directory: {_PYTEST_ROOT_PARENT}')
+if (hasattr(os, 'getuid')
+        and _PYTEST_ROOT_PARENT.stat().st_uid != os.getuid()):
+    raise pytest.UsageError(
+        f'pytest root parent has a foreign owner: {_PYTEST_ROOT_PARENT}')
+try:
+    _PYTEST_ROOT_PARENT.chmod(0o700)
+except OSError as exc:
+    raise pytest.UsageError(
+        f'cannot make pytest root parent private: {exc}') from exc
+
+
+def _pytest_root_owner_is_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        # A permission failure proves neither death nor ownership. Retaining a
+        # disposable directory is safer than deleting another user's live run.
+        return True
+    return True
+
+
+def _reclaim_stale_pytest_roots(
+    temp_root: str | os.PathLike[str] | None = None,
+    *,
+    current_pid: int | None = None,
+    reclaim_limit: int = _PYTEST_ROOT_RECLAIM_LIMIT,
+) -> dict[str, object]:
+    """Remove bounded, exact-format test roots owned by dead processes."""
+    root = Path(temp_root or _PYTEST_ROOT_PARENT).resolve()
+    this_pid = os.getpid() if current_pid is None else int(current_pid)
+    delete_budget = max(0, min(_PYTEST_ROOT_RECLAIM_LIMIT, int(reclaim_limit)))
+    scanned = 0
+    matched = 0
+    removed: list[str] = []
+    errors: list[str] = []
+    try:
+        entries = os.scandir(root)
+    except OSError as exc:
+        return {
+            'scanned': 0, 'matched': 0, 'removed': [],
+            'errors': [f'{type(exc).__name__}: {exc}'],
+        }
+    with entries:
+        for entry in entries:
+            scanned += 1
+            if scanned > _PYTEST_ROOT_SCAN_LIMIT:
+                break
+            match = _PYTEST_ROOT_PATTERN.fullmatch(entry.name)
+            if match is None:
+                continue
+            matched += 1
+            owner_pid = int(match.group('pid'))
+            if owner_pid == this_pid or _pytest_root_owner_is_alive(owner_pid):
+                continue
+            if len(removed) >= delete_budget:
+                continue
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                shutil.rmtree(entry.path)
+                removed.append(entry.name)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if len(errors) < 8:
+                    errors.append(
+                        f'{entry.name}: {type(exc).__name__}: {exc}')
+    return {
+        'scanned': scanned,
+        'matched': matched,
+        'removed': removed,
+        'errors': errors,
+    }
+
+
+_startup_root_reclaim = _reclaim_stale_pytest_roots()
+if _startup_root_reclaim['removed']:
+    _conftest_logger.info(
+        'reclaimed %d crashed pytest root(s)',
+        len(_startup_root_reclaim['removed']))
 
 # Test storage isolation must happen before the FIRST project import.  In
 # particular, importing tofu_search.config below can transitively import
@@ -34,9 +207,11 @@ _PYTEST_DATA_ROOT_KEY = f'TOFU_PYTEST_DATA_ROOT_{_PYTEST_ID}'
 _PYTEST_DATA_ROOT = os.environ.get(_PYTEST_DATA_ROOT_KEY)
 if not _PYTEST_DATA_ROOT:
     _PYTEST_DATA_ROOT = tempfile.mkdtemp(
-        prefix=f'tofu-test-data{_PYTEST_SUFFIX}-')
+        prefix=f'tofu-test-data{_PYTEST_SUFFIX}-pid-{os.getpid()}-',
+        dir=str(_PYTEST_ROOT_PARENT))
     os.environ[_PYTEST_DATA_ROOT_KEY] = _PYTEST_DATA_ROOT
 os.environ['TOFU_DATA_DIR'] = _PYTEST_DATA_ROOT
+os.environ['TOFU_PYTEST_RUN_ROOT'] = _PYTEST_DATA_ROOT
 # Pytest may load this file as top-level ``conftest`` while guard tests import
 # ``tests.conftest``.  Without an alias, Python executes the module twice: the
 # second import replaces TOFU_DATA_DIR after route modules have frozen paths,
@@ -49,10 +224,36 @@ _PYTEST_STORAGE_ROOT_KEY = f'TOFU_PYTEST_STORAGE_ROOT_{_PYTEST_ID}'
 _PYTEST_STORAGE_ROOT = os.environ.get(_PYTEST_STORAGE_ROOT_KEY)
 if not _PYTEST_STORAGE_ROOT:
     _PYTEST_STORAGE_ROOT = tempfile.mkdtemp(
-        prefix=f'tofu-test-storage{_PYTEST_SUFFIX}-')
+        prefix=f'tofu-test-storage{_PYTEST_SUFFIX}-pid-{os.getpid()}-',
+        dir=str(_PYTEST_ROOT_PARENT))
     os.environ[_PYTEST_STORAGE_ROOT_KEY] = _PYTEST_STORAGE_ROOT
 os.environ['TOFU_STORAGE_PROJECT_ROOT'] = _PYTEST_STORAGE_ROOT
 os.environ['TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE'] = '1'
+
+
+def _cleanup_owned_pytest_roots(roots: tuple[str, ...]) -> int:
+    """Remove only this process's captured roots after cooperative exit."""
+    removed = 0
+    for raw_path in roots:
+        path = Path(raw_path)
+        match = _PYTEST_ROOT_PATTERN.fullmatch(path.name)
+        if (match is None
+                or int(match.group('pid')) != os.getpid()
+                or path.parent.resolve() != _PYTEST_ROOT_PARENT
+                or path.is_symlink()
+                or not path.is_dir()):
+            continue
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError:
+            # The next run's dead-owner sweep is the bounded backstop.
+            continue
+    return removed
+
+
+_PYTEST_OWNED_ROOTS = (_PYTEST_STORAGE_ROOT, _PYTEST_DATA_ROOT)
+atexit.register(_cleanup_owned_pytest_roots, _PYTEST_OWNED_ROOTS)
 os.environ['TOFU_DEPLOYMENT_MODE'] = 'personal'
 os.environ['TOFU_PROCESS_ROLE'] = 'all'
 for _distributed_only_name in (
@@ -61,6 +262,7 @@ for _distributed_only_name in (
 ):
     os.environ.pop(_distributed_only_name, None)
 os.environ.setdefault('_TOFU_ENV_REEXEC', '1')
+os.environ.setdefault('TOFU_DISABLE_ENV_REEXEC', '1')
 os.environ.setdefault('TOFU_MLOCK', '0')
 os.environ.setdefault('TRADING_ENABLED', '0')
 os.environ.setdefault('PPTX_TRANSLATE_ENABLED', '0')
@@ -84,9 +286,6 @@ except Exception:
     pass
 
 import tofu_search.config as _config
-
-_conftest_logger = logging.getLogger('tests.conftest')
-
 
 @pytest.fixture
 def anyio_backend():
@@ -327,13 +526,6 @@ def _shield_private_loop_helpers(request):
 # migrate the NC to ``tests/_nc_harness.py`` (in-memory, never writes disk);
 # this belt is the backstop for any not-yet-migrated on-disk NC.
 _NC_GUARDED_SOURCES = (
-    'lib/conversations/project_board.py',
-    'lib/conversations/project_dispatch.py',
-    'lib/conversations/project_charter.py',
-    'lib/conversations/project_feed.py',
-    'lib/conversations/project_brain_summary.py',
-    'lib/conversations/project_brain_influence.py',
-    'lib/conversations/project_peer.py',
     'lib/message_queue.py',
     'lib/tasks_pkg/compaction/_persist/_splitters.py',
     'lib/tools/conversation.py',
@@ -496,9 +688,7 @@ def _configure_test_env():
         except Exception as exc:
             _conftest_logger.debug(
                 'test storage Sidecar cleanup failed: %s', exc)
-        import shutil
-        shutil.rmtree(_PYTEST_STORAGE_ROOT, ignore_errors=True)
-        shutil.rmtree(_PYTEST_DATA_ROOT, ignore_errors=True)
+        _cleanup_owned_pytest_roots(_PYTEST_OWNED_ROOTS)
 
 
 @pytest.fixture(scope="session")
@@ -650,6 +840,11 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    reclaim = _reclaim_stale_pytest_roots()
+    if reclaim['errors']:
+        _conftest_logger.debug(
+            'stale pytest root reclaim had bounded errors: %s',
+            reclaim['errors'])
     if not _FRONTEND_DEP_SKIPS:
         return
     try:
@@ -1184,6 +1379,9 @@ def _dismiss_onboarding_modals(pg):
                 pg.evaluate("""async () => {
                   const close = window.TofuModules?.resolveAction?.('closeSettings');
                   if (typeof close === 'function') await close();
+                  // The onboarding close action records the durable dismissal;
+                  // merely stripping `.open` makes it reappear after reload.
+                  document.getElementById('obCloseX')?.click();
                   document.querySelectorAll('.modal-overlay.open')
                     .forEach((element) => element.classList.remove('open'));
                 }""")

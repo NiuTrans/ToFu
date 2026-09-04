@@ -8,6 +8,12 @@ OPERATIONS = {
     # body; this mirrors the legacy lifecycle contract.
     'turn.create_pair': ops.OperationSpec(
         'command', False, ops._turn_create_pair, ops._turn_change_capture),
+    'turn.queue.activate': ops.OperationSpec(
+        'command', True, ops._turn_queue_activate, ops._turn_change_capture),
+    'turn.queue.cancel': ops.OperationSpec(
+        'command', True, ops._turn_queue_cancel, ops._turn_change_capture),
+    'turn.steer.commit': ops.OperationSpec(
+        'command', True, ops._turn_steer_commit, ops._turn_change_capture),
     'turn.append_settled': ops.OperationSpec(
         'command', True, ops._turn_append_settled, ops._turn_change_capture),
     'turn.attempt.claim': ops.OperationSpec('command', False, ops._turn_attempt_claim),
@@ -21,6 +27,14 @@ OPERATIONS = {
         ops._turn_change_capture),
     'turn.projection.update': ops.OperationSpec(
         'command', False, ops._turn_projection_update, ops._turn_change_capture),
+    'turn.perception.record': ops.OperationSpec(
+        'command', False, ops._turn_perception_record),
+    'raw_archive.put': ops.OperationSpec(
+        'command', False, ops._raw_archive_put),
+    'raw_archive.list': ops.OperationSpec(
+        'query', False, ops._raw_archive_list),
+    'raw_archive.read': ops.OperationSpec(
+        'query', False, ops._raw_archive_read),
     'turn.related.announce': ops.OperationSpec(
         'command', False, ops._turn_related_announce, ops._turn_change_capture),
     'turn.branch.create': ops.OperationSpec(
@@ -40,16 +54,26 @@ OPERATIONS = {
         'command', False, ops._turn_visible_sync, ops._turn_change_capture),
     'turn.attempt.bind': ops.OperationSpec(
         'command', False, ops._turn_attempt_bind, ops._turn_change_capture),
+    'turn.attempt.start': ops.OperationSpec(
+        'command', False, ops._turn_attempt_start, ops._turn_change_capture),
     'turn.event.record': ops.OperationSpec(
         'command', False, ops._turn_event_record, ops._turn_change_capture),
     'turn.get': ops.OperationSpec('query', False, ops._turn_get),
+    'turn.image.get': ops.OperationSpec('query', False, ops._turn_image_get),
     'turn.exists': ops.OperationSpec('query', False, ops._turn_exists),
     'turn.list': ops.OperationSpec('query', False, ops._turn_list),
     'turn.list_delta': ops.OperationSpec('query', False, ops._turn_list_delta),
     'turn.sync.snapshot': ops.OperationSpec('query', False, ops._turn_sync_snapshot),
+    'turn.timing_trace.get': ops.OperationSpec(
+        'query', False, ops._turn_timing_trace_get),
+    'turn.timing_trace.list': ops.OperationSpec(
+        'query', False, ops._turn_timing_trace_list),
+    'turn.sync.page': ops.OperationSpec('query', False, ops._turn_sync_page),
     'turn.sync.changes': ops.OperationSpec('query', False, ops._turn_sync_changes),
     'turn.sync.prune': ops.OperationSpec('command', False, ops._turn_sync_prune),
     'turn.attempt.get': ops.OperationSpec('query', False, ops._attempt_get),
+    'turn.attempt.dispatchable.list': ops.OperationSpec(
+        'query', False, ops._attempt_dispatchable_list),
     'turn.revision': ops.OperationSpec('query', False, ops._turn_revision),
     'turn.events.list': ops.OperationSpec('query', False, ops._turn_events),
     # Idempotent by construction (age-bounded DELETE), so no receipt lane.
@@ -64,6 +88,10 @@ _NON_SYNC_COMMANDS = {
     'turn.attempt.claim',
     'turn.cleanup',
     'turn.events.prune',
+    # Durable, attempt-scoped diagnostics are read by the inspector endpoint;
+    # they intentionally do not mutate or replay the conversation projection.
+    'turn.perception.record',
+    'raw_archive.put',
     'turn.search.backfill',
     'turn.sync.prune',
 }

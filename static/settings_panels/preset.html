@@ -15,20 +15,11 @@
           <div class="stg-section-head">
             <div class="settings-section-title" data-i18n="settings.modelDropdown">模型下拉列表</div>
             <div class="stg-section-actions">
-              <button class="stg-btn-secondary btn-xs" data-tofu-action="_probeAllDropdownModels()" data-i18n="settings.probeAllModels" data-i18n-title="settings.probeAllModelsTitle" id="stgProbeAllModelsBtn">测试全部</button>
               <button class="stg-btn-secondary btn-xs" data-tofu-action="_toggleAllDropdownModels(true)" data-i18n="settings.showAll">全部显示</button>
               <button class="stg-btn-secondary btn-xs" data-tofu-action="_toggleAllDropdownModels(false)" data-i18n="settings.hideAll">全部隐藏</button>
             </div>
           </div>
           <p class="settings-desc" data-i18n="settings.modelDropdownDesc">选择在模型切换下拉列表中显示哪些模型。隐藏的模型仍然可用，只是不会出现在下拉列表中。</p>
-          <div class="stg-dv-legend">
-            <span class="stg-dv-legend-item"><span class="stg-dv-health-dot mh-ok"></span><span data-i18n="settings.dhOk">测试通过</span></span>
-            <span class="stg-dv-legend-item"><span class="stg-dv-health-dot mh-degraded"></span><span data-i18n="settings.dhDegraded">部分线路可用</span></span>
-            <span class="stg-dv-legend-item"><span class="stg-dv-health-dot mh-unverified"></span><span data-i18n="settings.dhUnverified">未验证</span></span>
-            <span class="stg-dv-legend-item"><span class="stg-dv-health-dot mh-down"></span><span data-i18n="settings.dhDown">测试失败</span></span>
-            <span class="stg-dv-legend-item"><span class="stg-dv-health-dot"></span><span data-i18n="settings.mhNeverProbed">未测试</span></span>
-            <span class="stg-dv-legend-item"><span class="stg-dv-health-dot mh-stale"></span><span data-i18n="settings.dhStale">结果已过期</span></span>
-          </div>
           <div id="stgDropdownVisibility" class="stg-dropdown-visibility">
             <!-- JS renders model toggles -->
           </div>

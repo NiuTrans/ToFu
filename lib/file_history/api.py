@@ -14,18 +14,22 @@ import os
 import re
 import time
 import uuid
+from collections import deque
 
 from lib.json_store import write_bytes_atomic
 from lib.log import get_logger
 from lib.error_envelope import from_exception
 
 from lib.file_history.store import (
-    COMPACT_CHECK_EVERY,
     append_snapshot_record,
     backup_blob_path,
     ensure_store,
     find_snapshot,
+    find_latest_snapshot_id_by_metadata,
+    find_snapshot_with_previous,
+    get_snapshot_file_maps,
     iter_snapshots,
+    latest_snapshot_id,
     load_tracked,
     maybe_compact_store,
     read_blob,
@@ -37,11 +41,6 @@ from lib.file_history.store import (
 logger = get_logger(__name__)
 
 _DISABLED_WARNED = False
-
-# Per-project count of snapshots appended this process, used as a cheap
-# modulo gate for ``maybe_compact_store`` (avoids scanning the whole log
-# every round just to decide whether compaction is due).
-_SNAP_COUNTERS: dict[str, int] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -180,10 +179,15 @@ def make_snapshot(base_path: str, *,
         # equivalent of ``git add -A`` over the round's known file list,
         # but bounded to a list of paths instead of the whole worktree.
         if rel_paths:
+            normalized_paths: list[str] = []
+            seen_paths: set[str] = set()
             for rp in rel_paths:
                 norm = _normalize_rel(base_path, rp)
-                if norm:
-                    stage_backup(base_path, norm, task_id=task_id)
+                if norm and norm not in seen_paths:
+                    seen_paths.add(norm)
+                    normalized_paths.append(norm)
+            for norm in normalized_paths:
+                stage_backup(base_path, norm, task_id=task_id)
 
         tracked = load_tracked(base_path)
         # Build the snapshot file map: {rel_path: latest_version}.
@@ -212,24 +216,15 @@ def make_snapshot(base_path: str, *,
             'external': bool(external),
             'redoOf': redo_of,
         }
-        append_snapshot_record(base_path, record)
+        snapshot_count = append_snapshot_record(base_path, record)
         logger.info('[FileHistory] snapshot %s task=%s conv=%s files=%d%s',
                     snap_id[:8], (task_id or '-')[:12],
                     (conv_id or '-')[:8], len(files),
                     ' external' if external else '')
-        # Cheap modulo gate: only every COMPACT_CHECK_EVERY appends do we
-        # pay for the full-log scan inside compact_store. The counter is
-        # seeded from the on-disk log length the first time we see a project
-        # so a long-lived store still compacts promptly after a restart.
-        key = os.path.abspath(base_path)
-        n = _SNAP_COUNTERS.get(key)
-        if n is None:
-            n = sum(1 for _ in iter_snapshots(base_path))
-        else:
-            n += 1
-        _SNAP_COUNTERS[key] = n
-        if n % COMPACT_CHECK_EVERY == 0:
-            maybe_compact_store(base_path, n)
+        # ``append_snapshot_record`` obtains the exact count while it already
+        # validates the tail index.  The gate itself is an O(1) stat/modulo
+        # check, including immediate rewrites of an oversized legacy log.
+        maybe_compact_store(base_path, snapshot_count)
         return snap_id
     except Exception as e:
         logger.warning('[FileHistory] make_snapshot failed task=%s: %s',
@@ -251,32 +246,49 @@ def list_history(base_path: str, *,
     """
     if not is_enabled():
         return []
+    normalized_path = _normalize_rel(base_path, path) if path else None
+    bounded_limit = max(1, int(limit))
+    recent: deque[dict] = deque(maxlen=bounded_limit)
     try:
-        snaps = list(iter_snapshots(base_path))
+        for snapshot in iter_snapshots(base_path):
+            files = snapshot.get('files') or {}
+            if path and (normalized_path is None or normalized_path not in files):
+                continue
+            recent.append({
+                'id': snapshot.get('id'),
+                'shortId': (snapshot.get('id') or '')[:8],
+                'taskId': snapshot.get('taskId'),
+                'convId': snapshot.get('convId'),
+                'tools': snapshot.get('tools') or [],
+                'summary': snapshot.get('summary'),
+                'when': snapshot.get('when'),
+                'filesChanged': list(files.keys()),
+                'external': bool(snapshot.get('external')),
+                'redoOf': snapshot.get('redoOf'),
+            })
     except Exception as e:
         logger.warning('[FileHistory] list_history failed: %s', e)
         return []
-    snaps.reverse()  # newest first
-    if path:
-        norm = _normalize_rel(base_path, path)
-        snaps = [s for s in snaps
-                 if norm is not None and norm in (s.get('files') or {})]
-    out = []
-    for s in snaps[:max(1, int(limit))]:
-        files = list((s.get('files') or {}).keys())
-        out.append({
-            'id': s.get('id'),
-            'shortId': (s.get('id') or '')[:8],
-            'taskId': s.get('taskId'),
-            'convId': s.get('convId'),
-            'tools': s.get('tools') or [],
-            'summary': s.get('summary'),
-            'when': s.get('when'),
-            'filesChanged': files,
-            'external': bool(s.get('external')),
-            'redoOf': s.get('redoOf'),
-        })
-    return out
+    recent.reverse()
+    return list(recent)
+
+
+def find_latest_snapshot_id(
+    base_path: str,
+    *,
+    task_id: str | None = None,
+    conv_id: str | None = None,
+) -> str | None:
+    """Return only the newest matching id, without building history summaries."""
+    if not is_enabled() or (not task_id and not conv_id):
+        return None
+    try:
+        return find_latest_snapshot_id_by_metadata(
+            base_path, task_id=task_id, conv_id=conv_id,
+        )
+    except Exception as error:
+        logger.debug('[FileHistory] latest metadata lookup failed: %s', error)
+        return None
 
 
 def diff_name_status(base_path: str, from_id: str | None,
@@ -293,15 +305,10 @@ def diff_name_status(base_path: str, from_id: str | None,
     if not is_enabled() or not to_id:
         return []
     try:
-        to_snap = find_snapshot(base_path, to_id)
-        if not to_snap:
+        file_maps = get_snapshot_file_maps(base_path, from_id, to_id)
+        if file_maps is None:
             return []
-        to_files = to_snap.get('files') or {}
-        from_files: dict[str, int] = {}
-        if from_id:
-            from_snap = find_snapshot(base_path, from_id)
-            if from_snap:
-                from_files = from_snap.get('files') or {}
+        from_files, to_files = file_maps
         out: list[dict] = []
         for rel, v in to_files.items():
             prev = from_files.get(rel)
@@ -350,18 +357,17 @@ def rewind_to(base_path: str, snapshot_id: str) -> dict:
         result['error'] = 'disabled or empty snapshot_id'
         return result
     try:
-        target = find_snapshot(base_path, snapshot_id)
+        target, prior_snapshot = find_snapshot_with_previous(
+            base_path, snapshot_id,
+        )
         if not target:
             result['error'] = 'snapshot not found'
             return result
         # Pre-state = the most recent snapshot strictly before this one.
-        prior_files: dict[str, int] = {}
-        prev_seen = False
-        for s in iter_snapshots(base_path):
-            if s.get('id') == snapshot_id:
-                break
-            prior_files = s.get('files') or {}
-            prev_seen = True
+        prior_files: dict[str, int] = (
+            (prior_snapshot or {}).get('files') or {}
+        )
+        prev_seen = prior_snapshot is not None
         # Apply rewind: for every path in target.files, restore to
         # prior_files[path] (default: absent → delete).
         target_files = target.get('files') or {}
@@ -699,13 +705,11 @@ def detect_external_edits(base_path: str, *,
 # ═══════════════════════════════════════════════════════════════════
 
 def get_last_snapshot_id(base_path: str) -> str | None:
-    last = None
     try:
-        for s in iter_snapshots(base_path):
-            last = s.get('id') or last
+        return latest_snapshot_id(base_path)
     except Exception as e:
         logger.debug('[FileHistory] get_last_snapshot_id failed: %s', e)
-    return last
+        return None
 
 
 def diff_text(base_path: str, from_id: str | None, to_id: str | None,

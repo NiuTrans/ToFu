@@ -322,71 +322,66 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
 def models_payload(
     *, owner_user_id: int | None = None, tenant_id: str | None = None,
 ) -> dict:
-    """Build the ``/v1/models`` response from the dispatcher's view.
+    """Project the owner's routable v2 identities for ``/v1/models``.
 
-    When ``owner_user_id`` is supplied, the caller's BYO providers
-    (registered via :mod:`lib.byo_providers`) also appear, with each
-    served model exposed as ``id="<model>@<prov_id>"`` so OpenAI SDKs
-    can pin runs to that endpoint without any custom-client code.
-    Operator-curated models always come first.
+    Official rows keep the standard bare string ID and expose Creator plus
+    available Provider preferences through ``tofu``. Pending identities stay
+    Provider-scoped; this function never synthesizes ``model@provider``.
     """
-    out_models = []
-    seen: set[str] = set()
-    try:
-        from lib import _SAVED_CONFIG  # type: ignore
-    except ImportError as e:
-        logger.debug('[compat:openai] _SAVED_CONFIG unavailable: %s', e)
-        _SAVED_CONFIG = {}  # noqa: N806 — local fallback only
-    for prov in (_SAVED_CONFIG.get('providers', []) or []):
-        if not isinstance(prov, dict) or not prov.get('enabled', True):
-            continue
-        for m in (prov.get('models', []) or []):
-            if not isinstance(m, dict):
-                continue
-            mid = m.get('model_id')
-            if not mid or mid in seen:
-                continue
-            seen.add(mid)
-            out_models.append({
-                'id': mid,
+    if owner_user_id is None:
+        return {'object': 'list', 'data': []}
+    from lib.model_routing import ModelRoutingRepository, OwnerBoundary
+
+    document = ModelRoutingRepository().get(OwnerBoundary.create(
+        owner_user_id, tenant_id)).document
+    enabled_accesses = {
+        row['provider_access_id']: row['provider_id']
+        for row in document['provider_accesses'] if row['enabled']
+    }
+    offerings = {
+        row['offering_id']: row for row in document['offerings']
+        if row['enabled'] and not row.get('stale')
+        and row['provider_access_id'] in enabled_accesses
+    }
+    deployments = [
+        row for row in document['deployments']
+        if row['enabled'] and row['offering_id'] in offerings
+    ]
+    official: dict[tuple[str, str], set[str]] = {}
+    pending: list[dict] = []
+    for deployment in sorted(
+        deployments,
+        key=lambda row: (row['offering_id'], row['wire_model_id']),
+    ):
+        offering_id = deployment['offering_id']
+        offering = offerings[offering_id]
+        provider_id = enabled_accesses[offering['provider_access_id']]
+        if offering['identity_state'] == 'confirmed':
+            ref = offering['model']
+            official.setdefault(
+                (ref['creator_id'], ref['model_id']), set()).add(provider_id)
+        else:
+            pending.append({
+                'id': deployment['wire_model_id'],
                 'object': 'model',
-                'created': 0,
-                'owned_by': prov.get('id') or 'tofu',
-                'capabilities': m.get('capabilities') or [],
+                'owned_by': provider_id,
+                'tofu': {
+                    'preferred_provider_id': provider_id,
+                    'offering_id': offering_id,
+                    'pending_identity': True,
+                },
             })
-    # ── BYO providers owned by THIS caller ────────────────────────
-    if owner_user_id is not None:
-        try:
-            from lib.byo_providers import list_providers
-            for byo in list_providers(
-                    owner_user_id, tenant_id=tenant_id):
-                if byo.get('disabled'):
-                    continue
-                prov_id = byo.get('id') or ''
-                for m in (byo.get('models') or []):
-                    if not isinstance(m, dict):
-                        continue
-                    mid = m.get('model_id')
-                    if not mid:
-                        continue
-                    suffixed = f'{mid}@{prov_id}'
-                    if suffixed in seen:
-                        continue
-                    seen.add(suffixed)
-                    out_models.append({
-                        'id': suffixed,
-                        'object': 'model',
-                        'created': int(byo.get('created_at') or 0),
-                        'owned_by': prov_id,
-                        'capabilities': m.get('capabilities') or [],
-                        # Surface the human-readable name so SDKs that
-                        # group-by-owner can show "cluster-A" rather
-                        # than the opaque prov_xxx string.
-                        'tofu_provider_name': byo.get('name') or '',
-                    })
-        except Exception as e:
-            logger.debug('[compat:openai] BYO models enumeration failed: %s', e)
-    return {'object': 'list', 'data': out_models}
+    data = [{
+        'id': model_id,
+        'object': 'model',
+        'owned_by': creator_id,
+        'tofu': {
+            'creator_id': creator_id,
+            'provider_ids': sorted(provider_ids),
+        },
+    } for (creator_id, model_id), provider_ids in sorted(official.items())]
+    data.extend(pending)
+    return {'object': 'list', 'data': data}
 
 
 __all__ = [

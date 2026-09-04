@@ -52,6 +52,35 @@ _MODS_CACHE_CAPACITY = resolve_resource_budget(
 _mods_cache: OrderedDict[str, list] = OrderedDict()
 
 
+# ── Live-change listeners ─────────────────────────────────────────────
+# Presentation-only channel: the task engine subscribes
+# (``commit_round._derive.note_live_file_change``, registered from
+# ``lib.tasks_pkg.handlers.project``) so a RUNNING turn's fileChanges card
+# grows as edits land instead of appearing only at settlement.  The journal
+# stays the sole authority — listeners observe, never mutate.
+_live_change_listeners: list = []
+
+
+def register_live_change_listener(fn):
+    """Subscribe ``fn(task_id, entry)`` to journaled file changes. Idempotent."""
+    if fn not in _live_change_listeners:
+        _live_change_listeners.append(fn)
+
+
+def _default_live_action(mod_type, existed):
+    """Map a journal record to the settlement action vocabulary
+    (``commit_round._derive.derive_round_modified_files``)."""
+    if mod_type == 'write_file':
+        return 'written' if existed else 'created'
+    if mod_type in ('apply_diff', 'apply_diffs'):
+        return 'patched'
+    if mod_type in ('insert_content', 'insert_contents'):
+        return 'inserted'
+    if mod_type == 'run_command':
+        return 'modified' if existed else 'created'
+    return mod_type
+
+
 def _atomic_json_write(filepath, data):
     """Write JSON data to file atomically (write to temp, then rename).
 
@@ -166,12 +195,14 @@ def resolve_base_path(task_id=None, conv_id=None):
         try:
             from lib import file_history
 
-            for base_path in history_roots:
-                for entry in file_history.list_history(base_path, limit=2000):
-                    if task_id and entry.get('taskId') == task_id:
-                        return base_path
-                    if conv_id and not task_id and entry.get('convId') == conv_id:
-                        return base_path
+            for base_path in dict.fromkeys(history_roots):
+                snapshot_id = file_history.find_latest_snapshot_id(
+                    base_path,
+                    task_id=task_id or None,
+                    conv_id=conv_id if not task_id else None,
+                )
+                if snapshot_id:
+                    return base_path
         except Exception as e:
             logger.debug('[Modifications] history path resolution failed: %s', e)
     return None
@@ -381,13 +412,16 @@ def _decode_original(mod):
     return original
 
 
-def _record_modification(base_path, mod_type, path, original_content=None, reverse_patch=None, conv_id=None, task_id=None):
+def _record_modification(base_path, mod_type, path, original_content=None, reverse_patch=None, conv_id=None, task_id=None, action=None):
     """Record a modification for later undo, tagged with conv_id and task_id.
 
     Args:
         mod_type: 'write_file', 'apply_diff', or 'run_command'.
         conv_id: Conversation ID for per-conversation rollback.
         task_id: Task ID for per-round rollback (one user message = one task).
+        action: Optional live-display action hint in the settlement
+            vocabulary (run_command already knows deleted/created/modified
+            at record time; other types derive it from ``existed``).
     """
     session_dir = _get_session_dir(base_path)
     if not session_dir:
@@ -478,6 +512,18 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
     logger.debug('Recorded modification: %s %s (conv=%s task=%s session=%s)',
                  mod_type, path, conv_id or '?', task_id or '?',
                  os.path.basename(session_dir))
+
+    if task_id and _live_change_listeners:
+        entry = {
+            'path': path,
+            'action': action or _default_live_action(mod_type, mod.get('existed', True)),
+            **({'root': mod['root']} if mod.get('root') else {}),
+        }
+        for listener in tuple(_live_change_listeners):
+            try:
+                listener(task_id, entry)
+            except Exception as e:
+                logger.debug('[Modifications] live-change listener failed for %s: %s', path, e)
     return True
 
 
@@ -604,15 +650,6 @@ def _undo_modifications_list(base_path, modifications):
     return undone, failed
 
 
-# Kept for backward compatibility — external callers (if any) still import it.
-# Internally, mutations should go through _locked_rmw.
-def _save_modifications(session_dir):
-    """Flush the in-memory cache for ``session_dir`` to disk."""
-    with _lock:
-        mods = list(_cache_get(session_dir))
-        _flush_to_disk(session_dir, mods)
-
-
 def undo_conv_modifications(base_path, conv_id):
     """Undo modifications for a specific conversation (对话粒度回撤)."""
     session_dir = _get_session_dir(base_path)
@@ -693,11 +730,7 @@ def redo_task_modifications(base_path, task_id):
         return {'ok': False, 'error': 'File-history disabled (TOFU_FILE_HISTORY=0)'}
     if not task_id:
         return {'ok': False, 'error': 'taskId is required'}
-    snap_id = None
-    for entry in fh.list_history(base_path, limit=200):
-        if entry.get('taskId') == task_id:
-            snap_id = entry.get('id')
-            break
+    snap_id = fh.find_latest_snapshot_id(base_path, task_id=task_id)
     if not snap_id:
         return {'ok': False, 'taskId': task_id,
                 'error': 'No snapshot found for this task (was it ever committed?)'}

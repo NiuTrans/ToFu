@@ -26,6 +26,8 @@ import pytest
 
 import lib as _lib
 import lib.search_settings as ss
+from lib.tools.gateway import tool_schema_tokens
+from lib.tools.search import build_update_search_settings_tool
 
 pytestmark = pytest.mark.unit
 
@@ -65,6 +67,64 @@ class TestPureRead:
         res = ss.apply_updates({})
         assert res['effective']['fetch_top_n'] == 9
         assert res['effective']['skip_domains'] == ['a.com']
+
+
+class TestToolSchema:
+    def test_model_contract_keeps_safety_profiles_tradeoffs_and_result_honesty(self):
+        tool = build_update_search_settings_tool()
+        schema = tool['function']
+        desc = schema['description'].lower()
+        props = schema['parameters']['properties']
+
+        for phrase in (
+                'server-wide', 'pure read', 'always inspect',
+                'persist across restarts', 'hot-reload immediately',
+                'affect every conversation', 'user asks', 'repeated results',
+                'integers clamp', 'fast=3 pages/30k',
+                'balanced=6/60k', 'deep=10/100k', 'link deepening',
+                'legacy concrete knobs', 'coverage, latency, and tokens',
+                'max_download_mb is mb, not bytes',
+                'slower selective llm gate', 'faster/cheaper lexical',
+                'normalized fetch blocklist', 'rejected values with reasons',
+                'env overrides shadowing', 'new effective state',
+                'explain the outcome'):
+            assert phrase in desc, phrase
+
+        assert props['profile']['enum'] == ['fast', 'balanced', 'deep']
+        assert set(props['overrides']['properties']) == {
+            'fetch_top_n', 'max_chars_search', 'llm_content_filter',
+            'deepen_enabled',
+        }
+        assert set(props) == {
+            'profile', 'overrides', 'fetch_top_n', 'fetch_timeout',
+            'max_chars_search', 'max_chars_direct', 'max_chars_pdf',
+            'max_download_mb', 'llm_content_filter', 'block_domain',
+            'unblock_domain',
+        }
+
+    def test_model_contract_stays_within_resident_token_budget(self):
+        tokens = tool_schema_tokens([build_update_search_settings_tool()])
+        assert tokens <= 550, (
+            f'update_search_settings schema costs {tokens} tokens; compact '
+            'repeated global-safety, profile, and knob prose')
+
+    def test_profile_and_overrides_are_rendered_as_global_writes(self):
+        from lib.tasks_pkg.tool_dispatch._approval import (
+            _approval_meta_update_search_settings,
+        )
+
+        meta = {}
+        _approval_meta_update_search_settings(meta, {
+            'profile': 'deep',
+            'overrides': {'fetch_top_n': 9},
+        })
+
+        assert meta['path'] == 'Setting: profile, Setting: overrides'
+        rendered = json.dumps(meta, ensure_ascii=False)
+        assert 'Setting: profile' in rendered and 'deep' in rendered
+        assert 'Setting: overrides' in rendered and 'fetch_top_n' in rendered
+        assert 'SERVER-WIDE' in rendered
+        assert 'read-only' not in rendered
 
 
 # ═══════════════════════════════════════════════════════════

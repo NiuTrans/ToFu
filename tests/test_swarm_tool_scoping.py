@@ -97,15 +97,23 @@ def test_coder_role_excludes_denylist_even_when_hint_empty_match():
     assert names.isdisjoint(SUB_AGENT_DENYLIST)
 
 
-def test_specialist_single_capability_never_expands_to_privileged_tools():
-    """A capability gate leaving one browser tool must remain least-authority."""
+def test_browser_role_exposes_declared_download_without_privileged_tools():
+    """Browser download is role-visible without expanding to shell or writes."""
     tools = [
         {'type': 'function',
          'function': {'name': 'browser_preview_page', 'parameters': {}}},
+        {'type': 'function',
+         'function': {
+             'name': 'browser_download_url_to_server',
+             'parameters': {},
+         }},
         {'type': 'function',
          'function': {'name': 'run_command', 'parameters': {}}},
         {'type': 'function',
          'function': {'name': 'write_file', 'parameters': {}}},
     ]
     names = set(_names(scope_tools_for_role('browser', tools)))
-    assert names == {'browser_preview_page'}
+    assert names == {
+        'browser_preview_page',
+        'browser_download_url_to_server',
+    }

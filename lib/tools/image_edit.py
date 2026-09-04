@@ -29,19 +29,11 @@ INSPECT_IMAGE_TOOL = {
     "function": {
         "name": "inspect_image",
         "description": (
-            "Get a closer, transformed VIEW of a local image to read detail that is "
-            "too small to see in a normal read. When you read a large image (a "
-            "schematic, diagram, screenshot, scanned page, photo of a whiteboard) it "
-            "is downscaled to fit the model's input limit, so fine text and symbols "
-            "blur. This tool re-renders the image FROM THE ORIGINAL FILE at full "
-            "resolution after applying crop / zoom / rotate, recovering that detail.\n\n"
-            "**Typical workflow:** read the whole image once to get oriented, then "
-            "call inspect_image with `crop` (or `zoom`) on the region you need to "
-            "read. Inspect ONE region at a time — each call adds another image to "
-            "the conversation, and many large images get re-downscaled together.\n\n"
-            "Pass `grid=true` on a first pass to overlay a 0.0–1.0 coordinate grid, "
-            "then use those numbers to pick a precise `crop` box on the next call.\n\n"
-            "This is READ-ONLY: it never modifies the file on disk."
+            "Read fine detail by transforming the ORIGINAL image at source "
+            "resolution before model downscaling. Read the whole image once, then "
+            "inspect ONE crop/zoom region per call; many returned images are "
+            "downscaled together. Use grid=true first for 0–1 coordinates, then "
+            "crop. READ-ONLY; never changes the source."
         ),
         "parameters": {
             "type": "object",
@@ -49,22 +41,19 @@ INSPECT_IMAGE_TOOL = {
                 "path": {
                     "type": "string",
                     "description": (
-                        "Path to the image file (relative to the project root, or an "
-                        "absolute / ~ path). Same path rules as read_files. Supported "
-                        "formats: png, jpg, jpeg, gif, webp, bmp.\n"
-                        "For an image the USER UPLOADED in the chat, there is no "
-                        "filesystem path — pass the '[image ref: /api/images/<file>]' "
-                        "value shown next to the image (an /api/images/... string) as "
-                        "this `path`. Do NOT invent a path like /dev/null."
+                        "Local path using read_files rules (png/jpg/jpeg/gif/webp/bmp), "
+                        "or a chat upload's shown /api/images/<file> reference. Do not "
+                        "invent a path such as /dev/null."
                     )
                 },
                 "crop": {
                     "type": "array",
                     "description": (
-                        "Region to keep, as [x0, y0, x1, y1]. Values between 0 and 1 "
-                        "are fractions of the image size (e.g. [0.5, 0, 1, 0.5] = "
-                        "top-right quadrant); values greater than 1 are absolute "
-                        "pixels. Omit to keep the whole frame."
+                        "Keep [x0,y0,x1,y1]. Each 0–1 value is its axis fraction; >1 "
+                        "is pixels, and units may mix. Coordinates follow the visible "
+                        "frame after EXIF orientation then rotate. [.5,0,1,.5] is the "
+                        "top-right quadrant. Crop wins over zoom; omit for the whole "
+                        "frame. Prefer grid fractions."
                     ),
                     "items": {"type": "number"},
                     "minItems": 4,
@@ -73,24 +62,21 @@ INSPECT_IMAGE_TOOL = {
                 "zoom": {
                     "type": "number",
                     "description": (
-                        "Convenience centre-zoom factor > 1 (e.g. 2 keeps the middle "
-                        "quarter, magnified). Applied AFTER crop. Use crop instead "
-                        "when the region of interest is off-centre."
+                        "Centre zoom >1; 2 keeps the middle quarter. Used only when "
+                        "crop is omitted."
                     )
                 },
                 "rotate": {
                     "type": "integer",
                     "description": (
-                        "Clockwise rotation in degrees. One of 0, 90, 180, 270. "
-                        "Useful for sideways scans or photos. Default 0."
+                        "Clockwise degrees after EXIF orientation; default 0."
                     ),
                     "enum": [0, 90, 180, 270]
                 },
                 "grid": {
                     "type": "boolean",
                     "description": (
-                        "Overlay a labelled 0.0–1.0 coordinate grid on the returned "
-                        "view to help you choose a precise `crop` box next. Default false."
+                        "Overlay labelled 0–1 coordinates for a later crop; default false."
                     )
                 }
             },

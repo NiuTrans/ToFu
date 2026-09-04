@@ -20,15 +20,12 @@ caller keeps the local for use in the pre-loop init that follows.
   4. Emit ``PREFERENCES_APPLIED`` SSE if ``task['_appliedPreferences']`` was
      populated by the injection (the chip that lets the user see which
      preferences the model was made aware of).
-  5. Emit ``RELATED_CONVERSATIONS`` SSE if ``task['_relatedConversations']``
-     was populated by the injection (the sibling-conversation digest chip).
-  6. Pop the project-context future + shutdown the ``prefetch_executor``.
-  7. Stash ``_t_prep_done`` on the task and log the prep-duration timing line.
-  8. Emit VU phase ``Autopilot：上下文就绪，正在发送请求…``.
+  5. Pop the project-rules future + shutdown the ``prefetch_executor``.
+  6. Stash ``_t_prep_done`` on the task and log the prep-duration timing line.
+  7. Emit VU phase ``Autopilot：上下文就绪，正在发送请求…``.
 
-Steps 4 & 5 are guarded on task-field truthiness (no config lookup) — matches
-inline exactly.  Both are wrapped in a debug-swallow try/except to prevent an
-emit-side failure from breaking the run, mirroring the inline behaviour.
+The preferences chip is guarded on task-field truthiness and wrapped in a
+debug-swallow try/except so an emit-side failure cannot break the run.
 """
 
 from __future__ import annotations
@@ -155,35 +152,21 @@ def inject_context_and_emit_chips(
         except Exception as _e:
             logger.debug('[orchestrator] preferences_applied emit failed: %s', _e)
 
-    # 5. Related-conversations chip.
-    _related_convs = task.get('_relatedConversations')
-    if _related_convs:
-        try:
-            append_event(task, build_event(
-                EventType.RELATED_CONVERSATIONS,
-                count=_related_convs.get('count', 0),
-                items=_related_convs.get('items', []),
-                toolsAvailable=_related_convs.get('toolsAvailable', False),
-            ))
-            task['_relatedConversations'] = dict(_related_convs)
-        except Exception as _e:
-            logger.debug('[orchestrator] related_conversations emit failed: %s', _e)
-
-    # 6. Prefetch cleanup.
+    # 5. Prefetch cleanup.
     task.pop('_prefetch_project', None)
     try:
         prefetch_executor.shutdown(wait=False)
     except Exception as _e:
         logger.debug('[orchestrator] prefetch_executor shutdown failed: %s', _e)
 
-    # 7. Timing anchor + prep-duration log line (byte-parity with inline).
+    # 6. Timing anchor + prep-duration log line.
     _t_prep_done = time.time()
     task['_t_prep_done'] = _t_prep_done
     logger.info('[Timing:%s] prep=%.3fs (run_task→context-ready, '
                 'model=%s) — about to build first LLM request',
                 tid, _t_prep_done - t_run_start, model)
 
-    # 8. The next real backend action is request construction / dispatch.
+    # 7. The next real backend action is request construction / dispatch.
     _emit_vu_context_phase(
         vu_phase,
         'Autopilot context is ready; sending the model request…',

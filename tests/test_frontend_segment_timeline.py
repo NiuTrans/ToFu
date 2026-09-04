@@ -45,6 +45,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
@@ -65,6 +66,8 @@ def _extract_timeline_fns() -> str:
     `_segTimelineEnabled` feature-flag helper was removed, so extraction starts
     at the first surviving timeline helper."""
     src = open(TR_JS, encoding='utf-8').read()
+    owner_end = src.index('/* ===== migrated source: ui/tool_rounds.js ===== */')
+    grouping_owner = src[:owner_end]
     start = src.index('function _roundsByToolCallId(')
     end = src.index('\nfunction _renderUnifiedGroup(')
     chunk = src[start:end]
@@ -85,7 +88,7 @@ def _extract_timeline_fns() -> str:
     todo_start = src.index('function _projectTodoRoundsForDisplay(')
     todo_end = src.index('\nfunction ', todo_start + 1)
     todo_chunk = src[todo_start:todo_end]
-    return todo_chunk + '\n' + chunk + '\n' + sup_chunk
+    return grouping_owner + '\n' + todo_chunk + '\n' + chunk + '\n' + sup_chunk
 
 
 # Stubs for the collaborators the timeline helper calls. Each emits an
@@ -119,7 +122,7 @@ var config = {};
 """
 
 _HARNESS = _STUBS + r"""
-const src = process.env.TL_SRC;
+const src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 eval(src);
 
 const out = [];
@@ -189,8 +192,35 @@ check('round1_narration_falls_back_english', html.indexOf('<md>narrate1</md>') >
 console.log(out.join('\n'));
 """
 
+_REUSED_CALL_ID_HARNESS = _STUBS + r"""
+const src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
+eval(src);
+const out = [];
+function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+const segments = [
+  { type:'tool_use', blockId:'tool:reused-image-id', id:'reused-image-id',
+    name:'inspect_image', input:{crop:[0,0,0.5,0.5]}, llmRound:0, result:{} },
+  { type:'tool_use', blockId:'tool:reused-image-id~2', id:'reused-image-id',
+    name:'inspect_image', input:{crop:[0.5,0.5,1,1]}, llmRound:1, result:{} },
+];
+const msg = { role:'assistant', content:'', toolRounds:[
+  { roundNum:1, llmRound:0, toolCallId:'reused-image-id',
+    toolName:'inspect-first-crop' },
+  { roundNum:2, llmRound:1, toolCallId:'reused-image-id',
+    toolName:'inspect-second-crop' },
+]};
+const html = renderSegmentTimelineHTML(segments, msg, 0);
+const first = html.indexOf('<TOOL name=inspect-first-crop>');
+const second = html.indexOf('<TOOL name=inspect-second-crop>');
+check('both_occurrences_rendered_once', first >= 0 && second > first
+  && html.indexOf('<TOOL name=inspect-first-crop>', first + 1) === -1
+  && html.indexOf('<TOOL name=inspect-second-crop>', second + 1) === -1);
+console.log(out.join('\n'));
+"""
+
+
 _FALLBACK_HARNESS = _STUBS + r"""
-const src = process.env.TL_SRC;
+const src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 eval(src);
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -217,16 +247,16 @@ console.log(out.join('\n'));
 """
 
 _NC_HARNESS = _STUBS + r"""
-// NEUTER: collapse the llmRound batch key so EVERY segment lands in one batch.
+// Inject a grouping-port counterexample: EVERY segment lands in one batch.
 // Then the batch1 narration is emitted with batch0's prose (all prose before
 // all tools) — the per-batch adjacency ('narr1 after tools0') breaks.
-let src = process.env.TL_SRC;
-// Force the batch key constant → single batch.
-const neutered = src.replace(
-  /const key = \(s\.llmRound != null\) \? \("L" \+ s\.llmRound\) : "S";/,
-  'const key = "L0";');
-if (neutered === src) { console.log('FAIL nc_pattern_matched'); process.exit(0); }
-eval(neutered);
+eval(require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8'));
+computeExecutionBatches = function(values) {
+  return [{
+    key: 'L0', baseKey: 'L0', items: Array.from(values || []),
+    scope: '', llmRound: 0, attemptOrdinal: 1, totalAttempts: 1,
+  }];
+};
 
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -257,7 +287,7 @@ _NC_TRANSLATED_HARNESS = _STUBS + r"""
 // settled .seg-narration slot (not incidental). With it neutered, a segment
 // carrying translatedText must show ENGLISH, so the SETTLED view would snap
 // back to English narration at finalize — the exact regression we guard.
-let src = process.env.TL_SRC;
+let src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 const neutered = src.replace(
   /const _segText = \(s\.translatedText && s\.translatedText\.trim\(\)\) \? s\.translatedText : s\.text;/,
   'const _segText = s.text;');
@@ -284,7 +314,7 @@ console.log(out.join('\n'));
 
 
 _NT_STRIP_HARNESS = _STUBS + r"""
-const src = process.env.TL_SRC;
+const src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 eval(src);
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -321,7 +351,7 @@ _NC_NT_STRIP_HARNESS = _STUBS + r"""
 // NEUTER: remove the stripNoTranslateTags call from _renderTimelineBatch so the
 // raw translatedText goes straight to renderMarkdown. The marker must then LEAK
 // into the output — proving the strip is load-bearing (the exact regression).
-let src = process.env.TL_SRC;
+let src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 const neutered = src.replace(
   /const _segClean = \(typeof stripNoTranslateTags === 'function'\) \? stripNoTranslateTags\(_segText\) : _segText;/,
   'const _segClean = _segText;');
@@ -346,7 +376,7 @@ console.log(out.join('\n'));
 
 
 _SUPERSEDED_DROP_HARNESS = _STUBS + r"""
-const src = process.env.TL_SRC;
+const src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 eval(src);
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -403,7 +433,7 @@ _NC_SUPERSEDED_DROP_HARNESS = _STUBS + r"""
 // is NOT skipped. The misleading second chip must then reappear AND the header
 // count must inflate to 2 — proving the shared-predicate filter is load-bearing
 // for BOTH the render and the count (the exact coverage-gap regression).
-let src = process.env.TL_SRC;
+let src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 const neutered = src.replace(
   /function _isSupersededOrphanRound\(r\) \{/,
   'function _isSupersededOrphanRound(r) { return false;');
@@ -437,9 +467,16 @@ console.log(out.join('\n'));
 
 
 def _run(harness: str) -> str:
-    env = dict(os.environ, TL_SRC=_extract_timeline_fns())
-    proc = subprocess.run(['node', '-e', harness], capture_output=True,
-                          text=True, timeout=30, env=env)
+    with tempfile.TemporaryDirectory(prefix='tofu-segment-timeline-') as temp:
+        script = os.path.join(temp, 'harness.js')
+        source = os.path.join(temp, 'timeline-owner.js')
+        with open(script, 'w', encoding='utf-8') as stream:
+            stream.write(harness)
+        with open(source, 'w', encoding='utf-8') as stream:
+            stream.write(_extract_timeline_fns())
+        env = dict(os.environ, TL_SRC_PATH=source)
+        proc = subprocess.run(['node', script], capture_output=True,
+                              text=True, timeout=30, env=env)
     assert proc.returncode == 0, f'node failed: {proc.stderr}'
     return proc.stdout.strip()
 
@@ -450,6 +487,13 @@ def test_timeline_interleaves_prose_adjacent_to_tools():
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'interleave failures:\n' + out
     assert out.count('PASS') >= 12, f'expected >=12 PASS, got:\n{out}'
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_timeline_pairs_reused_tool_call_ids_by_occurrence():
+    out = _run(_REUSED_CALL_ID_HARNESS)
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'reused-id timeline association failures:\n' + out
 
 
 @pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
@@ -544,7 +588,7 @@ def test_NC_unfiltered_superseded_orphan_reappears_and_inflates_count():
 # vanished after the done-event/reload rewrote status to 'aborted'. The fix
 # keys on badge+result-less regardless of status → dropped on BOTH paths.
 _LIVE_DONE_LEAK_HARNESS = _STUBS + r"""
-const src = process.env.TL_SRC;
+const src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 eval(src);
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -646,26 +690,20 @@ def test_source_has_timeline_helper():
 #  inside the tool card and confirm the non-nesting assertion FAILS.
 # ═══════════════════════════════════════════════════════════════════════════
 def _run_jsdom(harness_body: str, extra_env=None) -> str:
-    """Run a self-contained jsdom harness (requires node_modules/jsdom).
-
-    TL_SRC (the extracted timeline fns) is passed via env, exactly like _run.
-    """
-    env = dict(os.environ, TL_SRC=_extract_timeline_fns())
-    if extra_env:
-        env.update(extra_env)
-    import tempfile
-    with tempfile.NamedTemporaryFile('w', suffix='.js', dir=HERE, delete=False,
-                                     encoding='utf-8') as fh:
-        harness_path = fh.name
-        fh.write(harness_body)
-    try:
+    """Run a self-contained jsdom harness (requires node_modules/jsdom)."""
+    with tempfile.TemporaryDirectory(
+            prefix='tofu-segment-timeline-jsdom-', dir=HERE) as temp:
+        harness_path = os.path.join(temp, 'harness.js')
+        source_path = os.path.join(temp, 'timeline-owner.js')
+        with open(harness_path, 'w', encoding='utf-8') as stream:
+            stream.write(harness_body)
+        with open(source_path, 'w', encoding='utf-8') as stream:
+            stream.write(_extract_timeline_fns())
+        env = dict(os.environ, TL_SRC_PATH=source_path)
+        if extra_env:
+            env.update(extra_env)
         proc = subprocess.run(['node', harness_path, ROOT], capture_output=True,
                               text=True, timeout=30, env=env)
-    finally:
-        try:
-            os.remove(harness_path)
-        except OSError:
-            pass
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
     return proc.stdout.strip()
 
@@ -710,7 +748,7 @@ function _renderToolGroupsHTML(rounds, allRounds){
   return html;
 }
 
-let src = process.env.TL_SRC;
+let src = require('fs').readFileSync(process.env.TL_SRC_PATH, 'utf8');
 if (WRAP) {
   // NEUTER: make _renderTimelineBatch NEST the prose inside a .ptool-turn card
   // by wrapping the whole batch output — the "box the three together"

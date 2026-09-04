@@ -18,8 +18,7 @@ Three defects, all measured on the shipped tree before this suite existed.
    because there were no existing rules.
 
    ``.stg-*`` is shared settings chrome and lives in ``styles.css``;
-   ``.devices-*`` is page-specific and lives in ``settings.css`` (the split
-   ``tests/test_settings_panels_parity.py`` enforces).
+   ``.devices-*`` is page-specific and loads with the typed Devices owner.
 
 2. **Two lanes, two generations, one payload.** ``_populateDevicesTab`` reset
    ``devicesAgentsList`` to a loading line but never touched
@@ -73,6 +72,8 @@ ROOT = Path(__file__).resolve().parent.parent
 STYLES_CSS = ROOT / "static" / "styles.css"
 SETTINGS_CSS = ROOT / "static" / "settings.css"
 DEVICES_JS = ROOT / "frontend" / "src" / "features" / "settings" / "devices.ts"
+DEVICES_CSS = ROOT / "frontend" / "src" / "features" / "settings" / "devices.css"
+SETTINGS_ENTRY = ROOT / "frontend" / "src" / "features" / "settings.ts"
 DEVICES_HTML = ROOT / "static" / "settings_panels" / "devices.html"
 ASSET_SCRIPT = ROOT / "scripts" / "release_assets.py"
 
@@ -113,6 +114,11 @@ def _settings() -> str:
     return _strip_css_comments(SETTINGS_CSS.read_text(encoding="utf-8"))
 
 
+@functools.lru_cache(maxsize=1)
+def _devices() -> str:
+    return _strip_css_comments(DEVICES_CSS.read_text(encoding="utf-8"))
+
+
 def _has_rule(css: str, cls: str) -> bool:
     """True when ``css`` declares at least one rule whose selector names ``cls``.
 
@@ -131,7 +137,7 @@ def _has_rule(css: str, cls: str) -> bool:
 # split rule: only page-specific prefixes move to settings.css).
 _SHARED_CHROME = ("stg-desc", "stg-row", "stg-table", "stg-dim", "stg-btn")
 
-# Page-specific — settings.css owns it.
+# Page-specific — the lazy typed Devices feature owns it.
 _PAGE_SPECIFIC = ("devices-agent-row", "devices-offline",
                   "devices-online-dot", "devices-token-row")
 
@@ -155,9 +161,15 @@ def test_shared_settings_chrome_is_defined(cls):
 @pytest.mark.parametrize("cls", _PAGE_SPECIFIC)
 def test_page_specific_device_classes_are_defined(cls):
     """The agent table and token rows had no rules either."""
-    assert _has_rule(_settings(), cls), (
-        f".{cls} has no rule in settings.css. Page-specific Devices styles "
-        f"belong there (styles.css keeps only shared .stg-* chrome)."
+    assert _has_rule(_devices(), cls), (
+        f".{cls} has no rule in the lazy Devices stylesheet. Page-specific "
+        "styles belong beside devices.ts; styles.css keeps shared .stg-* chrome."
+    )
+
+
+def test_settings_feature_imports_device_styles():
+    assert "import './settings/devices.css';" in SETTINGS_ENTRY.read_text(
+        encoding="utf-8",
     )
 
 
@@ -167,10 +179,13 @@ def test_device_classes_are_not_split_across_both_stylesheets():
     A prefix living in BOTH files is the split-brain state where nobody can
     tell which file owns the page.
     """
-    leaked = [c for c in _PAGE_SPECIFIC if _has_rule(_styles(), c)]
+    leaked = [
+        c for c in _PAGE_SPECIFIC
+        if _has_rule(_styles(), c) or _has_rule(_settings(), c)
+    ]
     assert not leaked, (
-        f"page-specific Devices classes also defined in styles.css: {leaked}. "
-        f"They belong ONLY in settings.css."
+        "page-specific Devices classes also exist in an eager stylesheet: "
+        f"{leaked}. They belong only in the lazy Devices owner."
     )
 
 
@@ -200,7 +215,7 @@ def test_every_class_the_devices_panel_uses_has_a_rule():
         used.update(token for token in group.split()
                     if token.startswith(("stg-", "devices-")))
     assert used, "scraper found no classes — the regex stopped matching"
-    both = _styles() + "\n" + _settings()
+    both = _styles() + "\n" + _settings() + "\n" + _devices()
     missing = sorted(c for c in used if not _has_rule(both, c))
     assert not missing, (
         f"Devices panel uses classes with NO rule anywhere: {missing}. "

@@ -567,12 +567,10 @@ def test_NEUTER_malformed_once_would_wedge_without_guard(monkeypatch):
     mgr._check_and_run_due_tasks()  # must NOT raise
 
 
-def test_ownerless_scheduler_runs_durable_rows_without_personal_sweeps(
+def test_ownerless_scheduler_runs_durable_rows_without_project_brain_work(
         monkeypatch):
     from lib.identity import PrincipalContext
     from lib.scheduler.manager import ScheduledTaskManager
-    import lib.conversations.project_dispatch as project_dispatch
-    import lib.message_queue as message_queue
     import lib.scheduler.manager as manager_module
 
     mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
@@ -591,12 +589,6 @@ def test_ownerless_scheduler_runs_durable_rows_without_personal_sweeps(
     monkeypatch.setattr(
         manager_module, '_scheduler_client',
         lambda *, write=False: client, raising=True)
-    project_sweep = mock.Mock()
-    peer_drain = mock.Mock()
-    monkeypatch.setattr(
-        project_dispatch, 'sweep_all_active_projects', project_sweep)
-    monkeypatch.setattr(
-        message_queue, 'drain_idle_peer_messages', peer_drain)
     ran = []
     mgr._run_and_record = lambda task: ran.append(
         (task['id'], task['user_id']))
@@ -605,8 +597,6 @@ def test_ownerless_scheduler_runs_durable_rows_without_personal_sweeps(
     mgr._check_and_run_due_tasks()
 
     assert ran == [('owner-23-durable-task', 23)]
-    project_sweep.assert_not_called()
-    peer_drain.assert_not_called()
 
 
 def test_poll_decision_survives_none_content(monkeypatch):

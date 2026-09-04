@@ -1,235 +1,192 @@
 #!/usr/bin/env python3
-"""Connection-class error envelope: recoverable copy + Recover button scoping.
+"""Connection-class error presentation keeps recovery truthful and scoped.
 
-WHY
----
-A dropped browser↔server link during a long turn (the VS Code port-forwarding
-idle-timeout case) surfaced as a red "Network error / Failed to fetch" bubble
-with no guidance and no recovery affordance — jargon a real user can't act on.
-The fix gives ONLY the recoverable ``server_offline`` kind a friendly, truthful
-headline + hint + an inline Recover button wired to the EXISTING offline
-recovery path (``_recoverOfflineConversations('manual_button')``), which adopts
-the server's completed result and clears the stale error.
-
-The scoping is the load-bearing subtlety: ``_recoverOfflineConversations`` only
-recovers conversations whose trailing message finished ``server_offline`` /
-``interrupted``. The ``network`` kind is stamped at ``context:'chat-start'``
-when the POST that STARTS a turn fails — no task ever ran, so a Recover button
-there would scan, find nothing, and no-op while claiming "your result may be
-saved". ``premature_close`` / ``abnormal_stop`` are upstream (server↔gateway)
-failures emitted after retries are exhausted — no saved result either. So the
-Recover button + "result may be saved" copy MUST be scoped to ``server_offline``
-ALONE; every other kind renders byte-identical to before (Retry-oriented).
-
-This test EXTRACTS the real shipped ``renderErrorEnvelope`` (+ its helpers +
-``ERROR_KIND_LABELS``) from ``static/js/core/error_envelope.js`` and evals it in
-node with the REAL i18n runtime (``_i18n`` table + ``t()`` from i18n.js) under
-BOTH ``zh`` and ``en``. It asserts:
-
-  • ``server_offline`` → localized title (``err.conn.title``) + localized hint
-    (``err.conn.hint``) + a Recover button whose onclick calls
-    ``_recoverOfflineConversations('manual_button')`` — in both languages.
-  • ``network`` / ``premature_close`` / ``abnormal_stop`` → NO Recover button,
-    NO ``_recoverOfflineConversations`` wiring (the scoping guard), and keep
-    their plain kind label.
-
-Poisoned-fixture NC: neuter ``_envIsRecoverable`` to always return false → the
-friendly title reverts to the "Server offline" jargon label AND the button
-disappears, proving the title/hint/button are all genuinely gated on the
-recoverable branch (not tautologies).
+The typed presentation owner receives translation and icon ports explicitly.
+These tests bundle and call that public owner under both shipped locales; they
+do not extract or rewrite implementation-private functions.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
+from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 
 import pytest
 
+from tests._runtime_sections import native_module_path
+
+
 pytestmark = pytest.mark.unit
-
-from tests._runtime_sections import runtime_section
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-# static/js was deleted by the Epic-E Vite migration; the shipped owner is
-# the core/error_envelope.js section of frontend/src/runtime/app-runtime.js.
-EE_JS = 'core/error_envelope.js'
-# Locale data migrated to Vite-owned JSON chunks; the harness rebuilds a
-# t()-compatible runtime directly from those authoritative tables.
-LOCALE_DIR = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+ROOT = Path(__file__).resolve().parents[1]
+OWNER = ROOT / 'frontend/src/error-presentation.ts'
+LOCALE_DIR = ROOT / 'frontend/src/i18n/locales'
 
 
-def _read(path: str) -> str:
-    return runtime_section(path, scope_prelude=False)
-
-
-def _brace_match(src: str, open_pos: int) -> int:
-    depth = 0
-    j = open_pos
-    while j < len(src):
-        if src[j] == '{':
-            depth += 1
-        elif src[j] == '}':
-            depth -= 1
-            if depth == 0:
-                return j + 1
-        j += 1
-    raise AssertionError('unbalanced braces')
-
-
-def _extract_fn(src: str, fn_name: str) -> str:
-    m = re.search(r'(?:async\s+)?function\s+' + re.escape(fn_name) + r'\s*\(', src)
-    assert m, f'{fn_name} not found'
-    i = src.find('{', m.end())
-    return src[m.start():_brace_match(src, i)]
-
-
-def _extract_const_obj(src: str, name: str) -> str:
-    """Grab `const <name> = { ... };` by brace-matching."""
-    m = re.search(r'const\s+' + re.escape(name) + r'\s*=\s*', src)
-    assert m, f'{name} not found'
-    brace = src.find('{', m.end())
-    return src[m.start():_brace_match(src, brace)] + ';'
-
-
-def _extract_i18n_runtime() -> str:
-    with open(os.path.join(LOCALE_DIR, 'zh.json'), encoding='utf-8') as f:
-        zh = json.load(f)
-    with open(os.path.join(LOCALE_DIR, 'en.json'), encoding='utf-8') as f:
-        en = json.load(f)
-    return (
-        'var _i18nLang = "zh";\n'
-        'var _i18n = { zh: ' + json.dumps(zh, ensure_ascii=False)
-        + ', en: ' + json.dumps(en, ensure_ascii=False) + ' };\n'
-        'function t(key, params) {\n'
-        '  var value = (_i18n[_i18nLang] && _i18n[_i18nLang][key])\n'
-        '    !== undefined ? _i18n[_i18nLang][key] : _i18n.zh[key];\n'
-        '  if (value === undefined) value = key;\n'
-        '  if (!params) return value;\n'
-        '  return value.replace(/\\{([A-Za-z0-9_]+)\\}/g, function (token, name) {\n'
-        '    return Object.prototype.hasOwnProperty.call(params, name)\n'
-        '      ? String(params[name] == null ? "" : params[name]) : token;\n'
-        '  });\n'
-        '}\n'
-    )
-
-
-def _render(*, kind: str, lang: str = 'en', poison: str = '') -> str:
-    """Render the real renderErrorEnvelope for an envelope of ``kind``."""
+def _render(*, kind: str, lang: str = 'en') -> str:
+    """Render one envelope through the public typed presentation factory."""
     node = shutil.which('node')
     if not node:
-        pytest.skip('node not available for extraction-and-eval')
-
-    src = _read(EE_JS)
-    labels = _extract_const_obj(src, 'ERROR_KIND_LABELS')
-    fns = [
-        '_envT', '_envResolveI18n', '_envLocalizedTitle', '_envLocalizedHint',
-        '_envIsRecoverable', '_envRepairMojibake', 'isErrorEnvelope',
-        'normalizeErrorEnvelope', 'renderErrorEnvelope',
-    ]
-    extracted = labels + '\n' + '\n'.join(_extract_fn(src, f) for f in fns)
-    i18n_runtime = _extract_i18n_runtime()
-
-    if poison == 'recoverable':
-        # Neuter the scoping predicate → nothing is ever "recoverable". The
-        # friendly title/hint override + Recover button must then vanish.
-        extracted = extracted.replace(
-            'return !!env && env.kind === \'server_offline\';',
-            'return false;')
-        assert 'return false;' in extracted, 'poison did not apply'
-
-    env = {
+        pytest.skip('node not available for typed-owner evaluation')
+    owner_bundle = native_module_path(
+        '.native/error-presentation-for-recovery.js', OWNER)
+    envelope = {
         'kind': kind,
         'severity': 'warning',
         'retryable': True,
         'message': 'something happened',
         'hint': 'preexisting hint',
         'detail': 'raw detail text',
-        'model': '', 'context': '', 'source': 'test', 'raw': '',
+        'model': '',
+        'context': '',
+        'source': 'test',
+        'raw': '',
     }
-
-    harness = f'''
-{i18n_runtime}
-_i18nLang = {json.dumps(lang)};
-function escapeHtml(s) {{ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){{
-  return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]; }}); }}
-function Icon(name) {{ return '<svg data-ico="' + name + '"></svg>'; }}
-
-{extracted}
-
-process.stdout.write(renderErrorEnvelope({json.dumps(env)}));
+    harness = r'''
+const fs = require('fs');
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const locales = {
+  zh: JSON.parse(fs.readFileSync(process.argv[3], 'utf8')),
+  en: JSON.parse(fs.readFileSync(process.argv[4], 'utf8')),
+};
+const language = process.argv[5];
+const envelope = JSON.parse(process.argv[6]);
+const translate = (key, params) => {
+  let value = Object.hasOwn(locales[language], key)
+    ? locales[language][key]
+    : (Object.hasOwn(locales.zh, key) ? locales.zh[key] : key);
+  for (const [name, replacement] of Object.entries(params || {})) {
+    value = value.replaceAll('{' + name + '}', String(replacement ?? ''));
+  }
+  return value;
+};
+const presentation = createErrorEnvelopePresentation({
+  translate,
+  iconHtml: (name) => '<svg data-ico="' + name + '"></svg>',
+});
+process.stdout.write(presentation.renderErrorEnvelope(envelope));
 '''
-    with tempfile.NamedTemporaryFile('w', suffix='.mjs', delete=False) as f:
-        f.write(harness)
-        tmp = f.name
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as handle:
+        handle.write(harness)
+        harness_path = handle.name
     try:
-        out = subprocess.run([node, tmp], capture_output=True, text=True, timeout=20)
-        assert out.returncode == 0, f'node eval failed: {out.stderr}'
-        return out.stdout
+        result = subprocess.run(
+            [
+                node,
+                harness_path,
+                owner_bundle,
+                str(LOCALE_DIR / 'zh.json'),
+                str(LOCALE_DIR / 'en.json'),
+                lang,
+                json.dumps(envelope),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
     finally:
-        os.unlink(tmp)
+        os.unlink(harness_path)
 
 
-# Localized strings we assert on (must match i18n.js err.conn.* entries).
-_TITLE = {'zh': '连接中断（结果可能已保存）', 'en': 'Connection lost (your result may be saved)'}
+def _evaluate_owner(program: str) -> dict[str, object]:
+    """Evaluate public pure helpers from the same bundled TypeScript owner."""
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node not available for typed-owner evaluation')
+    owner_bundle = native_module_path(
+        '.native/error-presentation-for-recovery.js', OWNER)
+    harness = (
+        "const fs = require('fs');\n"
+        "eval(fs.readFileSync(process.argv[1], 'utf8'));\n"
+        + program
+    )
+    result = subprocess.run(
+        [node, '-e', harness, owner_bundle],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+_TITLE = {
+    'zh': '连接中断（结果可能已保存）',
+    'en': 'Connection lost (your result may be saved)',
+}
 _RECOVER = {'zh': '恢复', 'en': 'Recover'}
-# A distinctive fragment of err.conn.hint per language.
-_HINT_FRAG = {'zh': '请不要重新生成', 'en': 'Do NOT regenerate'}
-_JARGON = 'Server offline'  # ERROR_KIND_LABELS.server_offline
+_HINT_FRAGMENT = {'zh': '请不要重新生成', 'en': 'Do NOT regenerate'}
+_JARGON = 'Server offline'
 
-
-# ─────────────────── server_offline: friendly + recoverable ───────────────────
 
 @pytest.mark.parametrize('lang', ['zh', 'en'])
 def test_server_offline_gets_recover_button_and_localized_copy(lang):
     html = _render(kind='server_offline', lang=lang)
-    # Recover button wired to the EXISTING offline-recovery path (not a regen).
     assert "_recoverOfflineConversations('manual_button')" in html
     assert 'error-block-recover-btn' in html
     assert _RECOVER[lang] in html
-    # Friendly, truthful title replaces the "Server offline" jargon label.
     assert _TITLE[lang] in html
     assert _JARGON not in html
-    # Truthful hint present (in this language).
-    assert _HINT_FRAG[lang] in html
-    # SVG glyph, not emoji (§3.4).
+    assert _HINT_FRAGMENT[lang] in html
     assert 'data-ico="refresh"' in html
 
-
-# ─────────────────── scoping guard: other kinds get NO button ───────────────────
 
 @pytest.mark.parametrize('kind', ['network', 'premature_close', 'abnormal_stop'])
 def test_non_recoverable_kinds_have_no_recover_button(kind):
     html = _render(kind=kind, lang='en')
-    assert '_recoverOfflineConversations' not in html, \
-        f'{kind} must NOT render a Recover button (nothing to recover → false hope)'
+    assert '_recoverOfflineConversations' not in html
     assert 'error-block-recover-btn' not in html
-    # It keeps its own plain kind label, not the "result may be saved" copy.
     assert _TITLE['en'] not in html
 
 
 def test_network_is_not_dressed_as_recoverable():
-    """The exact false-hope case: network (chat-start POST failed) must never
-    claim the result may be saved."""
     html = _render(kind='network', lang='zh')
     assert '_recoverOfflineConversations' not in html
     assert _TITLE['zh'] not in html
 
 
-# ─────────────────────────── poisoned-NC (load-bearing) ───────────────────────────
+def test_error_presentation_owner_has_no_browser_or_runtime_authority():
+    source = OWNER.read_text(encoding='utf-8')
+    assert 'export function createErrorEnvelopePresentation' in source
+    assert 'translate: Translator' in source
+    assert 'iconHtml?:' in source
+    for ambient_authority in ('runtimeScope', 'globalThis', 'window.', 'document.'):
+        assert ambient_authority not in source
 
-def test_nc_neutered_recoverable_reverts_to_jargon_and_drops_button():
-    """Neuter _envIsRecoverable → server_offline loses BOTH the friendly title
-    and the Recover button, proving the branch is load-bearing (the assertions
-    above aren't tautologies)."""
-    html = _render(kind='server_offline', lang='en', poison='recoverable')
-    assert '_recoverOfflineConversations' not in html
-    assert 'error-block-recover-btn' not in html
-    assert _TITLE['en'] not in html
-    # Falls back to the raw jargon kind label.
-    assert _JARGON in html
+
+def test_public_fallback_and_mojibake_helpers_preserve_display_policy():
+    result = _evaluate_owner(r'''
+const presentation = createErrorEnvelopePresentation({translate: (key) => key});
+const fallback = presentation.fallbackCauseParts({
+  fallbackKind: 'network',
+  fallbackReason: 'network: API HTTP 502: <html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1><script>secret()</script><p>openresty</p></body></html>',
+});
+const long = presentation.fallbackCauseParts({
+  fallbackKind: 'timeout',
+  fallbackReason: 'timeout: ' + 'x'.repeat(200),
+});
+process.stdout.write(JSON.stringify({
+  fallback,
+  long,
+  repaired: repairErrorMojibake('è¯·æ±‚å¤±è´¥'),
+}));
+''')
+    fallback = result['fallback']
+    assert isinstance(fallback, dict)
+    assert fallback['kindLabel'] == 'Network error'
+    assert fallback['shown'] == 'API HTTP 502: 502 Bad Gateway · openresty'
+    assert '<html>' in fallback['detail']
+    assert 'secret()' not in fallback['shown']
+    assert fallback['hasCause'] is True
+    long = result['long']
+    assert isinstance(long, dict)
+    assert len(long['shown']) == 161
+    assert long['shown'].endswith('…')
+    assert result['repaired'] == '请求失败'

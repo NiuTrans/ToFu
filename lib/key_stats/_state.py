@@ -84,8 +84,8 @@ _disk_fingerprint = _FINGERPRINT_UNKNOWN
 _pending_mutations: list[Callable[[dict, dict], None]] = []
 
 # ── Siblings lookup cache ──
-# Cached list of pair-keys (provider_id::key_name) per provider_id, re-read
-# from server_config.json every _SIBLINGS_TTL_SEC seconds.  Held under a
+# Cached list of pair-keys (provider_id::credential_id) per owner+Provider,
+# projected from live v2 Slots every _SIBLINGS_TTL_SEC seconds. Held under a
 # dedicated lock so the siblings lookup never contends with the hot-path
 # stats lock above (the hot path reads siblings OUTSIDE _lock and only
 # passes the already-computed list into the locked block).
@@ -123,18 +123,11 @@ def _pair_key(provider_id: str, key_name: str) -> str:
 
 
 def _list_siblings(provider_id: str) -> list:
-    """Return the list of pair-keys configured under *provider_id*.
+    """Return live credential pair-keys under one owner+Provider namespace.
 
-    Sourced from ``data/config/server_config.json`` via
-    :func:`lib._load_server_config`.  Cached for ``_SIBLINGS_TTL_SEC`` seconds
-    to avoid re-parsing the config on every dispatch call.
-
-    The returned names follow the convention produced by
-    :meth:`LLMDispatcher._build_slots_from_providers` — i.e. each key in a
-    provider's ``api_keys`` list becomes ``<provider_id>_key_<i>``.
-
-    For legacy env-var deployments (no ``providers`` in the config) this
-    enumerates ``LLM_API_KEYS`` under the ``'default'`` provider.
+    Slots already carry the owner, Provider and Credential identities chosen
+    by model-routing v2. Reading that projection avoids a second storage
+    authority and cannot mix equal Provider IDs belonging to two owners.
 
     Scope = same *provider_id* only.  Cross-provider "last key" counting is
     deliberately incorrect (a Meituan key shouldn't be kept alive just because
@@ -147,37 +140,28 @@ def _list_siblings(provider_id: str) -> list:
             if cached is not None:
                 return list(cached)
 
-    # Rebuild the cache outside any other lock — config I/O can be slow.
-    by_provider: dict = {}
+    by_provider: dict[str, set[str]] = {}
     try:
-        from lib import _load_server_config
-        cfg = _load_server_config() or {}
-        providers = cfg.get('providers') or []
-        if providers:
-            for p in providers:
-                pid = p.get('id') or 'default'
-                keys = p.get('api_keys') or []
-                pair_keys = [_pair_key(pid, f'{pid}_key_{i}')
-                             for i in range(len(keys))]
-                if pair_keys:
-                    by_provider[pid] = pair_keys
-        else:
-            # Legacy env-var setup — dispatcher names keys 'key_0', 'key_1', …
-            # under provider_id='default' (see dispatcher._build_slots_from_env).
-            from lib import LLM_API_KEYS
-            pair_keys = [_pair_key('default', f'key_{i}')
-                         for i in range(len(LLM_API_KEYS))]
-            if pair_keys:
-                by_provider['default'] = pair_keys
+        from lib.llm_dispatch.factory import get_dispatcher
+
+        for slot in list(get_dispatcher().slots):
+            slot_provider_id = slot.key_stats_provider_id()
+            key_name = slot.key_stats_key_name()
+            if key_name:
+                by_provider.setdefault(slot_provider_id, set()).add(
+                    _pair_key(slot_provider_id, key_name))
     except Exception as e:
         logger.debug('[KeyStats] siblings lookup failed (non-fatal): %s', e)
         by_provider = {}
 
+    normalized = {
+        key: sorted(values) for key, values in by_provider.items()}
+
     with _siblings_lock:
         _siblings_cache['ts'] = now
-        _siblings_cache['by_provider'] = by_provider
+        _siblings_cache['by_provider'] = normalized
 
-    return list(by_provider.get(provider_id or 'default', []))
+    return list(normalized.get(provider_id or 'default', []))
 
 
 def _fold_namespaces_unlocked(stats: dict | None = None,

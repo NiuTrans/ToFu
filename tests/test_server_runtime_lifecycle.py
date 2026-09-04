@@ -56,6 +56,7 @@ def test_runtime_lifecycle_registers_loop_before_production_with_shared_event():
         serving_registrar=serving,
         announce_ready=lambda *_args: None,
         environ={'TOFU_HOST': '127.0.0.1', 'TOFU_PORT': '15555'},
+        process_role='worker',
     ) is True
 
     assert order == ['serving', 'production']
@@ -63,6 +64,7 @@ def test_runtime_lifecycle_registers_loop_before_production_with_shared_event():
     production_args = captured['production']
     assert serving_args['host'] == '127.0.0.1'
     assert serving_args['port'] == 15555
+    assert serving_args['process_role'] == 'worker'
     assert isinstance(serving_args['shutdown_requested'], threading.Event)
     assert (
         serving_args['shutdown_requested']

@@ -39,11 +39,21 @@ interpreting one configuration differently.
 
 | Flag | Purpose |
 |---|---|
-| `--api-key-file <path>` | Read one LLM API key from a local secret file (recommended for unattended installs) |
-| `--port 8080` | Server port (default: explicit `PORT` environment value, then `15000`) |
 | `--dir <path>` | Install directory (default `~/tofu`) |
-| `--use-conda` | Force the legacy conda path, skipping the default uv fast path (see below) |
-| `--no-launch` | Install only; don't start the server |
+| `--env <name>` | Conda environment name; selects conda (default `tofu`) |
+| `--port <n>` | Server port, 1-65535 (default: explicit `PORT` environment value, then `15000`) |
+| `--api-key-file <path>` | Read one LLM API key from a local secret file (recommended for unattended installs) |
+| `--api-key <key>` | Legacy compatibility only; the value is visible in argv/history |
+| `--no-launch` | Install only; don't start or probe the server |
+| `--skip-playwright` | Skip the optional browser-engine download |
+| `--skip-node` | Legacy no-op (frontend bundles are prebuilt) |
+| `--no-update-conda` | Select conda; don't update installer-owned conda |
+| `--reset-env` | Recreate the selected env (destructive; ownership-gated) |
+| `--use-conda` | Force the legacy conda path, skipping the default uv fast path |
+| `--min-conda <n>` | Minimum existing conda major version (default `24`) |
+| `--force-sibling-conda` | Select conda and use a private sibling Miniforge |
+| `--with-docling` | Select conda and install PDF parsing (~2 GB) |
+| `--python <version>` | Python version (default `3.12`) |
 
 Example:
 
@@ -232,6 +242,20 @@ directory.
 
 ---
 
+## Offline / mirror / proxy
+
+`install.sh` honours five optional environment variables for hosts that cannot
+reach the public download sources directly. Leaving them unset keeps the
+default public behaviour.
+
+| Variable | Effect |
+|---|---|
+| `TOFU_PYPI_INDEX` | Base URL override for pip/uv package installs. Exported as `PIP_INDEX_URL`, `UV_INDEX_URL`, and `UV_DEFAULT_INDEX`, with the host added to `PIP_TRUSTED_HOST` / `UV_INSECURE_HOST` (so plain-HTTP corp mirrors work). Applied once before the uv/conda fork, so both backends inherit it. Empty = public PyPI. |
+| `TOFU_PLAYWRIGHT_MIRROR` | Base URL for the Playwright browser download, exported as `PLAYWRIGHT_DOWNLOAD_HOST`. Empty = upstream `cdn.playwright.dev`. |
+| `TOFU_CONDA_MIRROR` | Base URL for conda-forge; the installer expects `<base>/conda-forge/<arch>/repodata.json` to resolve. Applied only when the installer owns its sibling conda, writing `CONDA_BASE/.condarc` (never the user's `~/.condarc`). Empty = no override. |
+| `TOFU_MINIFORGE_LOCAL` | Absolute path to a pre-downloaded `Miniforge3-<platform>-<arch>.sh`. When set and readable, the installer runs it directly and skips all Miniforge download/mirror logic — the offline/air-gapped escape hatch. |
+| `TOFU_MINIFORGE_MIRRORS` | Whitespace-separated Miniforge installer URLs, tried in order before the built-in fallback chain. |
+
 ## Troubleshooting
 
 ### Start here: one diagnostic ladder
@@ -283,9 +307,10 @@ one conversation through the same operations entry point:
 python serverctl.py inspect-conversation mt18xr3wfs0rbq
 ```
 
-The command is read-only, auto-detects sidecar versus legacy storage, renders
-turn-native conversations through the server's canonical projection, and shows
-only matching bounded log evidence. Settings and log lines use the same
+The command is read-only, resolves the active Sidecar/fastpath SQLite authority,
+renders turn-native conversations and compaction receipts through the server's
+canonical operations, and shows only matching bounded log evidence. Settings
+and log lines use the same
 best-effort credential redaction as durable diagnostics. Its transcript remains
 the actual conversation and may contain private text or credentials pasted by
 the user, so review it before sharing; add `--no-logs` when log evidence is
@@ -335,13 +360,10 @@ cutover imports the verified export into an external PostgreSQL authority.
 
 ### Behind a corporate proxy that blocks GitHub releases
 
-The Miniforge download will fail. Workarounds:
-
-- Pre-download `Miniforge3-<platform>.sh` manually and set
-  `TOFU_MINIFORGE_LOCAL=/path/to/Miniforge3-...sh` before running the
-  installer.
-- Or set `TOFU_MINIFORGE_MIRRORS="https://your-mirror/..."` (one URL per
-  line) — the installer tries each in order before giving up.
+See [Offline / mirror / proxy](#offline--mirror--proxy) for the full set of
+mirror variables. In particular, pre-download the Miniforge installer and set
+`TOFU_MINIFORGE_LOCAL=/path/to/Miniforge3-<platform>-<arch>.sh`, or set
+`TOFU_MINIFORGE_MIRRORS` to an ordered list of reachable installer URLs.
 
 ### Install log
 
@@ -365,25 +387,69 @@ issue.
 | `TOFU_REDIS_URL_FILE` | Absolute `rediss://` secret file; required only in distributed mode |
 | `TOFU_REPLICA_ID` | Stable, unique replica identity; required only in distributed mode |
 | `TOFU_STORAGE_SQLITE_READ_POOL` | SQLite query-only pool size (personal probe: 2..12) |
+| `TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY` | Total waiting-job ceiling for the sole SQLite writer (personal probe: 8..64; 8 GiB reference: 16; probe-failure fallback: 8; distributed: 128; hard ceiling: 1,024). Saturation returns retryable `database_busy`; acquisition timeout immediately releases a still-queued operation payload. |
+| `TOFU_STORAGE_EVENT_QUEUE_CAPACITY` / `TOFU_STORAGE_EVENT_QUEUE_MAX_MIB` / `TOFU_STORAGE_EVENT_BATCH_MAX_MIB` | Durable task-event waiting objects, their serialized-byte envelope, and one Sidecar RPC frame budget. Defaults derive from the writer queue: probe-failure 256 / 64 MiB, 8 GiB reference 512 / 64 MiB, distributed 4,096 / 512 MiB; batches retain at most 500 events and default to 60 MiB. Hard override ceilings are 8,192 objects / 1,024 MiB waiting / 60 MiB per batch. |
 | `TOFU_STORAGE_RPC_CAPACITY` | Active Sidecar RPC ceiling (personal probe: 2..12; distributed: 64) |
-| `TOFU_STORAGE_IDLE_TRIM_RSS_MIB` | Sidecar RSS threshold for returning free arenas when the last active RPC exits (personal: 128..512 MiB from the writer-cache budget; distributed: 1,024 MiB; hard ceiling: 16 GiB) |
-| `TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS` | Minimum interval between Sidecar idle heap trims (default 300 s; bounded to 30..3,600 s) |
+| `TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB` | Independent process-wide weighted budgets for serialized storage frame bodies in the Sidecar and in every application/worker client (personal probe: 128..512 MiB; 8 GiB reference and probe-failure fallback: 128 MiB; distributed: 1,024 MiB; hard range: 128..8,192 MiB). The Sidecar reserves declared request bytes before allocation and one maximum response before encoding; a client reserves each declared response until JSON decode completes. Completed/command responses use the priority FIFO. Waits are bounded to five seconds; client pressure retries only replay-safe reads, never a command whose execution may have started. Decoded semantic objects remain governed by RPC/operation limits rather than this frame-body budget. The value is per process, not one host-wide aggregate. |
+| `TOFU_WEBHOOK_SUBSCRIPTION_CAPACITY` / `TOFU_WEBHOOK_QUEUE_CAPACITY` / `TOFU_WEBHOOK_BUFFER_MAX_MIB` / `TOFU_WEBHOOK_EVENT_MAX_KIB` / `TOFU_WEBHOOK_MAX_ATTEMPTS` | Outbound-webhook durable subscription, immediate/retry residency, aggregate bytes, per-event bytes and actual-attempt ceilings. Personal fallback/reference defaults: 64 subscriptions, 128 immediate + 64 retry items, 16 MiB aggregate, 512 KiB/event, 5 attempts; distributed: 2,048 / 2,048 + 1,024 / 256 MiB / 1 MiB / 5. Hard ceilings: 4,096 subscriptions/items, 512 MiB, 4 MiB/event, 8 attempts. |
+| `TOFU_PUSH_CLIENT_CAPACITY` / `TOFU_PUSH_OWNER_CLIENT_CAPACITY` / `TOFU_PUSH_EVENT_QUEUE_CAPACITY` / `TOFU_PUSH_EVENT_QUEUE_MAX_MIB` / `TOFU_PUSH_EVENT_MAX_MIB` | Unified Push-WebSocket process/owner connections and each client's lossy event item/byte/single-frame envelope. Probe-failure fallback: 32 / 12 / 512 / 4 MiB / 2 MiB; 8 GiB reference: 64 / 12 / 1,000 / 4 MiB / 2 MiB; distributed: 256 / 64 / 1,000 / 16 MiB / 8 MiB. Hard ceilings are 256 / 128 / 4,096 / 16 MiB / 8 MiB. Capacity rejection is retryable; sustained queue loss or one oversized/unencodable frame disconnects the socket so durable reconciliation runs. |
+| `TOFU_STORAGE_IDLE_TRIM_RSS_MIB` | Sidecar RSS threshold for returning free arenas when the last active RPC exits (personal: 128..384 MiB from the writer-cache budget; distributed: 1,024 MiB; hard ceiling: 16 GiB) |
+| `TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS` | Minimum interval between Sidecar idle heap trims (personal default: 60 s; distributed: 300 s; bounded to 30..3,600 s). Trims still require zero active RPCs and RSS above `TOFU_STORAGE_IDLE_TRIM_RSS_MIB` |
 | `TOFU_MCP_STDIO_IDLE_SECONDS` | Idle window before a local MCP stdio process tree exits while its cached tool catalog remains available (personal probe: 180..600 s; distributed: 1,800 s; `0` disables; hard ceiling: 86,400 s) |
+| `TOFU_MCP_CRED_PROBE_WORKERS` / `TOFU_MCP_CRED_PROBE_TIMEOUT_SECONDS` | Process slots and read deadline for unattended, reconstructible MCP credential-health probes (personal probe: 1..4 slots; 8 GiB reference: 2; probe-failure fallback: 1; distributed: 8; hard slot ceiling: 16; timeout default: 30 s, hard range: 1..300 s). A saturated probe is deferred to maintenance; ordinary user-owned MCP calls remain unlimited unless their server declares `timeout` |
 | `TOFU_NUMERIC_THREADS` | Process-wide ceiling for implicit OpenBLAS/OpenMP/MKL/NumExpr pools (personal probe: 1..4; distributed: 4; hard ceiling: 32); smaller library-specific values remain valid, larger inherited host values are clamped |
 | `TOFU_EXECUTOR_IDLE_SECONDS` | Quiet window before burst-grown serving-loop worker generations retire (personal probe: 300..1,800 s; distributed: 3,600 s; `0` disables; hard ceiling: 86,400 s); capacity is preserved and recreated lazily |
-| `TOFU_PROJECT_REFRESH_IDLE_SECONDS` | Idle window before reconstructible project summary/status/watch consumers exit (personal probe: 30..300 s; distributed: 600 s; `0` keeps consumers resident; hard ceiling: 86,400 s); queue capacity and coalescing are unchanged |
+| `TOFU_PROJECT_REFRESH_IDLE_SECONDS` | Idle window before reconstructible project summary/status/watch and provider-diagnostic consumers exit (personal probe: 30..300 s; distributed: 600 s; `0` keeps consumers resident; provider diagnostics clamp nonzero values to 15..3,600 s); queue capacity and coalescing are unchanged |
 | `TOFU_TREE_INDEX_WALK_JOBS` | Process-wide project tree scan-worker ceiling shared by concurrent roots (personal probe: 2..8; distributed/hard ceiling: 16) |
 | `TOFU_TREE_INDEX_MAX_ENTRIES` | Both the per-build admission ceiling and process-wide retained-path ceiling (personal probe: 50,000..600,000; 8 GiB reference: 409,600; probe-failure fallback: 100,000; distributed/hard ceiling: 600,000) |
 | `TOFU_TREE_INDEX_MEM_ROOTS` | Secondary in-memory project-root ceiling; the shared entry ceiling may evict sooner (personal probe: 2..4; distributed: 4; hard ceiling: 8) |
 | `TOFU_MAX_SSE_PER_PRINCIPAL` | Shared live SSE socket/lease ceiling across chat and conversation streams (personal probe: 8..24; 8 GiB reference/probe fallback: 12; distributed: 64; hard ceiling: 128); zero/malformed overrides do not disable the bound |
 | `TOFU_SSE_SLOT_TTL` | Crash-reclaim lease window for admitted SSE streams (default 300 s; clamped to 45..3,600 s and refreshed at most every one third of the window) |
-| `TOFU_TASK_MAX_API_ROUNDS` | Inherited model API-round ceiling per root task (personal: 192; distributed: 512; request overrides remain hard-capped at 1,024) |
+| `TOFU_MAX_INFLIGHT_TASKS` / `TOFU_AGENT_WORKERS` | Root-task admission and physical Agent execution concurrency. Personal defaults scale 1..48 from effective CPU and launch-probed memory/RSS headroom (8 GiB reference: 4; 64 CPU / 64 GiB reference with 48 GiB available: 18; a very large host reaches 48 inside the default 64 GiB worker cap). Raising only these values cannot bypass the process/cgroup admission envelope |
+| `TOFU_TASK_RUNTIME_TASK_CAPACITY` / `TOFU_TASK_RUNTIME_EVENT_CAPACITY` / `TOFU_TASK_RUNTIME_REPLAY_MAX_MIB` / `TOFU_TASK_RUNTIME_EVENT_MAX_MIB` | Process-memory terminal-record target per task kind plus per-task replay count, ordinary serialized-tail target, and complete single-event ceiling. Probe-failure profile: 64/1,024/2/4; 8 GiB reference: 128/2,048/4/8; distributed: 512/4,096/8/16; hard caps: 1,024/8,192/16/16. Active work is governed separately and never evicted. A valid event above the tail target occupies the window alone; an event above its hard ceiling resets only reconstructible memory replay and advances the absolute cursor. Explicit runtime arguments can lower but not widen the launch policy. |
+| `TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS` | Hot Python residency after a chat task receives its immutable terminal stamp. Personal launch probe: 600..1,800 s; 8 GiB and probe-failure profiles: 600 s; distributed: 3,600 s; explicit hard range: 60..86,400 s. Active tasks are never TTL-evicted. After the hot window, owner-scoped generic task detail/events/SSE reconstruct from `task_results` and the durable event log; this setting deletes neither conversation state nor durable task results. |
+| `TOOL_MAX_PARALLEL_WORKERS` | Per-task parallel read-only tool calls (personal probe: 1..4; probe-failure fallback: 1; distributed: 8; hard ceiling: 32). Streaming prefetch reuses at most four workers and retains eight calls per model round. Provider capability diagnostics reuse a process aggregate capped at eight: one provider task in personal mode, two only at the distributed eight-worker profile, with a finite 4..16 pending-task lane. |
+| `TOFU_PRODUCTION_LLM_FANOUT` | Per-job ceiling for independent LLM calls inside long-production stages such as research judges, long-form sections, slide pages, and motion scene authors (personal probe: 1..2; 8 GiB reference: 2; probe-failure fallback: 1; distributed: 4; explicit hard ceiling: 8). Motion authors additionally take the smaller image-generation budget and impose a two-worker capability ceiling. Root-task admission remains the process-wide multiplier |
+| `TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS` | Actual upstream 429-response ceiling per reconstructible project-summary, automatic-title, daily-report-analysis, or optimizer-proposal call (personal/probe-failure: 2; distributed: 8; explicit hard ceiling: 16). Slot-capacity polling does not consume the allowance; terminal no-slot/budget states fall back without another title dispatch. Attended Agent and explicit scheduler prompt execution do not inherit this policy |
+| `TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS` | Actual upstream 429-response ceiling per background production model call (personal probe: 4..8; 8 GiB reference: 8; probe-failure fallback: 4; distributed: 16; explicit hard ceiling: 64). Capacity polling does not consume this budget; interactive chat retains its separate retry policy |
+| `TOFU_PRODUCTION_IMAGE_FANOUT` | Per-job ceiling for independent background image-generation calls (personal probe: 1..2; 8 GiB reference: 2; probe-failure fallback: 1; distributed/explicit hard ceiling: 4). Encoded and decoded image replies remain bounded separately by the owning capability |
+| `TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS` | Actual upstream 429-response ceiling per background image-generation call (personal probe: 4..8; 8 GiB reference: 8; probe-failure fallback: 4; distributed: 16; explicit hard ceiling: 64). Interactive image generation retains its 120-cycle compatibility safety cap unless a production caller opts into this policy |
+| `TOFU_PRODUCTION_TTS_FANOUT` | Per-job ceiling for independent narration-segment synthesis (personal probe: 1..2; 8 GiB reference: 2; probe-failure fallback: 1; distributed: 4; explicit hard ceiling: 8). Audio bytes remain bounded by the script/chunk contracts until ordered assembly |
+| `TOFU_AGENT_QUEUE_CAPACITY` | Finite FIFO wait capacity before an Agent slot is acquired (default `workers * 8`, clamped to 8..512; explicit hard ceiling: 4,096). Saturation fails the accepted attempt visibly instead of entering an unbounded executor queue |
+| `TOFU_AGENT_STUCK_REPLACEMENTS` | Maximum physical replacement threads retained behind reaper-proven wedged calls (personal default `ceil(workers / 4)`, clamped to 1..4; explicit hard ceiling: `min(16, workers)`). Logical concurrency never increases |
+| `TOFU_TASK_RSS_RESERVE_MB` | Measured per-active-task RSS admission envelope used to derive the personal hard concurrency ceiling (512 MiB on smaller workers; 1,024 MiB when the worker hard limit exceeds 3 GiB) |
+| `TOFU_PROCESS_RSS_RELIEF_MB` / `TOFU_PROCESS_RSS_RECYCLE_MB` | Worker soft-relief and hard-recycle boundaries. New task and request admission also use these local-process limits even when the shared host/cgroup still has ample memory |
 | `TOFU_STORAGE_PG_READ_POOL` / `TOFU_STORAGE_PG_WRITE_POOL` | PostgreSQL pool requests (32/16, automatically capped to the 80% server budget) |
 | `TOFU_STORAGE_MIN_FREE_BYTES` | Data-filesystem startup reserve (personal probe: 1% of volume, clamped to 256 MiB..2 GiB) |
-| `TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB` | Total admitted SQLite recovery-copy footprint on one volume (personal: 50% of launch-probed data volume, clamped to 4..512 GiB; probe-failure fallback: 64 GiB; distributed: 1 TiB; explicit hard ceiling: 8 TiB) |
+| `TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB` | Total admitted SQLite recovery-copy footprint on one volume (personal: 50% of launch-probed data volume, clamped to 4..512 GiB; probe-failure fallback: 64 GiB; distributed: 1 TiB; explicit hard ceiling: 8 TiB). A same-filesystem fastpath may atomically replace older verified backups after the new hard-linked point is fully verified; rollback points never rotate automatically |
+| `TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS` | Full verified-backup deadline derived from the same copy budget (personal default: 1,800..21,600 s; probe-failure fallback: 5,896 s; explicit hard ceiling: 86,400 s) |
+| `TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB` | Admission watermark for each local/durable WAL before a full fastpath shadow rebase. The effective trigger is one quarter of authority bytes with a 64 MiB floor, capped per WAL at 2% of launch-time free disk and 16 GiB (probe-failure fallback: 512 MiB; distributed: 16 GiB; explicit maximum: 16 GiB). Shipper startup rechecks both the local-front and durable-shadow volumes and uses the smaller 2% envelope, so the two-WAL trigger envelope is at most 4% of observed free space. At the first physical commit at/above the watermark, later transactions receive retryable `database_busy` before `BEGIN` until the shipper's raw checkpoint creates headroom; one already-started bounded commit segment remains atomic. Image-plus-tail publication keeps its separate capacity check; lower overrides trade disk headroom for more database-sized sequential copies and earlier pressure |
 | `TOFU_RUN_PYTHON_CACHE=auto|1|0` / `TOFU_RUN_PYTHON_CACHE_MAX_MIB` | Auto-select repeat-heavy network-workspace Python bytecode caching, force it for experiments, or disable it; set its bounded local ceiling (personal probe: 16..64 MiB) |
 | `TOFU_SERVER_PYTHON_CACHE=auto|1|0` / `TOFU_SERVER_PYTHON_CACHE_MAX_MIB` / `TOFU_SERVER_PYTHON_CACHE_DIR` | Let the stdlib lifecycle manager select, force, disable, size, or relocate its project/interpreter-scoped host-local server bytecode cache (personal probe: 16..64 MiB; distributed: 128 MiB; hard ceiling: 512 MiB); an existing `PYTHONPYCACHEPREFIX` or `PYTHONDONTWRITEBYTECODE` wins |
-| `TOFU_TOKEN_COUNT_CACHE_CAPACITY` | Digest-only large-text token-count entries (personal probe: 64..512 in normal profiles; distributed: 1,024; hard ceiling: 4,096) |
+| `TOFU_TOKEN_COUNT_CACHE_CAPACITY` | Digest-only repeated-text token-count entries (personal probe: 64..512 in normal profiles; distributed: 1,024; hard ceiling: 4,096) |
+| `TOFU_USAGE_CACHE_CAPACITY` | Recent per-conversation provider-usage anchors used by the exact-first token counter (personal probe: 128..2,048; 8 GiB reference: 256; probe-failure fallback: 128; distributed: 4,096; hard ceiling: 8,192). Capacity/TTL eviction safely falls through to the next local counter tier; retained model/role/signature fields are bounded and memory-pressure relief may clear the reconstructible working set. |
+| `TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY` | Process-local exact sliding-window endpoint/client buckets and authenticated API-key token-pairs (personal probe: 512..4,096; 8 GiB reference: 1,024; probe-failure fallback: 512; distributed: 4,096; hard ceiling: 16,384). The endpoint/client store derives a second envelope of at most 128 timestamps per configured bucket, capped at 1,048,576 total; both stores reclaim LRU state. Sidecar-backed endpoint/client counters ignore this knob. |
+| `TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY` | Process-wide short-text tokenization working set for Tool Search (personal probe: 512..4,096 entries; 8 GiB reference: 1,024; probe-failure fallback: 512; distributed: 4,096; hard ceiling: 16,384). Inputs above 1,024 characters remain fully searchable but bypass the cache, so the entry limit is also a bounded text-residency budget. The same launch signal derives MCP pre-request catalog indexes (4 lean, 8 at 8 GiB, 32 distributed/hard ceiling) and 24-hour sticky selection states (1,024 lean, 2,048 at 8 GiB, 4,096 distributed/hard ceiling); no separate knobs can multiply this resident budget. Capacity resolves once per process, and an already materialized positive value is clamped without repeating the unused launch probe. Sticky TTL uses a process-monotonic LRU prefix, so live-state cleanup is independent of wall-clock corrections and does not scan the whole state budget. |
+| `TOFU_TOOL_RESULT_CACHE_CAPACITY` | Per-task FIFO of reusable and streaming-prefetched execution receipts (personal probe: 64..256 entries; 8 GiB reference: 128; probe-failure fallback: 64; distributed: 512; hard ceiling: 1,024). Pressure evicts the oldest optimization receipt for safe live re-execution; terminal settlement releases the whole cache before the remaining hot task TTL. |
+| `TOFU_MEMORY_METADATA_CACHE_CAPACITY` / `TOFU_MEMORY_METADATA_CACHE_MAX_MIB` | Process-wide parsed-frontmatter LRU for body-free memory summary lists, bounded by both entry count and estimated retained bytes (personal probe: 512..4,096 entries / 4..32 MiB; 8 GiB reference: 2,048 / 16 MiB; probe-failure fallback: 512 / 4 MiB; distributed: 8,192 / 64 MiB; hard ceilings: 16,384 / 128 MiB). Exact file fingerprints invalidate edits; body, provenance, eligibility, and authorization are never cached. |
+| `TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY` | Process-wide TTL/LRU of owner-scoped parsed-paper sources used by repeat Q&A starts (personal probe: 1..8 entries; 8 GiB reference: 2; probe-failure fallback: 1; distributed: 8; hard ceiling: 32). Every entry is independently capped at 1,000,000 characters, expires after 600 seconds, is cleared by process memory relief, and is re-authorized with a body-free owner lookup before reuse. |
+| `TOFU_PAPER_{REPORT,QA,DEEPEN,INSIGHT,RECOMMEND}_AGENT_TOKEN_BUDGET` / `TOFU_RESEARCH_{SURVEY,IDEATE}_TOKEN_BUDGET` | Per-task logical-token envelopes for open-ended Paper agent loops. Defaults by stage are Report 480k, Q&A 240k, Deepen 320k, Insight 240k, Recommend 160k, Survey 240k, and Ideate 160k. A reached envelope removes tools from the next call so the model can synthesize from gathered evidence; zero/malformed/below-16k values use the stage default and every override is hard-capped at 2,000,000. |
+| `TOFU_PAPER_{REPORT,QA,DEEPEN,INSIGHT,RECOMMEND}_AGENT_DISPATCH_BUDGET` / `TOFU_RESEARCH_{SURVEY,IDEATE}_DISPATCH_BUDGET` | Actual agent-loop dispatch attempts per Paper task, including responses without usage metadata and the reserved final tool-less synthesis call. Defaults are 10 for Report/Survey/Ideate and 8 for Q&A/Deepen/Insight/Recommend; zero/malformed/below-2 values use the stage default and the hard ceiling is 32. Provider-internal transport retries retain their separate bounded policy; exact repeats remain governed by the call+world breaker. |
+| `TOFU_TRANSLATE_CACHE_MAX_MIB` | Whole on-disk translation-result cache ceiling, divided exactly across 256 hash shards (personal probe: 32..512 MiB; probe-failure fallback: 128 MiB; distributed: 1,024 MiB; hard ceiling: 4,096 MiB) |
+| `TOFU_TRANSLATE_MAX_429_ATTEMPTS` | Actual upstream rate-limit-class responses allowed per optional translation dispatch (personal probe: 4..8; probe-failure fallback: 4; distributed: 16; hard ceiling: 64); capacity polling does not count and interactive agent dispatch is unchanged |
+| `TOFU_TRANSLATE_WORKERS` / `TOFU_TRANSLATE_QUEUE_CAPACITY` | Shared owner-fair optional-translation workers and finite pending background/send-input tasks (personal probe: 1..2 workers / 4..32 queued; probe-failure fallback: 1/4; distributed: 16/128; hard ceilings: 64/1,024). Attended send work advances only within its owner's queue and falls back to original input on saturation/timeout; no request-local carrier is created. The worker value also caps active MT/LLM calls across synchronous-send and incremental carriers; the queue value independently caps provider waiters, whose saturation returns retryable `server_busy` without model rotation or backoff. |
+| `TOFU_TRANSLATE_WORKER_IDLE_SECONDS` | Quiet window before shared translation workers retire and recreate lazily (personal: 60 s; distributed: 600 s; `0` keeps admitted workers resident; hard ceiling: 86,400 s) |
+| `TOFU_PDF_PROCESSES` / `TOFU_PDF_PARSE_CAPACITY` / `TOFU_PDF_MAX_PAGES` / `TOFU_PDF_MAX_TEXT_MIB` / `TOFU_PDF_PARSE_TIMEOUT` / `TOFU_PDF_WORKER_IDLE_SECONDS` | Classic local PDF child processes, aggregate direct+pool unfinished inputs, per-document page/text ceilings, caller wait ceiling, and idle child residency. The 8 GiB reference is 1/3/512/4 MiB/1,024 s/60 s idle; probe-failure fallback is 1/3/256/2 MiB/300 s/60 s; distributed is 4/16/2,048/16 MiB/3,600 s/600 s; hard ceilings are 16/64/4,096/64 MiB/3,600 s/86,400 s. A timed-out running child retains admission until it actually settles and is never rerun concurrently in-process; idle children retire automatically, while explicit idle `0` keeps them resident. Requests may only lower page/text limits; retained images are separately hard-capped at 64 and 2,048 px. |
+| `TOFU_PDF_VLM_TASK_WORKERS` / `TOFU_PDF_VLM_QUEUE_CAPACITY` | Shared owner-fair whole-PDF execution slots and pending source-PDF allowance (personal probe: 1..2 workers / 2..8 queued; probe-failure fallback: 1/2; distributed: 4/32; hard ceilings: 16/256). Since each upload is already capped at 200 MiB, the 8 GiB reference default of 1/2 bounds compressed input retained by active and queued tasks to 600 MiB |
+| `TOFU_PDF_VLM_CALL_WORKERS` / `TOFU_PDF_VLM_MAX_PAGES` | Page-batch model-call concurrency and page ceiling checked before rendering (personal probe: 1..4 calls / 64..256 pages; 8 GiB reference: 2/128; probe-failure fallback: 1/64; distributed: 8/512; hard ceilings: 16/2,048). Legacy `PDF_VLM_MAX_WORKERS` may only lower call concurrency |
+| `TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS` / `TOFU_PDF_VLM_MAX_429_ATTEMPTS` | Whole-job deadline and actual upstream rate-limit responses allowed per page-batch call (personal probe: 1,920..7,200 s / 4..8 attempts; probe-failure fallback: 1,920/4; distributed: 14,400/16; hard ceilings: 86,400/64) |
+| `TOFU_PDF_VLM_WORKER_IDLE_SECONDS` | Quiet window before whole-PDF worker threads retire and recreate lazily (personal: 60 s; distributed: 600 s; `0` keeps admitted workers resident; hard ceiling: 86,400 s) |
+| `TOFU_KNOWLEDGE_MAX_TEXT_CHARS` / `TOFU_KNOWLEDGE_OCR_MAX_PAGES` / `TOFU_KNOWLEDGE_VISUAL_MAX_PAGES` / `TOFU_KNOWLEDGE_MAX_VISUAL_ASSETS` / `TOFU_KNOWLEDGE_MAX_VISUAL_BYTES` / `TOFU_KNOWLEDGE_MAX_ASSET_BYTES` / `TOFU_KNOWLEDGE_MAX_IMAGE_PIXELS` | Local Knowledge text, scanned-PDF OCR, visual traversal/count/aggregate bytes, and individual image encoded/decoded ceilings. Defaults are 12,000,000 chars, 80/80 pages, 160 assets/160 MiB, 25 MiB/asset, and 40 million pixels; hard ceilings are 50,000,000 chars, 500 pages (also clamped by `TOFU_PDF_MAX_PAGES`), 1,000 assets/1 GiB, 100 MiB/asset, and 100 million pixels. Validation, text, OCR, asset/source persistence, and repository commit hold one classic-PDF lease; OCR stops when the text budget is full. At the 8 GiB reference capacity of three PDFs, compressed source residency is at most 150 MiB and retained visual candidates at most 480 MiB before parser-native transient state. |
+| `TOFU_KNOWLEDGE_ENRICH_WORKERS` / `TOFU_KNOWLEDGE_ENRICH_OWNER_CAPACITY` | Shared owner-round-robin knowledge-image description calls and finite retained owner IDs (personal probe: 1..2 workers / 4..32 owners; 8 GiB reference: 1/16; probe-failure fallback: 1/4; distributed: 8/128; hard ceilings: 16/512). Each owner turn claims one durable asset, so image bytes never accumulate in the scheduler |
+| `TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS` | Quiet window before knowledge-enrichment workers retire and recreate lazily (personal: 60 s; distributed: 600 s; `0` keeps admitted workers resident; hard ceiling: 86,400 s) |
+| `TOFU_SWARM_GLOBAL_WORKERS` / `TOFU_SWARM_MAX_PARALLEL` | Process-wide owner-round-robin SubAgent execution and per-session scheduler-thread ceilings (personal probe: 1..4 / 1..4; 8 GiB reference: 2/2; probe-failure fallback: 1/1; distributed: 16/8; hard ceilings: 32/16). Separate conversations therefore share one expensive execution budget instead of multiplying API/tool concurrency |
+| `TOFU_SWARM_MAX_AGENTS_PER_WAVE` / `TOFU_SWARM_MAX_AGENTS_PER_SESSION` / `TOFU_SWARM_MAX_RETRIES` | Accepted model work, retained dependency/results state, and automatic retries (personal probe: 2..8 per wave / 6..24 per live session / 1 retry; 8 GiB reference: 4/12/1; probe-failure fallback: 2/6/1; distributed: 16/64/2; hard ceilings: 32/128/4). The wave limit is also emitted as `spawn_agents.agents.maxItems` and repeated at backend admission |
+| `TOFU_SWARM_SESSION_CAPACITY` | Process-wide live/terminal in-memory swarm registry (personal probe: 2..8; 8 GiB reference: 4; probe-failure fallback: 2; distributed: 32; hard ceiling: 64). At capacity, durable terminal memory may retire first; productive sessions are never evicted to admit newer work |
 | `TOFU_STORAGE_PREFLIGHT_MAX_MS` | Maximum accepted filesystem preflight latency |
 
 Removed variables `TOFU_DB_BACKEND`, `TOFU_REQUIRE_PG`, and

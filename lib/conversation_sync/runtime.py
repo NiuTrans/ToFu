@@ -88,11 +88,23 @@ def _mutate_file_changes(
     return outcome
 
 
+def _retain_media_attachments(
+    projection: Mapping[str, Any], user_id: Any,
+) -> None:
+    attachments = projection.get("attachments")
+    if not isinstance(attachments, list) or not attachments:
+        return
+    from lib.media_attachments import resolve_client_refs
+
+    resolve_client_refs(attachments, user_id=int(user_id), retain=True)
+
+
 conversation_turn_commands = ConversationTurnCommandService(
     build_user_message=_build_user_message,
     was_aborted_after=_was_aborted_after,
     start_task=_start_task,
     mutate_file_changes=_mutate_file_changes,
+    retain_attachments=_retain_media_attachments,
 )
 
 

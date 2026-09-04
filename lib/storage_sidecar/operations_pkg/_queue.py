@@ -10,6 +10,18 @@ from typing import Any
 from lib.log import get_logger
 from lib.storage.errors import StorageError
 from lib.storage_sidecar.adapters.base import Session
+from lib.turn_source_queue_contract import (
+    KIND_AUTOPILOT,
+    KIND_GOAL_CONTINUATION,
+    KIND_REAL,
+    KIND_WORKFLOW,
+    QUEUE_REAP_PROBE_CONTRACT,
+    QUEUE_REAP_PROBE_CONVERSATIONS_FIELD,
+    QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD,
+    QUEUE_REAP_PROBE_REQUEST_FIELD,
+    QUEUE_REAP_PROBE_RESPONSE_FIELD,
+    TURN_SOURCE_KINDS,
+)
 
 
 logger = get_logger(__name__)
@@ -20,6 +32,9 @@ from lib.storage_sidecar.operations_pkg._common import (
     _integer,
     _load,
     _required_text,
+)
+from lib.storage_sidecar.operations_pkg._queue_shared import (
+    renumber_queue_positions as _queue_renumber,
 )
 
 
@@ -124,12 +139,9 @@ def _queue_autopilot_clear(session: Session, payload: Mapping[str, Any]) -> Any:
     return {"cleared": bool(deleted)}
 
 
-_QUEUE_KINDS = frozenset({"real", "peer_msg", "workflow_step", "autopilot"})
-
-
 def _queue_kind(payload: Mapping[str, Any]) -> str:
-    kind = payload.get("kind", "real")
-    if not isinstance(kind, str) or kind not in _QUEUE_KINDS:
+    kind = payload.get("kind", KIND_REAL)
+    if not isinstance(kind, str) or kind not in TURN_SOURCE_KINDS:
         raise StorageError("database_protocol_error", "Invalid queue kind")
     return kind
 
@@ -149,7 +161,7 @@ def _queue_item(row: Mapping[str, Any]) -> dict[str, Any]:
         "queueId": str(row["id"]),
         "userId": int(row["user_id"]),
         "position": int(row["position"]),
-        "kind": str(row["kind"] or "real"),
+        "kind": str(row["kind"] or KIND_REAL),
         "priority": int(row["priority"]),
         "timestamp": int(row["created_at_ms"]),
         # Preview contract — the documented lib.message_queue.get_queue keys:
@@ -162,11 +174,20 @@ def _queue_item(row: Mapping[str, Any]) -> dict[str, Any]:
         )[:2000],
         "hasImages": bool(payload.get("images")),
         "hasPdfs": bool(payload.get("pdfTexts")),
+        "hasAttachments": bool(payload.get("attachments")),
         "hasRefs": bool(payload.get("convRefs")),
         "hasQuotes": bool(payload.get("replyQuotes")),
         "payload": payload,
         "config": _load(row["config_json"]) or {},
     }
+    for column_name, public_name in (
+        ("input_turn_id", "inputTurnId"),
+        ("output_turn_id", "outputTurnId"),
+        ("attempt_id", "attemptId"),
+    ):
+        value = str(row.get(column_name) or "")
+        if value:
+            result[public_name] = value
     embedded_user = payload.get("_user_msg")
     source_message_id = str(
         (embedded_user.get("_msgId") if isinstance(embedded_user, Mapping) else "")
@@ -190,25 +211,12 @@ def _queue_rows(
 ) -> list[Mapping[str, Any]]:
     return session.fetch_all(
         "SELECT id, user_id, conv_id, payload_json, config_json, position, kind, "
-        "priority, created_at_ms, leased_until_ms, lease_task_id "
+        "priority, created_at_ms, leased_until_ms, lease_task_id, "
+        "input_turn_id, output_turn_id, attempt_id "
         "FROM storage_queue_items WHERE conv_id = ? AND user_id = ? "
         "ORDER BY priority, position",
         (conv_id, user_id),
     )
-
-
-def _queue_renumber(session: Session, conv_id: str, user_id: int) -> None:
-    rows = session.fetch_all(
-        "SELECT id FROM storage_queue_items WHERE conv_id = ? AND user_id = ? "
-        "ORDER BY priority, position, id",
-        (conv_id, user_id),
-    )
-    for position, row in enumerate(rows, 1):
-        session.execute(
-            "UPDATE storage_queue_items SET position = ? "
-            "WHERE id = ? AND user_id = ?",
-            (position, row["id"], user_id),
-        )
 
 
 def _queue_enqueue(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -224,20 +232,21 @@ def _queue_enqueue(session: Session, payload: Mapping[str, Any]) -> Any:
     _require_owned_conversation(session, conv_id, user_id)
     session.lock_key("queue-conversation", f"{user_id}:{conv_id}")
     rows = _queue_rows(session, conv_id, user_id)
-    board_task_id = message.get("boardTaskId")
-    if kind == "workflow_step" and board_task_id:
+    if kind == KIND_REAL:
+        # A later human command permanently supersedes a pending synthetic
+        # continuation. Priority alone is insufficient: replaying the stale
+        # row after the human turn would restore its old stamped objective.
+        deleted = session.execute(
+            "DELETE FROM storage_queue_items "
+            "WHERE conv_id = ? AND user_id = ? AND kind = ?",
+            (conv_id, user_id, KIND_GOAL_CONTINUATION),
+        )
+        if deleted:
+            _queue_renumber(session, conv_id, user_id)
+            rows = _queue_rows(session, conv_id, user_id)
+    if kind in {KIND_AUTOPILOT, KIND_GOAL_CONTINUATION}:
         for row in rows:
             if row["kind"] == kind:
-                candidate = _load(row["payload_json"]) or {}
-                if candidate.get("boardTaskId") == board_task_id:
-                    result = _queue_item(row)
-                    result.pop("payload", None)
-                    result.pop("config", None)
-                    result["deduped"] = True
-                    return result
-    if kind == "autopilot":
-        for row in rows:
-            if row["kind"] == "autopilot":
                 result = _queue_item(row)
                 result.pop("payload", None)
                 result.pop("config", None)
@@ -265,7 +274,8 @@ def _queue_enqueue(session: Session, payload: Mapping[str, Any]) -> Any:
     )
     inserted = session.fetch_one(
         "SELECT id, user_id, conv_id, payload_json, config_json, position, kind, "
-        "priority, created_at_ms, leased_until_ms, lease_task_id "
+        "priority, created_at_ms, leased_until_ms, lease_task_id, "
+        "input_turn_id, output_turn_id, attempt_id "
         "FROM storage_queue_items WHERE id=? AND user_id=?",
         (queue_id, user_id),
     )
@@ -310,6 +320,22 @@ def _queue_clear(session: Session, payload: Mapping[str, Any]) -> Any:
     return {"cleared": max(0, int(deleted or 0))}
 
 
+def _queue_kind_clear(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Delete one owner-scoped source kind without touching other intent."""
+    conv_id = _queue_conv_id(payload)
+    user_id = _queue_owner(payload)
+    kind = _queue_kind(payload)
+    session.lock_key("queue-conversation", f"{user_id}:{conv_id}")
+    deleted = session.execute(
+        "DELETE FROM storage_queue_items "
+        "WHERE conv_id = ? AND user_id = ? AND kind = ?",
+        (conv_id, user_id, kind),
+    )
+    if deleted:
+        _queue_renumber(session, conv_id, user_id)
+    return {"cleared": max(0, int(deleted or 0))}
+
+
 def _queue_dequeue(session: Session, payload: Mapping[str, Any]) -> Any:
     conv_id = _queue_conv_id(payload)
     user_id = _queue_owner(payload)
@@ -318,11 +344,12 @@ def _queue_dequeue(session: Session, payload: Mapping[str, Any]) -> Any:
     session.lock_key("queue-conversation", f"{user_id}:{conv_id}")
     row = session.fetch_one(
         "SELECT id, user_id, conv_id, payload_json, config_json, position, kind, "
-        "priority, created_at_ms, leased_until_ms, lease_task_id "
+        "priority, created_at_ms, leased_until_ms, lease_task_id, "
+        "input_turn_id, output_turn_id, attempt_id "
         "FROM storage_queue_items WHERE conv_id = ? AND user_id = ? AND kind != ? "
         "AND (leased_until_ms IS NULL OR leased_until_ms < ?) "
         "ORDER BY priority, position LIMIT 1",
-        (conv_id, user_id, "autopilot", now_ms),
+        (conv_id, user_id, KIND_AUTOPILOT, now_ms),
     )
     if row is None:
         return None
@@ -430,7 +457,39 @@ def _queue_conversations_list_all(
     exposed through a route.  Ordering by the oldest durable source makes the
     maintenance dispatch cap fair and deterministic.
     """
+    reap_probe_contract = payload.get(QUEUE_REAP_PROBE_REQUEST_FIELD)
+    if reap_probe_contract not in (None, QUEUE_REAP_PROBE_CONTRACT):
+        raise StorageError(
+            "database_protocol_error", "Invalid queue reap probe contract",
+        )
     kind = payload.get("kind")
+    if reap_probe_contract is not None:
+        if kind is not None:
+            raise StorageError(
+                "database_protocol_error",
+                "Queue reap probe cannot filter one source kind",
+            )
+        now_ms = _integer(payload, "now_ms", minimum=0)
+        rows = session.fetch_all(
+            "SELECT user_id, conv_id, MIN(created_at_ms) AS oldest_created_at, "
+            "MAX(CASE WHEN leased_until_ms IS NOT NULL "
+            "AND leased_until_ms < ? THEN 1 ELSE 0 END) AS has_expired_lease "
+            "FROM storage_queue_items WHERE kind != 'autopilot' "
+            "GROUP BY user_id, conv_id "
+            "ORDER BY oldest_created_at, user_id, conv_id",
+            (now_ms,),
+        )
+        conversations = [
+            {"userId": int(row["user_id"]), "convId": str(row["conv_id"])}
+            for row in rows if row["conv_id"]
+        ]
+        return {
+            QUEUE_REAP_PROBE_RESPONSE_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+            QUEUE_REAP_PROBE_CONVERSATIONS_FIELD: conversations,
+            QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD: any(
+                bool(row["has_expired_lease"]) for row in rows
+            ),
+        }
     if kind is not None:
         kind = _queue_kind({"kind": kind})
         rows = session.fetch_all(

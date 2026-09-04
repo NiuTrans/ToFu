@@ -9,6 +9,14 @@ from typing import Any
 import orjson
 
 from lib.log import get_logger
+from lib.paper.contracts import (
+    PAPER_FANIN_MAX_PAPERS,
+    PAPER_FANIN_MAX_TEXT_CHARS,
+    PAPER_QA_MAX_SOURCE_CHARS,
+    PAPER_REPORT_REOPEN_MAX_SIBLINGS,
+    PAPER_TRANSLATION_MAX_OUTPUT_BYTES,
+    PAPER_TRANSLATION_MAX_OUTPUT_CHARS,
+)
 from lib.storage.errors import StorageError
 from lib.storage_sidecar.adapters.base import Session
 
@@ -65,17 +73,8 @@ def _paper_report_upsert(session: Session, payload: Mapping[str, Any]) -> Any:
     return {"saved": True}
 
 
-def _paper_report_get(session: Session, payload: Mapping[str, Any]) -> Any:
-    user_id = _integer(payload, "user_id", minimum=1)
-    paper_hash = _required_text(payload, "paper_hash", 128)
-    lang = _required_text(payload, "lang", 64)
-    row = session.fetch_one(
-        "SELECT report, model, meta, created_at FROM paper_reports "
-        "WHERE user_id = ? AND paper_hash = ? AND lang = ?",
-        (user_id, paper_hash, lang),
-    )
-    if row is None:
-        return None
+def _paper_report_projection(row, *, user_id: int, paper_hash: str, lang: str):
+    """Decode the one canonical Sidecar projection for a report row."""
     try:
         meta = _load(row["meta"])
     except (TypeError, orjson.JSONDecodeError) as exc:
@@ -90,6 +89,219 @@ def _paper_report_get(session: Session, payload: Mapping[str, Any]) -> Any:
         "meta": meta if isinstance(meta, dict) else {},
         "created_at": int(row["created_at"] or 0),
     }
+
+
+def _paper_report_get(session: Session, payload: Mapping[str, Any]) -> Any:
+    user_id = _integer(payload, "user_id", minimum=1)
+    paper_hash = _required_text(payload, "paper_hash", 128)
+    lang = _required_text(payload, "lang", 64)
+    max_report_chars = payload.get("max_report_chars")
+    select_projection = "report, model, meta, created_at"
+    args: tuple[Any, ...] = (user_id, paper_hash, lang)
+    if max_report_chars is not None:
+        max_report_chars = _integer(
+            payload, "max_report_chars", minimum=1,
+            maximum=PAPER_FANIN_MAX_TEXT_CHARS)
+        select_projection = (
+            "substr(report, 1, ?) AS report, '' AS model, "
+            "'{}' AS meta, created_at"
+        )
+        args = (max_report_chars, user_id, paper_hash, lang)
+    row = session.fetch_one(
+        f"SELECT {select_projection} "
+        "FROM paper_reports "
+        "WHERE user_id = ? AND paper_hash = ? AND lang = ?",
+        args,
+    )
+    if row is None:
+        return None
+    return _paper_report_projection(
+        row, user_id=user_id, paper_hash=paper_hash, lang=lang)
+
+
+def _paper_report_resolve(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Resolve one owner's preferred/fallback report in a single SQL read."""
+    user_id = _integer(payload, "user_id", minimum=1)
+    paper_hash = _required_text(payload, "paper_hash", 128)
+    preferred_lang = _required_text(payload, "preferred_lang", 64)
+    languages = [preferred_lang]
+    if payload.get("fallback_lang") is not None:
+        fallback_lang = _required_text(payload, "fallback_lang", 64)
+        if fallback_lang != preferred_lang:
+            languages.append(fallback_lang)
+    placeholders = ",".join("?" for _ in languages)
+    row = session.fetch_one(
+        "SELECT lang, report, model, meta, created_at FROM paper_reports "
+        "WHERE user_id = ? AND paper_hash = ? "
+        f"AND lang IN ({placeholders}) "
+        "ORDER BY CASE WHEN lang = ? THEN 0 ELSE 1 END, "
+        "created_at DESC, lang ASC LIMIT 1",
+        (user_id, paper_hash, *languages, preferred_lang),
+    )
+    if row is None:
+        return None
+    return _paper_report_projection(
+        row,
+        user_id=user_id,
+        paper_hash=paper_hash,
+        lang=row["lang"] or "",
+    )
+
+
+def _paper_report_reopen(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Resolve a base report and its bounded sibling artifacts in one read."""
+    user_id = _integer(payload, "user_id", minimum=1)
+    paper_hash = _required_text(payload, "paper_hash", 128)
+    preferred_lang = _required_text(payload, "preferred_lang", 64)
+    fallback_lang = None
+    if payload.get("fallback_lang") is not None:
+        fallback_lang = _required_text(payload, "fallback_lang", 64)
+
+    offered_groups = payload.get("sibling_langs_by_base", {})
+    if not isinstance(offered_groups, Mapping):
+        raise StorageError(
+            "database_protocol_error",
+            "paper report reopen sibling groups must be an object",
+        )
+
+    base_langs = [preferred_lang]
+    if fallback_lang and fallback_lang != preferred_lang:
+        base_langs.append(fallback_lang)
+    allowed_base_langs = set(base_langs)
+    sibling_langs_by_base = {}
+    offered_sibling_count = 0
+    for base_lang, offered_siblings in offered_groups.items():
+        if base_lang not in allowed_base_langs or not isinstance(offered_siblings, list):
+            raise StorageError(
+                "database_protocol_error",
+                "Invalid paper report sibling group",
+            )
+        offered_sibling_count += len(offered_siblings)
+        if offered_sibling_count > PAPER_REPORT_REOPEN_MAX_SIBLINGS:
+            raise StorageError(
+                "database_protocol_error",
+                "paper report reopen requires at most "
+                f"{PAPER_REPORT_REOPEN_MAX_SIBLINGS} sibling languages",
+            )
+        normalized_siblings = []
+        for value in offered_siblings:
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.strip()) > 64
+            ):
+                raise StorageError(
+                    "database_protocol_error",
+                    "Invalid paper report sibling language",
+                )
+            normalized = value.strip()
+            if normalized not in normalized_siblings:
+                normalized_siblings.append(normalized)
+        sibling_langs_by_base[base_lang] = normalized_siblings
+
+    base_placeholders = ",".join("?" for _ in base_langs)
+    selected_artifact_clauses = ["p.lang = r.lang"]
+    selected_artifact_args = []
+    for base_lang in base_langs:
+        sibling_langs = sibling_langs_by_base.get(base_lang, [])
+        if not sibling_langs:
+            continue
+        sibling_placeholders = ",".join("?" for _ in sibling_langs)
+        selected_artifact_clauses.append(
+            f"(r.lang = ? AND p.lang IN ({sibling_placeholders}))")
+        selected_artifact_args.extend((base_lang, *sibling_langs))
+    rows = session.fetch_all(
+        "WITH resolved_lang AS ("
+        "SELECT lang FROM paper_reports "
+        "WHERE user_id = ? AND paper_hash = ? "
+        f"AND lang IN ({base_placeholders}) "
+        "ORDER BY CASE WHEN lang = ? THEN 0 ELSE 1 END, "
+        "created_at DESC, lang ASC LIMIT 1) "
+        "SELECT p.lang, p.report, p.model, p.meta, p.created_at "
+        "FROM paper_reports AS p JOIN resolved_lang AS r ON 1 = 1 "
+        "WHERE p.user_id = ? AND p.paper_hash = ? AND ("
+        + " OR ".join(selected_artifact_clauses)
+        + ") ORDER BY p.lang ASC",
+        (
+            user_id,
+            paper_hash,
+            *base_langs,
+            preferred_lang,
+            user_id,
+            paper_hash,
+            *selected_artifact_args,
+        ),
+    )
+    rows_by_lang = {row["lang"] or "": row for row in rows}
+    resolved_lang = preferred_lang if preferred_lang in rows_by_lang else ""
+    if not resolved_lang and fallback_lang in rows_by_lang:
+        resolved_lang = fallback_lang
+    resolved = None
+    if resolved_lang:
+        resolved = _paper_report_projection(
+            rows_by_lang[resolved_lang],
+            user_id=user_id,
+            paper_hash=paper_hash,
+            lang=resolved_lang,
+        )
+    return {
+        "report": resolved,
+        "siblings": [
+            _paper_report_projection(
+                rows_by_lang[lang],
+                user_id=user_id,
+                paper_hash=paper_hash,
+                lang=lang,
+            )
+            for lang in sibling_langs_by_base.get(resolved_lang, [])
+            if lang in rows_by_lang
+        ],
+    }
+
+
+def _paper_report_excerpts(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Return bounded report text for at most 40 requested paper hashes."""
+    user_id = _integer(payload, "user_id", minimum=1)
+    lang = _required_text(payload, "lang", 64)
+    max_report_chars = _integer(
+        payload, "max_report_chars", minimum=1,
+        maximum=PAPER_FANIN_MAX_TEXT_CHARS)
+    offered = payload.get("paper_hashes")
+    if (
+        not isinstance(offered, list)
+        or len(offered) > PAPER_FANIN_MAX_PAPERS
+    ):
+        raise StorageError(
+            "database_protocol_error",
+            "paper report excerpts require at most "
+            f"{PAPER_FANIN_MAX_PAPERS} paper_hashes",
+        )
+    paper_hashes = []
+    seen = set()
+    for value in offered:
+        if not isinstance(value, str) or not value.strip() or len(value) > 128:
+            raise StorageError(
+                "database_protocol_error", "Invalid paper report hash")
+        normalized = value.strip()
+        if normalized not in seen:
+            seen.add(normalized)
+            paper_hashes.append(normalized)
+    if not paper_hashes:
+        return []
+    placeholders = ",".join("?" for _ in paper_hashes)
+    rows = session.fetch_all(
+        "SELECT paper_hash, substr(report, 1, ?) AS report, created_at "
+        "FROM paper_reports WHERE user_id=? AND lang=? "
+        f"AND paper_hash IN ({placeholders}) ORDER BY paper_hash ASC",
+        (max_report_chars, user_id, lang, *paper_hashes),
+    )
+    return [{
+        "user_id": user_id,
+        "paper_hash": row["paper_hash"],
+        "lang": lang,
+        "report": row["report"] or "",
+        "created_at": int(row["created_at"] or 0),
+    } for row in rows]
 
 
 def _paper_report_latest(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -326,6 +538,23 @@ def _paper_report_second_pass_accumulate(
     return {"found": True, "meta": current}
 
 
+def _paper_translation_text(payload: Mapping[str, Any]) -> str:
+    """Validate one artifact against task, replay, and storage budgets."""
+    text = _optional_text(
+        payload,
+        "text",
+        maximum=PAPER_TRANSLATION_MAX_OUTPUT_CHARS,
+        scope="paper translation",
+    )
+    if len(text.encode("utf-8")) > PAPER_TRANSLATION_MAX_OUTPUT_BYTES:
+        raise StorageError(
+            "storage_payload_too_large",
+            "Paper translation exceeds "
+            f"{PAPER_TRANSLATION_MAX_OUTPUT_BYTES} UTF-8 bytes",
+        )
+    return text
+
+
 def _paper_translation_upsert(session: Session, payload: Mapping[str, Any]) -> Any:
     user_id = _integer(payload, "user_id", minimum=1)
     paper_hash = _required_text(payload, "paper_hash", 128)
@@ -343,9 +572,7 @@ def _paper_translation_upsert(session: Session, payload: Mapping[str, Any]) -> A
             user_id,
             paper_hash,
             lang,
-            _optional_text(
-                payload, "text", maximum=20_000_000, scope="paper translation"
-            ),
+            _paper_translation_text(payload),
             _optional_text(payload, "model", maximum=512, scope="paper translation"),
             _integer(payload, "created_at", minimum=0),
         ),
@@ -358,17 +585,36 @@ def _paper_translation_get(session: Session, payload: Mapping[str, Any]) -> Any:
     paper_hash = _required_text(payload, "paper_hash", 128)
     lang = _required_text(payload, "lang", 128)
     row = session.fetch_one(
-        "SELECT text, model, created_at FROM paper_translations "
+        "SELECT substr(text, 1, ?) AS bounded_text, model, created_at "
+        "FROM paper_translations "
         "WHERE user_id = ? AND paper_hash = ? AND lang = ?",
-        (user_id, paper_hash, lang),
+        (
+            PAPER_TRANSLATION_MAX_OUTPUT_CHARS + 1,
+            user_id,
+            paper_hash,
+            lang,
+        ),
     )
     if row is None:
+        return None
+    text = row["bounded_text"] or ""
+    if (
+        len(text) > PAPER_TRANSLATION_MAX_OUTPUT_CHARS
+        or len(text.encode("utf-8")) > PAPER_TRANSLATION_MAX_OUTPUT_BYTES
+    ):
+        logger.warning(
+            "[StorageSidecar] ignoring oversized legacy paper translation "
+            "user=%s hash=%s lang=%s",
+            user_id,
+            paper_hash[:12],
+            lang,
+        )
         return None
     return {
         "user_id": user_id,
         "paper_hash": paper_hash,
         "lang": lang,
-        "text": row["text"] or "",
+        "text": text,
         "model": row["model"] or "",
         "created_at": int(row["created_at"] or 0),
     }
@@ -465,71 +711,247 @@ def _paper_library_recent(session: Session, payload: Mapping[str, Any]) -> Any:
     ]
 
 
+def _paper_library_detail_item(
+    row: Mapping[str, Any],
+    *,
+    include_babel_cache: bool = True,
+) -> dict[str, Any]:
+    """Decode one complete bookshelf row into the stable wire projection."""
+    item = {
+        "id": row["id"],
+        "title": row["title"] or "",
+        "pdfUrl": row["pdf_url"] or "",
+        "pdfFilename": row["pdf_filename"] or "",
+        "arxivId": row["arxiv_id"] or "",
+        "paperHash": row["paper_hash"] or "",
+        "parsedText": row["parsed_text"] or "",
+        "qaHistory": _load(row["qa_history"]) or [],
+        "images": _load(row["images"]) or [],
+        "pageCount": int(row["page_count"] or 0),
+        "folderId": row["folder_id"] or "",
+        "parserVersion": row["parser_version"] or "",
+        "createdAt": int(row["created_at"] or 0),
+        "updatedAt": int(row["updated_at"] or 0),
+        "hasReport": bool(row["has_report"]),
+    }
+    if include_babel_cache:
+        item["babelCache"] = _load(row["babel_cache"]) or {}
+    return item
+
+
 def _paper_library_list(session: Session, payload: Mapping[str, Any]) -> Any:
-    """Return the authoritative bookshelf projection for the UI/API."""
+    """Compatibility projection for clients that still require full rows."""
     user_id = _integer(payload, "user_id", minimum=1)
-    paper_id = _optional_text(payload, "id", maximum=256, scope="paper library")
-    where = "WHERE user_id = ?"
-    args: list[Any] = [user_id]
-    if paper_id:
-        where += " AND id = ?"
-        args.append(paper_id)
     rows = session.fetch_all(
-        "SELECT id, title, pdf_url, pdf_filename, arxiv_id, paper_hash, "
-        "parsed_text, qa_history, images, babel_cache, page_count, folder_id, "
-        "parser_version, created_at, updated_at FROM paper_library "
-        + where
-        + " ORDER BY updated_at DESC",
-        tuple(args),
+        "SELECT library.id, library.title, library.pdf_url, "
+        "library.pdf_filename, library.arxiv_id, library.paper_hash, "
+        "library.parsed_text, library.qa_history, library.images, "
+        "library.babel_cache, library.page_count, library.folder_id, "
+        "library.parser_version, library.created_at, library.updated_at, "
+        "EXISTS(SELECT 1 FROM paper_reports AS report "
+        "WHERE report.user_id=library.user_id "
+        "AND report.paper_hash=library.paper_hash) AS has_report "
+        "FROM paper_library AS library "
+        "WHERE library.user_id = ? ORDER BY library.updated_at DESC",
+        (user_id,),
     )
-    result = []
-    for row in rows:
-        item = {
+    return [_paper_library_detail_item(row) for row in rows]
+
+
+def _paper_library_summaries(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Return bookshelf metadata without loading content or auxiliary JSON."""
+    user_id = _integer(payload, "user_id", minimum=1)
+    rows = session.fetch_all(
+        "SELECT library.id, library.title, library.pdf_url, "
+        "library.pdf_filename, library.arxiv_id, library.paper_hash, "
+        "library.page_count, library.folder_id, library.created_at, "
+        "library.updated_at, "
+        "EXISTS(SELECT 1 FROM paper_reports AS report "
+        "WHERE report.user_id=library.user_id "
+        "AND report.paper_hash=library.paper_hash) AS has_report "
+        "FROM paper_library AS library "
+        "WHERE library.user_id = ? ORDER BY library.updated_at DESC",
+        (user_id,),
+    )
+    return [
+        {
             "id": row["id"],
             "title": row["title"] or "",
             "pdfUrl": row["pdf_url"] or "",
             "pdfFilename": row["pdf_filename"] or "",
             "arxivId": row["arxiv_id"] or "",
             "paperHash": row["paper_hash"] or "",
-            "parsedText": row["parsed_text"] or "",
-            "qaHistory": _load(row["qa_history"]) or [],
-            "images": _load(row["images"]) or [],
-            "babelCache": _load(row["babel_cache"]) or {},
             "pageCount": int(row["page_count"] or 0),
             "folderId": row["folder_id"] or "",
-            "parserVersion": row["parser_version"] or "",
             "createdAt": int(row["created_at"] or 0),
             "updatedAt": int(row["updated_at"] or 0),
+            "hasReport": bool(row["has_report"]),
         }
-        report = (
-            session.fetch_one(
-                "SELECT 1 AS present FROM paper_reports "
-                "WHERE user_id=? AND paper_hash=? LIMIT 1",
-                (user_id, item["paperHash"]),
-            )
-            if item["paperHash"]
-            else None
+        for row in rows
+    ]
+
+
+def _paper_library_get(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Return one complete owner-scoped bookshelf row by its durable id."""
+    user_id = _integer(payload, "user_id", minimum=1)
+    paper_id = _required_text(payload, "id", 256)
+    row = session.fetch_one(
+        "SELECT library.id, library.title, library.pdf_url, "
+        "library.pdf_filename, library.arxiv_id, library.paper_hash, "
+        "library.parsed_text, library.qa_history, library.images, "
+        "library.babel_cache, library.page_count, library.folder_id, "
+        "library.parser_version, library.created_at, library.updated_at, "
+        "EXISTS(SELECT 1 FROM paper_reports AS report "
+        "WHERE report.user_id=library.user_id "
+        "AND report.paper_hash=library.paper_hash) AS has_report "
+        "FROM paper_library AS library "
+        "WHERE library.user_id = ? AND library.id = ?",
+        (user_id, paper_id),
+    )
+    if row is None:
+        return None
+    return _paper_library_detail_item(row)
+
+
+def _paper_library_reader(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Return reader state without the duplicate legacy Babel JSON column."""
+    user_id = _integer(payload, "user_id", minimum=1)
+    paper_id = _required_text(payload, "id", 256)
+    row = session.fetch_one(
+        "SELECT library.id, library.title, library.pdf_url, "
+        "library.pdf_filename, library.arxiv_id, library.paper_hash, "
+        "library.parsed_text, library.qa_history, library.images, "
+        "library.page_count, library.folder_id, library.parser_version, "
+        "library.created_at, library.updated_at, "
+        "EXISTS(SELECT 1 FROM paper_reports AS report "
+        "WHERE report.user_id=library.user_id "
+        "AND report.paper_hash=library.paper_hash) AS has_report "
+        "FROM paper_library AS library "
+        "WHERE library.user_id = ? AND library.id = ?",
+        (user_id, paper_id),
+    )
+    if row is None:
+        return None
+    return _paper_library_detail_item(row, include_babel_cache=False)
+
+
+def _paper_library_inputs(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Return only bounded paper bodies requested by an owner-scoped pipeline.
+
+    Unlike the UI bookshelf projection, this operation does not load auxiliary
+    JSON columns.
+    """
+    user_id = _integer(payload, "user_id", minimum=1)
+    max_text_chars = _integer(
+        payload, "max_text_chars", default=0, minimum=0,
+        maximum=PAPER_FANIN_MAX_TEXT_CHARS)
+    offered = payload.get("arxiv_ids")
+    if (
+        not isinstance(offered, list)
+        or len(offered) > PAPER_FANIN_MAX_PAPERS
+    ):
+        raise StorageError(
+            "database_protocol_error",
+            "paper library inputs require at most "
+            f"{PAPER_FANIN_MAX_PAPERS} arxiv_ids",
         )
-        item["hasReport"] = report is not None
-        result.append(item)
-    return result
+    arxiv_ids = []
+    seen = set()
+    for value in offered:
+        if not isinstance(value, str) or not value.strip() or len(value) > 256:
+            raise StorageError(
+                "database_protocol_error", "Invalid paper library arxiv_id")
+        normalized = value.strip()
+        if normalized not in seen:
+            seen.add(normalized)
+            arxiv_ids.append(normalized)
+    if not arxiv_ids:
+        return []
+    placeholders = ",".join("?" for _ in arxiv_ids)
+    rows = session.fetch_all(
+        "SELECT id, title, arxiv_id, paper_hash, "
+        "substr(parsed_text, 1, ?) AS parsed_text, "
+        "length(parsed_text) AS parsed_text_length, parser_version, "
+        "page_count, folder_id, created_at, updated_at FROM paper_library "
+        f"WHERE user_id=? AND arxiv_id IN ({placeholders}) "
+        "ORDER BY updated_at DESC",
+        (max_text_chars, user_id, *arxiv_ids),
+    )
+    return [{
+        "id": row["id"],
+        "title": row["title"] or "",
+        "arxivId": row["arxiv_id"] or "",
+        "paperHash": row["paper_hash"] or "",
+        "parsedText": row["parsed_text"] or "",
+        "parsedTextLength": int(row["parsed_text_length"] or 0),
+        "parserVersion": row["parser_version"] or "",
+        "pageCount": int(row["page_count"] or 0),
+        "folderId": row["folder_id"] or "",
+        "createdAt": int(row["created_at"] or 0),
+        "updatedAt": int(row["updated_at"] or 0),
+    } for row in rows]
 
 
 def _paper_library_identity(session: Session, payload: Mapping[str, Any]) -> Any:
     user_id = _integer(payload, "user_id", minimum=1)
     paper_hash = _required_text(payload, "paper_hash", 128)
-    row = session.fetch_one(
-        "SELECT title, arxiv_id, parsed_text FROM paper_library "
-        "WHERE user_id = ? AND paper_hash = ? "
-        "ORDER BY updated_at DESC LIMIT 1",
-        (user_id, paper_hash),
-    )
+    offered_max = payload.get("max_text_chars")
+    include_text_length = payload.get("include_text_length", True)
+    if not isinstance(include_text_length, bool):
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid include_text_length in storage request",
+        )
+    if offered_max is None:
+        if not include_text_length:
+            raise StorageError(
+                "database_protocol_error",
+                "Text length may be omitted only for a zero-text projection",
+            )
+        row = session.fetch_one(
+            "SELECT title, arxiv_id, parsed_text, "
+            "length(parsed_text) AS parsed_text_length FROM paper_library "
+            "WHERE user_id = ? AND paper_hash = ? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (user_id, paper_hash),
+        )
+    else:
+        max_text_chars = _integer(
+            payload,
+            "max_text_chars",
+            minimum=0,
+            maximum=PAPER_QA_MAX_SOURCE_CHARS,
+        )
+        if not include_text_length:
+            if max_text_chars != 0:
+                raise StorageError(
+                    "database_protocol_error",
+                    "Text length may be omitted only for a zero-text projection",
+                )
+            row = session.fetch_one(
+                "SELECT title, arxiv_id, '' AS parsed_text, "
+                "0 AS parsed_text_length FROM paper_library "
+                "WHERE user_id = ? AND paper_hash = ? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (user_id, paper_hash),
+            )
+        else:
+            row = session.fetch_one(
+                "SELECT title, arxiv_id, "
+                "substr(parsed_text, 1, ?) AS parsed_text, "
+                "length(parsed_text) AS parsed_text_length "
+                "FROM paper_library "
+                "WHERE user_id = ? AND paper_hash = ? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (max_text_chars, user_id, paper_hash),
+            )
     if row is None:
         return None
     return {
         "title": row["title"] or "",
         "arxiv_id": row["arxiv_id"] or "",
         "parsed_text": row["parsed_text"] or "",
+        "parsed_text_length": int(row["parsed_text_length"] or 0),
     }
 
 

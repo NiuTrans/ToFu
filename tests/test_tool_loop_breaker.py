@@ -19,12 +19,16 @@ RESULT changes (a growing log tail) — that is productive and must reset the
 counter. Only call AND outcome both byte-identical round-over-round counts.
 """
 
+import json
 import threading
 import pytest
 
 from lib.tasks_pkg.orchestrator._round_state import RoundState
 from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
+    _failure_fingerprint,
     _round_loop_digest,
+    _shell_command_is_observation,
+    finish_after_background_task_acceptance,
     handle_tool_loop_circuit_breaker,
 )
 from tests._registered_chat_task import registered_chat_task
@@ -47,7 +51,8 @@ def _rs():
 
 
 def _round(task, llm_round, name='run_command', args='{"command": "pwd"}',
-           content='', status='done', results=None):
+           content='', status='done', results=None,
+           tool_result_evidence=None):
     row = {
         'toolName': name, 'toolArgs': args, 'toolContent': content,
         'status': status, 'llmRound': llm_round,
@@ -55,7 +60,47 @@ def _round(task, llm_round, name='run_command', args='{"command": "pwd"}',
     }
     if results is not None:
         row['results'] = results
+    if tool_result_evidence is not None:
+        row['toolResultEvidence'] = tool_result_evidence
     task['toolRounds'].append(row)
+
+
+def _v2_result(*, evidence, artifact='', summary='bounded preview',
+               status='partial', items=(), truncated=True):
+    from lib.tools.result_envelope import ToolResultEnvelopeV2
+    return ToolResultEnvelopeV2(
+        status=status, summary=summary, items=tuple(items),
+        artifact_ref=artifact, cursor='0' if artifact else '',
+        truncated=truncated, raw_bytes=50_000,
+        evidence_id=evidence,
+    ).with_visible_bytes().to_envelope_text()
+
+
+def _single_tool_message_round(
+        task, messages, llm_round, *, name='run_command', args=None,
+        content=None, status='done'):
+    call_id = f'{name}-{llm_round}-{len(task["toolRounds"])}'
+    if args is None:
+        # An opaque (non-allowlisted) probe: rounds built with this helper
+        # exercise the efficiency nudges and must stay invisible to the
+        # observation-stall detector, which counts allowlisted read-only
+        # shell commands like ``pwd`` toward a stall.
+        args = ('{"command":"probe-service --check",'
+                '"description":"probe-%d"}') % llm_round
+    if content is None:
+        content = f'fresh evidence {llm_round}'
+    messages.extend([
+        {'role': 'assistant', 'content': '', 'tool_calls': [{
+            'id': call_id,
+            'type': 'function',
+            'function': {'name': name, 'arguments': args},
+        }]},
+        {'role': 'tool', 'tool_call_id': call_id, 'content': content},
+    ])
+    _round(
+        task, llm_round, name=name, args=args, content=content,
+        status=status,
+    )
 
 
 class TestDigest:
@@ -86,6 +131,22 @@ class TestDigest:
                                  'llmRound': 0, 'roundNum': 0,
                                  'results': [{'type': 'error', 'content': 'y'}]})
         assert _round_loop_digest(t1, 0) != _round_loop_digest(t2, 0)
+
+    def test_discarded_provider_attempt_does_not_enter_round_digest(self):
+        baseline = _task()
+        _round(baseline, 0, args='{"command": "pwd"}', content='real')
+        with_transport_artifact = _task()
+        with_transport_artifact['toolRounds'].append({
+            'toolName': 'run_command', 'toolArgs': '{"command": "true"}',
+            'toolContent': None, 'status': 'aborted', 'llmRound': 0,
+            'roundNum': 0, '_providerAttemptDiscarded': True,
+            'results': [{'badge': 'superseded'}],
+        })
+        _round(with_transport_artifact, 0, args='{"command": "pwd"}',
+               content='real')
+
+        assert _round_loop_digest(with_transport_artifact, 0) == (
+            _round_loop_digest(baseline, 0))
 
 
 class TestBreaker:
@@ -129,6 +190,7 @@ class TestBreaker:
                 round_num=rn, tid='abcdef12') is False, rn
         assert len(messages) == 1
         assert 'IDENTICAL TOOL LOOP DETECTED' in messages[0]['content']
+        assert messages[0]['_isMeta'] is True
         assert task['_toolLoopNudges'][0]['reason'] == 'exact_repetition'
         assert 'error' not in task
 
@@ -161,6 +223,491 @@ class TestBreaker:
         assert 'error' not in task
         assert task['_tool_loop_guard']['identical_repeat_count'] == 0
         assert task['_tool_loop_guard']['exact_nudge_digest'] == ''
+
+    def test_productive_serial_reads_get_one_local_ptc_adoption_nudge(self):
+        task, rs = _task(), _rs()
+        task['_ptc_local'] = {
+            'tier': 'program',
+            'eligible': ['read_files'],
+        }
+        task['_toolOrchestrationDecisions'] = [{
+            'programmaticBackend': 'local',
+        }]
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+
+        for rn in range(6):
+            call_id = f'read-{rn}'
+            args = (
+                f'{{"path":"lib/file_{rn}.py","start_line":1,'
+                '"end_line":20}'
+            )
+            content = (
+                f'File: lib/file_{rn}.py (lines 1-20 of 100)\n'
+                f'──\nsource evidence {rn}'
+            )
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': call_id,
+                    'type': 'function',
+                    'function': {
+                        'name': 'read_files',
+                        'arguments': args,
+                    },
+                }]},
+                {'role': 'tool', 'tool_call_id': call_id,
+                 'content': content},
+            ])
+            _round(task, rn, name='read_files', args=args, content=content)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        nudges = [
+            message for message in messages
+            if 'SERIAL READ CHAIN DETECTED' in str(message.get('content'))
+        ]
+        assert len(nudges) == 1
+        assert nudges[0]['_isMeta'] is True
+        assert len(task['_programmaticAdoptionNudges']) == 1
+        assert task['_programmaticAdoptionNudges'][0] == {
+            'afterRound': 3,
+            'targetRound': 4,
+            'reason': 'serial_direct_reads',
+            'chainLength': 3,
+            'tools': ['read_files', 'read_files', 'read_files'],
+            'max': 4,
+        }
+        from lib.tasks_pkg.manager._persist import build_result_meta
+        assert build_result_meta(task)['programmaticAdoptionNudges'] == (
+            task['_programmaticAdoptionNudges']
+        )
+        assert '_toolRoundTripNudges' not in task
+
+    @pytest.mark.parametrize(
+        ('damaged_field', 'damaged_value'),
+        (
+            ('_tool_loop_guard', {
+                'programmatic_adoption_nudge_count': 'not-an-integer',
+            }),
+            ('_programmaticAdoptionNudges', {'not': 'a-list'}),
+        ),
+    )
+    def test_damaged_recovery_state_cannot_break_ptc_adoption_nudge(
+            self, damaged_field, damaged_value):
+        task, rs = _task(), _rs()
+        task['_ptc_local'] = {
+            'tier': 'program',
+            'eligible': ['read_files'],
+        }
+        task['_toolOrchestrationDecisions'] = [{
+            'programmaticBackend': 'local',
+        }]
+        task[damaged_field] = damaged_value
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+
+        for rn in range(3):
+            call_id = f'read-{rn}'
+            args = f'{{"path":"lib/file_{rn}.py"}}'
+            content = f'File: lib/file_{rn}.py (20 lines, 1 KB)\n──\nx'
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': call_id,
+                    'type': 'function',
+                    'function': {
+                        'name': 'read_files',
+                        'arguments': args,
+                    },
+                }]},
+                {'role': 'tool', 'tool_call_id': call_id,
+                 'content': content},
+            ])
+            _round(task, rn, name='read_files', args=args, content=content)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        assert task['_tool_loop_guard'][
+            'programmatic_adoption_nudge_count'] == 1
+        assert len(task['_programmaticAdoptionNudges']) == 1
+
+    def test_native_ptc_projection_does_not_get_local_adoption_nudge(self):
+        task, rs = _task(), _rs()
+        task['_ptc_local'] = {
+            'tier': 'program',
+            'eligible': ['read_files'],
+        }
+        task['_toolOrchestrationDecisions'] = [{
+            'programmaticBackend': 'native_openai',
+        }]
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        for rn in range(3):
+            call_id = f'read-{rn}'
+            args = f'{{"path":"lib/file_{rn}.py"}}'
+            content = f'fresh source evidence {rn}'
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': call_id,
+                    'type': 'function',
+                    'function': {
+                        'name': 'read_files',
+                        'arguments': args,
+                    },
+                }]},
+                {'role': 'tool', 'tool_call_id': call_id,
+                 'content': content},
+            ])
+            _round(task, rn, name='read_files', args=args, content=content)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        assert '_programmaticAdoptionNudges' not in task
+
+    def test_adoption_nudge_metadata_is_bounded_and_damage_tolerant(self):
+        from lib.storage_projection import (
+            project_task_result_metadata_for_storage,
+        )
+        from lib.tasks_pkg.manager._persist import build_result_meta
+
+        task = {
+            '_programmaticAdoptionNudges': [
+                None,
+                {
+                    'afterRound': 'damaged',
+                    'targetRound': float('inf'),
+                    'reason': 'r' * 100,
+                    'chainLength': -50,
+                    'tools': ['tool-' + ('x' * 200)] * 10,
+                    'max': object(),
+                    'prompt': 'model-visible content must not persist',
+                },
+            ],
+            '_toolRoundTripNudges': [
+                None,
+                {
+                    'afterRound': '7',
+                    'targetRound': 8,
+                    'reason': 'q' * 100,
+                    'chainLength': 6,
+                    'tools': ['run_command'] * 10,
+                    'max': 99,
+                    'prompt': 'model-visible content must not persist',
+                },
+            ],
+        }
+
+        meta = build_result_meta(task)
+        public = meta['programmaticAdoptionNudges']
+        assert public == [{
+            'afterRound': 0,
+            'targetRound': 0,
+            'reason': 'r' * 64,
+            'chainLength': 0,
+            'tools': [('tool-' + ('x' * 200))[:128]] * 6,
+            'max': 0,
+        }]
+        assert meta['toolRoundTripNudges'] == [{
+            'afterRound': 7,
+            'targetRound': 8,
+            'reason': 'q' * 64,
+            'chainLength': 6,
+            'tools': ['run_command'] * 6,
+            'max': 99,
+        }]
+        assert project_task_result_metadata_for_storage(meta) == meta
+        damaged = build_result_meta({
+            '_programmaticAdoptionNudges': {'not': 'a-list'},
+            '_toolRoundTripNudges': {'not': 'a-list'},
+        })
+        assert 'programmaticAdoptionNudges' not in damaged
+        assert 'toolRoundTripNudges' not in damaged
+
+    def test_safety_correction_preempts_ptc_adoption_nudge_same_round(self):
+        task, rs = _task(), _rs()
+        task['_ptc_local'] = {
+            'tier': 'program',
+            'eligible': ['read_files'],
+        }
+        task['_toolOrchestrationDecisions'] = [{
+            'programmaticBackend': 'local',
+        }]
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        ranges = ((1, 100), (10, 20), (30, 40))
+        for rn, (start, end) in enumerate(ranges):
+            call_id = f'read-{rn}'
+            args = (
+                f'{{"path":"lib/x.py","start_line":{start},'
+                f'"end_line":{end}}}'
+            )
+            content = f'lines {start}-{end}'
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': call_id,
+                    'type': 'function',
+                    'function': {
+                        'name': 'read_files',
+                        'arguments': args,
+                    },
+                }]},
+                {'role': 'tool', 'tool_call_id': call_id,
+                 'content': content},
+            ])
+            _round(task, rn, name='read_files', args=args, content=content)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12',
+                max_redundant_read_rounds=2) is False
+
+        corrections = [
+            message for message in messages
+            if message.get('_isMeta') is True
+        ]
+        assert len(corrections) == 1
+        assert 'NO SEMANTIC PROGRESS' in corrections[0]['content']
+        assert '_programmaticAdoptionNudges' not in task
+
+    def test_serial_reads_do_not_nudge_without_local_ptc_projection(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        for rn in range(3):
+            call_id = f'read-{rn}'
+            args = f'{{"path":"lib/file_{rn}.py"}}'
+            content = f'File: lib/file_{rn}.py (20 lines, 1 KB)\n──\nx'
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': call_id,
+                    'type': 'function',
+                    'function': {
+                        'name': 'read_files',
+                        'arguments': args,
+                    },
+                }]},
+                {'role': 'tool', 'tool_call_id': call_id,
+                 'content': content},
+            ])
+            _round(task, rn, name='read_files', args=args, content=content)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        assert not any(
+            'SERIAL READ CHAIN DETECTED' in str(message.get('content'))
+            for message in messages
+        )
+        assert '_programmaticAdoptionNudges' not in task
+
+    def test_six_productive_single_tool_rounds_get_one_efficiency_nudge(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+
+        for rn in range(9):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+            if rn < 5:
+                assert '_toolRoundTripNudges' not in task
+
+        nudges = [
+            message for message in messages
+            if 'SERIAL SINGLE-TOOL CHAIN DETECTED'
+            in str(message.get('content'))
+        ]
+        assert len(nudges) == 1
+        assert nudges[0]['_isMeta'] is True
+        assert task['_toolRoundTripNudges'] == [{
+            'afterRound': 6,
+            'targetRound': 7,
+            'reason': 'serial_single_tool_rounds',
+            'chainLength': 6,
+            'tools': ['run_command'] * 6,
+            'max': 4,
+        }]
+        from lib.tasks_pkg.manager._persist import build_result_meta
+        assert build_result_meta(task)['toolRoundTripNudges'] == (
+            task['_toolRoundTripNudges'])
+
+    def test_efficiency_nudge_rearms_sparsely_and_caps_at_four(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+
+        for rn in range(108):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        evidence = task['_toolRoundTripNudges']
+        assert [row['afterRound'] for row in evidence] == [6, 30, 54, 78]
+        assert all(row['max'] == 4 for row in evidence)
+        assert task['_tool_loop_guard'][
+            'round_trip_efficiency_nudge_count'] == 4
+        prompts = [
+            message for message in messages
+            if 'SERIAL SINGLE-TOOL CHAIN DETECTED'
+            in str(message.get('content'))
+        ]
+        assert len(prompts) == 4
+        retained_bytes = sum(
+            len(message['content'].encode('utf-8')) for message in prompts
+        ) + len(json.dumps(
+            evidence, ensure_ascii=False, separators=(',', ':'),
+        ).encode('utf-8'))
+        assert retained_bytes <= 3 * 1024
+
+    def test_persisted_efficiency_witness_recovers_remaining_budget(self):
+        task, rs = _task(), _rs()
+        task['_toolRoundTripNudges'] = [{
+            'afterRound': 6,
+            'targetRound': 7,
+            'reason': 'serial_single_tool_rounds',
+            'chainLength': 6,
+            'tools': ['run_command'] * 6,
+            'max': 4,
+        }]
+        messages = [{'role': 'user', 'content': 'continued task'}]
+
+        for rn in range(6, 30):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        assert [row['afterRound'] for row in task['_toolRoundTripNudges']] == [
+            6, 30,
+        ]
+        assert task['_tool_loop_guard'][
+            'round_trip_efficiency_nudge_count'] == 2
+
+    def test_five_single_tool_rounds_do_not_get_efficiency_nudge(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        for rn in range(5):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+        assert '_toolRoundTripNudges' not in task
+
+    def test_failed_single_tool_round_does_not_get_efficiency_nudge(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        for rn in range(6):
+            _single_tool_message_round(
+                task, messages, rn, status='error' if rn == 5 else 'done')
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+        assert '_toolRoundTripNudges' not in task
+
+    def test_efficiency_and_local_ptc_nudges_share_one_task_budget(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        for rn in range(6):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        task['_ptc_local'] = {'tier': 'program', 'eligible': ['read_files']}
+        task['_toolOrchestrationDecisions'] = [{
+            'programmaticBackend': 'local',
+        }]
+        for rn in range(6, 9):
+            _single_tool_message_round(
+                task, messages, rn, name='read_files',
+                args=f'{{"path":"lib/file_{rn}.py"}}',
+            )
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        assert len(task['_toolRoundTripNudges']) == 1
+        assert '_programmaticAdoptionNudges' not in task
+
+    def test_parallel_round_breaks_single_tool_efficiency_chain(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        for rn in range(5):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        messages.append({'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'parallel-a', 'type': 'function', 'function': {
+                'name': 'read_files', 'arguments': '{"path":"a.py"}'}},
+            {'id': 'parallel-b', 'type': 'function', 'function': {
+                'name': 'read_files', 'arguments': '{"path":"b.py"}'}},
+        ]})
+        for call_id, path in (('parallel-a', 'a.py'), ('parallel-b', 'b.py')):
+            messages.append({
+                'role': 'tool', 'tool_call_id': call_id,
+                'content': f'fresh {path}',
+            })
+            _round(
+                task, 5, name='read_files', args=f'{{"path":"{path}"}}',
+                content=f'fresh {path}',
+            )
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=5, tid='abcdef12') is False
+
+        for rn in range(6, 11):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+        assert '_toolRoundTripNudges' not in task
+
+    def test_safety_correction_preempts_efficiency_nudge_same_round(self):
+        task, rs = _task(), _rs()
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        ranges = ((1, 100), (10, 20), (30, 40), (50, 60), (70, 80),
+                  (90, 95))
+        for rn, (start, end) in enumerate(ranges):
+            args = (
+                f'{{"path":"lib/x.py","start_line":{start},'
+                f'"end_line":{end}}}'
+            )
+            _single_tool_message_round(
+                task, messages, rn, name='read_files', args=args,
+                content=f'lines {start}-{end}',
+            )
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn, tid='abcdef12',
+                max_redundant_read_rounds=5) is False
+
+        corrections = [
+            message for message in messages if message.get('_isMeta') is True
+        ]
+        assert len(corrections) == 1
+        assert 'NO SEMANTIC PROGRESS' in corrections[0]['content']
+        assert '_toolRoundTripNudges' not in task
+
+    @pytest.mark.parametrize(
+        ('damaged_field', 'damaged_value'),
+        (
+            ('_tool_loop_guard', {
+                'round_trip_efficiency_nudge_count': 'not-an-integer',
+            }),
+            ('_toolRoundTripNudges', {'not': 'a-list'}),
+        ),
+    )
+    def test_damaged_state_cannot_break_efficiency_nudge(
+            self, damaged_field, damaged_value):
+        task, rs = _task(), _rs()
+        task[damaged_field] = damaged_value
+        messages = [{'role': 'user', 'content': 'inspect the repository'}]
+        for rn in range(6):
+            _single_tool_message_round(task, messages, rn)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+
+        assert task['_tool_loop_guard'][
+            'round_trip_efficiency_nudge_count'] == 1
+        assert len(task['_toolRoundTripNudges']) == 1
 
     def test_changed_args_reset_the_counter(self):
         task, rs = _task(), _rs()
@@ -441,8 +988,278 @@ class TestSemanticProgressGuard:
         assert task['_tool_loop_guard']['redundant_read_streak'] == 0
         assert messages == []
 
+    def test_partial_v2_whole_read_does_not_claim_hidden_file_coverage(self):
+        """Incident mtc6xp7kka0hls: hidden artifact bytes are not 'seen'."""
+        task, rs, messages = _task(), _rs(), []
+        partial = _v2_result(
+            evidence='ev_partial_panel', artifact='tool-result:' + 'a' * 64,
+            summary='File: panel.ts (1030 lines, 37.5 KB)\npartial prefix')
+        _round(task, 0, name='read_files',
+               args='{"path":"panel.ts"}', content=partial)
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=0, tid='abcdef12') is False
+        assert task['_tool_loop_guard']['read_coverage'] == {}
+
+        ranged = _v2_result(
+            evidence='ev_panel_130_260',
+            summary=('File: panel.ts (lines 130-260 of 1030)\n──\n'
+                     'new ranged evidence'),
+            status='ok', truncated=False)
+        _round(task, 1, name='read_files',
+               args=('{"path":"panel.ts","start_line":130,'
+                     '"end_line":260}'), content=ranged)
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=1, tid='abcdef12') is False
+        assert task['_tool_loop_guard']['read_coverage']['panel.ts'] == [
+            [130, 260]]
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+
+    def test_sparse_partial_sidecar_preserves_hidden_evidence_semantics(self):
+        from lib.tools.result_envelope import (
+            ToolResultEnvelopeV2,
+            split_tool_result_delivery,
+        )
+
+        task, rs = _task(), _rs()
+        envelope = ToolResultEnvelopeV2(
+            status='partial',
+            summary='File: panel.ts (1030 lines, 37.5 KB)\npartial prefix',
+            artifact_ref='tool-result:' + 'z' * 64,
+            cursor='0', truncated=True, raw_bytes=50_000,
+            evidence_id='ev_sparse_partial',
+        ).with_visible_bytes().to_envelope_text()
+        delivery = split_tool_result_delivery(envelope)
+        _round(
+            task, 0, name='read_files', args='{"path":"panel.ts"}',
+            content=delivery.model_text,
+            tool_result_evidence=dict(delivery.evidence or {}),
+        )
+
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, round_num=0, tid='abcdef12') is False
+        state = task['_tool_loop_guard']
+        assert state['read_coverage'] == {}
+        assert 'ev_sparse_partial' in state['read_evidence_ids']
+
+    def test_same_partial_v2_evidence_under_changed_ranges_is_redundant(self):
+        task, rs = _task(), _rs()
+        content = _v2_result(
+            evidence='ev_same_hidden_file',
+            artifact='tool-result:' + 'b' * 64)
+        _round(task, 0, name='read_files', args='{"path":"panel.ts"}',
+               content=content)
+        _round(task, 1, name='read_files',
+               args=('{"path":"panel.ts","start_line":130,'
+                     '"end_line":400}'), content=content)
+        for rn in range(2):
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, round_num=rn, tid='abcdef12') is False
+        assert task['_tool_loop_guard']['read_coverage'] == {}
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 1
+
+    def test_truncated_file_projection_item_does_not_claim_requested_range(self):
+        task, rs = _task(), _rs()
+        content = _v2_result(
+            evidence='ev_projection', artifact='tool-result:' + 'c' * 64,
+            items=({
+                'type': 'file_read/v1', 'index': 1, 'path': 'panel.ts',
+                'status': 'ok', 'preview': (
+                    'File: panel.ts (1030 lines, 37.5 KB)\npartial'),
+                'previewTruncated': True,
+            },))
+        _round(task, 0, name='read_files', args='{"path":"panel.ts"}',
+               content=content)
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, round_num=0, tid='abcdef12') is False
+        assert task['_tool_loop_guard']['read_coverage'] == {}
+
+    def test_unconsumed_partial_artifact_nudges_then_stops_across_tools(self):
+        """Incident mtcyxfbwqx03h0: paging/presentation knobs cannot evade."""
+        task, rs, messages = _task(), _rs(), []
+        fired = False
+        variants = (
+            (31, True, True, 30),
+            (29, False, True, 1),
+            (20, True, False, 2),
+            (12, True, True, 3),
+        )
+        for rn, (before, raw, details, limit) in enumerate(variants):
+            _round(
+                task, rn, name='get_conversation',
+                args=json.dumps({
+                    'conversation_id': 'history', 'raw': raw,
+                    'include_tool_details': details, 'before': before,
+                    'limit': limit,
+                }),
+                content=_v2_result(
+                    evidence=f'ev_page_{before}',
+                    artifact='tool-result:' + str(rn) * 64,
+                    summary='same settings prefix; requested page is hidden'),
+            )
+            fired = handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12')
+            if rn < 3:
+                assert fired is False
+        assert fired is True
+        assert len(messages) == 1
+        assert 'read_tool_artifact' in messages[0]['content']
+        assert rs.exit_reason == 'semantic_unresolved_artifact_loop'
+
+    def test_distinct_visible_partial_pages_are_productive(self):
+        """Paging through real new evidence must not trip the recovery guard."""
+        task, rs, messages = _task(), _rs(), []
+        for rn, before in enumerate((60, 50, 40, 30, 20, 10)):
+            _round(
+                task, rn, name='get_conversation',
+                args=json.dumps({
+                    'conversation_id': 'history', 'raw': True,
+                    'before': before, 'limit': 10,
+                }),
+                content=_v2_result(
+                    evidence=f'ev_page_{before}',
+                    artifact='tool-result:' + str(rn) * 64,
+                    summary=f'messages {before - 9}-{before}: SENTINEL_{before}'),
+            )
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+        assert messages == []
+        pending = task['_tool_loop_guard']['pending_artifacts_by_scope']
+        assert next(iter(pending.values()))['retryCount'] == 0
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'base_args', 'window_variants'), (
+            (
+                'grep_search', {'pattern': 'needle', 'path': 'lib'},
+                (
+                    {'max_results': 50, 'context_lines': 0},
+                    {'max_results': 10, 'context_lines': 3},
+                    {'max_results': 5, 'context_lines': 1},
+                    {'max_results': 20, 'context_lines': 5},
+                ),
+            ),
+            (
+                'read_skill_resource',
+                {'skill_id': 'skill-a', 'resource': 'references/large.md'},
+                (
+                    {'cursor': 0, 'max_chars': 6000},
+                    {'cursor': 6000, 'max_chars': 3000},
+                    {'cursor': 9000, 'max_chars': 12000},
+                    {'cursor': 21000, 'max_chars': 1000},
+                ),
+            ),
+            (
+                'search_memories', {'query': 'deployment decision'},
+                (
+                    {'top_k': 50}, {'top_k': 20},
+                    {'top_k': 5}, {'top_k': 10},
+                ),
+            ),
+        ),
+    )
+    def test_window_knobs_cannot_evade_unresolved_artifact_guard(
+            self, tool_name, base_args, window_variants):
+        task, rs, messages = _task(), _rs(), []
+        fired = False
+        for rn, window_args in enumerate(window_variants):
+            args = dict(base_args)
+            args.update(window_args)
+            _round(
+                task, rn, name=tool_name, args=json.dumps(args),
+                content=_v2_result(
+                    evidence=f'ev_{tool_name}_{rn}',
+                    artifact='tool-result:' + str(rn) * 64),
+            )
+            fired = handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12')
+            if rn < 3:
+                assert fired is False
+        assert fired is True
+        assert len(messages) == 1
+        assert rs.exit_reason == 'semantic_unresolved_artifact_loop'
+
+    def test_artifact_continuation_resolves_source_retry_obligation(self):
+        task, rs, messages = _task(), _rs(), []
+        artifact = 'tool-result:' + 'd' * 64
+        _round(
+            task, 0, name='get_conversation',
+            args='{"conversation_id":"history","raw":true,"before":30}',
+            content=_v2_result(evidence='ev_page', artifact=artifact))
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=0, tid='abcdef12') is False
+
+        _round(
+            task, 1, name='read_tool_artifact',
+            args=json.dumps({'artifact_ref': artifact, 'cursor': '0'}),
+            content=_v2_result(
+                evidence='ev_chunk', summary='recovered page content',
+                status='ok', truncated=False))
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=1, tid='abcdef12') is False
+
+        _round(
+            task, 2, name='get_conversation',
+            args='{"conversation_id":"history","raw":true,"before":20}',
+            content=_v2_result(
+                evidence='ev_next_page',
+                artifact='tool-result:' + 'e' * 64))
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=2, tid='abcdef12') is False
+        assert messages == []
+        pending = task['_tool_loop_guard']['pending_artifacts_by_scope']
+        assert len(pending) == 1
+        assert next(iter(pending.values()))['retryCount'] == 0
+
+    def test_parallel_partial_pages_count_as_one_prior_round_retry(self):
+        task, rs, messages = _task(), _rs(), []
+        _round(
+            task, 0, name='get_conversation',
+            args='{"conversation_id":"history","raw":true,"before":30}',
+            content=_v2_result(
+                evidence='ev_initial', artifact='tool-result:' + 'f' * 64))
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=0, tid='abcdef12') is False
+        for before in (25, 20, 15):
+            _round(
+                task, 1, name='get_conversation',
+                args=json.dumps({
+                    'conversation_id': 'history', 'raw': True,
+                    'before': before, 'limit': 1,
+                }),
+                content=_v2_result(
+                    evidence=f'ev_{before}',
+                    artifact='tool-result:' + str(before)[0] * 64))
+        assert handle_tool_loop_circuit_breaker(
+            task, rs, messages=messages,
+            round_num=1, tid='abcdef12') is False
+        assert messages == []
+        pending = task['_tool_loop_guard']['pending_artifacts_by_scope']
+        assert next(iter(pending.values()))['retryCount'] == 1
+
+    def test_different_search_queries_have_independent_artifact_scopes(self):
+        task, rs, messages = _task(), _rs(), []
+        for rn, query in enumerate(('alpha', 'beta', 'gamma', 'delta')):
+            _round(
+                task, rn, name='web_search',
+                args=json.dumps({'query': query, 'limit': rn + 1}),
+                content=_v2_result(
+                    evidence=f'ev_{query}',
+                    artifact='tool-result:' + query[0] * 64))
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages,
+                round_num=rn, tid='abcdef12') is False
+        assert messages == []
+
     def test_receipt_bounds_override_requested_range(self):
-        """Small files auto-expand; the guard records what the model saw."""
+        """Legacy/checkpointed receipts override stale requested bounds."""
         task, rs = _task(), _rs()
         _round(
             task, 0, name='read_files',
@@ -528,3 +1345,337 @@ class TestSemanticProgressGuard:
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=2, tid='abcdef12') is False
         assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+
+
+def _stagnation_thresholds(**over):
+    base = {
+        'obs_nudge': 16, 'obs_grace': 8,
+        'fail_nudge': 4, 'fail_grace': 2,
+        'poll_nudge': 4, 'poll_grace': 2,
+    }
+    base.update(over)
+    return base
+
+
+def _shell_ok(task, llm_round, cmd='npm test'):
+    # The round number in the output keeps exact-repetition digests distinct;
+    # the poll detector keys on the command set, not the output.
+    _round(task, llm_round, args=json.dumps({'command': cmd}),
+           content=f'12 passed ({llm_round})\n[exit code: 0]')
+
+
+def _shell_fail(task, llm_round, cmd='npm test',
+                err='AssertionError: expected 1 got 2'):
+    _round(task, llm_round, args=json.dumps({'command': cmd}),
+           content=f'{err}\n[exit code: 1]')
+
+
+def _edit(task, llm_round, path='src/x.py'):
+    _round(task, llm_round, name='edit_file',
+           args=json.dumps(
+               {'path': path, 'old_string': 'a', 'new_string': 'b'}),
+           content=f'updated {path}', results=[{'writeOk': True}])
+
+
+class TestShellObservationClassifier:
+    @pytest.mark.parametrize('command', [
+        'grep -rn foo .',
+        'cat a.txt | head -5',
+        'ls -la src/ 2>/dev/null',
+        'git status',
+        'git -C repo log --oneline',
+        'find . -name "*.py" | wc -l',
+        'true',
+        'pwd && ls',
+    ])
+    def test_read_only_commands(self, command):
+        assert _shell_command_is_observation(command) is True
+
+    @pytest.mark.parametrize('command', [
+        'npm test',
+        'git checkout main',
+        'echo hi > f.txt',
+        "grep 'a > b' f.txt",
+        'sed -i s/a/b/ f.txt',
+        'python -c "print(1)"',
+        'ls > /tmp/listing.txt',
+        'make build 2>&1 | tail -3',
+    ])
+    def test_potential_mutations(self, command):
+        assert _shell_command_is_observation(command) is False
+
+
+class TestFailureFingerprint:
+    def test_timestamps_normalize_away(self):
+        row_a = {'toolContent':
+                 '2026-09-01T10:00:00 build failed: boom\n[exit code: 1]'}
+        row_b = {'toolContent':
+                 '2026-09-01T11:22:33 build failed: boom\n[exit code: 1]'}
+        assert _failure_fingerprint(row_a) == _failure_fingerprint(row_b)
+
+    def test_different_error_differs(self):
+        row_a = {'toolContent': 'build failed: E1\n[exit code: 1]'}
+        row_b = {'toolContent': 'build failed: E2\n[exit code: 1]'}
+        assert _failure_fingerprint(row_a) != _failure_fingerprint(row_b)
+
+    def test_different_exit_code_differs(self):
+        row_a = {'toolContent': 'build failed: E1\n[exit code: 1]'}
+        row_b = {'toolContent': 'build failed: E1\n[exit code: 2]'}
+        assert _failure_fingerprint(row_a) != _failure_fingerprint(row_b)
+
+
+class TestSuccessPollDetector:
+    def test_nudges_then_clean_finishes(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(poll_nudge=3, poll_grace=2)
+        with registered_chat_task(task):
+            result = False
+            for rn in range(5):
+                _shell_ok(task, rn)
+                result = handle_tool_loop_circuit_breaker(
+                    task, rs, messages=messages, round_num=rn,
+                    tid='abcdef12', stagnation_thresholds=thresholds)
+                if rn < 4:
+                    assert result is False, rn
+        assert result is True
+        assert rs.exit_reason == 'success_poll_finish'
+        # The registered runtime adoption adds an ``error: None`` key; the
+        # production invariant is that no envelope was ever attached.
+        assert not task.get('error')
+        finish = task['_toolLoopCleanFinish']
+        assert finish['reason'] == 'success_poll_finish'
+        nudges = [
+            message for message in messages
+            if 'REPEATED IDENTICAL VERIFICATION'
+            in str(message.get('content'))
+        ]
+        assert len(nudges) == 1
+        assert nudges[0]['_isMeta'] is True
+        audit = task['_toolLoopBreakerAudit']
+        assert [row['action'] for row in audit] == ['nudge', 'finish']
+        assert all(row['detector'] == 'success_poll' for row in audit)
+        assert any(e.get('type') == 'round_end'
+                   and e.get('reason') == 'success_poll'
+                   for e in task['events'])
+
+    def test_edit_resets_the_poll_streak(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(poll_nudge=3, poll_grace=1)
+        _shell_ok(task, 0)
+        _shell_ok(task, 1)
+        _edit(task, 2)
+        _shell_ok(task, 3)
+        _shell_ok(task, 4)
+        for rn in range(5):
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds) is False
+        assert '_toolLoopNudges' not in task
+
+    def test_observation_commands_do_not_poll(self):
+        """Read-only commands exiting 0 are inspection, not verification."""
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(
+            poll_nudge=2, poll_grace=1, obs_nudge=100)
+        for rn in range(5):
+            _shell_ok(task, rn, cmd='cat build.log')
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds) is False
+        assert '_toolLoopNudges' not in task
+
+    def test_isolated_caller_finishes_at_first_threshold(self):
+        """No message lane -> the breaker ends the turn immediately."""
+        task, rs = _task(), _rs()
+        thresholds = _stagnation_thresholds(poll_nudge=2, poll_grace=5)
+        with registered_chat_task(task):
+            _shell_ok(task, 0)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, round_num=0, tid='abcdef12',
+                stagnation_thresholds=thresholds) is False
+            _shell_ok(task, 1)
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, round_num=1, tid='abcdef12',
+                stagnation_thresholds=thresholds) is True
+        assert rs.exit_reason == 'success_poll_finish'
+        # The registered runtime adoption adds an ``error: None`` key; the
+        # production invariant is that no envelope was ever attached.
+        assert not task.get('error')
+
+
+class TestPersistentFailureDetector:
+    def test_nudges_then_stops(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(fail_nudge=3, fail_grace=2)
+        for pair in range(5):
+            _edit(task, pair * 2)
+            _shell_fail(task, pair * 2 + 1)
+        with registered_chat_task(task):
+            results = [
+                handle_tool_loop_circuit_breaker(
+                    task, rs, messages=messages, round_num=rn,
+                    tid='abcdef12', stagnation_thresholds=thresholds)
+                for rn in range(10)
+            ]
+        assert results == [False] * 9 + [True]
+        assert task['error']['kind'] == 'tool_loop'
+        assert rs.exit_reason == 'semantic_persistent_failure_loop'
+        nudges = [
+            message for message in messages
+            if 'PERSISTENT IDENTICAL FAILURE' in str(message.get('content'))
+        ]
+        assert len(nudges) == 1
+        audit = task['_toolLoopBreakerAudit']
+        assert [row['action'] for row in audit] == ['nudge', 'stop']
+        assert all(row['detector'] == 'persistent_identical_failure'
+                   for row in audit)
+
+    def test_changed_error_is_progress_and_resets(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(fail_nudge=3, fail_grace=1)
+        for pair, err in enumerate((
+                'AssertionError: expected 1 got 2',
+                'AssertionError: expected 1 got 2',
+                'TypeError: None has no attribute x',
+                'TypeError: None has no attribute x')):
+            _edit(task, pair * 2)
+            _shell_fail(task, pair * 2 + 1, err=err)
+        for rn in range(8):
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds) is False
+        assert '_toolLoopNudges' not in task
+
+    def test_success_resets_the_failure_tracker(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(fail_nudge=3, fail_grace=1)
+        _shell_fail(task, 0)
+        _edit(task, 1)
+        _shell_fail(task, 2)
+        _shell_ok(task, 3, cmd='npm run build')
+        _shell_fail(task, 4)
+        for rn in range(5):
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds) is False
+        assert '_toolLoopNudges' not in task
+
+
+class TestObservationStallDetector:
+    def test_nudges_then_stops(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(obs_nudge=3, obs_grace=2)
+        with registered_chat_task(task):
+            results = []
+            for rn in range(5):
+                _shell_ok(task, rn, cmd='grep -rn TODO src/')
+                results.append(handle_tool_loop_circuit_breaker(
+                    task, rs, messages=messages, round_num=rn,
+                    tid='abcdef12', stagnation_thresholds=thresholds))
+        assert results == [False, False, False, False, True]
+        assert task['error']['kind'] == 'tool_loop'
+        assert rs.exit_reason == 'semantic_observation_stall'
+        nudges = [
+            message for message in messages
+            if 'OBSERVATION-ONLY STALL' in str(message.get('content'))
+        ]
+        assert len(nudges) == 1
+
+    def test_substantive_command_resets_the_streak(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(obs_nudge=3, obs_grace=1)
+        _shell_ok(task, 0, cmd='grep -rn TODO src/')
+        _shell_ok(task, 1, cmd='grep -rn TODO src/')
+        _shell_ok(task, 2, cmd='make build')
+        _shell_ok(task, 3, cmd='grep -rn TODO src/')
+        _shell_ok(task, 4, cmd='grep -rn TODO src/')
+        for rn in range(5):
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds) is False
+        assert '_toolLoopNudges' not in task
+
+    def test_read_only_tool_rounds_count_toward_the_streak(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(obs_nudge=2, obs_grace=1)
+        with registered_chat_task(task):
+            results = []
+            for rn in range(3):
+                _round(task, rn, name='read_files',
+                       args=json.dumps({'path': f'src/file_{rn}.py'}),
+                       content=f'contents of file {rn}')
+                results.append(handle_tool_loop_circuit_breaker(
+                    task, rs, messages=messages, round_num=rn,
+                    tid='abcdef12', stagnation_thresholds=thresholds))
+        assert results == [False, False, True]
+
+
+class TestStagnationEnvControls:
+    def test_extended_kill_switch_disables_all_detectors(self, monkeypatch):
+        monkeypatch.setenv('TOFU_LOOP_EXTENDED', '0')
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(obs_nudge=2, obs_grace=1)
+        for rn in range(6):
+            _shell_ok(task, rn, cmd='grep -rn TODO src/')
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds) is False
+        assert '_toolLoopNudges' not in task
+        assert '_toolLoopBreakerAudit' not in task
+
+    def test_thresholds_come_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv('TOFU_LOOP_OBS_NUDGE', '2')
+        monkeypatch.setenv('TOFU_LOOP_OBS_GRACE', '1')
+        task, rs, messages = _task(), _rs(), []
+        with registered_chat_task(task):
+            results = []
+            for rn in range(3):
+                _shell_ok(task, rn, cmd='grep -rn TODO src/')
+                results.append(handle_tool_loop_circuit_breaker(
+                    task, rs, messages=messages, round_num=rn,
+                    tid='abcdef12'))
+        assert results == [False, False, True]
+
+
+class TestCleanFinishSettlement:
+    def test_background_acceptance_finishes_without_polling_round(self):
+        task, rs = _task(), _rs()
+        task['_backgroundTaskAccepted'] = {
+            'tool': 'produce_slides',
+            'taskId': 'slides_abc123',
+            'message': 'PPT 已在后台开始生成。',
+        }
+        with registered_chat_task(task):
+            assert finish_after_background_task_acceptance(
+                task, rs, round_num=0, tid='abcdef12') is True
+
+        assert rs.exit_reason == 'background_task_accepted'
+        assert task['content'] == 'PPT 已在后台开始生成。'
+        assert task['_toolLoopCleanFinish']['reason'] \
+            == 'background_task_accepted'
+        assert task['_toolLoopBreakerAudit'][-1]['detector'] \
+            == 'background_task'
+        assert any(event.get('reason') == 'background_task_accepted'
+                   for event in task['events'])
+
+    def test_clean_finish_flag_settles_to_stop(self):
+        from lib.tasks_pkg.orchestrator._finalize import (
+            _settle_post_loop_finish_reason)
+        task = {
+            'aborted': False,
+            '_toolLoopCleanFinish': {'reason': 'success_poll_finish',
+                                     'round': 5},
+        }
+        assert _settle_post_loop_finish_reason(
+            task, 'tool_use', loop_exit_reason='success_poll_finish',
+            abort_detected_phase=None, model='m', tid='t') == 'stop'
+        assert 'error' not in task
+
+    def test_dangling_tool_use_without_flag_still_errors(self):
+        from lib.tasks_pkg.orchestrator._finalize import (
+            _settle_post_loop_finish_reason)
+        task = {'aborted': False}
+        assert _settle_post_loop_finish_reason(
+            task, 'tool_use', loop_exit_reason='length',
+            abort_detected_phase=None, model='m', tid='t') == 'error'
+        assert task['error']['kind'] == 'internal'

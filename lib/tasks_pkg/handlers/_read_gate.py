@@ -51,6 +51,7 @@ import os
 import threading
 
 from lib.log import get_logger
+from lib.tool_history_pairing import adjacent_tool_call_result_pairs
 
 logger = get_logger(__name__)
 
@@ -62,7 +63,12 @@ logger = get_logger(__name__)
 # every turn, is small, and its round entries mutate status in place
 # (``searching`` → ``done``), so a count/identity key would not see those
 # flips. The toolRounds scan stays a fresh cheap per-turn pass.
-_satisfied_cache: dict = {}
+from lib.ttl_cache import TTLCache
+_satisfied_cache = TTLCache(
+    ttl=600.0,
+    max_size=512,
+    name='read_gate_satisfied',
+)
 _satisfied_cache_lock = threading.Lock()
 
 
@@ -246,7 +252,9 @@ def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None,
     in ``task['messages'][start:]``.
 
     Walks every assistant message with ``tool_calls`` and pairs each call
-    with its corresponding ``role: tool`` result message by ``tool_call_id``.
+    with its adjacent ``role: tool`` result message.  IDs select a queue only
+    inside that provider batch; repeated legacy positional IDs are consumed
+    by occurrence instead of collapsing into one conversation-global value.
     Only pairs whose tool result is non-empty AND does not start with the
     standard error markers count. ``start`` is the incremental-cache seam:
     the suffix it cuts is always a whole-message boundary, and a tool result
@@ -256,64 +264,58 @@ def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None,
     msgs = (task.get('messages') or [])[start:]
     if not msgs:
         return set()
-    # Index tool result messages by tool_call_id for O(N) lookup.
-    tool_results: dict[str, str] = {}
-    for m in msgs:
-        if m.get('role') == 'tool':
-            tcid = m.get('tool_call_id') or ''
-            if tcid:
-                content = m.get('content') or ''
-                if isinstance(content, list):
-                    parts = [p.get('text', '') for p in content
-                             if isinstance(p, dict) and p.get('type') == 'text']
-                    content = ''.join(parts)
-                tool_results[tcid] = content if isinstance(content, str) else str(content)
-
     out: set[str] = set()
     conv_id = task.get('convId')
-    for m in msgs:
-        if m.get('role') != 'assistant':
+    for tc, result_message in adjacent_tool_call_result_pairs(msgs):
+        fn = tc.get('function') or {}
+        if not isinstance(fn, dict):
             continue
-        tcs = m.get('tool_calls') or []
-        for tc in tcs:
-            fn = tc.get('function') or {}
-            name = fn.get('name') or ''
-            if name not in _SATISFYING_TOOLS:
-                continue
-            tcid = tc.get('id') or ''
-            result_text = tool_results.get(tcid, '')
-            if not _result_indicates_success(name, result_text):
-                continue
-            args_raw = fn.get('arguments') or ''
-            try:
-                args = json.loads(args_raw) if args_raw else {}
-            except (json.JSONDecodeError, TypeError) as _e_audit:
-                logger.debug('[_read_gate] _collect_satisfied_paths_from_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
-                continue
-            if not isinstance(args, dict):
-                continue
-            args = _normalize_historical_args(name, args)
-            if name == 'read_files':
-                reads = args.get('reads')
-                if isinstance(reads, list):
-                    for spec in reads:
-                        if isinstance(spec, dict) and spec.get('path'):
-                            ap = _resolve_abs(project_path, conv_id, str(spec['path']))
-                            if ap:
-                                out.add(ap)
-                        elif isinstance(spec, str) and spec.strip():
-                            ap = _resolve_abs(project_path, conv_id, spec.strip())
-                            if ap:
-                                out.add(ap)
-                if isinstance(args.get('path'), str) and args['path'].strip():
-                    ap = _resolve_abs(project_path, conv_id, args['path'].strip())
-                    if ap:
-                        out.add(ap)
-            else:
-                for p in _collect_target_paths(name, args):
-                    ap = _resolve_abs(project_path, conv_id, p)
-                    if ap:
-                        out.add(ap)
+        name = fn.get('name') or ''
+        if name not in _SATISFYING_TOOLS:
+            continue
+        content = result_message.get('content') or ''
+        if isinstance(content, list):
+            parts = [
+                part.get('text', '') for part in content
+                if isinstance(part, dict) and part.get('type') == 'text'
+            ]
+            content = ''.join(parts)
+        result_text = content if isinstance(content, str) else str(content)
+        if not _result_indicates_success(name, result_text):
+            continue
+        args_raw = fn.get('arguments') or ''
+        try:
+            args = json.loads(args_raw) if args_raw else {}
+        except (json.JSONDecodeError, TypeError) as _e_audit:
+            logger.debug(
+                '[_read_gate] historical tool arguments failed to parse: '
+                '%s: %s', type(_e_audit).__name__, _e_audit)
+            continue
+        if not isinstance(args, dict):
+            continue
+        args = _normalize_historical_args(name, args)
+        if name == 'read_files':
+            reads = args.get('reads')
+            if isinstance(reads, list):
+                for spec in reads:
+                    if isinstance(spec, dict) and spec.get('path'):
+                        ap = _resolve_abs(
+                            project_path, conv_id, str(spec['path']))
+                        if ap:
+                            out.add(ap)
+                    elif isinstance(spec, str) and spec.strip():
+                        ap = _resolve_abs(project_path, conv_id, spec.strip())
+                        if ap:
+                            out.add(ap)
+            if isinstance(args.get('path'), str) and args['path'].strip():
+                ap = _resolve_abs(project_path, conv_id, args['path'].strip())
+                if ap:
+                    out.add(ap)
+        else:
+            for path in _collect_target_paths(name, args):
+                absolute_path = _resolve_abs(project_path, conv_id, path)
+                if absolute_path:
+                    out.add(absolute_path)
     return out
 
 
@@ -340,6 +342,15 @@ def _cached_satisfied_paths_from_messages(task: dict, project_path: str | None) 
             if msg_count > entry['msg_count']:
                 start = entry['msg_count']
                 base = entry['satisfied']
+                # A caller may observe the assistant carrier before its tool
+                # receipts are appended.  A suffix beginning with ``tool`` has
+                # crossed that semantic pair boundary; rescan rather than
+                # treating the orphan result as permanently unprovable.
+                if (start < msg_count
+                        and isinstance(msgs[start], dict)
+                        and msgs[start].get('role') == 'tool'):
+                    start = 0
+                    base = set()
             else:
                 start = 0
                 base = set()
@@ -354,11 +365,11 @@ def _cached_satisfied_paths_from_messages(task: dict, project_path: str | None) 
             task, project_path, start=start)
 
     with _satisfied_cache_lock:
-        _satisfied_cache[key] = {
+        _satisfied_cache.set(key, {
             'msg_count': msg_count,
             'msg_list_id': msg_list_id,
             'satisfied': set(satisfied),
-        }
+        })
     return set(satisfied)
 
 

@@ -92,6 +92,31 @@ assert.equal(requests[0].body.model, undefined);
 assert.equal(requests[0].body.stream, false);
 assert.equal(requests[0].headers.get('Idempotency-Key'), 'stable-run-key');
 
+const structuredModel = { creator_id: 'anthropic', model_id: 'claude' };
+await client.agents.run({
+  messages: [{ role: 'user', content: 'structured' }],
+  model: structuredModel,
+}, { maxRetries: 0 });
+structuredModel.model_id = 'mutated-after-submit';
+assert.deepEqual(requests[1].body.model, {
+  creator_id: 'anthropic',
+  model_id: 'claude',
+});
+assert.throws(
+  () => client.agents.run({
+    messages: [{ role: 'user', content: 'legacy' }],
+    provider: { api_key: 'must-not-send' },
+  }, { maxRetries: 0 }),
+  /inline provider blocks were removed/,
+);
+assert.throws(
+  () => client.chat({
+    messages: [{ role: 'user', content: 'legacy chat' }],
+    model: 'claude',
+  }),
+  /model must be/,
+);
+
 const events = [];
 for await (const event of client.agents.stream({
   messages: [{ role: 'user', content: 'stream' }],
@@ -100,8 +125,8 @@ for await (const event of client.agents.stream({
 }
 assert.deepEqual(events.map(event => event.type), ['delta', 'done']);
 assert.deepEqual(events.map(event => event.seq), [0, 1]);
-assert.equal(requests[1].headers.get('Idempotency-Key'), 'stable-stream-key');
-assert.equal(requests[1].headers.get('Prefer'), 'respond-async');
+assert.equal(requests[2].headers.get('Idempotency-Key'), 'stable-stream-key');
+assert.equal(requests[2].headers.get('Prefer'), 'respond-async');
 
 const failing = new Tofu({
   baseUrl: 'https://tofu.example',

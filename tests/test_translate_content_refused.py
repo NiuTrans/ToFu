@@ -161,42 +161,46 @@ def test_from_exception_uses_verdict_detail():
     assert env['source'] == 'api_v1.translate.sync'
 
 
-# ── 3. Route: typed catch precedes the generic 500 (source-scan guard) ────
+# ── 3. Route: typed refusal is a user-visible 502 envelope ───────────────
 
-def _route_scan(src: str) -> list[str]:
-    out = []
-    typed = src.find('except TranslationContentRefused')
-    generic = src.find('except Exception as e:', src.find('def translate_text_v1'))
-    if typed == -1:
-        out.append('route does not catch TranslationContentRefused')
-    elif generic != -1 and typed > generic:
-        out.append('typed catch is AFTER the generic except Exception — unreachable')
-    if typed != -1 and 'status=502' not in src[typed:typed + 800]:
-        out.append('typed catch does not return status=502')
-    return out
+def test_route_returns_502_for_content_refusal(monkeypatch):
+    """Exercise the registered route; catch order is observable as 502 vs 500."""
+    import asyncio
 
+    from quart import Quart, g
+    from lib.api_keys import local_admin_context
+    from routes.api_v1 import translate as translate_route
 
-def test_route_returns_502_for_content_refusal():
-    with open(os.path.join(ROOT, 'routes', 'api_v1', 'translate.py'),
-              encoding='utf-8') as f:
-        src = f.read()
-    v = _route_scan(src)
-    assert not v, 'route guard:\n  ' + '\n  '.join(v)
+    def refuse(*_args, **_kwargs):
+        raise TranslationContentRefused(
+            'wrong_language', 'latin-dominant output',
+            attempts=3, content_fails=3,
+        )
 
+    monkeypatch.setattr(translate_route, '_translate_freetext', refuse)
+    app = Quart(__name__)
 
-def test_NEUTER_route_guard_fires_without_typed_catch():
-    """Byte-reverting NEUTER: strip the typed catch block — the scanner MUST
-    report it (proves the guard is load-bearing)."""
-    with open(os.path.join(ROOT, 'routes', 'api_v1', 'translate.py'),
-              encoding='utf-8') as f:
-        src = f.read()
-    start = src.find('    except TranslationContentRefused as e:')
-    end = src.find('    except Exception as e:', start)
-    assert start != -1 and end != -1
-    neutered = src[:start] + src[end:]
-    v = _route_scan(neutered)
-    assert any('does not catch' in x for x in v), (
-        f'NEUTER FAILED: removing the typed catch was not flagged (got {v})')
+    @app.before_request
+    def _bind_test_owner():
+        g.auth_ctx = local_admin_context()
+
+    app.register_blueprint(translate_route.api_v1_translate_bp)
+
+    async def _request():
+        async with app.test_client() as client:
+            response = await client.post(
+                '/api/v1/translate',
+                json={'text': 'Translate this paragraph.',
+                      'targetLang': 'Chinese'},
+            )
+            return response.status_code, await response.get_json()
+
+    status, body = asyncio.run(_request())
+    assert status == 502
+    assert body['ok'] is False
+    assert body['error']['kind'] == 'content_refused'
+    assert body['error']['retryable'] is True
+    assert 'wrong_language' in body['error']['detail']
 
 
 # ── 4. Frontend vertical: i18n keys + kind label (source-scan guard) ──────
@@ -209,7 +213,7 @@ def _frontend_missing(i18n_src: str, labels_src: str) -> list[str]:
         if key not in i18n_src:
             out.append(f'i18n.js missing {key}')
     if 'content_refused' not in labels_src:
-        out.append('error_envelope.js ERROR_KIND_LABELS missing content_refused')
+        out.append('error-presentation.ts ERROR_KIND_LABELS missing content_refused')
     return out
 
 
@@ -217,8 +221,8 @@ def test_frontend_vertical_keys_present():
     with open(os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json'),
               encoding='utf-8') as f:
         i18n_src = f.read()
-    from tests._runtime_sections import runtime_section_path
-    with open(runtime_section_path('core/error_envelope.js'), encoding='utf-8') as f:
+    with open(os.path.join(ROOT, 'frontend', 'src', 'error-presentation.ts'),
+              encoding='utf-8') as f:
         labels_src = f.read()
     missing = _frontend_missing(i18n_src, labels_src)
     assert not missing, 'frontend vertical incomplete:\n  ' + '\n  '.join(missing)

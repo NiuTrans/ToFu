@@ -330,8 +330,23 @@
   font-size: 11px;
   margin-bottom: 4px;
 }
-.oauth-quota-row-head span:last-child {
+.oauth-quota-row-head > span:last-child {
   font-weight: 700;
+}
+
+.oauth-quota-window {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.oauth-quota-reset {
+  color: var(--s-muted);
+  font-family: var(--font-sans, sans-serif);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 .oauth-quota-track {
   height: 8px;
@@ -574,9 +589,7 @@
    The default 860px panel only offers ~305px (860 − 178 sidebar − content
    padding), where English facts shattered into 3-word lines and long
    tokens broke mid-word ("ModuleNotFoundErr/or"). Two layered fixes:
-   1. While My Context is active, the panel itself widens — pure-CSS
-      counterpart of the matrix tab's stg-matrix-wide (the width
-      transition already lives on .settings-panel), no JS hook needed. */
+   1. While My Context is active, the panel itself widens with no JS hook. */
 @media (min-width:769px){
   .settings-panel:has(#settingsTab_preferences.active){width:min(1180px,96vw)}
 }
@@ -1513,7 +1526,6 @@
 .skills-scope-tab.active{background:var(--s-ink);color:var(--s-white);border-color:var(--s-ink);box-shadow:2px 2px 0 var(--s-gold)}
 /* Cross-link to memory creation — a quiet secondary action, visually
  * separated from the scope control it used to masquerade as. */
-.skills-newmem-btn{display:inline-flex;align-items:center;gap:5px;flex-shrink:0}
 .skills-intro{margin:2px 0 10px}
 /* Local .zip install drop zone — dashed ink hairline on white, cream hover
  * lift, gold fill while a file is held over it. */
@@ -1752,499 +1764,6 @@
   padding: 6px;
   background: #fff;
 }
-/* ══════════════════════════════════════
-   Access Matrix — per-(key × model) grid
-   Same neo-brutalist house style as .stg-mcard: solid 1.5px ink borders,
-   hard shadows, JetBrains Mono ids. Cells are clickable access toggles.
-   ══════════════════════════════════════ */
-.stg-matrix-toggle.active {
-  background: var(--s-ink);
-  color: var(--s-white);
-}
-.stg-matrix { margin-top: 8px; }
-.stg-matrix-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
-}
-.stg-matrix-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* Uniform control height so the probe button, apply button, attempts
-   selector and clear button all sit on a single baseline. */
-.stg-matrix-tools > .stg-btn-add,
-.stg-matrix-tools > .stg-mx-attempts {
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  box-sizing: border-box;
-  margin: 0;
-}
-.stg-mx-status {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--s-ink-soft);
-}
-.stg-mx-status.running { color: #2563eb; }
-.stg-mx-status.error { color: #b91c1c; }
-.stg-mx-status.running::before {
-  content: '';
-  display: inline-block;
-  width: 9px; height: 9px;
-  margin-right: 5px;
-  border: 2px solid #2563eb;
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: stg-mx-spin 0.7s linear infinite;
-  vertical-align: -1px;
-}
-.stg-mx-probe.running { opacity: 0.6; cursor: progress; }
-.stg-mx-apply {
-  background: #16a34a !important;
-  color: var(--s-white) !important;
-  border: 2px solid #16a34a !important;
-  border-radius: var(--s-radius);
-  font-weight: 800;
-  box-shadow: var(--s-shadow-xs);
-}
-.stg-mx-apply:hover { background: #15923f !important; border-color: #15923f !important; filter: none; }
-.stg-matrix-legend {
-  display: flex;
-  gap: 14px;
-  align-items: center;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--s-ink-soft);
-}
-.stg-mx-leg { display: inline-flex; align-items: center; gap: 5px; }
-.stg-mx-leg .stg-mx-dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  border: 1.5px solid var(--s-ink); display: inline-block;
-}
-.stg-mx-leg.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; }
-.stg-mx-leg.off .stg-mx-dot { background: var(--s-cream); }
-.stg-mx-leg.ov .stg-mx-pip {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 14px; height: 14px; font-size: 11px; font-weight: 900;
-  border: 1.5px solid #c2410c; color: #c2410c; border-radius: 3px;
-}
-.stg-matrix-scroll {
-  overflow-x: auto;
-  border: 1.5px solid var(--s-ink);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
-  /* Scroll shadows (Lea-Verou technique): an edge shadow appears ONLY on
-     sides that can still scroll — the 'local' cover gradients hide the
-     'scroll' shadow gradients at the extremes. Cues that more key columns
-     exist off-screen even where the OS hides scrollbars. */
-  background:
-    linear-gradient(to right, var(--s-white) 30%, rgba(250, 248, 243, 0)),
-    linear-gradient(to right, rgba(250, 248, 243, 0), var(--s-white) 70%) 0 100%,
-    radial-gradient(farthest-side at 0 50%, rgba(26, 24, 20, 0.22), rgba(26, 24, 20, 0)),
-    radial-gradient(farthest-side at 100% 50%, rgba(26, 24, 20, 0.22), rgba(26, 24, 20, 0)) 0 100%;
-  background-repeat: no-repeat;
-  background-color: var(--s-white);
-  background-size: 40px 100%, 40px 100%, 12px 100%, 12px 100%;
-  background-attachment: local, local, scroll, scroll;
-  /* Always-visible horizontal scrollbar (custom scrollbars are exempt from
-     macOS 'show only while scrolling' auto-hiding) — the primary cue that
-     the grid scrolls horizontally. */
-  scrollbar-width: thin;
-  scrollbar-color: var(--s-ink) var(--s-cream);
-}
-.stg-matrix-scroll::-webkit-scrollbar { height: 10px; }
-.stg-matrix-scroll::-webkit-scrollbar-track {
-  background: var(--s-cream);
-  border-top: 1.5px solid var(--s-ink);
-  border-radius: 0 0 4px 4px;
-}
-.stg-matrix-scroll::-webkit-scrollbar-thumb {
-  background: var(--s-ink);
-  border: 2px solid var(--s-cream);
-  border-radius: 6px;
-}
-.stg-matrix-scroll::-webkit-scrollbar-thumb:hover { background: var(--s-gold); }
-
-/* Panel auto-widen: JS (_fitMatrixPanelWidth) adds .stg-matrix-wide when an
-   open matrix overflows the default 860px panel, giving 3–4 key columns a
-   chance to fit without scrolling. Desktop only — mobile keeps its own
-   full-width rule in styles.css. Guard: tests/test_frontend_matrix_scoped_probe.py */
-.settings-panel { transition: width 0.18s ease; }
-@media (min-width: 769px) {
-  .settings-panel.stg-matrix-wide { width: min(1240px, 96vw); }
-}
-.stg-matrix-table { border-collapse: collapse; width: 100%; }
-.stg-matrix-table th,
-.stg-matrix-table td {
-  border: 1px solid var(--s-line, rgba(0,0,0,0.12));
-  padding: 0;
-}
-.stg-mx-corner {
-  background: var(--s-cream);
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--s-ink-soft);
-  padding: 8px 10px !important;
-  text-align: left;
-  position: sticky; left: 0; z-index: 3;
-}
-.stg-mx-keyhead {
-  background: var(--s-cream);
-  /* right padding reserves a dedicated lane for the column probe button so
-     it never overlaps the full-width key-name input (mirrors the 28px lane
-     .stg-mx-model reserves for the row probe button) */
-  padding: 6px 26px 6px 8px !important;
-  min-width: 92px;
-  vertical-align: bottom;
-  position: relative;
-}
-.stg-mx-keyname {
-  width: 100%;
-  border: 1px solid transparent;
-  background: transparent;
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 800;
-  color: var(--s-ink);
-  padding: 2px 4px;
-  border-radius: 4px;
-  text-align: center;
-}
-.stg-mx-keyname:hover { border-color: var(--s-ink); background: var(--s-white); }
-.stg-mx-keyname:focus { outline: none; border-color: var(--s-ink); background: var(--s-white); }
-.stg-mx-keytail {
-  display: block;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9px;
-  color: var(--s-ink-soft);
-  opacity: 0.7;
-  text-align: center;
-  margin-top: 2px;
-}
-.stg-mx-model {
-  background: var(--s-white);
-  /* right padding reserves room for the row-scope probe button */
-  padding: 6px 28px 6px 10px !important;
-  position: sticky; left: 0; z-index: 2;
-  white-space: nowrap;
-}
-.stg-mx-model .stg-mx-gtoggle {
-  --stg-toggle-width: 30px;
-  --stg-toggle-height: 18px;
-  --stg-toggle-thumb-size: 12px;
-  --stg-toggle-thumb-gap: 2px;
-  --stg-toggle-travel: 14px;
-  vertical-align: middle;
-  margin-right: 6px;
-}
-.stg-mx-brand { vertical-align: middle; margin-right: 5px; display: inline-flex; }
-.stg-mx-mid {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--s-ink);
-  vertical-align: middle;
-  /* Long gateway ids (yuju-claude-opus-4.7-evaDaily…) would otherwise eat
-     the width the key columns need. Cap + ellipsis; the full id remains one
-     hover away via the title tooltip. */
-  display: inline-block;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.stg-mx-mid.alias-id { max-width: 220px; }
-.stg-mx-row.model-off { opacity: 0.5; }
-.stg-mx-row.model-off .stg-mx-mid { text-decoration: line-through; }
-/* ── Model groups: a root model + its aliases (each a distinct upstream) ──
-   A model that HAS aliases is bracketed with a left accent rail so the root
-   and its alias rows read as one unit; the last alias closes the bracket. */
-.stg-mx-row.grouped .stg-mx-model { position: relative; }
-.stg-mx-row.grouped.is-root .stg-mx-model::before,
-.stg-mx-row.grouped.is-alias .stg-mx-model::before {
-  content: '';
-  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-  background: var(--s-ink);
-}
-.stg-mx-row.grouped.is-root .stg-mx-model::before { top: 50%; border-top-left-radius: 2px; }
-.stg-mx-row.grouped.group-end .stg-mx-model::before { bottom: 50%; border-bottom-left-radius: 2px; }
-.stg-mx-row.is-root .stg-mx-aliascount {
-  margin-left: 8px;
-  font-size: 9px; font-weight: 800; line-height: 1;
-  text-transform: uppercase; letter-spacing: 0.03em;
-  padding: 2px 7px; border-radius: 999px;
-  border: 1.5px solid var(--s-ink); background: var(--s-cream); color: var(--s-ink);
-  vertical-align: 1px;
-}
-/* ── Logical header row (model-identity contract): the preset-facing model_id
-   of an explicit request_ids pool. It is never a wire id, so its per-key
-   cells are intentionally empty (nothing to grant/deny/probe). ── */
-.stg-mx-row.is-logical .stg-mx-model.root {
-  background: linear-gradient(90deg, rgba(0,0,0,0.035), transparent 55%);
-}
-.stg-mx-cell.logical {
-  background: rgba(0,0,0,0.03);
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
-}
-/* ── Not-routed cell: the row's wire id exists (some key routes it) but THIS
-   key's pool doesn't — the dispatcher can never send that pair. No toggle,
-   no probe; a faint hollow dot keeps the grid aligned. ── */
-.stg-mx-cell.noroute {
-  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0,0,0,0.025) 6px, rgba(0,0,0,0.025) 12px);
-}
-.stg-mx-cell.noroute::after {
-  content: '';
-  display: inline-block;
-  width: 8px; height: 8px; border-radius: 50%;
-  border: 1.5px dashed var(--s-ink-soft);
-  opacity: 0.45;
-}
-.stg-mx-preset {
-  margin-left: 6px;
-  font-size: 8px; font-weight: 800; line-height: 1;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  padding: 1px 5px; border-radius: 3px;
-  border: 1.5px dashed var(--s-ink-soft); color: var(--s-ink-soft);
-  background: none;
-  vertical-align: 1px;
-}
-/* ── Alias rows: a concrete id mapping to a distinct upstream model ── */
-.stg-mx-row.is-alias .stg-mx-model.alias {
-  padding-left: 14px !important;
-  background: linear-gradient(90deg,
-    hsla(var(--alias-hue, 265), 70%, 55%, 0.10), transparent 55%);
-}
-.stg-mx-tree {
-  display: inline-block; width: 14px;
-  color: var(--s-ink-soft); font-weight: 700;
-  font-family: 'JetBrains Mono', monospace; margin-right: 2px;
-}
-.stg-mx-aliasidx {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 20px; height: 16px; padding: 0 4px; margin-right: 6px;
-  font-size: 9px; font-weight: 900; line-height: 1;
-  font-family: 'JetBrains Mono', monospace;
-  border-radius: 4px;
-  color: hsl(var(--alias-hue, 265), 65%, 40%);
-  background: hsla(var(--alias-hue, 265), 70%, 55%, 0.16);
-  border: 1.5px solid hsl(var(--alias-hue, 265), 60%, 55%);
-}
-.stg-mx-mid.alias-id { font-weight: 600; font-size: 10.5px; }
-.stg-mx-row.is-alias .stg-mx-brand { opacity: 0.85; }
-/* ── Attempts selector (false-429 filter) ── */
-.stg-mx-attempts {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px; font-weight: 700; color: var(--s-ink-soft);
-  line-height: 1;
-  padding: 0 8px;
-  border: 2px dashed var(--s-ink-soft);
-  border-radius: var(--s-radius);
-  background: none;
-  white-space: nowrap;
-}
-.stg-mx-attempts select {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px; font-weight: 800;
-  height: 22px;
-  margin: 0;
-  padding: 0 4px;
-  border: 1.5px solid var(--s-ink);
-  border-radius: 4px;
-  background: var(--s-white); color: var(--s-ink);
-  cursor: pointer;
-  box-sizing: border-box;
-  vertical-align: middle;
-  line-height: 1;
-  box-shadow: none;
-}
-.stg-mx-attempts select:focus {
-  box-shadow: none;
-  transform: none;
-}
-/* ── Cells ── */
-.stg-mx-cell {
-  position: relative;
-  text-align: center;
-  vertical-align: middle;
-  height: 44px;
-  min-width: 92px;
-  transition: background 0.12s;
-}
-.stg-mx-cell.on { background: rgba(74, 222, 128, 0.10); }
-.stg-mx-cell.off { background: repeating-linear-gradient(45deg, var(--s-cream), var(--s-cream) 5px, rgba(0,0,0,0.04) 5px, rgba(0,0,0,0.04) 10px); }
-.stg-mx-cell.overridden { box-shadow: inset 0 0 0 2px #c2410c; }
-.stg-mx-toggle {
-  border: none; background: none; cursor: pointer;
-  padding: 4px; display: inline-flex; align-items: center; justify-content: center;
-}
-.stg-mx-cell .stg-mx-dot {
-  width: 16px; height: 16px; border-radius: 50%;
-  border: 1.5px solid var(--s-ink);
-  transition: transform 0.1s, background 0.12s;
-}
-.stg-mx-cell.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; box-shadow: 0 0 0 3px rgba(74,222,128,0.25); }
-.stg-mx-cell.off .stg-mx-dot { background: var(--s-white); }
-.stg-mx-toggle:hover .stg-mx-dot { transform: scale(1.18); }
-.stg-mx-badges {
-  position: absolute; top: 2px; left: 3px;
-  display: flex; gap: 2px; flex-wrap: wrap; max-width: 70%;
-}
-.stg-mx-badge {
-  font-size: 8px; font-weight: 800; line-height: 1;
-  padding: 1px 3px; border-radius: 3px;
-  border: 1px solid currentColor;
-  font-family: 'JetBrains Mono', monospace;
-}
-.stg-mx-badge.rpm { color: #2563eb; background: rgba(96,165,250,0.12); }
-.stg-mx-badge.alias { color: #7c3aed; background: rgba(167,139,250,0.12); }
-.stg-mx-badge.caps { color: #0d9488; background: rgba(45,212,191,0.12); }
-/* Probe-status health pip (top-right of a cell, set by Probe & Recommend) */
-.stg-mx-probe-pip {
-  position: absolute; top: 2px; right: 3px;
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 15px; height: 15px; padding: 0 3px;
-  font-size: 9px; font-weight: 900; line-height: 1;
-  border-radius: 4px;
-  border: 1.5px solid currentColor;
-  font-family: 'JetBrains Mono', monospace;
-  pointer-events: auto;
-}
-.stg-mx-probe-pip.ok     { color: #16a34a; background: rgba(74,222,128,0.18); }
-.stg-mx-probe-pip.rate   { color: #c2410c; background: rgba(251,146,60,0.20); }
-.stg-mx-probe-pip.unauth { color: #b91c1c; background: rgba(248,113,113,0.20); }
-.stg-mx-probe-pip.nf     { color: #6b7280; background: rgba(156,163,175,0.20); }
-.stg-mx-probe-pip.skip   { color: #6b7280; background: rgba(156,163,175,0.20); }
-.stg-mx-probe-pip.down   { color: #a16207; background: rgba(250,204,21,0.20); }
-.stg-mx-probe-pip.err    { color: #b91c1c; background: rgba(248,113,113,0.20); }
-/* When a cell is flagged (non-ok pip) but still enabled, nudge attention. */
-.stg-mx-cell:has(.stg-mx-probe-pip.rate) .stg-mx-dot,
-.stg-mx-cell:has(.stg-mx-probe-pip.unauth) .stg-mx-dot,
-.stg-mx-cell:has(.stg-mx-probe-pip.down) .stg-mx-dot { box-shadow: 0 0 0 2px rgba(194,65,12,0.25); }
-.stg-mx-edit {
-  position: absolute; bottom: 2px; right: 3px;
-  border: none; background: none; cursor: pointer;
-  font-size: 11px; color: var(--s-ink-soft); opacity: 0;
-  transition: opacity 0.12s;
-  padding: 1px 3px; line-height: 1;
-}
-.stg-mx-cell:hover .stg-mx-edit { opacity: 0.85; }
-.stg-mx-edit:hover { opacity: 1 !important; color: var(--s-ink); transform: scale(1.15); }
-
-/* ── Scoped probe triggers (row / column / cell) — one shared mini bolt
-   button in the matrix's hover-reveal language (mirrors .stg-mx-edit) ── */
-.stg-mx-zap {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 18px; height: 18px; padding: 0;
-  border: 1.5px solid var(--s-ink); border-radius: 4px;
-  background: var(--s-white); color: var(--s-ink);
-  cursor: pointer;
-  transition: opacity 0.12s, transform 0.1s, background 0.12s;
-  box-sizing: border-box;
-}
-.stg-mx-zap svg { width: 10px; height: 10px; display: block; }
-.stg-mx-zap:hover { background: var(--s-gold); transform: scale(1.12); }
-.stg-mx-zap:disabled { opacity: 0.3; cursor: default; transform: none; background: var(--s-cream); }
-.stg-mx-zap.probing { pointer-events: none; opacity: 1; background: var(--s-gold); }
-.stg-mx-zap.probing svg { animation: stg-mx-spin 0.7s linear infinite; }
-/* Column scope: vertically centered in the key header's reserved right
-   lane (same centering recipe as .stg-mx-zap.row), subtle until hovered. */
-.stg-mx-zap.col { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0.4; }
-.stg-mx-keyhead:hover .stg-mx-zap.col { opacity: 1; }
-/* Row scope: right edge of the (sticky) model label cell, hover-revealed. */
-.stg-mx-zap.row { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0; }
-.stg-mx-model:hover .stg-mx-zap.row { opacity: 0.9; }
-.stg-mx-zap.row.probing { opacity: 1; }
-/* Cell scope: bottom-left corner, hover-revealed (only when no pip yet —
-   once a verdict exists the pip itself is the re-probe trigger). */
-.stg-mx-zap.cell { position: absolute; bottom: 2px; left: 3px; opacity: 0; }
-.stg-mx-cell:hover .stg-mx-zap.cell { opacity: 0.9; }
-.stg-mx-zap.cell.probing { opacity: 1; }
-/* The verdict pip doubles as the re-probe trigger for its own cell. */
-.stg-mx-probe-pip.clickable { cursor: pointer; transition: transform 0.1s; }
-.stg-mx-probe-pip.clickable:hover { transform: scale(1.2); }
-.stg-matrix-empty {
-  padding: 16px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--s-ink-soft);
-  border: 1.5px dashed var(--s-ink);
-  border-radius: var(--s-radius);
-  margin-top: 8px;
-}
-/* ── Inline per-cell override editor (reuses .stg-edit-form base) ── */
-.stg-mx-editor { margin-top: 10px; }
-.stg-mx-editor-title {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  font-weight: 800;
-  color: var(--s-ink);
-  margin-bottom: 4px;
-  padding-bottom: 6px;
-  border-bottom: 1.5px solid var(--s-ink);
-}
-.stg-mx-editor-sub {
-  font-size: 11px;
-  color: var(--s-ink-soft);
-  margin-bottom: 10px;
-  line-height: 1.4;
-}
-.stg-mxe-ovrow {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin-top: 8px;
-}
-.stg-mxe-ovrow.caps { align-items: flex-start; flex-direction: column; }
-.stg-mxe-chk {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: 11px; font-weight: 700; color: var(--s-ink);
-  cursor: pointer; min-width: 130px;
-}
-.stg-mxe-ovrow input[type="number"],
-.stg-mxe-ovrow input[type="text"] {
-  flex: 1; min-width: 120px;
-  padding: 5px 8px;
-  border: 1.5px solid var(--s-ink);
-  border-radius: var(--s-radius);
-  font-size: 12px;
-}
-.stg-mxe-ovrow input:disabled { opacity: 0.4; background: var(--s-cream); }
-.stg-cap-btn.stg-mxe-cap.locked { opacity: 0.35; cursor: not-allowed; }
-/* ── Cascade repair (2026-07-24): the settings shell is `.modal.settings-panel`
-   (index.html:942), so two legacy generic-modal rules in styles.css reach
-   this editor and out-specify its single-class rules:
-     .modal label{display:block;…margin-bottom:6px}        (styles.css:2959)
-     .modal input,.modal select{width:100%;padding:10px 12px;
-        margin-bottom:16px;…}                               (styles.css:2959)
-   Effect: `.stg-mxe-chk` loses inline-flex, and the checkbox input stretches
-   to width:100% of the label — Blink paints the ~13px checkbox square
-   centered in that full-width box while the label text wraps to the next
-   line, so each checkbox appears ABOVE its own label with a tall empty gap;
-   the RPM number input also picks up margin-bottom:16px and inflates its
-   row. Re-assert the editor layout at higher specificity (settings.css also
-   wins ties by load order). Guard: tests/test_frontend_matrix_editor_cascade.py */
-.settings-panel .stg-mx-editor .stg-mxe-chk {
-  display: inline-flex;
-  margin-bottom: 0;
-  font-size: 11px; font-weight: 700; color: var(--s-ink);
-  text-transform: none; letter-spacing: normal;
-}
-.settings-panel .stg-mx-editor .stg-mxe-chk input[type="checkbox"] {
-  width: auto; padding: 0; margin: 0;
-}
-.settings-panel .stg-mx-editor .stg-mxe-ovrow input[type="number"] {
-  margin-bottom: 0;
-}
-@media (max-width: 640px) {
-  .stg-mx-keyhead, .stg-mx-cell { min-width: 76px; }
-  .stg-mxe-chk { min-width: 100%; }
-}
-
 /* ══════════════════════════════════════
    Batch D — search / network / advanced pages
    (chip input + authenticated sources + two-col row layout;
@@ -3523,93 +3042,6 @@
 
 
 /* ══════════════════════════════════════════════════════
-   Devices page — desktop agents + bridge tokens
-
-   The page-specific half of the "this panel had no styles at all" fix. The
-   shared chrome it sits on (.stg-table / .stg-row / .stg-desc / .stg-dim /
-   bare .stg-btn) lives in styles.css; everything keyed to a DEVICE state
-   lives here, per the settings.css split that
-   tests/test_settings_panels_parity.py enforces.
-
-   Design intent: a device row must answer "is it reachable RIGHT NOW" before
-   it answers anything else — an offline agent that looks identical to a live
-   one is how a user concludes their bridge works when it does not. So online
-   is the loud state (solid gold pip, full-contrast text) and offline is
-   deliberately receded, rather than the two differing only by a word.
-   ══════════════════════════════════════════════════════ */
-
-.devices-agent-row td { font-weight: 600; }
-/* Offline agents recede, but stay READABLE — a dead row the user cannot read
- * is a dead row they cannot debug. Hence dimmed text, not a dimmed opacity on
- * the whole row (which would also wash out the status pip they need to see). */
-.devices-agent-row.devices-offline td { color: var(--s-ink-soft); }
-.devices-agent-row.devices-offline td:first-child { text-decoration: none; }
-/* The live pip. Solid + ringed so it reads as a state light rather than a
- * bullet character, and stays legible on the row-hover wash. */
-.devices-online-dot {
-  color: #16a34a;
-  font-size: 13px;
-  line-height: 1;
-  vertical-align: -1px;
-  text-shadow: 0 0 0 currentColor;
-}
-
-/* ── Bridge-token rows ──
- * A token is a live credential, so its row carries the same hard-edged block
- * treatment as a provider card — it should not read as a throwaway list item
- * the user scrolls past. */
-.devices-token-row {
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 12px;
-  margin-bottom: 6px;
-  border: var(--s-border-sm);
-  border-radius: var(--s-radius);
-  background: var(--s-white);
-  box-shadow: var(--s-shadow-xs);
-  font-size: 12.5px;
-  font-weight: 700;
-  color: var(--s-ink);
-}
-.devices-token-row:last-child { margin-bottom: 0; }
-.devices-token-row .stg-dim { margin-left: 6px; }
-/* The revoke button carries .stg-btn-danger (red outline) already; this only
- * tightens it for a dense list row and stops it stretching. */
-.devices-revoke-btn {
-  flex: none;
-  padding: 5px 12px;
-  font-size: 11px;
-}
-
-/* ── Load-failure state ──
- * Distinct from the empty state ON PURPOSE. `Api.desktop.devices()` is
- * declared {onError:'null'}, so an unreachable backend RESOLVES with null
- * rather than rejecting — which is how "no devices yet" came to be shown to
- * users whose agent was running fine. "We could not ask" and "you have none"
- * are different facts and must not share a rendering. */
-.devices-load-failed {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border: var(--s-border-sm);
-  border-color: var(--s-blocked);
-  border-radius: var(--s-radius);
-  background: rgba(248, 113, 113, 0.07);
-  color: var(--s-ink);
-  font-size: 12px;
-  font-weight: 700;
-}
-.devices-load-failed-icon { flex: none; color: var(--s-blocked); font-size: 13px; }
-.devices-load-failed-detail {
-  font-weight: 600;
-  color: var(--s-ink-soft);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-  word-break: break-word;
-}
-
-/* ══════════════════════════════════════════════════════
    Remote-device picker (project folder browser)
 
    The SAME feature's second surface: #remoteDevicesSection in index.html,
@@ -3700,365 +3132,168 @@
   box-shadow: 3px 3px 0 var(--s-ink);
 }
 .remote-root-add:active { transform: translate(1px, 1px); box-shadow: none; }
+/* Model-routing v2 settings: Models are identities; Providers are suppliers. */
+.stg-v2-intro{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin:0 0 12px;padding:10px 0;border-bottom:1px solid var(--border,#ddd)}
+.stg-v2-intro strong{font-size:13px}
+.stg-v2-intro span,.stg-v2-body-head span,.stg-v2-manager-brand span,.stg-v2-diagnostic-note span{color:var(--text-muted,#777);font-size:12px}
 
-/* ══════════════════════════════════════════════════════════════════
-   Tools inventory panel (Settings → 工具) — 2026-08-06
-   Global live-registry catalogue: group blocks → family cards → rows.
-   ══════════════════════════════════════════════════════════════════ */
-.tools-inv-body { display: flex; flex-direction: column; gap: 14px; }
+/* The v2 card reuses the legacy .stg-provider-card chrome (hard border, offset
+   shadow, cream head hover) from the application shell; the rules below only
+   reset <summary>, rotate the chevron, and tint the v2 chips. */
+summary.stg-provider-head-v2{list-style:none}
+summary.stg-provider-head-v2::-webkit-details-marker{display:none}
+summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:-3px}
+.stg-provider-card-v2 .stg-chevron{flex:0 0 auto;transition:transform .18s ease;color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2[open] .stg-chevron{transform:rotate(180deg)}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge{background:rgba(99,102,241,.1);color:#6366f1}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge-models{background:rgba(74,222,128,.12);color:#16a34a}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge.off{background:rgba(248,113,113,.1);color:var(--s-blocked,#c92a2a)}
+.stg-provider-v2-foot{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:9px 13px;border-top:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 28%,transparent);background:var(--s-cream,#f2ecda)}
 
-.tools-inv-group-title {
-  font-size: 12px; font-weight: 900; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--s-muted);
-  margin: 4px 2px 6px;
+/* Expanded body — v0.15.0 layout: name/Base URL fields, one row per
+   credential, and full-width model cards. All rules are card-scoped so the
+   ported legacy classes cannot leak into other settings surfaces. */
+/* display:block must be explicit: the legacy class-toggle accordion hides
+   .stg-provider-body globally (06-file-changes-settings-shell.css) and the v2
+   card expands via native <details open>, never the .expanded class. Closed
+   details still suppress rendering via UA behavior. */
+.stg-provider-card-v2 .stg-provider-body{display:block;padding:12px 13px 4px;border-top:1.5px solid var(--s-ink,#1a1814);background:var(--s-white,#faf8f3)}
+.stg-provider-card-v2 .stg-field-grid{margin-bottom:2px}
+.stg-provider-card-v2 .stg-models-section{margin-top:12px;padding-top:12px;border-top:2px dashed color-mix(in srgb,var(--s-ink-soft,#3d362c) 70%,transparent)}
+.stg-provider-card-v2 .stg-models-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.stg-provider-card-v2 .stg-models-title{color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
+.stg-provider-card-v2 .stg-model-list{display:flex;flex-direction:column;gap:8px}
+.stg-provider-card-v2 .stg-empty-sm{margin:0;padding:10px 0;color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:600;text-align:center}
+.stg-provider-card-v2 .stg-mcard{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1.5px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);box-shadow:var(--s-shadow-xs,2px 2px 0 #1a1814);transition:transform .1s,box-shadow .1s}
+.stg-provider-card-v2 .stg-mcard:hover{transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--s-ink,#1a1814)}
+.stg-provider-card-v2 .stg-mcard.disabled{opacity:.55;background:var(--s-cream,#f2ecda)}
+.stg-provider-card-v2 .stg-mcard.disabled .stg-mcard-id{text-decoration:line-through;text-decoration-thickness:1.5px}
+.stg-provider-card-v2 .stg-mcard-icon{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:24px;height:24px;margin-top:1px}
+.stg-provider-card-v2 .stg-mcard-body{flex:1;min-width:0}
+.stg-provider-card-v2 .stg-mcard-main{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.stg-provider-card-v2 .stg-mcard-id{overflow:hidden;color:var(--s-ink,#1a1814);font:800 12px/1.35 'JetBrains Mono',ui-monospace,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-provider-card-v2 .stg-mcard-caps{display:flex;align-items:center;gap:4px;margin-top:5px;flex-wrap:wrap}
+.stg-provider-card-v2 .stg-cap{padding:2px 7px;border:1px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-cream,#f2ecda);color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase}
+.stg-provider-card-v2 .stg-cap.text{color:#2563eb;background:rgba(96,165,250,.12);border-color:#2563eb}
+.stg-provider-card-v2 .stg-cap.vision{color:#7c3aed;background:rgba(167,139,250,.12);border-color:#7c3aed}
+.stg-provider-card-v2 .stg-cap.cheap{color:#16a34a;background:rgba(74,222,128,.12);border-color:#16a34a}
+.stg-provider-card-v2 .stg-cap.image_gen{color:#db2777;background:rgba(244,114,182,.12);border-color:#db2777}
+.stg-provider-card-v2 .stg-cap.embedding{color:#0d9488;background:rgba(45,212,191,.12);border-color:#0d9488}
+.stg-provider-card-v2 .stg-cap.thinking{color:#c2410c;background:rgba(251,146,60,.12);border-color:#c2410c}
+.stg-provider-card-v2 .stg-mcard-stat{overflow:hidden;color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.stg-provider-card-v2 .stg-mcard-pricing{margin-top:5px;color:var(--s-ink-soft,#3d362c);font:10px/1.45 'JetBrains Mono',ui-monospace,Menlo,monospace}
+.stg-provider-card-v2 .stg-mcard-aliases{margin-top:5px;font:600 10px/1.45 'JetBrains Mono',ui-monospace,Menlo,monospace}
+.stg-provider-card-v2 .stg-mcard-actions{display:flex;align-items:center;align-self:center;flex-direction:column;flex-shrink:0;gap:4px}
+.stg-provider-card-v2 .stg-v2-cred-secret{width:100%;min-height:32px;margin-top:6px;padding:6px 9px;border:1.5px solid color-mix(in srgb,var(--s-ink,#1a1814) 45%,transparent);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stg-provider-card-v2 .stg-v2-cred-secret:focus{border-color:var(--s-ink,#1a1814);box-shadow:var(--s-shadow-xs,2px 2px 0 #1a1814);outline:none}
+.stg-v2-foot-spacer{flex:1}
+.stg-provider-model-alias,.stg-v2-model-alias,.stg-tpl-wizard-alias{color:var(--s-gold-dim,#a87d2e)!important}
+.stg-provider-cross-candidate{flex:0 0 auto;padding:4px 6px;border:1.5px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-gold,#c9993f);color:var(--s-ink,#1a1814);font-size:9px;font-weight:900;white-space:nowrap;box-shadow:1px 1px 0 var(--s-ink,#1a1814)}
+.stg-provider-model-more{width:100%;min-height:34px;border:0;border-top:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);background:var(--s-cream,#f2ecda);color:var(--s-ink-soft,#3d362c);font:800 10px/1.2 inherit;cursor:pointer}
+.stg-provider-model-more:hover{background:color-mix(in srgb,var(--s-gold,#c9993f) 20%,var(--s-cream,#f2ecda))}
+.stg-provider-model-more:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:-3px}
+
+.stg-v2-close,.stg-v2-manager-tabs button,.stg-v2-more{border:1px solid var(--border,#ddd);background:var(--bg-primary,#fff);color:var(--text-primary,#222);font:600 12px/1.2 inherit;cursor:pointer}
+.stg-v2-manager-tabs button:hover,.stg-v2-more:hover{background:var(--bg-hover,#f3f3f3)}
+.stg-v2-close:focus-visible,.stg-v2-manager-tabs button:focus-visible,.stg-v2-more:focus-visible{outline:2px solid var(--accent,#6d5dfc);outline-offset:2px}
+/* Card-foot 管理 button — dashed tofu action chip, same family as the legacy
+   provider-card action buttons. */
+.stg-v2-manage{padding:7px 12px;border:1.5px dashed color-mix(in srgb,var(--s-ink,#1a1814) 45%,transparent);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:800 11px/1.2 inherit;cursor:pointer;white-space:nowrap}
+.stg-v2-manage:hover{border-style:solid;background:color-mix(in srgb,var(--s-gold,#c9993f) 22%,var(--s-white,#faf8f3))}
+.stg-v2-manage:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:2px}
+.stg-v2-switch,.stg-v2-inline-check{display:inline-flex!important;align-items:center;gap:6px;margin:0!important;color:var(--text-secondary,#555);font-size:12px;white-space:nowrap}
+.stg-v2-switch input,.stg-v2-inline-check input{inline-size:auto!important}
+
+.stg-v2-manager-overlay{position:fixed;inset:0;z-index:12000;display:grid;place-items:center;padding:24px;background:rgba(10,12,14,.42);backdrop-filter:blur(2px)}
+.stg-v2-manager{display:grid;grid-template-rows:auto auto minmax(0,1fr);width:min(860px,94vw);max-height:min(760px,88vh);overflow:hidden;border:2px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);box-shadow:8px 8px 0 rgba(0,0,0,.34)}
+.stg-v2-manager-head{display:flex;align-items:center;justify-content:space-between;padding:15px 18px;border-bottom:2px solid var(--s-ink,#1a1814);background:var(--s-cream,#f2ecda)}
+.stg-v2-manager-brand{display:flex;align-items:center;gap:10px}
+.stg-v2-manager-brand div{display:grid;gap:2px}
+.stg-v2-manager-brand strong{font-size:14px}
+.stg-v2-close{width:32px;height:32px;border:0;border-radius:6px;background:transparent;font-size:22px}
+.stg-v2-manager-tabs{display:flex;gap:4px;padding:8px 12px;border-bottom:1.5px solid var(--s-ink,#1a1814);overflow-x:auto;background:var(--s-white,#faf8f3)}
+.stg-v2-manager-tabs button{min-height:34px;padding:7px 12px;border-color:transparent;border-radius:6px;color:var(--text-secondary,#555);white-space:nowrap}
+.stg-v2-manager-tabs button.active{border-color:var(--s-ink,#1a1814);background:var(--s-gold,#c9993f);color:var(--s-ink,#1a1814);box-shadow:2px 2px 0 var(--s-ink,#1a1814)}
+.stg-v2-manager-body{min-height:300px;overflow:auto;padding:16px 18px 20px}
+
+.stg-v2-toolbar,.stg-v2-body-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.stg-v2-toolbar input,#stgModelCatalogSearch{width:min(420px,100%);min-height:38px}
+.stg-v2-toolbar>span{color:var(--text-muted,#777);font-size:11px}
+.stg-v2-body-head>div{display:grid;gap:4px}
+.stg-v2-body-head strong{font-size:13px}
+.stg-v2-list,.stg-v2-catalog-list{border-top:1px solid var(--border,#ddd)}
+.stg-v2-model-row,.stg-v2-detail-row,.stg-v2-catalog-row{display:grid;align-items:center;gap:12px;min-width:0;padding:11px 4px;border-bottom:1px solid var(--border,#ddd)}
+.stg-v2-model-row{grid-template-columns:minmax(190px,1.5fr) minmax(140px,1fr) minmax(140px,.9fr) auto}
+.stg-v2-model-row.is-pending{background:color-mix(in srgb,#f59f00 6%,transparent)}
+.stg-v2-model-identity,.stg-v2-detail-main,.stg-v2-catalog-identity{display:grid;min-width:0;gap:3px}
+.stg-v2-model-identity strong,.stg-v2-detail-main strong,.stg-v2-catalog-identity strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.stg-v2-model-identity span,.stg-v2-detail-main span,.stg-v2-catalog-identity span,.stg-v2-detail-meta,.stg-v2-model-price{overflow:hidden;color:var(--text-muted,#777);font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-v2-model-alias{font-size:9px!important}
+.stg-v2-model-meta{display:flex;flex-wrap:wrap;gap:4px 8px;color:var(--text-secondary,#555);font-size:11px}
+.stg-v2-detail-row{grid-template-columns:minmax(150px,.7fr) minmax(180px,1.2fr) minmax(150px,.9fr) auto}
+.stg-v2-detail-row>label:not(.stg-v2-inline-check){display:grid;gap:4px;margin:0;color:var(--text-muted,#777);font-size:10px}
+.stg-v2-detail-row input:not([type="checkbox"]){width:100%;min-width:0}
+.stg-v2-diagnostic-row input:not([type="checkbox"]){font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+.stg-v2-note,.stg-v2-diagnostic-note,.stg-v2-pending{margin:0 0 12px;padding:10px 12px;border:1px solid var(--border,#ddd);border-radius:7px;background:var(--bg-secondary,#f7f7f7);color:var(--text-secondary,#555);font-size:12px}
+.stg-v2-diagnostic-note{display:grid;gap:4px}
+.stg-v2-more{width:100%;margin-top:10px;padding:9px;border-radius:6px}
+.stg-v2-catalog-tools{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 0 12px}
+.stg-v2-catalog-count{margin:0 0 8px;color:var(--text-muted,#777);font-size:11px}
+.stg-v2-catalog-row{grid-template-columns:28px minmax(190px,1fr) minmax(180px,1.4fr) auto}
+.stg-v2-catalog-icon{display:grid;place-items:center}
+.stg-v2-pending{margin-top:12px}
+.stg-v2-pending summary{cursor:pointer;font-weight:650}
+.stg-v2-pending p{margin:8px 0 0;color:var(--text-muted,#777)}
+
+.stg-tpl-wizard{width:min(720px,94vw)}
+.stg-tpl-wizard .stg-modal-body{display:grid;gap:12px}
+.stg-tpl-wizard-keylabel{display:grid;gap:6px;color:var(--s-ink,#1a1814);font-size:12px;font-weight:800}
+.stg-tpl-wizard-key{width:100%;min-height:38px;padding:8px 10px;border:var(--s-border-sm,1.5px solid #1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stg-tpl-wizard-key:focus,.stg-tpl-wizard-search:focus{outline:none;box-shadow:var(--s-shadow-xs,2px 2px 0 #1a1814)}
+.stg-tpl-wizard-keyhint{color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:500}
+.stg-tpl-wizard-toolbar{display:flex;align-items:center;gap:8px}
+.stg-tpl-wizard-search{flex:1;min-width:0;min-height:36px;padding:7px 10px;border:var(--s-border-sm,1.5px solid #1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font-size:12px}
+.stg-tpl-wizard-count{color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:700;white-space:nowrap}
+.stg-tpl-wizard-link{padding:2px 4px;border:0;background:transparent;color:var(--s-gold-dim,#a87d2e);font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap}
+.stg-tpl-wizard-link:hover{color:var(--s-gold,#c9993f)}
+.stg-tpl-wizard-link:focus-visible{outline:2px solid var(--s-gold,#c9993f);outline-offset:2px}
+.stg-tpl-wizard-list{display:grid;max-height:min(470px,55vh);overflow:auto;border:1.5px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3)}
+.stg-tpl-wizard-row{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(120px,.65fr);align-items:center;gap:10px;min-height:52px;padding:8px 10px;border-bottom:1px solid color-mix(in srgb,var(--s-ink,#1a1814) 18%,transparent);cursor:pointer}
+.stg-tpl-wizard-row:last-child{border-bottom:0}
+.stg-tpl-wizard-row:hover{background:var(--s-cream,#f2ecda)}
+.stg-tpl-wizard-identity{display:grid;min-width:0;gap:3px}
+.stg-tpl-wizard-mid{overflow:hidden;color:var(--s-ink,#1a1814);font:800 12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-tpl-wizard-alias{overflow:hidden;font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-tpl-wizard-meta{color:var(--s-ink-soft,#3d362c);font-size:10px;text-align:right}
+
+@media (max-width:760px){
+  .stg-section-actions{width:100%;flex-wrap:wrap}
+  .stg-template-menu{right:0;left:auto;width:min(100%,calc(100vw - 36px));min-width:0;max-width:none}
+  .stg-template-section{align-items:flex-start;flex-wrap:wrap}
+  .stg-template-section-desc{width:100%;margin-left:0}
+  .stg-template-grid{grid-template-columns:minmax(0,1fr)}
+  .stg-template-item,.stg-template-info,.stg-template-name{min-width:0}
+  .stg-template-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .stg-v2-intro{align-items:flex-start;flex-direction:column;gap:4px}
+  .stg-provider-head-v2{align-items:flex-start;flex-wrap:wrap}
+  .stg-provider-head-v2 .stg-provider-info{flex:1}
+  .stg-provider-head-v2 .stg-provider-badges{order:3;width:100%;justify-content:flex-start;padding-left:42px}
+  .stg-provider-card-v2 .stg-field-grid{grid-template-columns:1fr}
+  .stg-provider-card-v2 .stg-mcard{flex-wrap:wrap;gap:6px}
+  .stg-provider-card-v2 .stg-mcard-actions{align-self:flex-end;flex-direction:row}
+  .stg-v2-manager-overlay{align-items:end;padding:0}
+  .stg-v2-manager{width:100%;max-height:92dvh;border-radius:10px 10px 0 0}
+  .stg-v2-manager-body{min-height:240px;padding:14px}
+  .stg-v2-model-row,.stg-v2-detail-row{grid-template-columns:minmax(0,1fr) auto}
+  .stg-v2-model-meta,.stg-v2-model-price,.stg-v2-detail-meta,.stg-v2-wide-field,.stg-v2-secret-field{grid-column:1/-1}
+  .stg-v2-catalog-row{grid-template-columns:24px minmax(0,1fr)}
+  .stg-v2-catalog-tools{align-items:stretch;flex-direction:column}
+  #stgModelCatalogSearch{width:100%}
+  .stg-tpl-wizard-row{grid-template-columns:auto minmax(0,1fr)}
+  .stg-tpl-wizard-meta{grid-column:2;text-align:left}
+  .stg-tpl-wizard-toolbar{align-items:stretch;flex-wrap:wrap}
+  .stg-tpl-wizard-search{flex-basis:100%}
 }
 
-.tools-inv-family {
-  background: var(--s-white);
-  border: var(--s-border-sm);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
-  padding: 8px 10px;
-  margin-bottom: 8px;
-}
-.tools-inv-family-head {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-}
-.tools-inv-family-name { font-weight: 900; font-size: 13px; color: var(--s-ink); font-family: monospace; }
-.tools-inv-family-desc { font-size: 11.5px; color: var(--s-muted); flex: 1; min-width: 120px; }
-.tools-inv-family-count { font-size: 11px; font-weight: 800; color: var(--s-ink-soft); font-variant-numeric: tabular-nums; }
-
-.tools-inv-tools {
-  margin-top: 7px; display: flex; flex-direction: column; gap: 4px;
-  border-top: 1px dashed var(--s-ink-soft); padding-top: 7px;
-}
-.tools-inv-tool { padding: 3px 6px; }
-.tools-inv-tool-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.tools-inv-tool-name { font-size: 12px; font-weight: 700; color: var(--s-ink); }
-.tools-inv-tool-desc { font-size: 11px; color: var(--s-muted); line-height: 1.45; margin-top: 1px; }
-.tools-inv-tool-req { font-size: 10.5px; color: var(--s-ink-soft); margin-top: 2px; }
-.tools-inv-tool-req code { font-size: 10px; }
-
-.tools-inv-badge {
-  font-size: 9.5px; font-weight: 900; letter-spacing: 0.03em;
-  padding: 1px 5px; border: var(--s-border-sm); border-radius: var(--s-radius);
-}
-.tools-inv-badge.is-write { background: var(--s-gold); color: var(--s-ink); }
-.tools-inv-badge.is-mcp { background: var(--s-cream); color: var(--s-ink-soft); }
-.tools-inv-badge.is-plugin { background: var(--s-accent); color: var(--s-white); }
-
-.tools-inv-empty { font-size: 11px; color: var(--s-muted); padding: 4px 0; }
-
-/* ══════════════════════════════════════════════════════════════════
-   Settings comfort pass — progressive disclosure + quieter surfaces
-
-   Keep the complete no-code editor, but make uncommon groups opt-in and
-   reduce the number of hard borders competing for attention. This block is
-   deliberately scoped to the settings modal so the rest of the app keeps its
-   existing visual language.
-   ══════════════════════════════════════════════════════════════════ */
-.settings-disclosure {
-  margin: 8px 0;
-  overflow: clip;
-  background: var(--s-white);
-  border: 1px solid rgba(26, 24, 20, 0.16);
-  border-radius: 9px;
-}
-.settings-disclosure > summary {
-  min-height: 48px;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 10px 13px;
-  color: var(--s-ink);
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-  font-size: 12.5px;
-  font-weight: 750;
-  line-height: 1.35;
-}
-.settings-disclosure > summary::-webkit-details-marker { display: none; }
-.settings-disclosure > summary::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-right: 1.5px solid var(--s-ink-soft);
-  border-bottom: 1.5px solid var(--s-ink-soft);
-  transform: rotate(-45deg);
-  transition: transform .16s ease;
-}
-.settings-disclosure[open] > summary::before { transform: rotate(45deg) translate(-1px, -1px); }
-.settings-disclosure[open] > summary { border-bottom: 1px solid rgba(26, 24, 20, 0.10); }
-.settings-disclosure > summary:hover { background: rgba(201, 153, 63, 0.055); }
-.settings-disclosure > .settings-disclosure-body {
-  padding: 12px 13px 13px;
-  margin: 0;
-  background: rgba(250, 247, 242, 0.45);
-}
-.settings-disclosure > .settings-disclosure-body > :last-child { margin-bottom: 0; }
-.search-advanced-sub { min-width: 0; }
-
-/* Preferences are editable accordions. The count keeps collapsed sections
-   informative without forcing every learned item onto the screen at once. */
-.prefs-list { gap: 8px; margin-top: 10px; }
-.pref-section {
-  display: block;
-  overflow: clip;
-  border: 1px solid rgba(26, 24, 20, 0.16);
-  border-radius: 9px;
-  background: var(--s-white);
-}
-.pref-section:not([open]) > .pref-section-body { display: none; }
-.pref-section-head {
-  min-height: 48px;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 9px;
-  padding: 10px 13px;
-  margin: 0;
-  border: 0;
-  cursor: pointer;
-  list-style: none;
-}
-.pref-section-head::-webkit-details-marker { display: none; }
-.pref-section-head::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-right: 1.5px solid var(--s-ink-soft);
-  border-bottom: 1.5px solid var(--s-ink-soft);
-  transform: rotate(-45deg);
-  transition: transform .16s ease;
-}
-.pref-section[open] > .pref-section-head::before { transform: rotate(45deg) translate(-1px, -1px); }
-.pref-section[open] > .pref-section-head { border-bottom: 1px solid rgba(26, 24, 20, 0.10); }
-.pref-section-title {
-  flex: 1;
-  color: var(--s-ink);
-  font-size: 12.5px;
-  font-weight: 750;
-  letter-spacing: 0;
-  text-transform: none;
-}
-.pref-section-count {
-  min-width: 24px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: rgba(26, 24, 20, 0.06);
-  color: var(--s-ink-soft);
-  text-align: center;
-  font-size: 10.5px;
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
-}
-.pref-section-body {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px 12px;
-  background: rgba(250, 247, 242, 0.45);
-}
-.pref-add-btn { align-self: flex-end; margin-bottom: 2px; }
-.pref-item-row { padding: 6px 9px; border-radius: 7px; background: var(--s-white); }
-
-/* The modal chrome previously used a hard outline and offset shadow on nearly
-   every control. Preserve the warm tofu palette while reserving emphasis for
-   selected/primary actions. */
-.settings-panel .settings-section-title {
-  font-size: 12px;
-  letter-spacing: .045em;
-  text-transform: none;
-}
-.settings-panel .settings-divider { height: 1px; margin: 18px 0; background: rgba(26, 24, 20, .14); opacity: 1; }
-.settings-panel .settings-field label { letter-spacing: .035em; text-transform: none; }
-.settings-panel .settings-field input,
-.settings-panel .settings-field select,
-.settings-panel .settings-textarea,
-.settings-panel .mcp-search {
-  border: 1px solid rgba(26, 24, 20, .24);
-  border-radius: 7px;
-  box-shadow: none;
-  transform: none;
-}
-.settings-panel .settings-field input:focus,
-.settings-panel .settings-field select:focus,
-.settings-panel .settings-textarea:focus,
-.settings-panel .mcp-search:focus {
-  border-color: var(--s-gold-dim);
-  box-shadow: 0 0 0 3px rgba(201, 153, 63, .12);
-  transform: none;
-  background: var(--s-white);
-}
-.settings-panel .settings-toggle-row,
-.settings-panel .stg-update-row,
-.settings-panel .oauth-provider-card,
-.settings-panel .oauth-step,
-.settings-panel .search-pipeline-card,
-.settings-panel .tools-inv-family,
-.settings-panel .mt-provider-card,
-.settings-panel .stg-dropdown-visibility,
-.settings-panel .stg-table,
-.settings-panel .stg-provider-card,
-.settings-panel .stg-key-card,
-.settings-panel .stg-mcard {
-  border: 1px solid rgba(26, 24, 20, .17);
-  border-radius: 9px;
-  box-shadow: none;
-  transform: none;
-}
-.settings-panel .settings-toggle-row:hover,
-.settings-panel .stg-update-row:hover,
-.settings-panel .mt-provider-card:hover,
-.settings-panel .stg-provider-card:hover,
-.settings-panel .stg-key-card:hover,
-.settings-panel .stg-mcard:hover {
-  border-color: rgba(201, 153, 63, .42);
-  box-shadow: none;
-  transform: none;
-}
-.settings-panel .stg-toggle-track {
-  border: 1px solid rgba(26, 24, 20, .34);
-  border-radius: 999px;
-  box-shadow: inset 0 1px 2px rgba(26, 24, 20, .1);
-}
-.settings-panel .stg-toggle-thumb { border: 0; border-radius: 50%; }
-.settings-panel .stg-provider-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.settings-panel .stg-provider-body { border-top: 1px solid rgba(26, 24, 20, .13); }
-.settings-panel .stg-models-section { border-top-width: 1px; }
-.settings-panel .stg-field label { letter-spacing: .035em; text-transform: none; }
-.settings-panel .stg-field input,
-.settings-panel .stg-field textarea,
-.settings-panel .stg-field select,
-.settings-panel .stg-key-card-edit > input.stg-keys-input {
-  border: 1px solid rgba(26, 24, 20, .24);
-  border-radius: 7px;
-  box-shadow: none;
-  transform: none;
-}
-.settings-panel .stg-field input:focus,
-.settings-panel .stg-field textarea:focus,
-.settings-panel .stg-field select:focus,
-.settings-panel .stg-key-card-edit > input.stg-keys-input:focus {
-  border-color: var(--s-gold-dim);
-  box-shadow: 0 0 0 3px rgba(201, 153, 63, .12);
-  transform: none;
-  background: var(--s-white);
-}
-.settings-panel .stg-keys-btn,
-.settings-panel .stg-keys-info,
-.settings-panel .stg-keys-idx,
-.settings-panel .stg-badge { border-width: 1px; box-shadow: none; }
-.settings-panel .stg-keys-btn:hover { box-shadow: none; transform: none; }
-.settings-panel .skills-scope-tabs {
-  border: 1px solid rgba(26, 24, 20, .19);
-  border-radius: 8px;
-  box-shadow: none;
-}
-.settings-panel .skills-scope-tab { border-width: 1px; border-radius: 6px; }
-.settings-panel .skills-scope-tab.active { box-shadow: none; }
-.settings-panel .theme-option,
-.settings-panel .lang-option {
-  border: 1px solid rgba(26, 24, 20, .20);
-  border-radius: 8px;
-  box-shadow: none;
-  transform: none;
-}
-.settings-panel .theme-option:hover,
-.settings-panel .lang-option:hover { border-color: rgba(201, 153, 63, .55); box-shadow: none; transform: none; }
-.settings-panel .theme-option.active,
-.settings-panel .lang-option.active {
-  border-color: var(--s-gold-dim);
-  box-shadow: 0 0 0 2px rgba(201, 153, 63, .13);
-  transform: none;
-}
-.settings-panel .stg-btn-add,
-.settings-panel .stg-btn-balance,
-.settings-panel .stg-update-btn,
-.settings-panel .btn-xs,
-.settings-panel .btn.btn-sm {
-  border-width: 1px;
-  border-radius: 7px;
-  box-shadow: none;
-  transform: none;
-  white-space: nowrap;
-  word-break: normal;
-}
-.settings-panel .stg-btn-add:hover,
-.settings-panel .stg-btn-balance:hover,
-.settings-panel .stg-update-btn:hover,
-.settings-panel .btn-xs:hover,
-.settings-panel .btn.btn-sm:hover { box-shadow: none; transform: none; }
-.settings-panel .mcp-store-header .mcp-connect-all-btn {
-  border-width: 1px !important;
-  box-shadow: none !important;
-}
-.settings-panel .stg-section-actions > button { min-height: 34px; }
-
-@media (max-width: 768px) {
-  .settings-content { padding: 17px 15px 20px; }
-  .settings-panel .settings-row.two-col { flex-direction: column; gap: 3px; width: 100%; }
-  .settings-panel .settings-row.two-col > .settings-field { flex: none; width: 100%; min-width: 0; }
-  .settings-panel .settings-field input,
-  .settings-panel .settings-field select { width: 100%; max-width: none !important; }
-  .settings-panel .settings-toggle-row { padding: 10px 11px; gap: 12px; }
-  .settings-panel .settings-toggle-row > :first-child { min-width: 0; }
-  .settings-disclosure > summary,
-  .pref-section-head { min-height: 46px; padding: 9px 11px; }
-  .settings-disclosure > .settings-disclosure-body { padding: 10px 11px 12px; }
-
-  .settings-panel .stg-section-head { align-items: stretch; flex-direction: column; gap: 9px; }
-  .settings-panel .stg-section-actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    width: 100%;
-  }
-  .settings-panel .stg-section-actions > button {
-    width: 100%;
-    min-width: 0;
-    min-height: 34px;
-    padding-inline: 8px;
-    justify-content: center;
-    white-space: nowrap;
-    font-size: 10.5px;
-  }
-
-  .settings-panel .mcp-store-header { align-items: center; gap: 8px; }
-  .settings-panel .mcp-store-header-spacer { display: none; }
-  .settings-panel .mcp-store-header-title { flex: 1 1 auto; min-width: 0; }
-  .settings-panel .mcp-store-header .skills-scope-tabs {
-    order: 2;
-    flex: 1 1 100%;
-    width: 100%;
-  }
-  .settings-panel .mcp-store-header > .btn {
-    flex: 0 0 auto !important;
-    min-width: max-content !important;
-    min-height: 34px;
-    padding-inline: 10px;
-    white-space: nowrap;
-    word-break: keep-all;
-  }
-  .settings-panel .mcp-store-header .mcp-search {
-    order: 5;
-    flex: 1 1 100%;
-    min-width: 0;
-    max-width: none;
-    width: 100%;
-  }
-
-  .settings-panel .oauth-steps { display: grid; grid-template-columns: 1fr; gap: 6px; }
-  .settings-panel .oauth-step { min-width: 0; }
-  .settings-panel .oauth-step-arrow { display: none; }
-  .settings-panel .oauth-manual-fallback > div { min-width: 0; }
-  .settings-panel .oauth-manual-input { min-width: 0; }
-}
+@media (prefers-reduced-motion:reduce){.stg-v2-manager-overlay{backdrop-filter:none}}

@@ -161,17 +161,18 @@ def _evidence(
         started=task_start_ns + 300_000_000, queue=3,
     )
     raw_result = "exit_code=0\nstdout:\nready"
-    envelope = json.dumps({
-        "contractVersion": "tofu.tool-result/v2",
+    model_result = "ready"
+    result_evidence = {
+        "contractVersion": "tofu.tool-result-evidence/v1",
+        "resultContractVersion": "tofu.tool-result/v2",
         "status": "ok",
-        "summary": "ready",
-        "items": [],
-        "artifactRef": None,
-        "cursor": None,
+        "projectionKind": "text",
         "truncated": False,
         "rawBytes": len(raw_result.encode()),
-        "visibleBytes": 0,
-    }, separators=(",", ":"))
+        "visibleBytes": len(model_result.encode()),
+        "envelopeBytes": 256,
+        "evidenceId": "ev_test",
+    }
     event_values = [
         {"type": "messages_snapshot", "kind": "request", "roundNum": 1,
          "model": "kimi-k3", "params": {"stream": True},
@@ -185,14 +186,15 @@ def _evidence(
          "arguments": {"command": "printf ready"}},
         {"type": "tool_complete", "roundNum": 1,
          "toolCallId": "tool-1", "toolName": "custom__run_command",
-         "toolContent": envelope, "status": "done",
+         "toolContent": model_result,
+         "toolResultEvidence": result_evidence, "status": "done",
          "tStart": 1120, "tEnd": 1170},
         {"type": "messages_snapshot", "kind": "request", "roundNum": 2,
          "model": "kimi-k3", "params": {"stream": True},
          "messages": [
              {"role": "user", "content": "solve"},
              {"role": "tool", "tool_call_id": "tool-1",
-              "content": envelope},
+              "content": model_result},
          ], "tools": schemas},
         {"type": "delta", "content": "done"},
         {"type": "round_usage", "roundNum": 2, "model": "kimi-k3",

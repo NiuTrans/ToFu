@@ -1,4 +1,18 @@
-"""lib/memory/tools.py — Tool definitions for LLM function calling."""
+"""Provider-facing memory tool schemas backed by shared payload limits."""
+
+from lib.memory.contracts import (
+    MEMORY_BODY_MAX_CHARS,
+    MEMORY_DESCRIPTION_MAX_CHARS,
+    MEMORY_ID_MAX_CHARS,
+    MEMORY_MERGE_MAX_ITEMS,
+    MEMORY_NAME_MAX_CHARS,
+    MEMORY_SEARCH_QUERY_MAX_CHARS,
+    MEMORY_SEARCH_TOP_K_DEFAULT,
+    MEMORY_SEARCH_TOP_K_MAX,
+    MEMORY_SEARCH_TOP_K_MIN,
+    MEMORY_TAG_MAX_CHARS,
+    MEMORY_TAG_MAX_ITEMS,
+)
 
 __all__ = ['ALL_MEMORY_TOOLS', 'MEMORY_TOOL_NAMES',
            'CREATE_MEMORY_TOOL', 'UPDATE_MEMORY_TOOL',
@@ -11,39 +25,60 @@ CREATE_MEMORY_TOOL = {
     "function": {
         "name": "create_memory",
         "description": (
-            "Save verified, reusable project experience for future sessions: "
-            "a confirmed convention, reproduced failure/root-cause/fix, or "
-            "documented tool/API quirk. Never save user identity/preferences, "
-            "one-off requests, chat summaries, speculative reasoning, or a "
-            "solution transcript; user-specific facts belong to My Context."
+            "Save a verified reusable lesson: project convention, "
+            "reproduced failure/root cause/fix, or documented tool/API quirk. "
+            "Never store identity/preferences (use My Context), one-off "
+            "requests, chat summaries, speculation, reasoning, or transcripts."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Generated FIRST. ONE dense ~120-char sentence that front-loads the concrete search triggers (symptom, the symbol/file name, the fix or rule). This is the primary signal for both search_memories and per-turn prefetch ranking — vague summaries like 'fixes a bug' are useless. Don't pad to a fixed length; pack signal."
+                    "minLength": 1,
+                    "maxLength": MEMORY_DESCRIPTION_MAX_CHARS,
+                    "description": (
+                        "Write first: dense sentence front-loading searchable "
+                        "symptom, symbol/file, and verified fix/rule; drives "
+                        "search and prefetch."
+                    ),
                 },
                 "name": {
                     "type": "string",
-                    "description": "Short descriptive name for the memory"
+                    "minLength": 1,
+                    "maxLength": MEMORY_NAME_MAX_CHARS,
+                    "description": "Short descriptive title."
                 },
                 "body": {
                     "type": "string",
-                    "description": "Concise reusable evidence as skimmable Markdown, never a conversation or reasoning recap. Include the verified context, concrete rule/fix, and evidence/test that established it."
+                    "minLength": 1,
+                    "maxLength": MEMORY_BODY_MAX_CHARS,
+                    "description": (
+                        "Concise Markdown: context, reusable rule/fix, and "
+                        "verification evidence; no chat/reasoning recap."
+                    ),
                 },
                 "tags": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional tags for categorization (e.g. ['python', 'testing', 'convention'])"
+                    "maxItems": MEMORY_TAG_MAX_ITEMS,
+                    "uniqueItems": True,
+                    "items": {
+                        "type": "string", "minLength": 1,
+                        "maxLength": MEMORY_TAG_MAX_CHARS,
+                    },
+                    "description": "Optional category tags."
                 },
                 "scope": {
                     "type": "string",
                     "enum": ["global", "project"],
-                    "description": "Where to store the memory: 'global' (all projects) or 'project' (current project only). Default: 'project'"
+                    "description": (
+                        "global applies across projects; project only to the "
+                        "current project. Default: project"
+                    ),
                 }
             },
-            "required": ["description", "name", "body"]
+            "required": ["description", "name", "body"],
+            "additionalProperties": False,
         }
     }
 }
@@ -53,36 +88,52 @@ UPDATE_MEMORY_TOOL = {
     "function": {
         "name": "update_memory",
         "description": (
-            "Update an existing memory's content, description, or tags. "
-            "Use this when you discover new information that extends or corrects "
-            "an existing memory, or when a memory's description needs improvement."
+            "Correct or extend an existing memory's search description, title, "
+            "full body, or tags."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Generated FIRST. New ONE dense ~120-char sentence front-loading search triggers (symptom, symbol/file, fix/rule) — the primary ranking signal for search and prefetch."
+                    "maxLength": MEMORY_DESCRIPTION_MAX_CHARS,
+                    "description": (
+                        "Write first: one dense sentence front-loading symptom, "
+                        "symbol/file, and verified fix/rule for search/prefetch."
+                    ),
                 },
                 "memory_id": {
                     "type": "string",
-                    "description": "The ID of the memory to update (the memory's filename without .md, as shown in a search_memories result or the injected <relevant_memories> block)"
+                    "minLength": 1,
+                    "maxLength": MEMORY_ID_MAX_CHARS,
+                    "description": (
+                        "ID from search_memories or <relevant_memories>."
+                    ),
                 },
                 "name": {
                     "type": "string",
-                    "description": "New name for the memory (optional)"
+                    "minLength": 1,
+                    "maxLength": MEMORY_NAME_MAX_CHARS,
+                    "description": "New title."
                 },
                 "body": {
                     "type": "string",
-                    "description": "New full memory content in Markdown (optional)"
+                    "maxLength": MEMORY_BODY_MAX_CHARS,
+                    "description": "New complete Markdown body; replaces the old body."
                 },
                 "tags": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "New tags for categorization (optional)"
+                    "maxItems": MEMORY_TAG_MAX_ITEMS,
+                    "uniqueItems": True,
+                    "items": {
+                        "type": "string", "minLength": 1,
+                        "maxLength": MEMORY_TAG_MAX_CHARS,
+                    },
+                    "description": "Complete replacement tag list."
                 }
             },
-            "required": ["memory_id"]
+            "required": ["memory_id"],
+            "additionalProperties": False,
         }
     }
 }
@@ -91,20 +142,19 @@ DELETE_MEMORY_TOOL = {
     "type": "function",
     "function": {
         "name": "delete_memory",
-        "description": (
-            "Remove an outdated, incorrect, or duplicate memory. "
-            "Use this when a memory is completely obsolete, contains harmful "
-            "misinformation, or is a duplicate of another better memory."
-        ),
+        "description": "Delete an obsolete, incorrect, or duplicate memory.",
         "parameters": {
             "type": "object",
             "properties": {
                 "memory_id": {
                     "type": "string",
-                    "description": "The ID of the memory to delete"
+                    "minLength": 1,
+                    "maxLength": MEMORY_ID_MAX_CHARS,
+                    "description": "Memory ID to delete."
                 }
             },
-            "required": ["memory_id"]
+            "required": ["memory_id"],
+            "additionalProperties": False,
         }
     }
 }
@@ -114,42 +164,62 @@ MERGE_MEMORY_TOOL = {
     "function": {
         "name": "merge_memories",
         "description": (
-            "Combine multiple overlapping or related memories into one consolidated memory. "
-            "The original memories are deleted after merging. Use this when two or more "
-            "memories cover similar topics and would be better as a single comprehensive memory."
+            "Consolidate 2–32 overlapping memories, then delete originals. "
+            "Use when one replacement is clearer; deletion failures are reported."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "memory_ids": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of memory IDs to merge (at least 2)"
+                    "minItems": 2,
+                    "maxItems": MEMORY_MERGE_MAX_ITEMS,
+                    "uniqueItems": True,
+                    "items": {
+                        "type": "string", "minLength": 1,
+                        "maxLength": MEMORY_ID_MAX_CHARS,
+                    },
+                    "description": "Unique source memory IDs."
                 },
                 "description": {
                     "type": "string",
-                    "description": "Generated FIRST. ONE dense ~120-char sentence front-loading the merged memory's search triggers (symptom, symbol/file, fix/rule) — the primary ranking signal for search and prefetch."
+                    "minLength": 1,
+                    "maxLength": MEMORY_DESCRIPTION_MAX_CHARS,
+                    "description": (
+                        "Write first: dense sentence front-loading merged search "
+                        "triggers and the verified rule."
+                    ),
                 },
                 "name": {
                     "type": "string",
-                    "description": "Name for the merged memory"
+                    "minLength": 1,
+                    "maxLength": MEMORY_NAME_MAX_CHARS,
+                    "description": "Merged memory title."
                 },
                 "body": {
                     "type": "string",
-                    "description": "The consolidated memory content in Markdown — combine the best parts of all source memories"
+                    "minLength": 1,
+                    "maxLength": MEMORY_BODY_MAX_CHARS,
+                    "description": "Complete consolidated Markdown body."
                 },
                 "tags": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Tags for the merged memory (optional — if omitted, tags from all source memories are combined)"
+                    "maxItems": MEMORY_TAG_MAX_ITEMS,
+                    "uniqueItems": True,
+                    "items": {
+                        "type": "string", "minLength": 1,
+                        "maxLength": MEMORY_TAG_MAX_CHARS,
+                    },
+                    "description": "Merged tags; omit to union source tags."
                 },
                 "scope": {
                     "type": "string",
                     "enum": ["global", "project"],
-                    "description": "Where to store the merged memory: 'global' or 'project'. Default: 'project'"
+                    "description": "Destination scope. Default: project"
                 }
             },
-            "required": ["memory_ids", "description", "name", "body"]
+            "required": ["memory_ids", "description", "name", "body"],
+            "additionalProperties": False,
         }
     }
 }
@@ -159,32 +229,30 @@ SEARCH_MEMORIES_TOOL = {
     "function": {
         "name": "search_memories",
         "description": (
-            "Search your accumulated memories (past experiences, bug patterns, "
-            "project conventions, workflow recipes) by keyword. "
-            "Use this NARROWLY: when you suspect THIS project has an established "
-            "convention you've forgotten, or a logged lesson applies to the current "
-            "problem. Do NOT use this as a generic discovery step — if the user "
-            "mentions a local file path, use read_files/find_files or a plain ls "
-            "through run_command; if they ask about "
-            "an external project / library / product, use web_search or read its "
-            "local copy. A `<relevant_memories>` block, when present, was already "
-            "prefetched for this turn — don't re-search the same topic. "
-            "Installed skill packages are NOT memories and are not in this corpus — "
-            "see the <available_skills> block and use load_skill for those."
+            "Search durable lessons narrowly when this project may have an "
+            "established convention or past fix. Not for local files "
+            "(read/find/run_command), external facts (web), an already-prefetched "
+            "<relevant_memories> topic, or skills (load_skill)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search keywords — use specific terms related to what you're looking for (e.g. 'flask blueprint circular import', 'NCCL socket retry', 'cache invalidation pattern')"
+                    "minLength": 1,
+                    "maxLength": MEMORY_SEARCH_QUERY_MAX_CHARS,
+                    "description": "Specific symptom, symbol/file, fix, or rule keywords."
                 },
                 "top_k": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 30)"
+                    "minimum": MEMORY_SEARCH_TOP_K_MIN,
+                    "maximum": MEMORY_SEARCH_TOP_K_MAX,
+                    "default": MEMORY_SEARCH_TOP_K_DEFAULT,
+                    "description": "Maximum results."
                 }
             },
-            "required": ["query"]
+            "required": ["query"],
+            "additionalProperties": False,
         }
     }
 }

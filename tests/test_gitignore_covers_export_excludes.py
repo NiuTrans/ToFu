@@ -62,6 +62,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EXTRA_KEEPERS = {
     'export.py',                                 # export infra (sanitization patterns)
     'CLAUDE.md',                                 # agent-rules doc (stripped from public)
+    'JOURNAL.md',                                # internal evolution journal (public history ships via CHANGELOG.md)
+    'android/JOURNAL.md',                        # same internal-journal contract as the root JOURNAL.md
     'static/provider_templates/meituan.json',    # functional internal provider template
     # Dir-placeholder: export strips ALL of uploads/ (runtime data), but this
     # 0-byte marker stays tracked so the dir exists in a fresh checkout. It is
@@ -116,6 +118,14 @@ _EXTRA_KEEPERS = {
 # (not a bare `_candidates` glob), so it cannot silently absorb an unrelated dir.
 _KEEPER_PREFIXES = (
     'static/icons/_gen/tofu-pet/_candidates/',
+    # The export toolchain itself. Tracked in the private repo because it IS
+    # the release tool, but never published: export_pkg/_lists.py carries
+    # private markers (real API keys, Feishu secrets, internal
+    # usernames/domains) as sanitization patterns, so the whole package is in
+    # OPENSOURCE_EXTRA_EXCLUDE_DIRS. Same contract as the export.py keeper
+    # above (ALWAYS_EXCLUDE_FILES) — registered as a prefix so adding a
+    # module to the package never requires editing this list.
+    'export_pkg/',
 )
 
 
@@ -298,12 +308,15 @@ def test_neuter_guard_has_teeth():
 
 
 def test_neuter_keeper_prefix_is_load_bearing():
-    """Empty ONLY the prefix list → the pet masters must resurface as offenders.
+    """Empty ONLY the prefix list → every prefix-covered subtree must resurface
+    as offenders (pet masters, export_pkg/ toolchain).
 
     Distinct from the neuter above, which empties everything at once and so
-    cannot tell WHICH mechanism did the work. This proves the prefix specifically
-    is what covers the 16 raw masters, so a future edit that drops it fails here
-    with a pointed message instead of silently re-opening the drift.
+    cannot tell WHICH mechanism did the work. This proves the prefixes
+    specifically are what cover those tracked files, so a future edit that
+    drops one fails here with a pointed message instead of silently re-opening
+    the drift. Offenders must be exactly the union of the registered prefixes'
+    subtrees — anything else means the exact-path keepers drifted.
     """
     _require_git_repo()
     export = pytest.importorskip('export', reason='export.py not shipped')
@@ -316,9 +329,10 @@ def test_neuter_keeper_prefix_is_load_bearing():
         assert offenders, (
             'emptying the keeper PREFIX list produced no offenders — the prefix '
             'mechanism is not load-bearing (are the masters still tracked?)')
-        assert all('_candidates/' in o for o in offenders), (
-            'the prefix should cover exactly the master-art subtree; other '
-            f'offenders appeared, so the exact-path keepers have drifted: {offenders[:5]}')
+        assert all(any(o.startswith(p) for p in real_prefixes) for o in offenders), (
+            'the prefixes should cover exactly their documented subtrees; other '
+            'offenders appeared, so the exact-path keepers have drifted: '
+            f'{offenders[:5]}')
     finally:
         globals()['_KEEPER_PREFIXES'] = real_prefixes
     assert not _offenders(export, tracked)

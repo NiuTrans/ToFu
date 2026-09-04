@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode('open')]
@@ -96,7 +98,7 @@ def test_no_marker_creates_turn_and_forwards_abort_after_ts(flask_client,
     assert resp.status_code == 200
     body = resp.get_json()
     assert body.get('aborted') is not True
-    assert body['turn']['status'] == 'running'
+    assert body['turn']['status'] == 'pending'
     assert isinstance(captured.get('abort_after_ts'), float)
 
 
@@ -160,6 +162,125 @@ def test_start_attempt_forwards_abort_after_ts(monkeypatch):
     assert captured.get('abort_after_ts') == 123.0
     assert captured['order'] == [
         'registered', 'durable-bind', 'worker-started',
+    ]
+
+
+def test_same_process_claim_replay_cannot_launch_two_executors(monkeypatch):
+    """A lost-ACK retry may replay its claim, but launch stays single-owner."""
+    import lib.conversation_sync.command_service as command_module
+    from lib.conversation_sync.command_service import ConversationTurnCommandService
+
+    state_lock = threading.Lock()
+    first_start_entered = threading.Event()
+    release_first_start = threading.Event()
+    state = {'bound': False, 'starts': 0}
+
+    def claim(_attempt_id, *, user_id):
+        del user_id
+        with state_lock:
+            return not state['bound']
+
+    def bind(_attempt_id, task_id, *, user_id):
+        del user_id
+        with state_lock:
+            state['bound'] = True
+        return {'attemptId': 'att-race', 'taskId': task_id}
+
+    def start_task(_conv_id, _config, _data, _abort_after, on_registered):
+        with state_lock:
+            state['starts'] += 1
+            start_number = state['starts']
+        if start_number == 1:
+            first_start_entered.set()
+            assert release_first_start.wait(2)
+        on_registered('task-race')
+        return 'task-race', None
+
+    monkeypatch.setattr(command_module, 'claim_attempt_start', claim)
+    monkeypatch.setattr(command_module, 'bind_task', bind)
+    service = ConversationTurnCommandService(
+        build_user_message=lambda *args: {},
+        was_aborted_after=lambda *args: False,
+        start_task=start_task,
+    )
+    result = {
+        '_needsStart': True,
+        'turn': {
+            'turnId': 'turn-race', 'conversationId': 'conv-race',
+            'actor': 'assistant', 'kind': 'reply', 'projection': {},
+        },
+        'attempt': {'attemptId': 'att-race', 'operation': 'generate'},
+    }
+    errors = []
+
+    def dispatch():
+        try:
+            service._start_accepted_attempt(
+                result, 7, {}, {}, abort_after_ts=123.0,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion carrier
+            errors.append(exc)
+
+    first = threading.Thread(target=dispatch)
+    second = threading.Thread(target=dispatch)
+    first.start()
+    assert first_start_entered.wait(2)
+    second.start()
+    release_first_start.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert state['starts'] == 1
+
+
+def test_media_draft_is_retained_only_after_turn_commit(monkeypatch):
+    import lib.conversation_sync.command_service as command_module
+    from lib.conversation_sync.command_service import ConversationTurnCommandService
+
+    order = []
+
+    def create_pair(*args, **kwargs):
+        order.append('turn-committed')
+        return {
+            '_needsStart': False,
+            'turn': {'turnId': 'turn-output'},
+            'attempt': {'attemptId': 'attempt-output'},
+        }
+
+    monkeypatch.setattr(command_module, 'create_turn_pair', create_pair)
+    monkeypatch.setattr(
+        command_module, 'get_turn',
+        lambda *args, **kwargs: {'turnId': 'turn-output'})
+    monkeypatch.setattr(
+        command_module, 'get_attempt',
+        lambda *args, **kwargs: {'attemptId': 'attempt-output'})
+    monkeypatch.setattr(
+        command_module, 'get_conversation_revision',
+        lambda *args, **kwargs: 2)
+
+    service = ConversationTurnCommandService(
+        build_user_message=lambda *args: {
+            'content': 'inspect it',
+            'attachments': [{'attachmentId': 'media-draft'}],
+        },
+        was_aborted_after=lambda *args: False,
+        start_task=lambda *args: ('', None),
+        retain_attachments=lambda projection, user_id: order.append(
+            ('attachment-retained', projection['attachments'][0]['attachmentId'],
+             user_id)),
+    )
+
+    service.create_turn(
+        'conversation', 7,
+        {'commandId': 'command', 'message': {'text': 'inspect it'},
+         'config': {}},
+        request_started_at=1.0,
+    )
+
+    assert order == [
+        'turn-committed', ('attachment-retained', 'media-draft', 7),
     ]
 
 
@@ -259,6 +380,49 @@ def test_abort_by_task_id_denies_foreign_registry_task(flask_client):
         response = flask_client.post(f'/api/v1/chat/abort/{task_id}')
         assert response.status_code == 404
         assert task['aborted'] is False
+    finally:
+        with tasks_lock:
+            tasks.pop(task_id, None)
+
+
+def test_abort_by_task_id_cancels_and_settles_a_queued_task(
+        flask_client, monkeypatch):
+    import threading
+
+    from tests.support.chat_tasks import (
+        chat_task_fixture_guard as tasks_lock,
+        chat_task_registry as tasks,
+    )
+
+    task_id = 'queued-abort-task'
+    task = {
+        'id': task_id,
+        'convId': 'queued-abort-conv',
+        '_userId': 1,
+        'aborted': False,
+        'status': 'pending',
+        'abort_event': threading.Event(),
+        'created_at': 1.0,
+    }
+    cancelled = []
+    finalized = []
+    monkeypatch.setattr(
+        'lib.tasks_pkg.spawn.cancel_queued_task',
+        lambda candidate: cancelled.append(candidate) or True,
+    )
+    monkeypatch.setattr(
+        'lib.tasks_pkg.manager.finalize_chat_task_aborted',
+        lambda owner: finalized.append(owner),
+    )
+    with tasks_lock:
+        tasks[task_id] = task
+    try:
+        response = flask_client.post(f'/api/v1/chat/abort/{task_id}')
+        assert response.status_code == 200
+        assert cancelled == [task_id]
+        assert finalized == [task]
+        assert task['aborted'] is True
+        assert task['abort_event'].is_set()
     finally:
         with tasks_lock:
             tasks.pop(task_id, None)

@@ -74,6 +74,14 @@ def test_sidecar_event_backlog_drains_separate_bounded_batches(monkeypatch):
                for call in client.calls)
     assert all(call[1]['retention_class'] == 'streaming'
                for call in client.calls)
+    assert all(call[1]['limit'] == event_log._PRUNE_BATCH_ROWS
+               for call in client.calls)
+    assert all(
+        call[1]['legacy_recovery_limit']
+        == event_log._LEGACY_EVENT_RECOVERY_ROWS
+        for call in client.calls
+    )
+    assert event_log._LEGACY_EVENT_RECOVERY_ROWS > event_log._PRUNE_BATCH_ROWS
     assert all(call[3]['priority'] == 'maintenance'
                for call in client.calls)
 

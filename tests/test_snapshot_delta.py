@@ -1,7 +1,8 @@
 """Snapshot delta storage (Request Inspector P5) — pytest suite.
 
-Design: docs/FRONTEND_ARCHITECTURE.md §10 (format FROZEN). The owner's
-acceptance criteria drive these tests:
+Design: docs/FRONTEND_ARCHITECTURE.md §10 (v1 format frozen; v2 is explicitly
+versioned and backward-compatible). The owner's acceptance criteria drive
+these tests:
 
   1. ROUNDTRIP FIDELITY — rebuild(project(x)) == x byte-for-byte
      (canonical JSON), for a realistic multi-round task. This is the
@@ -35,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.tasks_pkg.snapshot_delta import (  # noqa: E402
     SnapshotProjector,
+    content_hash,
     prefix_hash,
     rebuild_snapshots,
     shared_prefix_len,
@@ -93,6 +95,75 @@ def _project_all(payloads, task_id='t1'):
     return rows
 
 
+def _interleaved_request_state_rounds(n_rounds=8):
+    """Real ordering: request Rn, post-tool state Rn+1, request Rn+1."""
+    request_tools = _tools(5)
+    state_tools = _tools(7)
+    messages = [
+        {'role': 'system', 'content': 'S' * 2000},
+        {'role': 'user', 'content': 'U' * 500},
+    ]
+    out = []
+    for r in range(1, n_rounds + 1):
+        out.append({
+            'type': 'messages_snapshot', 'kind': 'request',
+            'roundNum': r, 'model': 'm-x',
+            'messages': [dict(message) for message in messages],
+            'tools': request_tools,
+        })
+        messages = messages + [
+            {'role': 'assistant', 'content': f'A{r}' * 300,
+             'tool_calls': [{
+                 'id': f'call_{r}', 'type': 'function',
+                 'function': {'name': 'tool_1', 'arguments': '{}'},
+             }]},
+            {'role': 'tool', 'tool_call_id': f'call_{r}',
+             'content': f'T{r}' * 800},
+        ]
+        out.append({
+            'type': 'messages_snapshot', 'kind': 'state',
+            'roundNum': r + 1, 'model': 'm-x',
+            'messages': [dict(message) for message in messages],
+            'tools': state_tools,
+        })
+    return out
+
+
+def _legacy_kind_project_all(payloads, task_id='legacy-task'):
+    """Frozen v1 writer used to prove old kind-scoped rows still rebuild."""
+    previous = {}
+    known_tools = set()
+    rows = []
+    for payload in payloads:
+        out = {
+            key: value for key, value in payload.items()
+            if key not in ('messages', 'tools')
+        }
+        tools = payload.get('tools')
+        if isinstance(tools, list) and tools:
+            tools_hash = content_hash(tools)
+            out['toolsHash'] = tools_hash
+            out['toolsCount'] = len(tools)
+            if tools_hash not in known_tools:
+                known_tools.add(tools_hash)
+                out['tools'] = tools
+        else:
+            out['toolsCount'] = 0
+        messages = payload.get('messages') or []
+        key = (task_id, payload.get('turn') or '',
+               payload.get('kind') or 'request')
+        prior = previous.get(key)
+        shared = shared_prefix_len(prior, messages) if prior is not None else 0
+        out['prefixLen'] = shared
+        out['prefixHash'] = prefix_hash(messages, shared)
+        out['messageCount'] = len(messages)
+        if messages[shared:]:
+            out['newMessages'] = messages[shared:]
+        previous[key] = list(messages)
+        rows.append({'type': out['type'], 'payload': out})
+    return rows
+
+
 def test_roundtrip_is_byte_identical():
     """★ THE MIGRATION GATE: rebuild(project(x)) == x, canonical-JSON exact."""
     originals = _task_rounds(8)
@@ -107,6 +178,75 @@ def test_roundtrip_is_byte_identical():
             f'round {orig["roundNum"]} tools diverged')
         for k in ('kind', 'roundNum', 'model', 'params', 'label'):
             assert got.get(k) == orig.get(k), f'metadata {k} lost'
+
+
+def test_v2_interleaved_kinds_share_one_turn_baseline_exactly():
+    originals = _interleaved_request_state_rounds(5)
+    rows = _project_all(originals)
+    snapshots = [row['payload'] for row in rows]
+
+    assert all(snapshot.get('snapshotDeltaVersion') == 2
+               for snapshot in snapshots)
+    assert snapshots[0]['prefixLen'] == 0
+    assert snapshots[1]['prefixLen'] == 2
+    # The next request is byte-identical to the preceding post-tool state.
+    assert snapshots[2]['prefixLen'] == snapshots[2]['messageCount'] == 4
+    assert 'newMessages' not in snapshots[2]
+
+    rebuilt = rebuild_snapshots(rows)
+    assert len(rebuilt) == len(originals)
+    for original, restored in zip(originals, rebuilt):
+        assert not restored.get('degraded')
+        assert _canon(restored['messages']) == _canon(original['messages'])
+        assert _canon(restored['tools']) == _canon(original['tools'])
+        assert restored['kind'] == original['kind']
+        assert 'snapshotDeltaVersion' not in restored
+
+
+def test_v2_interleaved_kind_storage_budget_beats_frozen_v1():
+    originals = _interleaved_request_state_rounds(60)
+    v1_rows = _legacy_kind_project_all(originals)
+    v2_rows = _project_all(originals)
+    v1_bytes = sum(len(_canon(row['payload'])) for row in v1_rows)
+    v2_bytes = sum(len(_canon(row['payload'])) for row in v2_rows)
+    assert v2_bytes <= v1_bytes * 0.75, (
+        f'shared turn baseline saved only {1 - v2_bytes / v1_bytes:.1%}')
+
+
+def test_frozen_v1_kind_scoped_rows_remain_exactly_rebuildable():
+    originals = _interleaved_request_state_rounds(5)
+    rows = _legacy_kind_project_all(originals)
+    assert all('snapshotDeltaVersion' not in row['payload'] for row in rows)
+
+    rebuilt = rebuild_snapshots(rows)
+    for original, restored in zip(originals, rebuilt):
+        assert not restored.get('degraded')
+        assert _canon(restored['messages']) == _canon(original['messages'])
+        assert _canon(restored['tools']) == _canon(original['tools'])
+
+
+def test_restart_boundary_mixes_frozen_v1_and_self_contained_v2_exactly():
+    originals = _interleaved_request_state_rounds(6)
+    split = 6
+    v1_rows = _legacy_kind_project_all(originals[:split])
+    # A restarted process has no prior v2 baseline, so its first row carries
+    # prefixLen=0 and never depends on the earlier v1 chain.
+    v2_rows = _project_all(originals[split:], task_id='legacy-task')
+    assert v2_rows[0]['payload']['prefixLen'] == 0
+
+    rebuilt = rebuild_snapshots(v1_rows + v2_rows)
+    for original, restored in zip(originals, rebuilt):
+        assert not restored.get('degraded')
+        assert _canon(restored['messages']) == _canon(original['messages'])
+        assert _canon(restored['tools']) == _canon(original['tools'])
+
+
+def test_unknown_snapshot_delta_version_degrades_honestly():
+    rows = _project_all(_interleaved_request_state_rounds(1))
+    rows[0]['payload']['snapshotDeltaVersion'] = 999
+    rebuilt = rebuild_snapshots(rows)
+    assert rebuilt[0]['degraded'] is True
+    assert 'version' in rebuilt[0]['degradedReason']
 
 
 def test_tools_stored_once_and_messages_are_deltas():
@@ -243,6 +383,42 @@ def test_shared_prefix_helpers():
     assert shared_prefix_len(a, a[:2] + [{'z': 99}]) == 2
     assert shared_prefix_len([], a) == 0
     assert prefix_hash(a, 0) == prefix_hash([], 0)
+
+
+def test_projector_fuses_canonical_message_scans(monkeypatch):
+    """Each current message is canonicalized once, independent of prefix."""
+    import lib.tasks_pkg.snapshot_delta as snapshot_delta
+
+    payloads = _task_rounds(2)
+    for payload in payloads:
+        payload.pop('tools', None)
+    calls = []
+    original_canon = snapshot_delta._canon
+
+    def counted(value):
+        calls.append(value)
+        return original_canon(value)
+
+    monkeypatch.setattr(snapshot_delta, '_canon', counted)
+    projector = SnapshotProjector()
+    rows = [projector.project('fused-scan', payload) for payload in payloads]
+    assert len(calls) == sum(len(payload['messages']) for payload in payloads)
+    assert rows[1]['prefixHash'] == prefix_hash(
+        payloads[1]['messages'], rows[1]['prefixLen'])
+
+
+def test_projector_retains_only_content_free_message_fingerprints():
+    projector = SnapshotProjector()
+    payload = _task_rounds(1)[0]
+    payload['messages'][0]['content'] = 'private-prompt-' + 'x' * 20_000
+    projector.project('fingerprint-memory', payload)
+
+    retained = projector._prev_message_fingerprints
+    fingerprints = next(iter(retained.values()))
+    assert len(fingerprints) == len(payload['messages'])
+    assert all(isinstance(value, bytes) and len(value) == 32
+               for value in fingerprints)
+    assert 'private-prompt' not in repr(retained)
 
 
 def test_neuter_tools_dedup_breaks_compression_not_roundtrip():

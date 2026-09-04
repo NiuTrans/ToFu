@@ -285,9 +285,58 @@ def test_floorretry_first_attempt_orphan_reconciled(monkeypatch):
     # The orchestrator layer's reconcile (above FloorRetry) settles the orphan.
     n = acc.reconcile_announced_rounds(msg)
     assert n == 1, f'reconcile must settle the FloorRetry first-attempt orphan; settled={n}'
-    assert acc.announced_tc_map['tc_A'][1]['status'] == 'aborted'
+    assert task['toolRounds'][0]['status'] == 'aborted'
     # And it carries NO toolContent, so Layer-2 drops it from model history.
-    assert acc.announced_tc_map['tc_A'][1].get('toolContent') is None
+    assert task['toolRounds'][0].get('toolContent') is None
+
+
+def test_transport_restart_retires_tool_only_attempt_state(monkeypatch):
+    """The manager retry callback retires tools even when no text was emitted."""
+    import threading as _thr2
+    import lib.tasks_pkg.manager._stream as _mgr
+    from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+    task = {
+        'id': 'task-tool-retry', 'convId': 'conv-tool-retry', '_userId': OWNER,
+        'content': '', 'thinking': '', 'config': {}, 'events': [],
+        'toolRounds': [], 'content_lock': _thr2.Lock(),
+        'events_lock': _thr2.Lock(),
+    }
+    acc = StreamingToolAccumulator(
+        task, project_path='/tmp', round_num=0, project_enabled=True)
+    replacement = {
+        'id': 'write_file_0', 'type': 'function',
+        'function': {
+            'name': 'write_file',
+            'arguments': '{"path":"new.txt","content":"new"}',
+        },
+    }
+
+    def _fake_dispatch(body, **kwargs):
+        kwargs['on_tool_call_ready']({
+            'id': 'write_file_0', 'type': 'function',
+            'function': {
+                'name': 'write_file',
+                'arguments': '{"path":"old.txt","content":"old"}',
+            },
+        })
+        kwargs['on_attempt_restart'](reason='injected transport retry')
+        kwargs['on_tool_call_ready'](replacement)
+        return ({'role': 'assistant', 'tool_calls': [replacement]},
+                'tool_calls', {})
+
+    monkeypatch.setattr(_mgr, 'dispatch_stream', _fake_dispatch)
+    msg, _finish, _usage = _mgr.stream_llm_response(
+        task, _body(), tag='R1',
+        on_tool_call_ready=acc.on_tool_call_ready)
+
+    assert replacement['id'] != 'write_file_0'
+    assert acc.reconcile_announced_rounds(msg) == 1
+    assert [row['status'] for row in task['toolRounds']] == [
+        'aborted', 'searching',
+    ]
+    assert set(acc.announced_tc_map) == {replacement['id']}
+    acc.inject_into_cache(task)  # deterministic pool shutdown
 
 
 def test_stream_stamps_floor_retry_adopted_marker(monkeypatch):
@@ -392,7 +441,7 @@ def test_reconcile_logs_true_cause_floor_retry_vs_stream_retry(monkeypatch):
     assert ev1 and ev1[0].get('cause') == 'floor_retry_adoption', (
         f'marker True must audit floor_retry_adoption; got {ev1}')
     # The husk snippet reflects the resend-adoption cause, not stream reconnect.
-    husk1 = acc1.announced_tc_map['tc_A'][1]['results'][0]
+    husk1 = acc1._task['toolRounds'][0]['results'][0]
     assert 'resend' in husk1['snippet'].lower(), (
         f'FloorRetry husk snippet must mention the resend; got {husk1["snippet"]!r}')
 

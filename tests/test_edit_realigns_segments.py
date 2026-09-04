@@ -77,3 +77,14 @@ def test_edit_appends_a_missing_terminal_deliverable():
     assert updated[-1]["deliverable"] is True
     assert derive_content(updated) == "NEW ANSWER"
     assert apply_edited_deliverable(partial, "") is None
+
+
+def test_edit_isolates_malformed_segment_siblings():
+    from lib.tasks_pkg.segments import apply_edited_deliverable, derive_content
+
+    updated = apply_edited_deliverable(
+        [None, "broken", *_segments_with_terminal()], "SAFE ANSWER")
+
+    assert updated is not None
+    assert derive_content(updated) == "SAFE ANSWER"
+    assert all(isinstance(segment, dict) for segment in updated)

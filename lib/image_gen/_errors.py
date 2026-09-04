@@ -8,7 +8,6 @@ generator falls back to when the API returns a URL instead of inline base64.
 
 import os
 
-from lib.http_client import http_get
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -16,6 +15,7 @@ logger = get_logger(__name__)
 # Image-gen API base — fallback only; prefer slot-derived base from dispatch.
 # Used when no provider-specific base_url is available from the slot.
 _IMAGE_GEN_BASE_DEFAULT = os.environ.get('IMAGE_GEN_BASE_URL', '')
+_MAX_GENERATED_IMAGE_BYTES = 32 * 1024 * 1024
 
 
 class _RateLimitError(Exception):
@@ -36,11 +36,33 @@ def _download_image(url: str, default_mime: str = 'image/png') -> tuple:
     """Download an image URL and return (base64_str, mime_type)."""
     try:
         import base64 as _b64
+        from lib.http_client import http_stream
         logger.info('[ImageGen] Downloading image from URL: %.120s', url)
-        img_resp = http_get(url, timeout=30)
-        img_resp.raise_for_status()
-        image_b64 = _b64.b64encode(img_resp.content).decode('ascii')
-        ct = img_resp.headers.get('Content-Type', '')
+        raw = bytearray()
+        with http_stream('GET', url, timeout=30) as img_resp:
+            img_resp.raise_for_status()
+            declared_raw = img_resp.headers.get('Content-Length')
+            try:
+                declared = (int(declared_raw)
+                            if declared_raw is not None else None)
+            except (TypeError, ValueError):
+                declared = None
+            if declared is not None and declared > _MAX_GENERATED_IMAGE_BYTES:
+                raise ValueError(
+                    f'generated image declares {declared} bytes; limit is '
+                    f'{_MAX_GENERATED_IMAGE_BYTES}')
+            for chunk in img_resp.iter_content(chunk_size=256 * 1024):
+                if not chunk:
+                    continue
+                if len(raw) + len(chunk) > _MAX_GENERATED_IMAGE_BYTES:
+                    raise ValueError(
+                        f'generated image stream exceeds '
+                        f'{_MAX_GENERATED_IMAGE_BYTES} bytes')
+                raw.extend(chunk)
+            ct = img_resp.headers.get('Content-Type', '')
+        if not raw:
+            raise ValueError('generated image download was empty')
+        image_b64 = _b64.b64encode(raw).decode('ascii')
         if ct.startswith('image/'):
             mime = ct.split(';')[0].strip()
         elif url.endswith(('.jpg', '.jpeg')):
@@ -50,7 +72,7 @@ def _download_image(url: str, default_mime: str = 'image/png') -> tuple:
         else:
             mime = default_mime
         logger.info('[ImageGen] Downloaded %d bytes → %d chars b64, mime=%s',
-                    len(img_resp.content), len(image_b64), mime)
+                    len(raw), len(image_b64), mime)
         return image_b64, mime
     except Exception as dl_e:
         logger.error('[ImageGen] Failed to download image from %s: %s', url, dl_e, exc_info=True)

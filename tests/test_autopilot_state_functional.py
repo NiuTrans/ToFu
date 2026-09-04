@@ -15,6 +15,9 @@ Gaps this file closes vs the pre-slice-1 baseline:
   * ``_get_or_persist_objective`` — was UNCOVERED. All 5 branches:
     empty conv_id, existing pin (early-return, no write), fresh derive+persist,
     no-objective-to-pin (return derived, don't write), conv-row absent (fallback).
+  * ``_update_objective_from_receipt`` — NEW. All 6 branches: empty args,
+    no-pin (never mints), identical pin (skip write), changed pin (overwrite),
+    conv-row absent (silent), exception swallowed (compaction stays green).
   * ``_get_or_persist_run_id`` — was UNCOVERED. All 4 branches:
     empty conv_id (ephemeral), existing pin (no write), fresh mint+persist,
     conv-row absent (ephemeral).
@@ -359,6 +362,70 @@ def test_get_or_persist_objective_exception_falls_back(monkeypatch):
     result = ap_state._get_or_persist_objective(
         'cv-err', [{'role': 'user', 'content': 'fallback ask'}], user_id=1)
     assert result == 'fallback ask'
+
+
+# ══════════════════════════════════════════════════════════
+#  _update_objective_from_receipt — all 6 branches
+# ══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+def test_repin_empty_args_noop(store):
+    """Empty conv_id or empty objective → no write, returns False."""
+    assert ap_state._update_objective_from_receipt('', 'goal', user_id=1) is False
+    assert ap_state._update_objective_from_receipt('cv1', '', user_id=1) is False
+    assert ap_state._update_objective_from_receipt('cv1', '   ', user_id=1) is False
+    assert store.write_count == 0
+
+
+@pytest.mark.unit
+def test_repin_without_existing_pin_never_mints(store):
+    """No autopilotObjective pin → skip. Re-pinning must not create pins for
+    conversations autopilot never ran in (minting is _get_or_persist's job)."""
+    store.ensure('cv1', unrelatedKey='x')
+    assert ap_state._update_objective_from_receipt(
+        'cv1', 'new goal', user_id=1) is False
+    assert store.rows['cv1'] == {'unrelatedKey': 'x'}
+    assert store.skip_count == 1 and store.write_count == 0
+
+
+@pytest.mark.unit
+def test_repin_identical_objective_skips_write(store):
+    store.ensure('cv2', autopilotObjective='same goal')
+    assert ap_state._update_objective_from_receipt(
+        'cv2', 'same goal', user_id=1) is False
+    assert store.rows['cv2']['autopilotObjective'] == 'same goal'
+    assert store.skip_count == 1 and store.write_count == 0
+
+
+@pytest.mark.unit
+def test_repin_changed_objective_overwrites_pin(store):
+    """The goal-replacement path: an L2 receipt's model-authored Objective
+    becomes the VU's new north star."""
+    store.ensure('cv3', autopilotObjective='Build the CSV exporter.')
+    assert ap_state._update_objective_from_receipt(
+        'cv3', 'Rewrite the report as a press release.', user_id=1) is True
+    assert store.rows['cv3']['autopilotObjective'] == (
+        'Rewrite the report as a press release.')
+    assert store.write_count == 1
+
+
+@pytest.mark.unit
+def test_repin_conv_row_absent_silent(monkeypatch):
+    import lib.conversations as conv_pkg
+    monkeypatch.setattr(conv_pkg, 'update_conversation_settings',
+                        lambda *a, **k: None)
+    assert ap_state._update_objective_from_receipt('gone', 'goal', user_id=1) is False
+
+
+@pytest.mark.unit
+def test_repin_exception_swallowed(monkeypatch):
+    """Compaction must never fail because run bookkeeping couldn't update."""
+    import lib.conversations as conv_pkg
+    def _boom(*a, **k):
+        raise RuntimeError('settings store on fire')
+    monkeypatch.setattr(conv_pkg, 'update_conversation_settings', _boom)
+    assert ap_state._update_objective_from_receipt(
+        'cv-err', 'goal', user_id=1) is False
 
 
 # ══════════════════════════════════════════════════════════

@@ -42,6 +42,48 @@ def _fmt(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=1)
 
 
+def _mark_background_task_accepted(task: dict, fn_name: str,
+                                   result: dict, round_num: int) -> None:
+    """Stamp the explicit post-dispatch terminal contract for root chat.
+
+    The worker owns subsequent progress. Asking the model to poll it creates a
+    second state machine, spends provider rounds, and can fabricate completion
+    claims. The root loop consumes this marker immediately after every tool in
+    the current round has settled.
+    """
+    if not isinstance(task, dict) or result.get('ok') is not True:
+        return
+    task_id = str(result.get('task_id') or '')[:80]
+    if not task_id:
+        return
+    lang = str(result.get('lang') or 'zh')
+    labels = {
+        PRODUCE_VIDEO_TOOL_NAME: ('视频', 'video'),
+        PRODUCE_REPORT_TOOL_NAME: ('报告', 'report'),
+        PRODUCE_SLIDES_TOOL_NAME: ('PPT', 'PPT deck'),
+        PRODUCE_RESEARCH_TOOL_NAME: ('研究任务', 'research job'),
+    }
+    zh_label, en_label = labels.get(fn_name, ('后台任务', 'background job'))
+    if lang == 'en':
+        message = (
+            f'The {en_label} is now running in the background (task '
+            f'`{task_id}`). Track it in the task panel; completion and '
+            'artifact quality will be reported there.')
+    else:
+        message = (
+            f'{zh_label} 已在后台开始生成（任务 `{task_id}`）。请在任务面板'
+            '查看进度；完成状态和成品质量会以后台任务结果为准。')
+    task['_backgroundTaskAccepted'] = {
+        'tool': fn_name,
+        'taskId': task_id,
+        'poll': str(result.get('poll') or '')[:240],
+        'download': str(result.get('download') or '')[:240],
+        'deduped': bool(result.get('deduped')),
+        'round': int(round_num) + 1,
+        'message': message,
+    }
+
+
 @tool_registry.tool_set(
     MOTION_VIDEO_TOOL_NAMES,
     category='video',
@@ -142,7 +184,8 @@ def _handle_motion_video_tool(task, tc, fn_name, tc_id, fn_args, rn,
                         voice=fn_args.get('voice') or None,
                         speed=fn_args.get('speed'),
                         alignment=fn_args.get('alignment') or 'loose',
-                        abort_event=abort_event)
+                        abort_event=abort_event,
+                        owner_user_id=task_user_id(task))
                     if result.get('ok'):
                         badge = ('degraded' if result.get('degraded')
                                  else f"{len(result.get('scenes', []))} scenes")
@@ -263,6 +306,9 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
             max_scenes = max(3, min(max_scenes, 12))
             narration = bool(fn_args.get('narration', True))
             model = str(fn_args.get('model') or '').strip()
+            from lib.production.contracts import normalise_creative_mode
+            creative_mode = normalise_creative_mode(
+                fn_args.get('creative_mode'))
 
             job_id = _motion_task_id()
             workdir = _os.path.join(motion_root(), 'jobs', job_id)
@@ -275,6 +321,7 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
             job['topic'] = topic
             job['lang'] = lang
             job['max_scenes'] = max_scenes
+            job['creative_mode'] = creative_mode
             job['kind'] = 'topic'
             if model:
                 job['model'] = model
@@ -304,6 +351,7 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
                     'line) — speed over looks, as requested.')
             result = {'ok': True, 'task_id': job_id, 'topic': topic,
                       'lang': lang, 'aspect': aspect,
+                      'creative_mode': creative_mode,
                       'visual_quality': visual,
                       'quality_hint': quality_hint,
                       'poll': f'/api/v1/motion/videos/poll/{job_id}',
@@ -316,6 +364,7 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
             badge = 'failed'
 
     tool_content = _fmt(result)
+    _mark_background_task_accepted(task, fn_name, result, rn)
     meta = _build_simple_meta(
         fn_name, tool_content, source='Produce', title='video',
         snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',
@@ -371,6 +420,7 @@ def _handle_produce_report(task, tc, fn_name, tc_id, fn_args, rn,
             badge = 'failed'
 
     tool_content = _fmt(result)
+    _mark_background_task_accepted(task, fn_name, result, rn)
     meta = _build_simple_meta(
         fn_name, tool_content, source='Produce', title='report',
         snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',
@@ -401,11 +451,15 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
     else:
         try:
             from lib.slides.engine import start_slides_job
+            from lib.slides.readiness import SlidesRuntimeUnavailable
 
             lang = 'en' if str(fn_args.get('lang') or 'zh').strip() == 'en' \
                 else 'zh'
             style = str(fn_args.get('style') or '').strip()
             model = str(fn_args.get('model') or '').strip()
+            from lib.production.contracts import normalise_creative_mode
+            creative_mode = normalise_creative_mode(
+                fn_args.get('creative_mode'))
             try:
                 max_pages = int(fn_args.get('max_pages') or 12)
             except (TypeError, ValueError) as _e:
@@ -422,11 +476,13 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
             started = start_slides_job(topic, lang=lang, style=style,
                                        max_pages=max_pages, size=size,
                                        conv_id=conv_id, model=model,
+                                       creative_mode=creative_mode,
                                        user_id=task_user_id(task))
             tid = started['task_id']
             result = {'ok': True, 'task_id': tid, 'topic': topic,
                       'lang': lang, 'style': style, 'max_pages': max_pages,
                       'model': model,
+                      'creative_mode': creative_mode,
                       'deduped': started.get('deduped', False),
                       'poll': f'/api/v1/tasks/{tid}',
                       'download': f'/api/v1/slides/{tid}/file',
@@ -434,6 +490,10 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
                               'poll for progress, then download the PPTX '
                               'from the download URL.'}
             badge = 'joined' if started.get('deduped') else 'started'
+        except SlidesRuntimeUnavailable as e:
+            logger.error('[Produce] slides runtime is unavailable: %s', e)
+            result = e.tool_result()
+            badge = 'env-missing'
         except Exception as e:
             logger.error('[Produce] failed to start slides job: %s', e,
                          exc_info=True)
@@ -441,6 +501,7 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
             badge = 'failed'
 
     tool_content = _fmt(result)
+    _mark_background_task_accepted(task, fn_name, result, rn)
     meta = _build_simple_meta(
         fn_name, tool_content, source='Produce', title='slides',
         snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',
@@ -499,7 +560,9 @@ def _handle_edit_slides(task, tc, fn_name, tc_id, fn_args, rn,
                 from lib.slides.author import edit_page
                 lang = ('en' if str(fn_args.get('lang') or 'zh') == 'en'
                         else 'zh')
-                res = edit_page(deck_dir, page - 1, instruction, lang=lang)
+                res = edit_page(
+                    deck_dir, page - 1, instruction, lang=lang,
+                    owner_user_id=task_user_id(task))
                 res['task_id'] = task_id
                 res['download'] = f'/api/v1/slides/{task_id}/file'
                 res['preview_url'] = (f'/api/v1/slides/{task_id}/pages/'
@@ -540,26 +603,24 @@ def _handle_produce_research(task, tc, fn_name, tc_id, fn_args, rn,
     else:
         try:
             from lib.research.api import produce_research
+            from lib.research.contracts import normalize_research_request
 
-            lang = 'zh' if str(fn_args.get('lang') or 'en').strip() == 'zh' else 'en'
-            try:
-                n_ideas = int(fn_args.get('n_ideas') or 6)
-            except (TypeError, ValueError) as _e:
-                logger.debug('handle produce research: unexpected type/unparseable (%s)', _e)
-                n_ideas = 6
-            n_ideas = max(3, min(n_ideas, 12))
-            seeds = fn_args.get('seed_arxiv_ids') or None
-            if seeds is not None and not isinstance(seeds, list):
-                seeds = None
+            request = normalize_research_request(
+                direction, lang=fn_args.get('lang'),
+                n_ideas=fn_args.get('n_ideas'),
+                seed_arxiv_ids=fn_args.get('seed_arxiv_ids'))
             conv_id = ''
             if isinstance(task, dict):
                 conv_id = task.get('conv_id') or task.get('convId') or ''
-            started = produce_research(direction, lang=lang, n_ideas=n_ideas,
-                                       conv_id=conv_id, seed_arxiv_ids=seeds,
-                                       user_id=task_user_id(task))
+            started = produce_research(
+                request.direction, lang=request.lang,
+                n_ideas=request.n_ideas, conv_id=conv_id,
+                seed_arxiv_ids=(list(request.seed_arxiv_ids) or None),
+                user_id=task_user_id(task))
             tid = started['task_id']
-            result = {'ok': True, 'task_id': tid, 'direction': direction,
-                      'lang': lang, 'n_ideas': n_ideas,
+            result = {'ok': True, 'task_id': tid,
+                      'direction': request.direction,
+                      'lang': request.lang, 'n_ideas': request.n_ideas,
                       'deduped': started.get('deduped', False),
                       'poll': f'/api/v1/tasks/{tid}',
                       'note': 'Research is running in the background: the '
@@ -573,6 +634,7 @@ def _handle_produce_research(task, tc, fn_name, tc_id, fn_args, rn,
             badge = 'failed'
 
     tool_content = _fmt(result)
+    _mark_background_task_accepted(task, fn_name, result, rn)
     meta = _build_simple_meta(
         fn_name, tool_content, source='Produce', title='research',
         snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',

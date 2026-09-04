@@ -69,7 +69,7 @@ def fake_row(monkeypatch):
     })
     monkeypatch.setattr(
         _detail, '_read_conversation_snapshot',
-        lambda conversation_id, *, user_id: row)
+        lambda conversation_id, *, user_id, **projection: row)
     return row
 
 
@@ -154,15 +154,10 @@ class TestLibraryDefaultUnchanged:
             'the tool-surface default leaked into the prompt-assembly path')
 
 
-class TestCardAndPayloadAgree:
-    """One resolver, so the rendered badge can never describe the wrong mode."""
+class TestToolPayloadIsTheOnlyResultAuthority:
+    """The handler must not synthesize a second-read display replacement."""
 
-    def _handler_digest(self, fn_args):
-        """Capture the REAL _post_build closure's digest for these args.
-
-        Stubs only ``simple_call`` (the executor seam) so the handler's own
-        digest logic runs for real — mirrors test_conv_ref_raw.py.
-        """
+    def _handler_post_build(self, fn_args):
         import lib.tasks_pkg.handlers.misc._brain as brain
         captured = {}
 
@@ -180,9 +175,7 @@ class TestCardAndPayloadAgree:
                 'get_conversation', 't', fn_args,
                 1, {}, {}, '/tmp/x', False,
             )
-            meta = {}
-            captured['post_build'](meta, 'PAYLOAD', fn_args)
-            return meta.get('convDigest')
+            return captured.get('post_build')
         finally:
             brain.simple_call = orig
 
@@ -192,19 +185,12 @@ class TestCardAndPayloadAgree:
         {'conversation_id': 'c1', 'raw': False},
         {'conversation_id': 'c1', 'raw': 'false'},   # stringified opt-out
     ])
-    def test_badge_matches_the_payload_that_was_returned(self, fake_row, fn_args):
-        digest = self._handler_digest(fn_args)
-        assert digest is not None, 'the human card went missing'
-        badged_raw = digest.get('raw') is True
-        payload_raw = _is_raw(_run_tool(fn_args))
-        assert badged_raw is payload_raw, (
-            f'args={fn_args}: card badge raw={badged_raw} but the payload was '
-            f'raw={payload_raw} — the card describes a mode that never ran')
-
-    def test_default_read_is_badged_raw(self, fake_row):
-        """Concrete floor for the parity test above (which a two-sided
-        regression could satisfy by flipping BOTH to prose)."""
-        assert self._handler_digest({'conversation_id': 'c1'}).get('raw') is True
+    def test_handler_has_no_independent_digest(self, fake_row, fn_args):
+        assert self._handler_post_build(fn_args) is None
+        # The actual payload mode still follows the requested/default contract;
+        # it is simply no longer replaced in the frontend by a later DB read.
+        assert _is_raw(_run_tool(fn_args)) is (fn_args.get('raw') is not False
+                                               and fn_args.get('raw') != 'false')
 
 
 class TestSchemaDescribesTheDefault:
@@ -234,3 +220,33 @@ class TestSchemaDescribesTheDefault:
         assert 'default (raw=false)' not in desc, (
             'the tool description still presents the prose transcript as the '
             'default mode')
+
+    def test_schema_keeps_retrieval_safety_and_window_contracts(self):
+        schema = self._schema()
+        desc = schema['description'].lower()
+        props = schema['parameters']['properties']
+        raw = props['raw']['description'].lower()
+        details = props['include_tool_details']['description'].lower()
+        limit = props['limit']['description'].lower()
+        before = props['before']['description'].lower()
+
+        assert 'explicitly' in desc and 'never call proactively' in desc
+        assert 'raw' in desc and 'defaults to true' in desc
+        assert 'metadata' in desc and 'tool rounds' in desc
+        assert 'raw=false' in desc and 'drops' in desc and 'condenses' in desc
+        assert 'head+tail' in desc and 'whole messages' in desc
+        assert 'delivered n of m' in desc and 'before=n' in desc
+        assert 'default true' in raw and 'all fields' in raw
+        assert 'raw=false' in details and 'default true' in details
+        assert 'whole-message' in limit and 'clamp' in limit and 'header' in limit
+        assert 'exclusive' in before and '1-based' in before
+        assert 'omit for latest' in before and 'never pass 0' in before
+
+    def test_schema_stays_within_always_paid_token_budget(self):
+        from lib.tools.conversation import CONV_REF_GET_TOOL
+        from lib.tools.gateway import tool_schema_tokens
+
+        tokens = tool_schema_tokens([CONV_REF_GET_TOOL])
+        assert tokens <= 350, (
+            f'get_conversation schema costs {tokens} tokens; compact repeated '
+            'raw/window prose without removing its safety or paging contracts')

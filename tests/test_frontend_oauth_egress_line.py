@@ -41,7 +41,7 @@ def test_egress_renderer_explains_every_route_state():
 def test_unknown_routing_state_repolls_silently():
     renderer = _renderer_source()
     assert "egress.state === 'unknown'" in renderer
-    assert '_scheduleEgressRepoll()' in renderer
+    assert '_scheduleOAuthStatusRepoll()' in renderer
 
 
 @pytest.mark.skipif(NODE is None, reason='node is required to execute oauth.js')
@@ -57,7 +57,7 @@ const el = { innerHTML: 'stale', textContent: 'stale',
              style: { display: '' }, className: 'stale' };
 globalThis.document = { getElementById: (id) => id === 'oauthClaudeEgress' ? el : null };
 eval(fs.readFileSync(process.argv[1], 'utf8'));
-globalThis._scheduleEgressRepoll = () => { globalThis.repolled = true; };
+globalThis._scheduleOAuthStatusRepoll = () => { globalThis.repolled = true; };
 const out = {};
 const cases = {
   direct: { state: 'direct', preferred_server_route: 'direct',

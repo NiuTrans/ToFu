@@ -86,8 +86,9 @@ function _optRenderAction(p) {
 }
 
 function _optimizerFeatureEnabled() {
-  if (typeof _featureFlags === "undefined") return true; // optimistic pre-load
-  return _featureFlags.optimizer_enabled !== false;
+  var flags = runtimeScope._featureFlags;
+  if (!flags) return true; // optimistic pre-load
+  return flags.optimizer_enabled !== false;
 }
 
 async function _refreshOptimizerPanel() {
@@ -285,24 +286,6 @@ async function _optimizerRunNow() {
   }
 }
 
-// Bind the badge click handler here (formerly inline onclick in index.html).
-// Inline onclick raced the `defer` script and threw ReferenceError if the
-// user clicked before optimizer.js executed — see logs/error.log spam.
-(function _bindOptimizerBadge() {
-  function bind() {
-    const badge = document.getElementById("optimizerBadge");
-    if (!badge) return;
-    if (badge.dataset.optimizerBound === "1") return;
-    badge.dataset.optimizerBound = "1";
-    badge.addEventListener("click", toggleOptimizerPanel);
-  }
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bind);
-  } else {
-    bind();
-  }
-})();
-
 // Auto-refresh while panel is open (and once on load to populate the badge)
 function _startOptimizerPolling() {
   if (_optimizerPollTimer) return;
@@ -336,4 +319,3 @@ document.addEventListener("click", (e) => {
     if (panel) panel.classList.remove("visible");
   }
 });
-

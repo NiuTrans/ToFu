@@ -4,25 +4,18 @@
 
    Swarm "Parallel Execution" panel rendering + the stuck-panel reconciler.
    This is a self-contained LEAF cluster: it produces panel HTML and runs a
-   self-healing reconciliation sweep. Its public builders are consumed by
+   demand-scoped self-healing reconciler. Its public builders are consumed by
    ui/tool_rounds.js and the typed ConversationSurface adapter.
 
    Contents:
-     _buildSwarmInboxChipsHTML, _SW_SVG, _SW_FILE_WRITE_TOOLS,
+     _SW_SVG, _SW_FILE_WRITE_TOOLS,
      _swAgentModifiedCount, _SW_STATUS_SVG, _SW_STALE_MS, _swStatusIcon,
      _swarmResultsByAgent, _recoverSwarmAgents, _buildSwarmPanelHTML,
-     _buildSwarmDoneHTML, _swarmRoundTaskId, _settleStuckSwarmRound,
-     _reconcileStuckSwarmPanels (+ ticker), _tickSwarmTimers (+ ticker).
+     _swarmRoundTaskId, _settleStuckSwarmRound,
+     _reconcileStuckSwarmPanelsOnce, _tickSwarmTimers (+ typed scheduler).
 
    Concatenated through the runtime manifest; symbols share runtime scope.
    ═══════════════════════════════════════════════════════════════════ */
-
-/* Compatibility seam for callers that may run before the deferred swarm
- * module loads. Inbox updates now have one canonical representation: the
- * chronological `_inboxInject` tool row anchored before the consuming round. */
-function _buildSwarmInboxChipsHTML(_injects) {
-  return "";
-}
 
 /* Inline SVG icon set for the swarm panel — no emoji (CLAUDE.md §3.4).
    `currentColor` lets each icon inherit the surrounding text/status color. */
@@ -66,24 +59,9 @@ const _SW_STATUS_SVG = {
   pending: '<svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="7"/></svg>',
   stale: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>',
 };
-/* Wall-clock age after which an UNSETTLED swarm panel (still flagged
-   _swarmActive / _asyncRunning, no _swarmEndTime) is treated as STALE: a
-   tab that never received the terminal `swarm_phase:complete` event — e.g.
-   the server restarted, or the SSE stream dropped before settling. Beyond
-   any realistic swarm wave, so it only ever fires on a genuine zombie. The
-   active backend probe (_reconcileStuckSwarmPanels) settles such panels
-   sooner when the server is reachable; this is the offline fallback so an
-   open tab still self-corrects visually without a manual refresh. */
+/* Offline fallback for an unsettled panel that lost its terminal push. */
 const _SW_STALE_MS = 30 * 60 * 1000;
-/* How long a backend `active===true` confirmation (stamped on the round by
-   _reconcileStuckSwarmPanels as `_swActiveConfirmedAt`) suppresses the
-   wall-clock staleness guess. The reconciler sweeps every 20s and skips a
-   conv that is actively streaming (its own SSE/poll is authoritative there),
-   so a live long swarm gets re-confirmed each sweep; 90s (>4 sweeps) tolerates
-   a couple of missed/slow sweeps before the age fallback is allowed to speak
-   again. This is what makes `isStale` a genuine OFFLINE residual: it can only
-   fire when the backend fact is ABSENT or STALE (server unreachable), never
-   against a fresh known-active verdict. */
+/* Fresh backend truth suppresses the age guess across several slow checks. */
 const _SW_ACTIVE_CONFIRM_TTL_MS = 90 * 1000;
 function _swStatusIcon(status) {
   if (status === 'done' || status === 'completed') return _SW_STATUS_SVG.done;
@@ -97,10 +75,23 @@ function _swStatusIcon(status) {
    stubs from the persisted `spawn_agents` handle JSON stored in
    `round.toolContent` so the completed panel's body isn't empty when the
    user expands it. Returns [] when no handle is recoverable. */
-/* Persisted swarm results are bare (legacy) or tool-result/v2 items. */
+/* Persisted swarm results are bare (legacy), a full tool-result/v2 envelope,
+   or the sparse {summary, items} model projection — _model_projection in
+   lib/tools/result_envelope.py intentionally drops contractVersion from that
+   projection, so the marker alone cannot gate unwrapping (conv mtgvz7gyrf3pg2:
+   the spawn handle WAS persisted, but marker-gated recovery found no agents
+   and the reloaded panel rendered 子智能体明细未被持久化). */
 function _swarmUnwrapResultPayload(parsed) {
-  const items = parsed?.contractVersion === "tofu.tool-result/v2" && parsed.items;
-  if (!Array.isArray(items)) return parsed;
+  if (!parsed || typeof parsed !== "object") return parsed;
+  /* A bare payload carries its own fields at the top level — never unwrap it. */
+  const barePayload = parsed.agent_id
+    || ["agents", "completed", "results"].some(key => Array.isArray(parsed[key]));
+  const items = !barePayload && Array.isArray(parsed.items)
+    && (parsed.contractVersion === "tofu.tool-result/v2"
+        || (parsed.contractVersion === undefined
+            && typeof parsed.summary === "string"))
+    ? parsed.items : null;
+  if (!items) return parsed;
   const payload = items.find(item => item && typeof item === "object" && (
     item.agent_id || ["agents", "completed", "results"].some(
       key => Array.isArray(item[key])
@@ -228,6 +219,8 @@ function _recoverSwarmAgents(round, allRounds) {
         error: a.error || "",
         tools,
         _toolCalls: toolCalls,
+        _toolCallsOmitted: (typeof a.toolCallsOmitted === "number" && a.toolCallsOmitted > 0)
+          ? a.toolCallsOmitted : 0,
         _startedAt: startedAt || undefined,
         /* Stall evidence persisted by the backend (master._build_agent_snapshot)
            — without carrying it here a reloaded stalled card loses its
@@ -322,7 +315,6 @@ function _swarmCopyAgentId(el, evt) {
   setTimeout(() => el.classList.remove("sw-a-id-copied"), 900);
 }
 function _buildSwarmPanelHTML(round, allRounds) {
-  _swEnsureTicker();
   /* Live path: `_swarmAgents` is populated from swarm_* SSE events.
      Reload path: that field is gone, so recover agents from the persisted
      handle JSON + sibling result rounds — otherwise the completed panel
@@ -349,23 +341,9 @@ function _buildSwarmPanelHTML(round, allRounds) {
       round._swarmEndTime = round._swarmStartTime || Date.now();
     }
   }
-  /* ── Staleness guard (age fallback, OFFLINE residual only) ──
-     A panel still flagged active/async with no frozen end time, whose start is
-     older than _SW_STALE_MS, MIGHT be a zombie: the terminal
-     swarm_phase:complete event never reached this tab (server restart /
-     dropped SSE).
-
-     Root-cause guard (FE-inference-debt #1): the wall-clock age is a GUESS and
-     must NEVER override a known backend fact. _reconcileStuckSwarmPanels probes
-     Api.swarm.status(taskId) and, when the backend reports `active===true`,
-     stamps `_swActiveConfirmedAt` on the round. While that confirmation is
-     fresh, the swarm is AUTHORITATIVELY still alive (a big multi-agent wave can
-     legitimately run well past 30 min) — so we suppress the age guess entirely.
-     The age fallback is thus reachable ONLY when NO fresh backend fact exists
-     (server unreachable → the reconciler's probe returned null / never ran), so
-     an open offline tab still self-corrects a genuine zombie without a manual
-     refresh, exactly as before — but a genuinely long, backend-confirmed-alive
-     swarm is never mislabeled "Stale". */
+  /* Wall-clock age is an offline fallback, never settlement authority. A fresh
+     backend `active:true` confirmation suppresses it, so a legitimate long
+     swarm cannot be mislabeled Stale; an unreachable zombie still converges. */
   const _swStartedAt = round._swarmStartTime || 0;
   const _backendConfirmedActive = !!round._swActiveConfirmedAt
     && (Date.now() - round._swActiveConfirmedAt) < _SW_ACTIVE_CONFIRM_TTL_MS;
@@ -395,6 +373,16 @@ function _buildSwarmPanelHTML(round, allRounds) {
    * changes — see _syncToolRoundsDOM). */
   const tickerAttr = (isActive && round._swarmStartTime)
     ? ` data-sw-start="${round._swarmStartTime}"` : "";
+  const hasLiveAgentTimer = agents.some((agent) => agent
+    && (agent.status === "running" || agent.status === "thinking")
+    && agent._startedAt);
+  if (tickerAttr || hasLiveAgentTimer) _swEnsureTicker();
+  /* Rendering is the demand boundary: conversations outside the active
+     surface incur no reconciliation clock. Live/reloaded unresolved panels
+     keep a visibility-aware check armed until backend truth settles them. */
+  if (isActive || round._swarmActive || round._asyncRunning) {
+    _swDemandReconciliation(_SW_RECONCILE_INTERVAL_MS);
+  }
 
   /* ── Header icon ── */
   const headerIcon = isActive
@@ -414,12 +402,7 @@ function _buildSwarmPanelHTML(round, allRounds) {
     headerSubtitle = `<span class="sw-header-subtitle">Planning…</span>`;
   }
 
-  /* ── Status pill ──
-     "Async" wins over "Complete" while ANY agent is still running in the
-     background and the main agent has moved on.  This is the visual
-     anchor for our async-fire-and-forget model — the user sees that the
-     swarm panel above hasn't actually settled yet, and to expect more
-     <swarm-update> chips to land on later turns.                       */
+  /* Async outranks Complete while background agents remain unresolved. */
   const stillRunningAsync = !isStale && !!round._asyncRunning && (running > 0 || pending > 0);
   let statusPill;
   if (isStale) {
@@ -432,25 +415,15 @@ function _buildSwarmPanelHTML(round, allRounds) {
     const n = running + pending;
     statusPill = `<span class="sw-status-pill sw-pill-async" title="Sub-agents are still working in the background — updates arrive automatically as the conversation continues."><span class="sw-async-dot"></span>${n} running async</span>`;
   } else if (round._swarmError) {
-    /* Driver-level crash, reported on the wire (swarm_phase:error). This
-       outranks the count heuristics AND the Unconfirmed limbo: the backend
-       TOLD us what broke, so the pill says Failed and carries the reason. */
+    /* Explicit driver failure outranks inferred agent counts. */
     statusPill = `<span class="sw-status-pill sw-pill-error" title="${escapeHtml(round._swarmError)}">${_SW_STATUS_SVG.failed} Failed</span>`;
   } else if (failed > 0 && done === 0) {
     statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Failed</span>`;
   } else if (finished === 0 && total > 0
              && !(round._swarmSnapshot && round._swarmSnapshot.settled)) {
-    /* No agent has reported a terminal result (done/failed) AND we have no
-       authoritative settled snapshot. This is a reloaded-but-still-running
-       panel whose live `_swarmActive` flag was lost, OR one the reconciler
-       just settled (which sets _swarmEndTime but leaves unreported agents
-       `unknown`): the agents are in `unknown`/`pending` limbo (e.g. wedged on
-       upstream gateway 500s), NOT finished. Rendering a green "Complete" here
-       is the false-positive that contradicts the per-agent "No result" cards.
-       NOTE: this must NOT also require `!_swarmEndTime` — _settleStuckSwarmRound
-       freezes _swarmEndTime, so gating on it would let a reconciled all-unknown
-       panel fall through to the green "Complete" else-branch. Show
-       "Unconfirmed" instead. */
+    /* No terminal agent or settled snapshot is never Complete. Deliberately
+       ignore `_swarmEndTime`: reconciliation freezes it even when truth for
+       every agent remains unknown. */
     _swScheduleUnconfirmedProbe(round);
     statusPill = `<span class="sw-status-pill sw-pill-stale" title="This panel was reloaded while its agents were still working and lost its live connection; no agent has reported a final result yet. It will reconcile automatically when the server is reachable.">${_SW_STATUS_SVG.stale} Unconfirmed</span>`;
   } else {
@@ -588,16 +561,28 @@ function _buildSwarmPanelHTML(round, allRounds) {
       // Per-tool-call execution timeline — same look as ptool-panel rows.
       // Each row has a status dot, tool name, args brief, and elapsed.
       // Click a row to expand its preview/error.
-      if (a._toolCalls && a._toolCalls.length > 0) {
-        const rowsHTML = a._toolCalls.map(c => {
+      const timelineCalls = Array.isArray(a._toolCalls) ? a._toolCalls : [];
+      const omittedToolCalls = Number(a._toolCallsOmitted || 0);
+      if (timelineCalls.length > 0 || omittedToolCalls > 0) {
+        const rowsHTML = timelineCalls.map(c => {
           const dot = c.status === "running" ? '<span class="sw-tl-dot sw-tl-running"></span>'
                     : c.status === "failed"  ? `<span class="sw-tl-dot sw-tl-failed">${_SW_STATUS_SVG.failed}</span>`
                     :                          `<span class="sw-tl-dot sw-tl-done">${_SW_STATUS_SVG.done}</span>`;
           const td = _TOOL_DISPLAY[c.toolName];
           const icon = (td && td.icon) ? td.icon : _SW_SVG.tool;
           const elapsedStr = (typeof c.elapsed === "number") ? `${c.elapsed.toFixed(1)}s` : "";
-          const detail = c.error || c.preview || "";
-          const expandable = !!detail;
+          const detailIsError = !!c.error || !!c.errorTruncated
+            || Number(c.errorFullChars || 0) > 0;
+          const detail = detailIsError ? (c.error || "") : (c.preview || "");
+          const detailTruncated = detailIsError
+            ? !!c.errorTruncated : !!c.previewTruncated;
+          const fullChars = Number(detailIsError
+            ? c.errorFullChars : c.previewFullChars) || detail.length;
+          const omittedChars = Math.max(0, fullChars - detail.length);
+          const truncationNote = detailTruncated
+            ? `<div class="sw-tl-truncated">${escapeHtml(t("swarm.toolPreviewTruncated", { count: omittedChars.toLocaleString() }))}</div>`
+            : "";
+          const expandable = !!detail || detailTruncated;
           const onclick = expandable
             ? ` data-tofu-action="event.stopPropagation();this.classList.toggle('sw-tl-open')"` : "";
           return `<div class="sw-tl-row sw-tl-${c.status}${expandable ? ' sw-tl-expandable' : ''}"${onclick}>` +
@@ -609,12 +594,15 @@ function _buildSwarmPanelHTML(round, allRounds) {
                 (elapsedStr ? `<span class="sw-tl-elapsed">${elapsedStr}</span>` : "") +
                 (expandable ? `<span class="sw-tl-chev">${_SW_SVG.chevron}</span>` : "") +
               `</div>` +
-              (detail
-                ? `<div class="sw-tl-detail${c.error ? ' sw-tl-detail-error' : ''}">${escapeHtml(detail)}</div>`
+              (expandable
+                ? `<div class="sw-tl-detail${detailIsError ? ' sw-tl-detail-error' : ''}">${escapeHtml(detail)}${truncationNote}</div>`
                 : "") +
             `</div>`;
         }).join("");
-        bodyContent += `<div class="sw-a-timeline">${rowsHTML}</div>`;
+        const omittedHTML = omittedToolCalls > 0
+          ? `<div class="sw-tl-omitted">${escapeHtml(t("swarm.toolCallsOmitted", { count: omittedToolCalls.toLocaleString() }))}</div>`
+          : "";
+        bodyContent += `<div class="sw-a-timeline">${omittedHTML}${rowsHTML}</div>`;
       }
 
       // Preview — live stream with typing cursor
@@ -664,6 +652,16 @@ function _buildSwarmPanelHTML(round, allRounds) {
     }).join("");
   }
 
+  /* ── Empty-body note ──
+     A settled panel whose roster is unrecoverable (no durable snapshot and
+     the persisted spawn handle gone or unparseable) used to render
+     header-only: the collapse toggle then hid zero elements and the click
+     read as dead. Render an honest note so the header always has something
+     to expand. */
+  let emptyNote = "";
+  if (agents.length === 0 && !isActive) {
+    emptyNote = `<div class="sw-agent-grid"><div class="sw-empty">${escapeHtml(t("swarm.panelEmpty"))}</div></div>`;
+  }
   /* ── Stats footer ── */
   let statsFooter = "";
   const footerParts = [];
@@ -694,132 +692,9 @@ function _buildSwarmPanelHTML(round, allRounds) {
       `</div>` +
     `</div>` +
     progressBar +
-    (agentCards ? `<div class="sw-agent-grid">${agentCards}</div>` : "") +
+    (agentCards ? `<div class="sw-agent-grid">${agentCards}</div>` : emptyNote) +
     statsFooter +
   `</div>`;
-}
-
-/* Build the done HTML specifically for swarm rounds — reuses the panel layout */
-function _buildSwarmDoneHTML(round, showNums, allRounds) {
-  /* Prefer the full panel: live `_swarmAgents`, else agents recovered from
-     the persisted handle JSON + sibling result rounds (post-reload). */
-  if ((round._swarmAgents && round._swarmAgents.length > 0)
-      || _recoverSwarmAgents(round, allRounds).length > 0) {
-    const patchedRound = Object.assign({}, round, { _swarmActive: false });
-    return _buildSwarmPanelHTML(patchedRound, allRounds);
-  }
-  /* No agents and no results — don't render empty swarm panels */
-  const results = round.results || [];
-  if (!results.length && !round._swarmAgents?.length) return "";
-  /* Fallback: historical saved data without agent details — compact summary */
-  const snippet = results[0]?.snippet || "";
-  const elapsed = round._elapsed || "";
-  return `<div class="sw-panel sw-complete">` +
-    `<div class="sw-header">` +
-      `<div class="sw-header-left">` +
-        `<span class="sw-header-icon">${_SW_SVG.hub}</span>` +
-        `<div class="sw-header-info">` +
-          `<span class="sw-header-title">Parallel Execution</span>` +
-        `</div>` +
-      `</div>` +
-      `<div class="sw-header-right">` +
-        `<span class="sw-status-pill sw-pill-done">${_SW_STATUS_SVG.done} Complete</span>` +
-        (elapsed ? `<span class="sw-header-timer">${elapsed}</span>` : "") +
-      `</div>` +
-    `</div>` +
-    (snippet ? `<div class="sw-footer" style="opacity:0.7">${escapeHtml(snippet)}</div>` : "") +
-  `</div>`;
-}
-
-/* Patch the existing panel so frequent SSE updates preserve animation/node
- * identity and disclosure state. Agent/tool rows are append-only, making
- * index-based morphing stable. */
-const _SW_PRESERVE_CLASSES = ["sw-collapsed", "sw-a-open", "sw-tl-open"];
-
-function _swSyncAttrs(oldEl, newEl) {
-  /* Remove attributes gone from the new render. */
-  for (const attr of Array.from(oldEl.attributes)) {
-    if (attr.name !== "class" && !newEl.hasAttribute(attr.name)) {
-      oldEl.removeAttribute(attr.name);
-    }
-  }
-  /* Add / update changed attributes (class handled separately). */
-  for (const attr of Array.from(newEl.attributes)) {
-    if (attr.name === "class") continue;
-    if (oldEl.getAttribute(attr.name) !== attr.value) {
-      oldEl.setAttribute(attr.name, attr.value);
-    }
-  }
-  /* Class: take the new class set, but let the OLD node's user-toggle
-     classes win — a card the user expanded (added `sw-a-open`) or a panel
-     they collapsed (`sw-collapsed`) must not be reset by the fresh render. */
-  const newSet = new Set((newEl.getAttribute("class") || "").split(/\s+/).filter(Boolean));
-  for (const c of _SW_PRESERVE_CLASSES) {
-    if (oldEl.classList.contains(c)) newSet.add(c);
-    else newSet.delete(c);
-  }
-  const finalCls = Array.from(newSet).join(" ");
-  if ((oldEl.getAttribute("class") || "") !== finalCls) {
-    oldEl.setAttribute("class", finalCls);
-  }
-}
-
-function _swMorphNode(oldNode, newNode) {
-  /* Text node → update value only when it actually changed (no-op = no
-     flicker while a preview streams char-by-char). */
-  if (oldNode.nodeType === 3 && newNode.nodeType === 3) {
-    if (oldNode.nodeValue !== newNode.nodeValue) oldNode.nodeValue = newNode.nodeValue;
-    return;
-  }
-  /* Different node type, or different element tag → replace outright. */
-  if (oldNode.nodeType !== newNode.nodeType
-      || (oldNode.nodeType === 1 && oldNode.tagName !== newNode.tagName)) {
-    if (oldNode.parentNode) oldNode.parentNode.replaceChild(newNode.cloneNode(true), oldNode);
-    return;
-  }
-  if (oldNode.nodeType === 1) {
-    _swSyncAttrs(oldNode, newNode);
-    _swMorphChildren(oldNode, newNode);
-  }
-  /* comments / other node types: leave untouched */
-}
-
-function _swMorphChildren(oldParent, newParent) {
-  const oldNodes = Array.from(oldParent.childNodes);
-  const newNodes = Array.from(newParent.childNodes);
-  for (let i = 0; i < newNodes.length; i++) {
-    const on = oldNodes[i];
-    if (!on) {
-      /* New trailing node (e.g. a freshly-spawned agent card, an appended
-         tool-call row) — clone it in; only this new node touches the DOM. */
-      oldParent.appendChild(newNodes[i].cloneNode(true));
-      continue;
-    }
-    _swMorphNode(on, newNodes[i]);
-  }
-  /* Remove surplus old children (from the tail, so indices stay valid). */
-  for (let i = oldNodes.length - 1; i >= newNodes.length; i--) {
-    oldParent.removeChild(oldNodes[i]);
-  }
-}
-
-/* Patch `slot`'s existing swarm panel toward `html` in place. Falls back to a
-   full `innerHTML` set on first render or if the panel root is absent /
-   structurally different (a genuine replace, not a per-event churn). */
-function _morphSwarmSlot(slot, html) {
-  const existing = slot.firstElementChild;
-  if (!existing || !(existing.classList && existing.classList.contains("sw-panel"))) {
-    slot.innerHTML = html;
-    return;
-  }
-  const tpl = document.createElement("template");
-  tpl.innerHTML = html;
-  const fresh = tpl.content.firstElementChild;
-  if (!fresh || fresh.tagName !== existing.tagName) {
-    slot.innerHTML = html;
-    return;
-  }
-  _swMorphNode(existing, fresh);
 }
 
 /* ── Stuck swarm-panel reconciler (Option 2) ──
@@ -926,11 +801,7 @@ function _applyBackendSwarmAgents(round, backendAgents) {
 }
 
 function _settleStuckSwarmRound(round, backendAgents) {
-  /* Mirror the swarm_phase:complete settle, but for a panel the terminal
-     event never reached. When the backend handed us real per-agent statuses
-     (session still in memory), apply them; otherwise (session evicted after a
-     restart) leave any still-running/pending agent as 'unknown' rather than
-     fabricating a green "done" — same honesty as _recoverSwarmAgents. */
+  /* Apply backend truth; preserve missing per-agent outcomes as unknown. */
   round._swarmActive = false;
   round._asyncRunning = false;
   if (round.status !== "done") round.status = "done";
@@ -945,15 +816,15 @@ function _settleStuckSwarmRound(round, backendAgents) {
     if (a && a.id && answered.has(a.id)) continue;
     if (a.status === "running" || a.status === "thinking"
         || a.status === "pending" || !a.status) {
-      /* No authoritative status and still mid-flight on screen — the swarm
-         is provably over (backend says inactive) but this tab never saw the
-         result, so don't claim success. */
+      /* The swarm ended, but this agent's outcome is not known. */
       a.status = "unknown";
       a.phase = "unknown";
     }
   }
 }
 
+const _SW_RECONCILE_INTERVAL_MS = SWARM_RECONCILIATION_POLICY.intervalMs;
+const _SW_RECONCILE_FAST_MS = SWARM_RECONCILIATION_POLICY.fastMs;
 const _swFastProbeAtByRoundKey = new Map();
 
 function _swarmPresentationRoundKey(round, index) {
@@ -967,14 +838,8 @@ function _swarmPresentationRoundKey(round, index) {
 }
 
 function _swScheduleUnconfirmedProbe(round) {
-  /* First-truth fast path: the 20s reconcile sweep bounds a reloaded panel's
-     "Unconfirmed" limbo to a full sweep interval — far too long when the
-     backend can answer in milliseconds. Rendering the Unconfirmed pill
-     schedules a one-shot probe (throttled per round) so the panel
-     re-attaches almost immediately after reload instead of sitting limbo
-     for up to 20s. The jsdom harness neuters setTimeout (never fires), so
-     tests still drive the reconciler manually and only see the stamp. */
-  if (typeof setTimeout !== "function") return;
+  /* First-truth fast path: rendering an Unconfirmed pill advances the shared
+     demand scheduler instead of creating a second, untracked timer class. */
   const now = Date.now();
   const key = _swarmPresentationRoundKey(round);
   const previous = _swFastProbeAtByRoundKey.get(key) || 0;
@@ -985,9 +850,7 @@ function _swScheduleUnconfirmedProbe(round) {
       if (now - timestamp > 60000) _swFastProbeAtByRoundKey.delete(candidate);
     }
   }
-  setTimeout(() => {
-    try { _reconcileStuckSwarmPanels(); } catch (e) { /* best-effort self-heal */ }
-  }, 800);
+  _swDemandReconciliation(_SW_RECONCILE_FAST_MS);
 }
 
 const _swReconcileStateByRound = new Map();
@@ -997,10 +860,29 @@ function _swReconcileStateKey(convId, turnId, round, index) {
 }
 
 function _swReconcileStateFor(key) {
+  const now = Date.now();
   let state = _swReconcileStateByRound.get(key);
   if (!state) {
-    state = { checked: false, unknowns: 0 };
+    state = {
+      checked: false,
+      unknowns: 0,
+      unchangedActivePolls: 0,
+      activeFingerprint: '',
+      nextProbeAt: 0,
+      at: now,
+    };
     _swReconcileStateByRound.set(key, state);
+  } else {
+    state.at = now;
+  }
+  /* Mirror _swFastProbeAtByRoundKey's self-pruning so per-round reconcile
+     state cannot grow unbounded once a round settles and stops being swept. */
+  if (_swReconcileStateByRound.size > 256) {
+    for (const [candidate, candidateState] of _swReconcileStateByRound) {
+      if (now - candidateState.at > 60000) {
+        _swReconcileStateByRound.delete(candidate);
+      }
+    }
   }
   return state;
 }
@@ -1030,13 +912,18 @@ function _swUpdateReconciledRound(entry, updateRound) {
   });
 }
 
-async function _reconcileStuckSwarmPanels() {
-  if (typeof Api === "undefined" || !Api.swarm || !Api.swarm.status) return;
-  if (typeof conversations === "undefined" || !Array.isArray(conversations)) return;
+async function _reconcileStuckSwarmPanelsOnce() {
+  if (typeof Api === "undefined" || !Api.swarm || !Api.swarm.status) return null;
+  if (typeof conversations === "undefined" || !Array.isArray(conversations)) return null;
   const owner = runtimeScope.ConversationSwarmPresentation;
-  if (!owner?.candidates || !owner?.update) return;
-  /* Collect stable Turn/round identities first, then probe each backend task
-     once. No projected message or durable round is mutated during discovery. */
+  if (!owner?.candidates || !owner?.update) return null;
+  let nextDelayMs = null;
+  const requestFollowup = (delayMs = _SW_RECONCILE_INTERVAL_MS) => {
+    const boundedDelay = Math.max(0, Number(delayMs) || 0);
+    nextDelayMs = nextDelayMs == null
+      ? boundedDelay : Math.min(nextDelayMs, boundedDelay);
+  };
+  /* Discover immutable Turn identities; probe each backend task once. */
   const probes = new Map();
   for (const conv of conversations) {
     if (!conv?.id) continue;
@@ -1054,11 +941,17 @@ async function _reconcileStuckSwarmPanels() {
         );
         const reconcileState = _swReconcileStateFor(stateKey);
         if (reconcileState.checked) return;
-        /* Live Turn frames are push-owned only while this particular round is
-           explicitly live. A detached/reloaded unresolved round still enters
-           recovery immediately. */
+        const now = Date.now();
+        if (now < Number(reconcileState.nextProbeAt || 0)) {
+          requestFollowup(reconcileState.nextProbeAt - now);
+          return;
+        }
+        /* Explicitly live Turn rounds remain push-owned; detached rounds probe. */
         const turnLive = turn.status === 'pending' || turn.status === 'running';
-        if (turnLive && (round._swarmActive || round._asyncRunning)) return;
+        if (turnLive && (round._swarmActive || round._asyncRunning)) {
+          requestFollowup();
+          return;
+        }
         let agents = Array.isArray(round._swarmAgents) ? round._swarmAgents : [];
         if (!agents.length && typeof _recoverSwarmAgents === 'function') {
           try { agents = _recoverSwarmAgents(round, rounds); }
@@ -1096,9 +989,13 @@ async function _reconcileStuckSwarmPanels() {
     } catch (error) {
       console.warn('[Swarm] reconcile probe failed task=' +
         String(taskId).slice(0, 8) + ': ' + (error?.message || error));
+      requestFollowup();
       continue;
     }
-    if (!status) continue;
+    if (!status) {
+      requestFollowup();
+      continue;
+    }
     if (status.active === false && status.known !== false) {
       for (const entry of entries) {
         console.warn('[Swarm] backend reports task=' +
@@ -1115,9 +1012,15 @@ async function _reconcileStuckSwarmPanels() {
       const now = Date.now();
       for (const entry of entries) {
         const reconcileState = _swReconcileStateFor(entry.stateKey);
+        reconcileState.unchangedActivePolls = 0;
+        reconcileState.activeFingerprint = '';
+        reconcileState.nextProbeAt = 0;
         reconcileState.unknowns += 1;
         const age = entry.startedAt ? now - entry.startedAt : Infinity;
-        if (reconcileState.unknowns < 3 || age <= 60000) continue;
+        if (reconcileState.unknowns < 3 || age <= 60000) {
+          requestFollowup();
+          continue;
+        }
         const terminalAgents = (status.agents || []).filter((agent) => agent
           && ['completed', 'failed', 'done', 'cancelled', 'aborted']
             .includes(agent.status));
@@ -1132,6 +1035,27 @@ async function _reconcileStuckSwarmPanels() {
     for (const entry of entries) {
       const reconcileState = _swReconcileStateFor(entry.stateKey);
       reconcileState.unknowns = 0;
+      const fingerprint = JSON.stringify((status.agents || []).map((agent) => [
+        agent?.id || agent?.agentId || '', agent?.status || '',
+        agent?.rounds || agent?.roundsUsed || 0,
+      ]));
+      if (fingerprint === reconcileState.activeFingerprint) {
+        reconcileState.unchangedActivePolls += 1;
+      } else {
+        reconcileState.activeFingerprint = fingerprint;
+        reconcileState.unchangedActivePolls = 0;
+      }
+      /* A detached live swarm has no SSE owner, so retain status recovery but
+         back off when successive probes report the same facts. The scheduler
+         sleeps directly to the earliest due probe; 20→40→80→120s bounds both
+         browser wakeups, request noise, and terminal-detection delay. */
+      const backoffMs = Math.min(
+        120000,
+        _SW_RECONCILE_INTERVAL_MS
+          * (2 ** Math.min(reconcileState.unchangedActivePolls, 3)),
+      );
+      reconcileState.nextProbeAt = now + backoffMs;
+      requestFollowup(backoffMs);
       _swUpdateReconciledRound(entry, (round) => {
         round._swActiveConfirmedAt = now;
         round._swarmActive = true;
@@ -1148,55 +1072,83 @@ async function _reconcileStuckSwarmPanels() {
       }
     }
   }
-}
-if (typeof window !== 'undefined' && !runtimeScope._swReconcileTicker) {
-  runtimeScope._swReconcileTicker = setInterval(() => {
-    try {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      _reconcileStuckSwarmPanels();
-    } catch (e) { /* swallowed — reconciler is best-effort self-healing */ }
-  }, 20000);
+  return nextDelayMs;
 }
 
-/* ── 1 Hz wall-clock ticker for swarm timers ──
- * The fingerprint gate in _syncToolRoundsDOM (correctly) skips re-renders
- * when nothing changes — but elapsed-time strings DO change every second
- * even when no SSE event landed. Rather than churn the gate with a
- * fake per-second fingerprint, we update [data-sw-start] elements in
- * place: zero re-render, single timer, ~O(N agents) per tick. */
+function _swReconcileDocumentHidden() {
+  return typeof document !== 'undefined'
+    && (document.hidden === true || document.visibilityState === 'hidden');
+}
+
+function _swResumeTimerTicker() {
+  if (typeof document !== 'undefined'
+      && typeof document.querySelector === 'function'
+      && document.querySelector('.sw-panel [data-sw-start]')) {
+    _swEnsureTicker();
+  }
+}
+
+function _swSubscribeReconcileVisibility(listener) {
+  if (typeof document === 'undefined'
+      || typeof document.addEventListener !== 'function') return () => {};
+  document.addEventListener('visibilitychange', listener);
+  return () => document.removeEventListener('visibilitychange', listener);
+}
+
+const _swReconciliationScheduler = createSwarmReconciliationScheduler({
+  schedule: {
+    now: Date.now,
+    setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+    clearTimeout: (handle) => globalThis.clearTimeout(handle),
+  },
+  visibility: {
+    isHidden: _swReconcileDocumentHidden,
+    subscribe: _swSubscribeReconcileVisibility,
+  },
+  reconcile: _reconcileStuckSwarmPanelsOnce,
+  onHidden: _swStopTimerTicker,
+  onVisible: _swResumeTimerTicker,
+  onError: (error) => console.warn('[Swarm] reconcile cycle failed: ' +
+    (error?.message || error)),
+});
+
+function _swDemandReconciliation(delayMs = _SW_RECONCILE_INTERVAL_MS) {
+  if (typeof window === 'undefined') return;
+  _swReconciliationScheduler.demand(delayMs);
+}
+
+/* Update elapsed nodes in place without defeating the render fingerprint. */
 function _tickSwarmTimers() {
   const els = document.querySelectorAll('.sw-panel [data-sw-start]');
   if (!els.length) {
-    /* Idle-stop: no live timers for 60s → stop the 1Hz ticker. Re-armed by
-     *   _buildSwarmPanelHTML the next time a swarm panel renders. */
-    if (++_swTickerIdleTicks >= 60 && runtimeScope._swTimerTicker) {
-      clearInterval(runtimeScope._swTimerTicker);
-      runtimeScope._swTimerTicker = null;
-    }
+    /* A future live render re-arms, so an empty tick stops immediately. */
+    _swStopTimerTicker();
     return;
   }
-  _swTickerIdleTicks = 0;
   const now = Date.now();
   for (const el of els) {
     const start = +el.getAttribute('data-sw-start');
     if (!start) continue;
-    /* Don't tick a runaway zombie timer forever: once past the staleness
-       cap, freeze the text so the panel doesn't read "408m9s and counting"
-       after a server restart ate the completion event. The pill itself flips
-       to "Stale" via _buildSwarmPanelHTML; this just stops the live number. */
+    /* Freeze zombie elapsed text at the same offline-staleness boundary. */
     if (now - start > _SW_STALE_MS) continue;
     const sec = Math.max(0, Math.floor((now - start) / 1000));
     const txt = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
     if (el.textContent !== txt) el.textContent = txt;
   }
 }
-/* Lazy 1Hz ticker: armed by _buildSwarmPanelHTML when a swarm panel exists,
- *   self-stops after 60 idle seconds. A booted page with no swarm activity
- *   no longer spins 1Hz forever (). */
-let _swTickerIdleTicks = 0;
+/* Lazy 1Hz ticker: armed only when rendering a live elapsed-time node and
+   stopped on its first empty DOM tick. */
+function _swStopTimerTicker() {
+  if (runtimeScope._swTimerTicker != null
+      && typeof clearInterval === 'function') {
+    clearInterval(runtimeScope._swTimerTicker);
+  }
+  runtimeScope._swTimerTicker = null;
+}
 function _swEnsureTicker() {
-  if (typeof window !== 'undefined' && !runtimeScope._swTimerTicker) {
-    _swTickerIdleTicks = 0;
+  if (typeof window !== 'undefined' && !_swReconcileDocumentHidden()
+      && runtimeScope._swTimerTicker == null
+      && typeof setInterval === 'function') {
     runtimeScope._swTimerTicker = setInterval(_tickSwarmTimers, 1000);
   }
 }

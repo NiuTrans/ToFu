@@ -711,6 +711,56 @@ def test_chromium_env_survives_the_export():
     _ok('chromium_env.py survives all three export modes and is git-tracked')
 
 
+def test_arch_whitelist_normalizes_and_rejects_unsupported():
+    """Miniforge download paths need x86_64 / aarch64; unsupported arches must
+    fail fast with a Docker pointer instead of a late mirror-failure."""
+    text = _install_sh()
+    block = text[text.index('ARCH="$(uname -m)"'):text.index('info "Platform: $OS $ARCH"')]
+    assert 'amd64|x86_64)  ARCH="x86_64"' in block, \
+        'amd64 is not normalized to x86_64'
+    assert 'arm64|aarch64) ARCH="aarch64"' in block, \
+        'arm64 is not normalized to aarch64'
+    assert 'fail "Unsupported architecture:' in block, \
+        'no fail-fast for an unsupported architecture'
+    assert 'Docker image' in block, \
+        'the unsupported-arch failure does not point at the Docker path'
+    _ok('arch whitelist normalizes aliases and rejects unsupported arches early')
+
+
+def test_disk_preflight_thresholds_and_df_fallback():
+    """ENOSPC must fail before package installs: df -Pk on the install-dir
+    parent, fail <2 GB, warn <4 GB (6 GB with --with-docling), graceful df
+    fallback so a missing df never aborts the install."""
+    text = _install_sh()
+    fn = text[text.index('_disk_preflight() {'):text.index('\n_disk_preflight\n')]
+    assert 'df -Pk "$_df_parent"' in fn, \
+        'disk preflight does not use df -Pk on the install-dir parent'
+    assert 'Could not measure free disk space' in fn, \
+        'no graceful fallback when df is unavailable'
+    assert 'need at least 2 GB' in fn, 'no fail threshold (~2 GB)'
+    assert '_warn_gb=4' in fn and '_warn_gb=6' in fn, \
+        'warn thresholds must be 4 GB (6 GB with --with-docling)'
+    _ok('disk preflight checks the install-dir parent with df fallback and thresholds')
+
+
+def test_base_conda_git_install_respects_ownership():
+    """git must be installed into base ONLY when we own the conda. A user-owned
+    conda is never mutated — the installer must fail with manual options."""
+    text = _install_sh()
+    step3 = text[text.index('step "Completing deferred Tofu source checkout"'):
+                 text.index('#  Step 4: Create / reuse conda env')]
+    assert 'if [[ "$CONDA_OWNED_BY_US" -eq 1 ]]; then' in step3, \
+        'git install is not gated on conda ownership'
+    owned = step3[step3.index('if [[ "$CONDA_OWNED_BY_US" -eq 1 ]]; then'):]
+    assert 'conda install -n base -c conda-forge --override-channels -y git' in owned, \
+        'owned-conda branch does not install git into base'
+    assert 'user-owned (we never mutate it)' in owned, \
+        'user-owned branch does not explain the never-mutate policy'
+    assert 're-run install.sh' in owned, \
+        'user-owned branch does not list manual options / re-run guidance'
+    _ok('base-conda git install is ownership-gated; user-owned conda is never mutated')
+
+
 def main():
     print()
     print(_color('═══ install.sh uv fast-path / conda-fallback Guard Tests ═══', '36'))
@@ -739,6 +789,9 @@ def main():
         test_force_reinstall_is_conditional_not_unconditional,
         test_install_log_is_unique_private_and_created_without_overwrite,
         test_chromium_env_survives_the_export,
+        test_arch_whitelist_normalizes_and_rejects_unsupported,
+        test_disk_preflight_thresholds_and_df_fallback,
+        test_base_conda_git_install_respects_ownership,
     ]
     for fn in tests:
         try:

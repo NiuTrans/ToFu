@@ -17,12 +17,12 @@
 }
 
 [data-theme="tofu"] .conversation-surface {
-  --turn-rule: #e1d8c7;
-  --turn-spine: #d8cdbb;
-  --turn-marker: #978c78;
-  --turn-process-surface: rgba(244, 239, 229, .64);
-  --turn-process-hover: rgba(229, 222, 206, .7);
-  --turn-answer-marker: #b66f43;
+  --turn-rule: #d9dee4;
+  --turn-spine: #cfd5db;
+  --turn-marker: #8d969f;
+  --turn-process-surface: rgba(238, 241, 244, .72);
+  --turn-process-hover: rgba(225, 230, 235, .78);
+  --turn-answer-marker: #c97a1d;
 }
 
 .conversation-surface :is(summary, button) {
@@ -324,6 +324,56 @@
   letter-spacing: .012em;
 }
 
+.conversation-surface button.ptool-panel-header {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.conversation-surface button.ptool-panel-header:hover {
+  color: var(--text-secondary);
+}
+
+.conversation-surface button.ptool-panel-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+
+.conversation-surface .ptool-panel-routine {
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--turn-rule) 82%, transparent);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 520;
+  letter-spacing: 0;
+}
+
+.conversation-surface .ptool-panel-chevron {
+  display: inline-flex;
+  color: var(--text-tertiary);
+  transition: transform .16s ease;
+}
+
+.conversation-surface .ptool-panel.collapsed > .ptool-panel-body {
+  display: none;
+}
+
+.conversation-surface .ptool-panel.collapsed .ptool-panel-chevron {
+  transform: rotate(-90deg);
+}
+
+.conversation-surface .ptool-parent-child {
+  margin-left: 14px;
+  border-left: 2px solid color-mix(in srgb, var(--turn-rule) 74%, transparent);
+}
+
 .conversation-surface .conversation-block--tool .ptool-turn {
   margin: 4px 0;
   border: 1px solid var(--turn-rule);
@@ -486,6 +536,13 @@
   color: var(--s-done, #4f8151);
 }
 
+/* Terminal-error summary: the marker rides the spine out of flow, so the
+ * summary must not keep the base 12px marker track — the body would land in
+ * it and wrap one character per line. */
+.conversation-surface .activity-event__terminal-summary {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .conversation-surface .activity-event__summary {
   font-size: 11.75px;
   line-height: 1.45;
@@ -603,6 +660,7 @@
   .ig-path-icon,
   .ig-ba-arrow,
   .ptool-turn-chev,
+  .ptool-panel-chevron,
   .timer-poll-caret,
   .timer-toggle,
   .sw-tl-chev,
@@ -658,10 +716,13 @@
 }
 
 /* File-changes summary joins the process family: one calm card riding the
- * same spine marker as tool blocks, undo/redo tucked into a footer strip
- * instead of an orphaned chip below. The [open] clamp lift also repairs the
- * file list, which stayed invisible because only the retired .fc-expanded
- * class raised max-height while the renderer drives native <details open>. */
+ * same spine marker as tool blocks, with undo/redo in the title row instead
+ * of an orphaned footer. The [open] clamp lift also repairs the file list,
+ * which stayed invisible because only the retired .fc-expanded class raised
+ * max-height while the renderer drives native <details open>. The clamp must
+ * carry its own overflow-y:auto — the collapsed base rule keeps overflow:hidden
+ * for the max-height animation, so without it long lists clip at 400px with no
+ * scrollbar. */
 .conversation-surface .conversation-block--file-changes {
   border: 1px solid var(--turn-rule);
   border-radius: 8px;
@@ -680,6 +741,7 @@
 }
 
 .conversation-surface .conversation-file-changes .fc-summary {
+  min-width: 0;
   padding: 7px 10px;
   border-radius: 7px;
 }
@@ -690,17 +752,18 @@
 
 .conversation-surface .conversation-file-changes[open] .fc-details {
   max-height: 400px;
+  overflow-y: auto;
   padding: 2px 10px 8px;
   border-top: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
 }
 
-.conversation-surface .conversation-block--file-changes > .fc-actions {
-  margin-left: 0;
-  padding: 5px 10px 7px;
-  border-top: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+.conversation-surface .conversation-file-changes .fc-summary > .fc-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 8px;
 }
 
-.conversation-surface .conversation-block--file-changes > .fc-actions:empty {
+.conversation-surface .conversation-file-changes .fc-summary > .fc-actions:empty {
   display: none;
 }
 
@@ -870,6 +933,15 @@
   color: var(--text-primary);
 }
 
+.conversation-surface .msg-action-btn--copied,
+.conversation-surface .msg-action-btn--copied:hover {
+  color: #4ade80;
+}
+
+.conversation-surface .msg-action-btn--copied .msg-action-icon {
+  opacity: 1;
+}
+
 .conversation-surface .msg-action-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -939,6 +1011,11 @@
 .conversation-surface .conversation-turn-footer .finish-tag.preset {
   color: var(--text-secondary);
   font-weight: 620;
+}
+
+.conversation-surface .conversation-turn-footer .finish-tag.timing {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .conversation-surface .conversation-turn-footer .finish-tag.ok {
@@ -1095,7 +1172,7 @@
 
   .conversation-surface .msg-action-btn,
   [data-theme="tofu"] .conversation-surface .msg-action-btn {
-    min-height: 40px;
+    min-height: 44px;
     padding: 7px 10px;
     flex: 0 0 auto;
     font-size: 11px;
@@ -1138,6 +1215,14 @@
 
 .conversation-surface .turn-inline-editor-input {
   box-sizing: border-box;
+  /* The bare composer `textarea{flex:1;max-height:200px;…}` rule (see
+   * 02-messages-composer.css) leaks onto this input: flex-basis:0% in the
+   * column flex host makes the browser ignore the JS-fitted pixel height,
+   * and the 200px clamp sits below the editor's own 45vh fit cap — together
+   * they pinned the box at min-height while fitEditorTextarea had already
+   * chosen overflow-y:hidden, truncating long drafts with no way to scroll. */
+  flex: none;
+  max-height: none;
   width: 100%;
   min-height: 72px;
   margin: 0;
@@ -1223,6 +1308,67 @@
   cursor: default;
 }
 
+.conversation-surface .turn-inline-editor-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.conversation-surface .turn-inline-editor-attachments[hidden] {
+  display: none;
+}
+
+.conversation-surface .turn-inline-editor-chip {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.conversation-surface .turn-inline-editor-chip img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.conversation-surface .turn-inline-editor-chip[data-processing="true"] img {
+  opacity: .55;
+}
+
+.conversation-surface .turn-inline-editor-chip-status {
+  position: absolute;
+  inset: auto 0 0;
+  padding: 1px 2px;
+  font-size: 10px;
+  text-align: center;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+}
+
+.conversation-surface .turn-inline-editor-chip-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg-primary) 86%, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.conversation-surface .turn-inline-editor-chip-remove:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
 .conversation-surface .turn-inline-editor[data-submitting="true"] {
   opacity: .75;
 }

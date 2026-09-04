@@ -69,8 +69,11 @@ const win = dom.window;
 global.window = win;
 global.document = win.document;
 global.console = console;
-// Neuter the periodic tick + the debounced refetch — we drive render by hand.
-global.setInterval = win.setInterval = () => 0;
+// A page-lifetime tick is forbidden; neuter only the demand debounce because
+// this presentation harness drives render by hand.
+global.setInterval = win.setInterval = () => {
+  throw new Error('presence boot interval must stay retired');
+};
 global.clearInterval = win.clearInterval = () => {};
 global.setTimeout = win.setTimeout = () => 0;
 global.clearTimeout = win.clearTimeout = () => {};

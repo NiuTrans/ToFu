@@ -1,15 +1,14 @@
-"""lib/search_bridge.py — Wire chatui behavior into tofu-search's seams.
+"""lib/search_bridge.py — Wire Tofu host behavior into tofu-search's seams.
 
-tofu-search is a standalone library with no knowledge of chatui's LLM
+tofu-search is a standalone library with no knowledge of the host's LLM
 dispatcher, browser extension, or auth-source store. It exposes three seams
 (an LLM callable + two providers) that a host fills in. This module installs
-chatui's implementations so the migrated search/fetch pipeline behaves
+Tofu's implementations so the migrated search/fetch pipeline behaves
 *exactly* as the in-tree ``lib/search`` + ``lib/fetch`` did before extraction:
 
-  * **LLM filter** → chatui's ``dispatch_chat`` (model routing, key pools,
-    ``capability='cheap'``, ``FETCH_FILTER_MODEL`` override, the
-    ``§§IRRELEVANT§§`` stop token, and the HTTP-450 ``ContentFilterError``
-    placeholder text).
+  * **LLM relevance gate** → chatui's ``dispatch_chat`` (model routing, key
+    pools, ``capability='cheap'``, ``FETCH_FILTER_MODEL`` override, bounded
+    binary verdicts, and the HTTP-450 ``ContentFilterError`` placeholder text).
   * **Browser fallback** → ``lib.browser`` extension (fetch + DDG-HTML search).
   * **Authenticated fetch** → ``lib.auth_sources`` (cookies/proxy lookup).
 
@@ -27,21 +26,30 @@ from contextvars import ContextVar
 from urllib.parse import urlparse
 
 import lib as _lib
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 # ``search_runtime.ensure_search_runtime`` normally installs this policy first,
 # but config/acceptance callers may import the bridge directly. Keep that path
 # bounded too without creating a circular import back through search_runtime.
-try:
-    from runtime_guards import install_pymupdf_classic_policy
-    install_pymupdf_classic_policy()
-except Exception:
-    pass
+def _install_search_import_policy() -> bool:
+    """Apply the dependency policy, leaving evidence on fail-soft startup."""
+    try:
+        from runtime_guards import install_pymupdf_classic_policy
+        return install_pymupdf_classic_policy()
+    except Exception as policy_error:
+        logger.warning(
+            '[SearchBridge] classic PyMuPDF policy installation failed: %s',
+            type(policy_error).__name__,
+        )
+        return False
+
+
+_install_search_import_policy()
 
 import tofu_search
 from lib.browser.log_safety import text_for_log, url_for_log
-from lib.log import get_logger
-
-logger = get_logger(__name__)
 
 __all__ = [
     'BrowserFileHandoffReady', 'bind_search_browser',
@@ -53,6 +61,9 @@ __all__ = [
 # Module-level filter knobs mirror the old lib/fetch/content_filter.py.
 _FILTER_MODEL = os.environ.get('FETCH_FILTER_MODEL', '')   # empty ⇒ dispatcher default
 _IRRELEVANT_STOP = '§§IRRELEVANT§§'
+_GATE_SYSTEM_MARKER = 'web page relevance judge'
+_GATE_MAX_OUTPUT_TOKENS = 32
+_CONTENT_FILTER_MAX_429_ATTEMPTS = 1
 
 _installed = False
 _install_lock = threading.RLock()
@@ -183,8 +194,25 @@ def _chatui_llm(messages, **kwargs):
 
     extra = {}
     stop = kwargs.get('stop')
-    if stop:
-        extra['stop'] = stop
+    stops = [stop] if isinstance(stop, str) else list(stop or ())
+    # ``§§IRRELEVANT§§`` is the filter's semantic verdict. Sending the exact
+    # same string as a provider stop makes compliant providers remove it from
+    # the returned text, after which tofu-search mistakes the empty completion
+    # for an anomaly and serves the irrelevant page. A tiny output ceiling
+    # bounds gate generation without consuming its verdict. Preserve any
+    # unrelated caller stops for forward compatibility.
+    safe_stops = [value for value in stops if value != _IRRELEVANT_STOP]
+    if safe_stops:
+        extra['stop'] = safe_stops
+
+    is_gate = any(
+        message.get('role') == 'system'
+        and _GATE_SYSTEM_MARKER in str(message.get('content') or '')
+        for message in messages
+        if isinstance(message, dict)
+    )
+    output_budget = (
+        {'max_tokens': _GATE_MAX_OUTPUT_TOKENS} if is_gate else {})
 
     try:
         content, _usage = dispatch_chat(
@@ -197,6 +225,8 @@ def _chatui_llm(messages, **kwargs):
             log_prefix='[ContentFilter]',
             timeout=kwargs.get('timeout'),
             extra=extra or None,
+            max_429_attempts=_CONTENT_FILTER_MAX_429_ATTEMPTS,
+            **output_budget,
         )
         return content or ''
     except ContentFilterError:
@@ -871,6 +901,11 @@ def _resolve_proxy_url() -> str:
 def sync_search_config():
     """Push chatui's live FETCH_* settings into tofu-search's global config."""
     filter_enabled = getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True)
+    filter_min_chars = max(1000, min(
+        100_000, int(os.environ.get('FETCH_FILTER_MIN_CHARS', '6000'))))
+    gate_input_max_chars = max(1000, min(
+        12_000, int(os.environ.get('FETCH_FILTER_GATE_MAX_CHARS', '6000'))))
+    filter_mode = os.environ.get('FETCH_FILTER_MODE', 'gate')
     proxy_url = _resolve_proxy_url()
     # The FULL global-pool failover chain behind the primary: a primary that
     # dies mid-run (hk-gw tunnel-403, 2026-08-20) no longer empties search —
@@ -942,14 +977,15 @@ def sync_search_config():
         fetch_max_bytes=_lib.FETCH_MAX_BYTES,
         skip_domains=set(_lib.SKIP_DOMAINS),
         filter_enabled=filter_enabled,
-        filter_min_chars=int(os.environ.get('FETCH_FILTER_MIN_CHARS', '3000')),
+        filter_min_chars=filter_min_chars,
         # 45s matches the library default since 0.6.0 (was 300): on timeout the
         # raw text is served — filtering is an enhancement, never a blocker.
         filter_timeout=int(os.environ.get('FETCH_FILTER_TIMEOUT', '45')),
         # tofu-search >=0.6.0: 'gate' (verdict-only, capped input, original text
         # kept — fast) vs 'rewrite' (pre-0.6 full-page regeneration, 10-60s+/page).
         # Passed UNCONDITIONALLY like the other knobs → requirements floor 0.6.0.
-        filter_mode=os.environ.get('FETCH_FILTER_MODE', 'gate'),
+        filter_mode=filter_mode,
+        gate_input_max_chars=gate_input_max_chars,
         proxy_dual_attempt=proxy_dual_attempt,
         prefetch_gate_enabled=prefetch_gate_enabled,
         prefetch_gate_min_query_terms=prefetch_gate_min_query_terms,
@@ -981,7 +1017,8 @@ def sync_search_config():
     tofu_search.configure(**_cfg)
     logger.info('[Bridge] tofu-search config synced: top_n=%d timeout=%ds '
                 'deadline(call=%ds url=%ds) '
-                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r proxy=%s failover=%d '
+                'max_chars(search=%d direct=%d pdf=%d) '
+                'filter=%s(mode=%s min=%d gate_chars=%d) model=%r proxy=%s failover=%d '
                 'dual_attempt=%s prefetch_gate=%s(terms>=%d,floor=%d) '
                 'ssrf_guard=%s allow_private_hosts=%s insecure_ssl=%s '
                 'throttle=%dms searxng=%s',
@@ -990,6 +1027,7 @@ def sync_search_config():
                 _lib.FETCH_MAX_CHARS_SEARCH, _lib.FETCH_MAX_CHARS_DIRECT,
                 _lib.FETCH_MAX_CHARS_PDF,
                 'on' if filter_enabled else 'off',
+                filter_mode, filter_min_chars, gate_input_max_chars,
                 _FILTER_MODEL or 'dispatch-default',
                 'set' if proxy_url else 'env/none',
                 len(proxy_failover),

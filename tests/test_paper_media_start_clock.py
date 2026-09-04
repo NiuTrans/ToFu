@@ -14,9 +14,9 @@ throat:
 
 UNIT: every clock on the wire is epoch **milliseconds** under a camelCase name,
 matching the shipped chat contract (``lib/chat_dispatch.py``). Handing the
-frontend seconds is a SILENT failure — ``_seedStreamTimerStart``'s min-guard
-accepts it and the UI renders a ~50-year elapsed. The magnitude guards below
-are the only thing that catches that class of mistake.
+frontend seconds is a SILENT failure — a monotonic min-guard can accept it and
+the UI renders a ~50-year elapsed. The magnitude guards below are the only
+thing that catches that class of mistake.
 
 These drive the real handler functions with a real runtime task, and assert the
 observable response — no source-text anchors, no private-symbol assertions.

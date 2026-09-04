@@ -42,6 +42,8 @@ const { document, check, report } = setup({
   globals: {
     formatRelativeTime: () => '',
     highlightMatch: (s) => s,
+    _conversationDisplayTitle: (title, fallback) => title || fallback || '',
+    conversationTimestampLabels: () => ({ date: '08/28', time: '10:00' }),
     sidebarSearchQuery: '',
     getFolders: () => [],
     getActiveFolderId: () => null,
@@ -130,4 +132,68 @@ def test_conv_list_collapse_never_hides_all_rows():
         body_js=_BODY,
         min_pass=6,
         label='conv-list collapse',
+    )
+
+
+_CLONE_BADGE_BODY = r"""
+const { setup } = require(process.env.JSDOM_HARNESS);
+const { document, check, report } = setup({
+  root: process.argv[3],
+  html: '<!DOCTYPE html><body><div id="convList"></div><div id="sidebarSearchStats"></div></body>',
+  targets: [process.argv[2], process.argv[4]],
+  globals: {
+    formatRelativeTime: () => '',
+    highlightMatch: (s) => s,
+    _conversationDisplayTitle: (title, fallback) => title || fallback || '',
+    conversationTimestampLabels: () => ({ date: '08/28', time: '10:00' }),
+    sidebarSearchQuery: '',
+    getFolders: () => [],
+    getActiveFolderId: () => null,
+    setActiveFolderId: () => {},
+    areFoldersLoaded: () => true,
+    renderFolderTabs: () => {},
+    _isDebug: false,
+    BASE_PATH: '',
+    activeStreams: new Map(),
+    pendingMessageQueue: new Map(),
+    streamBufs: new Map(),
+  },
+});
+
+// Settings-envelope → catalog-row mapping (real adapter, extra target).
+const mapped = {};
+_applySettingsToConv(mapped, { clonedFrom: 'src-9' });
+check('settings_map_clonedFrom', mapped.clonedFrom === 'src-9');
+_applySettingsToConv(mapped, { folderId: 'f-1' });
+check('settings_without_marker_keeps_provenance', mapped.clonedFrom === 'src-9');
+
+// Row render: the badge must sit inside .conv-date, after the timestamp.
+global.activeConvId = window.activeConvId = null;
+global.conversations = window.conversations = [
+  { id: 'clone1', title: 'Copied', _serverTurnCount: 1, updatedAt: Date.now(),
+    clonedFrom: 'src-9' },
+  { id: 'plain1', title: 'Plain', _serverTurnCount: 1, updatedAt: Date.now() },
+];
+renderConversationList();
+const cloneDate = document.querySelector(
+  '.conv-item[data-conv-id="clone1"] .conv-date');
+const badge = cloneDate && cloneDate.querySelector('.conv-copy-badge');
+check('clone_row_badge_in_date_line', !!badge);
+check('clone_row_badge_text', !!badge && badge.textContent.length > 0);
+const plainBadge = document.querySelector(
+  '.conv-item[data-conv-id="plain1"] .conv-copy-badge');
+check('plain_row_has_no_badge', !plainBadge);
+
+report();
+"""
+
+
+def test_clone_badge_renders_in_date_line():
+    """clonedFrom provenance: settings adapter → conv field → .conv-date chip."""
+    run_harness(
+        target_js=runtime_section_path('ui/conversation_list.js'),
+        body_js=_CLONE_BADGE_BODY,
+        extra_targets=[runtime_section_path('core/conv_apply_settings.js')],
+        expect_pass=5,
+        label='conv-list clone badge',
     )

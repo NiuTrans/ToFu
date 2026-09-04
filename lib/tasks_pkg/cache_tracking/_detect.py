@@ -8,6 +8,7 @@ Owns the break-classification thresholds and the single-source
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import time
 from typing import Any
@@ -30,11 +31,11 @@ from lib.tasks_pkg.cache_tracking._state import (
 from lib.tasks_pkg.cache_tracking._hashing import (
     _diff_prefix_fields,
     _diff_tool_hashes,
-    _hash_prefix_content,
     _hash_prefix_fields,
     _hash_system_prompt,
     _hash_tools,
     _hash_tools_per_tool,
+    _is_current_prefix_field_snapshot,
 )
 from lib.tasks_pkg.cache_tracking._roi import _emit_l2_roi
 
@@ -79,6 +80,104 @@ class _WireEvidence:
     routing: Any = None
 
 
+@dataclass(frozen=True)
+class _ClientChangeEvidence:
+    """Fallback hashes and named client changes for one cache round."""
+
+    system_hash: str
+    message_count: int
+    tools_hash: str
+    per_tool_hashes: dict
+    prefix_field_hashes: list
+    client_changes: dict
+    prefix_mutated: bool
+    prefix_culprits: list
+
+
+def _detect_client_changes(prev, messages, tools, model, wire_evidence, *,
+                           conv_id):
+    """Compute source-level change evidence once, outside break policy.
+
+    Provider-bound fingerprints remain authoritative when available. These
+    hashes are the diagnostic fallback and the next-round baseline; keeping
+    their construction together prevents the classifier from re-walking a
+    long history for each field.
+    """
+    system_hash = _hash_system_prompt(messages)
+    message_count = len(messages)
+    current_wire_tools_hash = _validated_wire_region_hash(
+        wire_evidence.region, 'tools')
+    previous_wire_tools_hash = _validated_wire_region_hash(
+        prev.wire_region, 'tools')
+    wire_tools_comparable = bool(
+        current_wire_tools_hash and previous_wire_tools_hash)
+    wire_tools_changed = (
+        wire_tools_comparable
+        and current_wire_tools_hash != previous_wire_tools_hash)
+    if prev.call_count == 0 or not wire_tools_comparable or wire_tools_changed:
+        tools_hash = _hash_tools(tools)
+        per_tool_hashes = _hash_tools_per_tool(tools)
+    else:
+        tools_hash = prev.tools_hash
+        per_tool_hashes = prev.per_tool_hashes
+
+    previous_prefix_count = (
+        prev.prefix_field_count if prev.call_count > 0 else 0)
+    new_prefix_count = max(0, message_count - EDITABLE_TAIL_COUNT)
+    hash_count = max(previous_prefix_count, new_prefix_count)
+    all_prefix_hashes = _hash_prefix_fields(messages, hash_count)
+    current_previous_range = (
+        all_prefix_hashes if previous_prefix_count == hash_count
+        else all_prefix_hashes[:previous_prefix_count])
+    prefix_field_hashes = (
+        all_prefix_hashes if new_prefix_count == hash_count
+        else all_prefix_hashes[:new_prefix_count])
+
+    client_changes = {}
+    prefix_mutated = False
+    prefix_culprits = []
+    if prev.call_count > 0:
+        if system_hash != prev.system_hash:
+            client_changes['system_prompt'] = 'changed'
+        if tools_hash != prev.tools_hash:
+            tool_diffs = _diff_tool_hashes(
+                prev.per_tool_hashes, per_tool_hashes)
+            client_changes['tools'] = (
+                f'changed: [{", ".join(tool_diffs)}]' if tool_diffs
+                else 'changed (ordering or meta)')
+        if model != prev.model:
+            client_changes['model'] = f'{prev.model} → {model}'
+        if message_count < prev.message_count:
+            client_changes['message_count'] = (
+                f'{prev.message_count} → {message_count} (compacted)')
+        if (previous_prefix_count > 0
+                and prev.prefix_field_hashes
+                and _is_current_prefix_field_snapshot(
+                    prev.prefix_field_hashes)
+                and current_previous_range != prev.prefix_field_hashes
+                and not prev.compaction_pending):
+            prefix_mutated = True
+            prefix_culprits = _diff_prefix_fields(
+                prev.prefix_field_hashes, current_previous_range)
+            logger.warning(
+                '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION DETECTED: '
+                'messages[0:%d] content hash changed without compaction. '
+                'This will cause a cache miss. changed=[%s]',
+                conv_id[:8], prev.call_count + 1, previous_prefix_count,
+                ', '.join(prefix_culprits) or '?')
+
+    return _ClientChangeEvidence(
+        system_hash=system_hash,
+        message_count=message_count,
+        tools_hash=tools_hash,
+        per_tool_hashes=per_tool_hashes,
+        prefix_field_hashes=prefix_field_hashes,
+        client_changes=client_changes,
+        prefix_mutated=prefix_mutated,
+        prefix_culprits=prefix_culprits,
+    )
+
+
 def _wire_evidence_from_usage(usage: dict | None) -> _WireEvidence:
     if not usage:
         return _WireEvidence()
@@ -92,6 +191,18 @@ def _wire_evidence_from_usage(usage: dict | None) -> _WireEvidence:
         region=usage.get('_wire_region'),
         routing=usage.get('_wire_routing'),
     )
+
+
+def _validated_wire_region_hash(region: Any, field: str) -> str:
+    """Return one trusted 16-hex true-byte region digest, or empty."""
+    if not isinstance(region, dict):
+        return ''
+    value = region.get(field)
+    if (not isinstance(value, str) or len(value) != 16
+            or any(character not in '0123456789abcdef'
+                   for character in value)):
+        return ''
+    return value
 
 
 def _detect_namespace_switch(
@@ -600,6 +711,8 @@ def detect_cache_break(
     *,
     user_id: int,
     durable: bool = True,
+    cache_prefix_hwm_sink: Callable[[int], None] | None = None,
+    last_turn_cache_read_sink: Callable[[int], None] | None = None,
 ) -> dict[str, Any] | None:
     """Two-phase cache break detection (inspired by Claude Code).
 
@@ -622,90 +735,43 @@ def detect_cache_break(
 
     now = time.time()
 
-    # Cross-turn cache_read baseline for a NEW turn's round-1. MUST be read
-    # BEFORE acquiring _cache_lock below — get_prev_turn_cache_read takes the
-    # SAME lock, so calling it inside the `with _cache_lock:` block would
-    # deadlock. It EXCLUDES the current thread's own entry, so it returns the
-    # PREVIOUS turn's final cached-prefix read (carried across the run_task
-    # thread boundary), not this round's. 0 when there is no prior warm turn.
-    _cross_turn_prev_read = get_prev_turn_cache_read(
-        conv_id, user_id=user_id)
-
     _key = _state_key(conv_id, user_id=user_id)
+    # Cross-turn cache_read is consumed ONLY by the new-thread round-1 verdict.
+    # Avoid scanning every sibling state (and possibly the durable settings
+    # store) on every steady-state provider round. Peek under the shared lock,
+    # release it before get_prev_turn_cache_read (which takes the same lock),
+    # and skip the lookup entirely once this thread has a completed call. A
+    # pre-call compaction placeholder also needs no baseline here because its
+    # expected drop is explicitly suppressed by compaction_pending.
+    with _cache_lock:
+        _current = _cache_states.get(_key)
+        _needs_cross_turn_read = (
+            _current is None
+            or (_current.call_count == 0 and not _current.compaction_pending)
+        )
+    _cross_turn_prev_read = (
+        get_prev_turn_cache_read(conv_id, user_id=user_id)
+        if _needs_cross_turn_read else 0
+    )
+
     with _cache_lock:
         prev = _cache_states.get(_key)
         if prev is None:
             prev = CacheState()
             _cache_states[_key] = prev
 
-        # ── Phase 1: Detect WHAT changed (client-side hashes) ──
-        sys_hash = _hash_system_prompt(messages)
-        tools_hash = _hash_tools(tools)
-        msg_count = len(messages)
+        _wire_evidence = _wire_evidence_from_usage(usage)
 
-        # Per-tool hash diffing for detailed diagnostics
-        per_tool_hashes = _hash_tools_per_tool(tools)
-
-        # Prefix content mutation detection (diagnostic only)
-        # FIX: Use the PREVIOUS call's prefix count for mutation comparison,
-        #   then compute a NEW prefix hash for saving.
-        #   Bug was: _prefix_count grew each round (prev.message_count - 2),
-        #   so the hash covered MORE messages than prev.prefix_content_hash,
-        #   causing false positives every round (942 in one log window!).
-        #   Fix: compare hash(messages[0:prev_prefix]) against saved hash,
-        #   then save hash(messages[0:new_prefix]) for next round.
-        _prev_prefix_count = prev.prefix_content_count if prev.call_count > 0 else 0
-        _new_prefix_count = max(0, msg_count - EDITABLE_TAIL_COUNT)
-        _prev_prefix_hash = _hash_prefix_content(messages, _prev_prefix_count)
-        prefix_hash = _hash_prefix_content(messages, _new_prefix_count)
-        # Per-field hashes of the SAME (prev) range — lets us name the exact
-        # message+field that changed, not just THAT the prefix changed.
-        _cur_field_hashes_prevrange = _hash_prefix_fields(
-            messages, _prev_prefix_count)
-        prefix_field_hashes = _hash_prefix_fields(messages, _new_prefix_count)
-
-        client_changes = {}
-        _prefix_mutated = False
-        _prefix_culprits: list = []
-        if prev.call_count > 0:
-            if sys_hash != prev.system_hash:
-                client_changes['system_prompt'] = 'changed'
-            if tools_hash != prev.tools_hash:
-                # Identify exactly which tools changed
-                tool_diffs = _diff_tool_hashes(
-                    prev.per_tool_hashes, per_tool_hashes)
-                if tool_diffs:
-                    client_changes['tools'] = (
-                        f'changed: [{", ".join(tool_diffs)}]')
-                else:
-                    client_changes['tools'] = 'changed (ordering or meta)'
-            if model != prev.model:
-                client_changes['model'] = f'{prev.model} → {model}'
-            # Message count going down is an explicit compaction/truncation.
-            # Committed turns are immutable outside lifecycle operations, so
-            # there is no second "history rewrite" cause to infer here.
-            if msg_count < prev.message_count:
-                client_changes['message_count'] = (
-                    f'{prev.message_count} → {msg_count} (compacted)')
-
-            # Diagnostic: prefix content mutation detection
-            # Compare hash of the SAME range (prev prefix count) to detect
-            # if existing messages were silently mutated in-place.
-            if (_prev_prefix_hash
-                    and prev.prefix_content_hash
-                    and _prev_prefix_hash != prev.prefix_content_hash
-                    and not prev.compaction_pending):
-                _prefix_mutated = True
-                _prefix_culprits = _diff_prefix_fields(
-                    prev.prefix_field_hashes, _cur_field_hashes_prevrange)
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION DETECTED: '
-                    'messages[0:%d] content hash changed without compaction. '
-                    'This will cause a cache miss. changed=[%s] '
-                    'prev_hash=%s new_hash=%s',
-                    conv_id[:8], prev.call_count + 1, _prev_prefix_count,
-                    ', '.join(_prefix_culprits) or '?',
-                    prev.prefix_content_hash[:8], _prev_prefix_hash[:8])
+        client_evidence = _detect_client_changes(
+            prev, messages, tools, model, _wire_evidence, conv_id=conv_id)
+        sys_hash = client_evidence.system_hash
+        msg_count = client_evidence.message_count
+        tools_hash = client_evidence.tools_hash
+        per_tool_hashes = client_evidence.per_tool_hashes
+        prefix_field_hashes = client_evidence.prefix_field_hashes
+        client_changes = client_evidence.client_changes
+        _prefix_mutated = client_evidence.prefix_mutated
+        _prefix_culprits = client_evidence.prefix_culprits
 
         # ── Phase 2: Check API-reported cache stats ──
         cache_read = 0
@@ -770,14 +836,13 @@ def detect_cache_break(
         # prepare_request — the only point after add_cache_breakpoints AND
         # openai_body_to_anthropic). Diffing it against the previous round's
         # stored fingerprint is GROUND TRUTH for prefix mutation, unlike the
-        # `_hash_prefix_content` reconstruction above which is blind to the
+        # fallback field reconstruction above which is blind to the
         # build_body / breakpoint / anthropic-translation transforms. When
         # present it OVERRIDES the reconstruction's verdict:
         #   * identical  → our bytes did NOT change → any miss is PROVABLY
         #                  server-side (the "stochastic" label is now earned,
         #                  not reached by elimination).
         #   * differ     → names the exact msg.field WE mutated → client-caused.
-        _wire_evidence = _wire_evidence_from_usage(usage)
         _cur_wire_fp = _wire_evidence.fingerprint
         _wire_static = _wire_evidence.static_prefix
         _cur_wire_system = _wire_evidence.system
@@ -1078,8 +1143,7 @@ def detect_cache_break(
         prev.system_hash = sys_hash
         prev.tools_hash = tools_hash
         prev.per_tool_hashes = per_tool_hashes
-        prev.prefix_content_hash = prefix_hash
-        prev.prefix_content_count = _new_prefix_count
+        prev.prefix_field_count = max(0, msg_count - EDITABLE_TAIL_COUNT)
         prev.prefix_field_hashes = prefix_field_hashes
         if _wire_available:
             prev.wire_fp = _cur_wire_fp
@@ -1124,14 +1188,25 @@ def detect_cache_break(
         if durable and (cache_read > 1000 or cache_write > 1000):
             _durable_boundary = max(0, msg_count - EDITABLE_TAIL_COUNT)
             if _durable_boundary > 0:
-                try:
-                    from lib.tasks_pkg.cache_tracking._persist import (
-                        advance_persisted_boundary)
-                    advance_persisted_boundary(
-                        conv_id, _durable_boundary, user_id=user_id)
-                except Exception as _pe:
-                    logger.debug('[CacheTrack] advance_persisted_boundary '
-                                 'failed conv=%s: %s', conv_id[:8], _pe)
+                _boundary_staged = False
+                if cache_prefix_hwm_sink is not None:
+                    try:
+                        cache_prefix_hwm_sink(_durable_boundary)
+                        _boundary_staged = True
+                    except Exception as _pe:
+                        logger.debug(
+                            '[CacheTrack] cache-prefix sink failed conv=%s: %s',
+                            conv_id[:8], _pe,
+                        )
+                if not _boundary_staged:
+                    try:
+                        from lib.tasks_pkg.cache_tracking._persist import (
+                            advance_persisted_boundary)
+                        advance_persisted_boundary(
+                            conv_id, _durable_boundary, user_id=user_id)
+                    except Exception as _pe:
+                        logger.debug('[CacheTrack] advance_persisted_boundary '
+                                     'failed conv=%s: %s', conv_id[:8], _pe)
         # ── Persist the DURABLE round-1 read baseline (survives restart /
         #    stale-eviction / replica switch). This round's cache_read becomes
         #    the NEXT turn's cross-turn baseline; when that next turn starts on a
@@ -1142,14 +1217,25 @@ def detect_cache_break(
         #    read is not a usable prior-warm baseline and writing it would just
         #    lower the durable value pointlessly. Best-effort, last-writer-wins.
         if durable and cache_read > _MIN_CACHE_MISS_TOKENS:
-            try:
-                from lib.tasks_pkg.cache_tracking._persist import (
-                    write_last_turn_cache_read)
-                write_last_turn_cache_read(
-                    conv_id, cache_read, user_id=user_id)
-            except Exception as _pe:
-                logger.debug('[CacheTrack] write_last_turn_cache_read '
-                             'failed conv=%s: %s', conv_id[:8], _pe)
+            _last_read_staged = False
+            if last_turn_cache_read_sink is not None:
+                try:
+                    last_turn_cache_read_sink(cache_read)
+                    _last_read_staged = True
+                except Exception as _pe:
+                    logger.debug(
+                        '[CacheTrack] last-read sink failed conv=%s: %s',
+                        conv_id[:8], _pe,
+                    )
+            if not _last_read_staged:
+                try:
+                    from lib.tasks_pkg.cache_tracking._persist import (
+                        write_last_turn_cache_read)
+                    write_last_turn_cache_read(
+                        conv_id, cache_read, user_id=user_id)
+                except Exception as _pe:
+                    logger.debug('[CacheTrack] write_last_turn_cache_read '
+                                 'failed conv=%s: %s', conv_id[:8], _pe)
         if not prev.first_call_time:
             prev.first_call_time = now
         # Accumulate session-level stats
@@ -1281,7 +1367,22 @@ def detect_cache_break(
                     'the turn boundary.',
                     conv_id[:8], prev.call_count, cache_write, cache_read,
                     _cross_turn_prev_read, elapsed)
-                return _finish({'turn_boundary_rebill': _boundary_cause})
+                # Attach STRUCTURED fields alongside the free-form cause so the
+                # frontend can render a localized, parameterized sentence
+                # (t('finishInfo.cb.turnBoundaryRebill', {prev, read, gap}))
+                # instead of substring-translating English prose with dynamic
+                # numbers (which can never match a static phrase table). The
+                # string cause is RETAINED for back-compat with any persisted
+                # row / consumer that renders the value verbatim; no backend
+                # consumer reads the string value (replay/aggregate key off the
+                # dict KEY via classify_verdict), so the extra keys are inert
+                # there.
+                return _finish({
+                    'turn_boundary_rebill': _boundary_cause,
+                    'prev_read': int(_cross_turn_prev_read),
+                    'read': int(cache_read),
+                    'gap_s': round(float(elapsed or 0), 1),
+                })
 
             # Build the most specific cause we can (pure; see _resolve_break_cause).
             #
@@ -1355,7 +1456,17 @@ def detect_cache_break(
                     '%.1fs, gap=%.1fs) — prior cold write not yet visible.',
                     conv_id[:8], prev.call_count, cache_write, cache_read,
                     prev_cache_read, float(_cold_gap), elapsed)
-                return _finish({'cache_write_unsettled': _unsettled_cause})
+                # Structured sibling fields for the parameterized frontend
+                # rendering (see the turn_boundary_rebill note above): the
+                # string cause stays for back-compat, the numbers let the zh/en
+                # UI interpolate instead of substring-matching dynamic digits.
+                return _finish({
+                    'cache_write_unsettled': _unsettled_cause,
+                    'prev_read': int(prev_cache_read),
+                    'read': int(cache_read),
+                    'gap_s': round(float(elapsed or 0), 1),
+                    'cold_gap_s': round(float(_cold_gap), 1),
+                })
 
             # CACHE-NAMESPACE SWITCH — a body-identical round whose ROUTING
             #   flipped (upstream key / anthropic-beta / endpoint) is a

@@ -27,12 +27,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 
 import pytest
-from tests._runtime_sections import runtime_section
+from tests._runtime_sections import native_module_path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -70,19 +71,17 @@ _TARGETS = tuple(
         '../_task_routes.py',
     )
 )
-_API_JS = os.path.join(
-    _ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
-_ENDPOINTS_JS = _API_JS
-_ENDPOINT_TRANSPORT_JS = _API_JS
-_RESPONSE_CONTRACTS_JS = _API_JS
-_CLIENT_METHODS_JS = _API_JS
-_HTTP_CONTRACT_JS = _API_JS
+_API_CLIENT_SOURCE = Path(
+    _ROOT, 'frontend/src/features/orchestration/api-client.ts')
+_REQUEST_CONTRACT_SOURCE = Path(
+    _ROOT,
+    'frontend/src/features/orchestration/request-contracts.generated.ts',
+)
+_API_CLIENT_JS = native_module_path(
+    '.native/orchestration-api-client.js', _API_CLIENT_SOURCE,
+)
 
 pytestmark = pytest.mark.unit
-
-
-def _migrated_source(name: str) -> str:
-    return runtime_section(name, scope_prelude=False)
 
 
 def _make_app():
@@ -188,48 +187,35 @@ def test_bare_array_coordinated_migration():
 
     asyncio.run(_t())
 
-    src = _migrated_source('api/orchestrations.js')
-    endpoints = _migrated_source('api/orchestration-endpoints.js')
-    endpoint_transport = _migrated_source(
-        'api/orchestration-endpoint-transport.js')
-    http_contract = _migrated_source(
-        'api/orchestration-http-contract.generated.js')
-    m = re.search(r'orchestrations\s*=\s*\{(?P<body>.*?)\n\s*\};', src,
-                  re.DOTALL)
-    assert m, 'could not locate Api.orchestrations in api.js'
-    block = m.group('body')
-    assert 'listResult' in block and '_listResult()' in block, (
+    src = _API_CLIENT_SOURCE.read_text(encoding='utf-8')
+    contract = _REQUEST_CONTRACT_SOURCE.read_text(encoding='utf-8')
+    assert 'const listResult = async' in src and 'methods.listResult' in src, (
         'Api.orchestrations must expose one status-preserving list read while '
         'keeping list() as the array compatibility facade')
     assert re.search(r'Array\.isArray\(body\)', src), (
         'the normalized list read must retain a bare-array fallback for '
         'rolling-deploy skew against a pre-migration server')
-    assert "parse: 'response'" in endpoint_transport, (
+    assert "normalized ? { parse: 'response' }" in src, (
         'listResult must preserve HTTP status instead of folding failures '
         'into the empty-list state')
-    assert 'const contracts = endpointRegistry.contracts()' in src
-    assert 'Object.keys(contracts).forEach((endpoint)' in src
-    assert http_contract.count(
+    assert 'ORCHESTRATION_REQUEST_CONTRACTS' in src
+    assert 'for (const [endpoint, contract] of Object.entries(' in src
+    assert contract.count(
         '/api/v1/orchestrations/authoring-contract') == 1
-    assert '/api/v1/orchestrations/role-schema' not in http_contract
-    assert '/api/v1/orchestrations' not in endpoints
-    assert re.search(
-        r'\bsave\s*:\s*\(id, definition, expectedUpdatedAt, '
-        r'writeContract\)\s*=>\s*_request',
-        block,
-    ), (
+    assert '/api/v1/orchestrations/role-schema' not in contract
+    assert '/api/v1/orchestrations' not in src
+    assert 'methods.save = (' in src, (
         'Api.orchestrations.save must normalize create/update persistence')
     assert 'return normalized ? httpResult.normalize(response) : response' \
-        in endpoint_transport
-    assert 'if (spec.writeOperation)' in endpoint_transport
-    assert 'args[spec.writeVersionArg]' in endpoint_transport, (
+        in src
+    assert 'if (contract.writeOperation)' in src
+    assert 'args[Number(contract.writeVersionArg)]' in src, (
         'definition updates must use the shared contract-aware '
         'optimistic-write options')
-    assert "method === 'list' || method === 'listResult' || method === 'save'" \
-        in src
+    assert "method === 'list' || method === 'listResult' || method === 'save'" in src
     assert 'installMethod(endpoint, contract.resultMethod, true)' in src
     assert 'installMethod(endpoint, contract.directMethod, false)' in src
-    assert 'methodOwners[method]' in src, (
+    assert 'methodOwners.get(method)' in src, (
         'normalized methods must win when result/direct names intentionally '
         'share one public facade method')
 
@@ -239,22 +225,13 @@ def _normalise_route(path: str) -> str:
 
 
 def _frontend_endpoint_contracts() -> dict[str, dict]:
-    names = (
-        'api/orchestration-http-contract.generated.js',
-        'api/orchestration-response-contracts.js',
-        'api/orchestration-client-methods.js',
-        'api/orchestration-endpoint-transport.js',
-        'api/orchestration-endpoints.js',
-    )
-    sections = [runtime_section(name, scope_prelude=False) for name in names]
     script = """
-global.window=global;
-global.runtimeScope=global;
-__SECTIONS__
-process.stdout.write(JSON.stringify(runtimeScope.ApiOrchestrationEndpoints.contracts()));
-""".replace('__SECTIONS__', '\n'.join(sections))
+const fs=require('fs');global.window=global;
+eval(fs.readFileSync(process.argv[1],'utf8'));
+process.stdout.write(JSON.stringify(orchestrationEndpointContracts()));
+"""
     proc = subprocess.run(
-        ['node', '-e', script],
+        ['node', '-e', script, _API_CLIENT_JS],
         cwd=_ROOT, capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, (proc.stdout or '') + (proc.stderr or '')
@@ -287,19 +264,22 @@ def test_endpoint_registry_exactly_matches_live_backend(flask_app):
         for name, contract in backend_contracts.items()
     }
     assert {
-        name: contract['pathArgs'] for name, contract in contracts.items()
+        name: contract.get('pathArgs', {})
+        for name, contract in contracts.items()
     } == {
         name: contract.get('pathArgs', {})
         for name, contract in backend_contracts.items()
     }
     assert {
-        name: contract['queryArgs'] for name, contract in contracts.items()
+        name: contract.get('queryArgs', {})
+        for name, contract in contracts.items()
     } == {
         name: contract.get('queryArgs', {})
         for name, contract in backend_contracts.items()
     }
     assert {
-        name: contract['bodyArgs'] for name, contract in contracts.items()
+        name: contract.get('bodyArgs', {})
+        for name, contract in contracts.items()
     } == {
         name: contract.get('bodyArgs', {})
         for name, contract in backend_contracts.items()
@@ -312,7 +292,8 @@ def test_endpoint_registry_exactly_matches_live_backend(flask_app):
         ('writeContractArg', None),
     ):
         assert {
-            name: contract[field] for name, contract in contracts.items()
+            name: contract.get(field, default)
+            for name, contract in contracts.items()
         } == {
             name: contract.get(field, default)
             for name, contract in backend_contracts.items()
@@ -346,16 +327,16 @@ def test_endpoint_registry_exactly_matches_live_backend(flask_app):
         assert ('requestBody' in operation) is declares_body, \
             (contract, operation)
 
-    facade = open(_API_JS, encoding='utf-8').read()
+    facade = _API_CLIENT_SOURCE.read_text(encoding='utf-8')
     # Ordinary facade methods are generated from these exact contracts at
     # runtime; the companion frontend endpoint test compares the resulting
     # method set to every resultMethod/directMethod. Keep this parity test from
     # forcing the old hand-copied method table back into the source.
-    assert 'const contracts = endpointRegistry.contracts()' in facade
+    assert 'ORCHESTRATION_REQUEST_CONTRACTS' in facade
     assert 'installMethod(endpoint, contract.resultMethod, true)' in facade
     assert 'installMethod(endpoint, contract.directMethod, false)' in facade
     for special in ('listResult', 'list', 'save'):
-        assert re.search(rf'\b{special}\s*:', facade)
+        assert f'methods.{special} =' in facade
 
 
 def test_generated_http_contract_is_current():

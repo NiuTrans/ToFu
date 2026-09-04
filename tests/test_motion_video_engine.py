@@ -131,20 +131,32 @@ def _engine_task(tmp_path, **over):
 
 def _fake_narration(monkeypatch, tmp_path):
     """Fake TTS: per-scene REAL silence WAVs, loose targets == srt durations."""
+    import hashlib
     import lib.tts as T
+    from lib.motion_video import _audio as narration_audio
+
     def fake(scenes, out_dir, **kw):
         os.makedirs(out_dir, exist_ok=True)
         out = []
         for sc in scenes:
             dur = float(sc['end']) - float(sc['start'])
             wav = os.path.join(out_dir, f"{sc['id']}.wav")
+            wav_bytes = T.silence_wav_bytes(dur)
             with open(wav, 'wb') as f:
-                f.write(T.silence_wav_bytes(dur))
+                f.write(wav_bytes)
             out.append({'scene_id': sc['id'], 'wav': wav,
                         'text_chars': len(sc.get('text', '')),
+                        'text_sha256': narration_audio._scene_text_sha256(
+                            sc.get('text')),
+                        'wav_bytes': len(wav_bytes),
+                        'wav_sha256': hashlib.sha256(wav_bytes).hexdigest(),
                         'audio_duration': dur, 'srt_duration': dur,
                         'target_duration': dur, 'overflow': 0.0})
-        return {'ok': True, 'degraded': False, 'alignment': 'loose',
+        return {'ok': True, 'degraded': False, 'manifest_version': 2,
+                'request': narration_audio._manifest_request_contract(
+                    voice=kw.get('voice'), speed=kw.get('speed'),
+                    alignment=kw.get('alignment', 'loose'), tail_pad=0.35),
+                'alignment': 'loose',
                 'overflow_total': 0.0, 'scenes': out}
     monkeypatch.setattr('lib.motion_video.synthesize_scene_narrations', fake)
 
@@ -205,6 +217,7 @@ def test_engine_full_chain(monkeypatch, tmp_path):
     # storyboard + compositions + sidecar really written
     job = task['workdir']
     assert os.path.isfile(os.path.join(job, 'scenes.json'))
+    assert os.path.isfile(os.path.join(job, 'audio', 'manifest.json'))
     assert os.path.isfile(result['srt_path'])
     scenes = json.load(open(os.path.join(job, 'scenes.json'), encoding='utf-8'))
     for sc in scenes:

@@ -164,7 +164,7 @@ async def get_cached_report(date_str):
         if today_todos:
             logger.debug('[DailyReport] GET %s: no report, inheriting %d todos from prev day',
                          date_str, len(today_todos))
-            # Off-loop: full-day messages scan + json.loads (see get_conv_count).
+            # Off-loop: bounded legacy archives may still need JSON decoding.
             conv_count = await asyncio.to_thread(
                 _daily_report._count_convs_for_date, date_str,
                 owner_user_id=owner_user_id)
@@ -242,7 +242,7 @@ async def get_calendar_month(year, month):
     prefix = f'{year:04d}-{month:02d}-'
     cache_key = (owner_user_id, year, month)
     cached = _daily_report._calendar_cache.get(cache_key)
-    cache_fresh = cached and (time.monotonic() - cached['ts']) < _daily_report._CALENDAR_CACHE_TTL
+    cache_fresh = cached is not None
 
     # ── Per-day report summary: reuse the cached parse when fresh ──
     # Quick-win: previously we re-listed + re-parsed every YYYY-MM-*.json on
@@ -310,9 +310,9 @@ async def get_calendar_month(year, month):
             ms_start = int(_dt.datetime.combine(month_start, _dt.time.min).timestamp() * 1000)
             ms_end = int(_dt.datetime.combine(month_end, _dt.time.min).timestamp() * 1000)
 
-            # Off-loop and row-backed: the normal path projects only one
-            # timestamp scalar per message after an exact batch mirror gate.
-            # A verified-stale conversation alone falls back to its blob.
+            # Off-loop and authority-backed: Turn-native rows project only one
+            # timestamp scalar; frozen archives decode in bounded Sidecar
+            # batches, and transcript content never crosses this RPC.
             conv_days = await asyncio.to_thread(
                 _daily_report._activity_counts_for_range, ms_start, ms_end,
                 owner_user_id=owner_user_id,
@@ -339,12 +339,12 @@ async def get_calendar_month(year, month):
 
         # Store in cache (including the parsed per-day report summaries so
         # subsequent hits skip both the DB scans and the filesystem walk).
-        _daily_report._calendar_cache[cache_key] = {
+        _daily_report._calendar_cache.set(cache_key, {
             'days': days,
             'conv_days': conv_days,
             'cost_days': cost_days,
             'ts': time.monotonic(),
-        }
+        })
 
     logger.debug('[DailyReport] Calendar %d-%02d: %d days with reports, %d days with convs, '
                  '%d days with costs',
@@ -598,10 +598,8 @@ async def get_conv_count(date_str):
         return api_bad_request('Invalid date format')
     owner_user_id = _request_owner_user_id()
 
-    # Off-loop: _daily_report._count_convs_for_date fetches + json.loads-es EVERY in-window
-    # conversation's full messages blob just to count (measured ~300 MB on an
-    # active day) — synchronous here it stalls the event loop past the 5s
-    # LoopWatch threshold (real stalls on 2026-08-01 traced to this call).
+    # Off-loop: Turn-native rows stay timestamp-only, but frozen archives still
+    # require bounded Sidecar JSON decoding and can exceed the loop watchdog.
     count = await asyncio.to_thread(
         _daily_report._count_convs_for_date, date_str,
         owner_user_id=owner_user_id)
@@ -778,7 +776,7 @@ async def get_generation_status(date_str):
             return api_ok({'status': 'done', 'report': existing})
         # Check if previous day has inherited todos
         if today_todos:
-            # Off-loop: full-day messages scan + json.loads (see get_conv_count).
+            # Off-loop: bounded legacy archives may still need JSON decoding.
             conv_count = await asyncio.to_thread(
                 _daily_report._count_convs_for_date, date_str,
                 owner_user_id=owner_user_id)

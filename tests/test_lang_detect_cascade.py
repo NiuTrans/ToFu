@@ -316,7 +316,11 @@ class LlmCorrectorRealCallPathTest(unittest.TestCase):
     """
 
     def _patch(self, fn):
+        import lib.lang_correct as lc
         import lib.llm_dispatch as d
+        reset = getattr(lc, '_reset_language_correction_cache_for_test', None)
+        if reset is not None:
+            reset()
         self._orig = d.smart_chat
         d.smart_chat = fn
         self.addCleanup(lambda: setattr(d, 'smart_chat', self._orig))
@@ -336,6 +340,26 @@ class LlmCorrectorRealCallPathTest(unittest.TestCase):
         self.assertEqual(seen.get('max_tokens'), 8)
         self.assertIn('log_prefix', seen)
         self.assertIn('max_retries', seen)
+        self.assertEqual(seen.get('max_429_attempts'), 1)
+
+    def test_repeated_prompt_reuses_opaque_bounded_cache(self):
+        calls = []
+
+        def fake(messages, **kw):
+            calls.append(messages)
+            return ('zh', {})
+
+        self._patch(fake)
+        import lib.lang_correct as lc
+
+        text = '继续推进这个任务'
+        self.assertEqual(lc.llm_language_corrector(text), 'zh')
+        self.assertEqual(lc.llm_language_corrector(text), 'zh')
+        self.assertEqual(len(calls), 1)
+        snapshot = lc.language_correction_cache_snapshot()
+        self.assertEqual(snapshot['capacity'], 512)
+        self.assertEqual(snapshot['size'], 1)
+        self.assertEqual(snapshot['hits'], 1)
 
     def test_chatty_reply_rejected_not_garbage(self):
         # The owner's case: a chatty reply must parse to None, NOT 'the'.

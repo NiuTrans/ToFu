@@ -36,12 +36,16 @@ import re
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
-from tests._runtime_sections import runtime_section
+from tests._runtime_sections import native_module_path, runtime_section
 
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 FRAGMENT = os.path.join(ROOT, 'static', 'settings_panels', 'search.html')
+HTML_SAFETY = native_module_path(
+    '.native/search-panel-html-safety.js',
+    os.path.join(ROOT, 'frontend', 'src', 'html-safety.ts'),
+)
 
 # The four preset-owned knobs the 自定义 option must gate as a SET.
 _GATED_IDS = (
@@ -245,7 +249,7 @@ def test_search_panel_fragment_dom():
         target_js=os.path.join(JS_DIR, 'settings', 'other_tabs.js'),
         body_js=body_js,
         extra_targets=[
-            os.path.join(JS_DIR, 'core', 'safe_html.js'),
+            HTML_SAFETY,
             os.path.join(JS_DIR, 'settings', 'save_export.js'),
         ],
         expect_pass=34,

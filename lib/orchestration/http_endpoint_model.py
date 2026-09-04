@@ -29,10 +29,6 @@ class OrchestrationHttpEndpoint:
     def path_fields(self) -> tuple[str, ...]:
         return tuple(field for field, _index in self.path_args)
 
-    @property
-    def body_fields(self) -> tuple[str, ...]:
-        return tuple(field for field, _index in self.body_args)
-
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
             'route': self.route,

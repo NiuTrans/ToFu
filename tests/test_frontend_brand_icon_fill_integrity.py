@@ -25,6 +25,20 @@ child, because a child's own presentation attribute always beats the
 inherited value — so the icon renders correctly both under the CSS rule and
 without it.
 
+Second bug class (2026-08-31): an icon painted via
+``fill="url(#some-gradient)"`` resolves the paint server to the FIRST
+matching id in the document — when that instance lives in a display:none
+subtree (the closed preset dropdown also renders bedrock badges), browsers
+drop the fill and EVERY bedrock badge paints nothing (a 20px blank box, as
+seen in the provider-template picker). The registry therefore keeps every
+icon free of url(#…)/gradient references; mono paths inherit currentColor.
+
+Third bug class (2026-08-31): a presentation surface references a brand key
+the registry never defined (provider-template ``brand: 'groq'`` had no
+``groq`` icon — the card silently fell back to the generic smiley). Every
+icon key referenced by the retained provider templates
+must resolve in the registry.
+
 This test:
   1. loads the REAL branding section from frontend/src/runtime/app-runtime.js
      and asserts every icon whose root svg declares fill="none" has an
@@ -41,8 +55,11 @@ This test:
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -66,41 +83,40 @@ if tinycss2 is None:
         'tinycss2 not installed (pip install -e ".[test]")',
         allow_module_level=True)
 
-from tests._runtime_sections import runtime_section_path
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..'))
 CSS_PATH = os.path.join(ROOT, 'static', 'styles.css')
+BRAND_ICONS_BUNDLE = native_module_path(
+    '.native/model-brand-icons-fill-integrity.js',
+    os.path.join(ROOT, 'frontend', 'src', 'core', 'model-brand-icons.ts'),
+)
 
 #: shape elements whose painted interior depends on the inherited `fill`
 _SHAPES = ('path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon')
 
 
-def _brand_icons_source(mutate: str | None = None) -> str:
-    with open(runtime_section_path('settings/branding.js'),
-              encoding='utf-8') as fh:
-        src = fh.read()
-    if mutate:
-        needle, replacement = mutate
-        assert needle in src, (
-            'brand-icon mutation anchor drifted; the NEUTER case no longer '
-            'exercises the intended production markup')
-        mutated = src.replace(needle, replacement, 1)
-        assert mutated != src
-        src = mutated
-    return src
-
-
-def _extract_brand_icons(src: str) -> dict:
-    """{'claude': '<svg …>…</svg>', …} — the JS single-quoted string bodies."""
-    out = {}
-    for m in re.finditer(
-            r"(?:^|,)\s*(\w+):\s*'<svg\b.*?</svg>'", src, re.S | re.M):
-        out[m.group(1)] = m.group(0)[m.group(0).index('<svg'):]
-    assert out, '_BRAND_ICONS could not be extracted from branding.js'
-    return out
+def _brand_icons() -> dict[str, str]:
+    """Read the typed owner's public immutable registry through its bundle."""
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node not installed')
+    script = (
+        "const fs=require('fs');"
+        "(0,eval)(fs.readFileSync(process.argv[1],'utf8'));"
+        "process.stdout.write(JSON.stringify(MODEL_BRAND_ICONS));"
+    )
+    proc = subprocess.run(
+        [node, '-e', script, BRAND_ICONS_BUNDLE],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    icons = json.loads(proc.stdout)
+    assert icons, 'typed MODEL_BRAND_ICONS registry is empty'
+    return icons
 
 
 def _root_fill_none(icon: str) -> bool:
@@ -134,7 +150,7 @@ def test_stroke_brand_icons_are_fill_self_contained():
     """Invariant: an icon whose root svg declares fill="none" must put an
     explicit fill on EVERY shape child — otherwise the load-bearing CSS
     `fill: currentColor` solid-fills the shapes into one dark blob."""
-    icons = _extract_brand_icons(_brand_icons_source())
+    icons = _brand_icons()
     stroke_icons = sorted(k for k, v in icons.items() if _root_fill_none(v))
     assert 'generic' in stroke_icons and 'local' in stroke_icons, (
         'expected the two stroke-based icons (generic/local) to be tracked; '
@@ -150,7 +166,7 @@ def test_stroke_brand_icons_are_fill_self_contained():
 def test_generic_smiley_pins():
     """Concrete offender pins: generic = hollow round-rect + filled eyes +
     stroked smile; local = hollow server rects + filled LEDs + stroked slots."""
-    icons = _extract_brand_icons(_brand_icons_source())
+    icons = _brand_icons()
     g = icons['generic']
     assert re.search(
         r'<rect\b[^>]*rx="4"[^>]*fill="none"', g), (
@@ -202,19 +218,46 @@ def test_css_fill_currentcolor_stays():
             f'those icons black')
 
 
-def test_NC_stripping_child_fill_reintroduces_blob():
-    """NEUTER: remove fill="none" from generic's round-rect (the pre-fix
-    markup) and the self-containment invariant must FAIL — proving the guard
-    bites and a careless revert cannot silently re-ship the blob."""
-    src = _brand_icons_source()
-    bad = src.replace(
+def test_blob_detector_rejects_missing_child_fill():
+    """The invariant checker itself rejects the historical broken shape."""
+    icons = _brand_icons()
+    bad = icons['generic'].replace(
         '<rect x="3" y="3" width="18" height="18" rx="4" fill="none"/>',
         '<rect x="3" y="3" width="18" height="18" rx="4"/>', 1)
-    assert bad != src, 'NC pattern did not match — test is stale'
-    offenders = _blob_offenders(_extract_brand_icons(bad))
+    assert bad != icons['generic'], 'historical broken-shape fixture drifted'
+    offenders = _blob_offenders({**icons, 'generic': bad})
     assert any(o.startswith('generic<rect>') for o in offenders), (
         'the blob guard must flag generic<rect> when its fill="none" is '
         'stripped (the original blob shape)')
+
+
+def test_no_url_paint_server_references():
+    """Invariant: no registry icon paints via url(#…)/gradient references —
+    a hidden first instance (display:none dropdown) invalidates the paint
+    server document-wide and the badge renders as an empty box."""
+    offenders = [
+        key for key, icon in _brand_icons().items()
+        if 'url(#' in icon or 'Gradient' in icon]
+    assert not offenders, (
+        f'brand icons using cross-SVG paint-server references (invisible '
+        f'when the first badge is in a display:none subtree): {offenders} — '
+        f'keep icons mono currentColor (see bedrock history 2026-08-31)')
+
+
+def test_referenced_icon_keys_resolve():
+    """Every retained template brand must exist in the icon registry."""
+    icons = _brand_icons()
+    referenced: dict[str, str] = {}
+    templates_src = open(
+        os.path.join(ROOT, 'frontend', 'src', 'runtime', 'sections',
+                     'settings', 'provider_templates.js'),
+        encoding='utf-8').read()
+    for key in re.findall(r"brand: '([^']+)'", templates_src):
+        referenced.setdefault(key, 'provider_templates.js')
+    missing = sorted(k for k in referenced if k not in icons)
+    assert not missing, (
+        f'icon keys referenced but missing from MODEL_BRAND_ICONS: '
+        f'{[(k, referenced[k]) for k in missing]}')
 
 
 if __name__ == '__main__':

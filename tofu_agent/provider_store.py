@@ -1,10 +1,10 @@
-"""Encrypted, database-free persistence for the managed Provider.
+"""Encrypted, database-free persistence for model-routing v2 access.
 
 Responsibility
 --------------
-Persist the one Provider selected by the standalone ``tofu-agent`` control
-panel.  The endpoint and model remain inspectable operational metadata; API
-keys and custom header values are stored only inside a Fernet envelope.
+Persist one complete ``tofu.model-routing/v2`` aggregate.  Entity metadata
+remains inspectable; values keyed by Credential ``secret_reference`` are
+stored only inside a Fernet envelope.
 
 This module deliberately does not import the application storage authority or
 ``lib.config_dir``.  Its lifecycle is one small file plus an adjacent key,
@@ -22,19 +22,19 @@ from typing import Mapping
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from tofu_agent.models import AgentConfigurationError, ProviderConfig
+from tofu_agent.models import AgentConfigurationError, ModelRoutingConfig
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _CONFIG_KEY_ENV = 'TOFU_AGENT_CONFIG_KEY'
 _MAX_CONFIG_BYTES = 2 * 1024 * 1024
 
 
-class ProviderStoreError(AgentConfigurationError):
-    """The encrypted Provider settings could not be read or written."""
+class ModelRoutingStoreError(AgentConfigurationError):
+    """The encrypted model-routing settings could not be read or written."""
 
 
-def default_provider_config_path(
+def default_model_routing_config_path(
     environ: Mapping[str, str] | None = None,
 ) -> Path:
     """Return the per-user settings path without touching the filesystem."""
@@ -44,11 +44,11 @@ def default_provider_config_path(
         return Path(explicit).expanduser()
     xdg_home = str(source.get('XDG_CONFIG_HOME') or '').strip()
     if xdg_home:
-        return Path(xdg_home).expanduser() / 'tofu-agent' / 'provider.json'
+        return Path(xdg_home).expanduser() / 'tofu-agent' / 'model-routing.json'
     app_data = str(source.get('APPDATA') or '').strip()
     if os.name == 'nt' and app_data:
-        return Path(app_data).expanduser() / 'tofu-agent' / 'provider.json'
-    return Path.home() / '.config' / 'tofu-agent' / 'provider.json'
+        return Path(app_data).expanduser() / 'tofu-agent' / 'model-routing.json'
+    return Path.home() / '.config' / 'tofu-agent' / 'model-routing.json'
 
 
 def secret_hint(value: str) -> str:
@@ -61,12 +61,12 @@ def secret_hint(value: str) -> str:
     return f'{normalized[:4]}…{normalized[-4:]}'
 
 
-class ProviderSettingsStore:
-    """Atomically persist one encrypted :class:`ProviderConfig`.
+class ModelRoutingSettingsStore:
+    """Atomically persist one encrypted :class:`ModelRoutingConfig`.
 
     A caller may inject ``TOFU_AGENT_CONFIG_KEY`` for containers or replicated
     deployments.  Otherwise an adjacent ``.key`` file is created once.  A
-    copied provider JSON file alone is intentionally insufficient to recover
+    copied metadata JSON file alone is intentionally insufficient to recover
     its credentials.
     """
 
@@ -78,7 +78,7 @@ class ProviderSettingsStore:
     ) -> None:
         self.environ = os.environ if environ is None else environ
         self.path = (Path(path).expanduser() if path is not None
-                     else default_provider_config_path(self.environ))
+                     else default_model_routing_config_path(self.environ))
         self.key_path = self.path.with_name(f'.{self.path.name}.key')
         self._lock = threading.RLock()
 
@@ -90,8 +90,8 @@ class ProviderSettingsStore:
         try:
             self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         except OSError as exc:
-            raise ProviderStoreError(
-                'provider settings directory could not be created') from exc
+            raise ModelRoutingStoreError(
+                'model-routing settings directory could not be created') from exc
 
     @staticmethod
     def _tighten_permissions(path: Path) -> None:
@@ -100,8 +100,8 @@ class ProviderSettingsStore:
             if mode & 0o077:
                 os.chmod(path, 0o600)
         except OSError as exc:
-            raise ProviderStoreError(
-                'provider settings permissions could not be secured') from exc
+            raise ModelRoutingStoreError(
+                'model-routing settings permissions could not be secured') from exc
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
         self._ensure_parent()
@@ -115,7 +115,7 @@ class ProviderSettingsStore:
             while remaining:
                 written = os.write(descriptor, remaining)
                 if written <= 0:
-                    raise OSError('provider settings write made no progress')
+                    raise OSError('model-routing settings write made no progress')
                 remaining = remaining[written:]
             os.fsync(descriptor)
             os.close(descriptor)
@@ -132,8 +132,8 @@ class ProviderSettingsStore:
                 finally:
                     os.close(directory)
         except OSError as exc:
-            raise ProviderStoreError(
-                'provider settings could not be written atomically') from exc
+            raise ModelRoutingStoreError(
+                'model-routing settings could not be written atomically') from exc
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -154,15 +154,15 @@ class ProviderSettingsStore:
             self._tighten_permissions(self.key_path)
             try:
                 if self.key_path.stat().st_size > 4096:
-                    raise ProviderStoreError(
-                        'provider encryption key file is unexpectedly large')
+                    raise ModelRoutingStoreError(
+                        'model-routing encryption key file is unexpectedly large')
                 return self.key_path.read_bytes().strip()
             except OSError as exc:
-                raise ProviderStoreError(
-                    'provider encryption key could not be read') from exc
+                raise ModelRoutingStoreError(
+                    'model-routing encryption key could not be read') from exc
         if not create:
-            raise ProviderStoreError(
-                'provider encryption key is missing; re-save the Provider '
+            raise ModelRoutingStoreError(
+                'model-routing encryption key is missing; re-save the access '
                 'from /setup or restore its adjacent key file')
         key = Fernet.generate_key()
         self._atomic_write(self.key_path, key + b'\n')
@@ -171,82 +171,78 @@ class ProviderSettingsStore:
     def _fernet(self, *, create: bool) -> Fernet:
         try:
             return Fernet(self._key_material(create=create))
-        except ProviderStoreError:
+        except ModelRoutingStoreError:
             raise
         except (TypeError, ValueError) as exc:
-            raise ProviderStoreError(
+            raise ModelRoutingStoreError(
                 f'{_CONFIG_KEY_ENV} or the adjacent key file is invalid') from exc
 
-    def load(self) -> ProviderConfig | None:
-        """Decrypt and validate the stored Provider, or return ``None``."""
+    def load(self) -> ModelRoutingConfig | None:
+        """Decrypt and validate the stored v2 aggregate, or return ``None``."""
         with self._lock:
             if not self.path.is_file():
                 return None
             self._tighten_permissions(self.path)
             try:
                 if self.path.stat().st_size > _MAX_CONFIG_BYTES:
-                    raise ProviderStoreError(
-                        'provider settings file is unexpectedly large')
+                    raise ModelRoutingStoreError(
+                        'model-routing settings file is unexpectedly large')
                 document = json.loads(self.path.read_text(encoding='utf-8'))
-            except ProviderStoreError:
+            except ModelRoutingStoreError:
                 raise
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                raise ProviderStoreError(
-                    'provider settings file is unreadable or invalid JSON') from exc
+                raise ModelRoutingStoreError(
+                    'model-routing settings file is unreadable or invalid JSON') from exc
             if not isinstance(document, dict) \
                     or document.get('schema_version') != _SCHEMA_VERSION:
-                raise ProviderStoreError(
-                    'provider settings schema is unsupported')
-            stored = document.get('provider')
+                raise ModelRoutingStoreError(
+                    'model-routing settings schema is unsupported')
+            stored = document.get('model_routing')
             if not isinstance(stored, dict):
-                raise ProviderStoreError(
-                    'provider settings payload is invalid')
+                raise ModelRoutingStoreError(
+                    'model-routing settings payload is invalid')
             ciphertext = stored.get('secret_envelope')
             if not isinstance(ciphertext, str) or not ciphertext:
-                raise ProviderStoreError(
-                    'provider secret envelope is missing')
+                raise ModelRoutingStoreError(
+                    'model-routing secret envelope is missing')
             try:
                 plaintext = self._fernet(create=False).decrypt(
                     ciphertext.encode('ascii'))
                 secrets = json.loads(plaintext.decode('utf-8'))
-            except ProviderStoreError:
+            except ModelRoutingStoreError:
                 raise
             except (InvalidToken, UnicodeError, ValueError, TypeError,
                     json.JSONDecodeError) as exc:
-                raise ProviderStoreError(
-                    'provider secrets could not be decrypted') from exc
+                raise ModelRoutingStoreError(
+                    'model-routing secrets could not be decrypted') from exc
             if not isinstance(secrets, dict) \
                     or secrets.get('schema_version') != _SCHEMA_VERSION:
-                raise ProviderStoreError(
-                    'provider secret envelope is invalid')
-            return ProviderConfig(
-                base_url=stored.get('base_url') or '',
-                model=stored.get('model') or '',
-                api_key=secrets.get('api_key') or '',
-                extra_headers=secrets.get('extra_headers') or {},
-                thinking_format=stored.get('thinking_format') or '',
-                capabilities=stored.get('capabilities') or (),
+                raise ModelRoutingStoreError(
+                    'model-routing secret envelope is invalid')
+            return ModelRoutingConfig(
+                document=stored.get('document') or {},
+                model=stored.get('model') or {},
+                routing=stored.get('routing') or {},
+                credential_secrets=secrets.get('credential_secrets') or {},
             )
 
-    def save(self, provider: ProviderConfig) -> None:
+    def save(self, model_routing: ModelRoutingConfig) -> None:
         """Encrypt secrets, then atomically replace the settings file."""
-        if not isinstance(provider, ProviderConfig):
-            raise TypeError('provider must be ProviderConfig')
+        if not isinstance(model_routing, ModelRoutingConfig):
+            raise TypeError('model_routing must be ModelRoutingConfig')
         with self._lock:
             secret_payload = json.dumps({
                 'schema_version': _SCHEMA_VERSION,
-                'api_key': provider.api_key,
-                'extra_headers': dict(provider.extra_headers),
+                'credential_secrets': dict(model_routing.credential_secrets),
             }, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
             ciphertext = self._fernet(create=True).encrypt(
                 secret_payload.encode('utf-8')).decode('ascii')
             document = {
                 'schema_version': _SCHEMA_VERSION,
-                'provider': {
-                    'base_url': provider.base_url,
-                    'model': provider.model,
-                    'thinking_format': provider.thinking_format,
-                    'capabilities': sorted(provider.capabilities),
+                'model_routing': {
+                    'document': dict(model_routing.document),
+                    'model': dict(model_routing.model),
+                    'routing': dict(model_routing.routing),
                     'secret_envelope': ciphertext,
                 },
             }
@@ -256,21 +252,21 @@ class ProviderSettingsStore:
             self._atomic_write(self.path, encoded)
 
     def delete(self) -> bool:
-        """Remove the Provider document but retain its encryption key."""
+        """Remove the access document but retain its encryption key."""
         with self._lock:
             try:
                 self.path.unlink()
             except FileNotFoundError:
                 return False
             except OSError as exc:
-                raise ProviderStoreError(
-                    'provider settings could not be removed') from exc
+                raise ModelRoutingStoreError(
+                    'model-routing settings could not be removed') from exc
             return True
 
 
 __all__ = [
-    'ProviderSettingsStore',
-    'ProviderStoreError',
-    'default_provider_config_path',
+    'ModelRoutingSettingsStore',
+    'ModelRoutingStoreError',
+    'default_model_routing_config_path',
     'secret_hint',
 ]

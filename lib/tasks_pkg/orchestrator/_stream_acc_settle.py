@@ -78,7 +78,8 @@ def settle_stream_accumulator(
     # Read back updated tool_round_num from streaming accumulator
     #   (tool_start events emitted during streaming already consumed
     #   round numbers, so parse_tool_calls must start from here).
-    if stream_acc.announced_tc_map:
+    if (stream_acc.announced_tc_map
+            or getattr(stream_acc, 'announced_count', 0)):
         rs.tool_round_num = stream_acc.tool_round_num
 
     # Inject pre-computed streaming tool results into dedup cache.

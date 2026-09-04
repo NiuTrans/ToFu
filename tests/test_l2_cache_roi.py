@@ -25,6 +25,8 @@ halves (not just the cheap-to-measure "saved" side). Double-neutered.
 
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -271,6 +273,64 @@ def test_l2_roi_cold_conv_is_noop():
     _ok('cold conv record_l2_compaction is a safe no-op')
 
 
+def test_l2_roi_cross_thread_pre_call_compaction_pairs():
+    """A new task may L2-compact before its first provider response.
+
+    Its current-thread state is absent at compaction time while the previous
+    turn's warm sibling state remains. The compaction recorder must bridge
+    that thread boundary so the following response is both suppression-safe
+    and paired with the cached prefix that the summary invalidated.
+    """
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._roi import (
+        notify_compaction,
+        record_l2_compaction,
+    )
+    from lib.tasks_pkg.cache_tracking._state import (
+        CacheState,
+        _cache_states,
+        _state_key,
+    )
+
+    conv = 'l2roi-cross-thread-pre-call'
+    _cache_states.clear()
+    current_key = _state_key(conv, user_id=1)
+    sibling = CacheState()
+    sibling.call_count = 8
+    sibling.last_cache_read_tokens = 204_800
+    sibling.last_update_time = time.time()
+    _cache_states[(1, conv, threading.get_ident() + 10_000_000)] = sibling
+
+    outcome = {}
+
+    def _run():
+        record_l2_compaction(
+            conv, tokens_before=528_717, tokens_after=9_722,
+            msgs_before=437, msgs_after=6, user_id=1)
+        # Mirrors the pipeline's general prefix-mutation notification after the
+        # L2-specific recorder has run.
+        notify_compaction(conv, user_id=1)
+        outcome['verdict'] = detect_cache_break(
+            conv,
+            [{'role': 'system', 'content': 'sys'},
+             {'role': 'user', 'content': 'compacted continuation'}],
+            None, 'claude-opus-4',
+            usage={'cache_read_input_tokens': 0,
+                   'cache_creation_input_tokens': 9_722},
+            user_id=1, durable=False)
+
+    rec = _capture_roi(_run)
+    current = _cache_states.get(current_key)
+    assert outcome['verdict'] is None, (
+        f'post-compaction first call must not be a boundary break: {outcome}')
+    assert current is not None and current.total_breaks == 0
+    assert len(rec) == 1, f'expected one paired cross-thread ROI record: {rec}'
+    assert rec[0].get('outcome') == 'paired', rec[0]
+    assert rec[0].get('cache_read_busted') == 204_800, rec[0]
+    assert rec[0].get('cache_write_rebilled') == 9_722, rec[0]
+    _ok('pre-call cross-thread L2 pairs ROI and suppresses boundary false positive')
+
+
 def main():
     print()
     print(_color('═══ Phase-C L2 cache-ROI ratchet ═══', '36'))
@@ -282,6 +342,7 @@ def main():
         test_l2_roi_flushed_at_cleanup_when_no_following_round,
         test_l2_roi_second_event_flushes_first,
         test_l2_roi_cold_conv_is_noop,
+        test_l2_roi_cross_thread_pre_call_compaction_pairs,
     ]
     for fn in tests:
         try:

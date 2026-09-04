@@ -23,6 +23,9 @@ import threading
 
 from lib.log import get_logger
 from lib.agent_core.task_runtime import TaskRuntime
+from lib.agent_core.task_runtime_policy import (
+    resolve_chat_task_terminal_ttl_seconds,
+)
 
 logger = get_logger(__name__)
 
@@ -30,12 +33,15 @@ logger = get_logger(__name__)
 # ── Backing runtime ──────────────────────────────────────────────
 # kind='chat'. push_channel='chat' (matches the existing /api/push routes
 # and the frontend ``pushSubscribe('chat', taskId)`` consumer).
-# ttl=3600 matches the legacy cleanup_old_tasks threshold.
+# Terminal state survives through owner-scoped task-results + event cold
+# replay, so the hot Python dictionary needs only the launch-derived late
+# poller window. Active tasks are never TTL-evicted by TaskRuntime.
 # TODO(enterprise, R1): live task/event registry is single-process memory —
 # relay per-task frames on the push bus so any replica can serve
 # SSE/poll/abort. docs/ENTERPRISE_READINESS_AUDIT.md
+CHAT_TASK_TERMINAL_TTL_SECONDS = resolve_chat_task_terminal_ttl_seconds()
 chat_task_runtime = TaskRuntime(
-    'chat', ttl=3600,
+    'chat', ttl=CHAT_TASK_TERMINAL_TTL_SECONDS,
     push_channel='chat',
     error_source='lib.tasks_pkg.manager',
 )
@@ -94,7 +100,8 @@ except (ValueError, TypeError) as _e:
     CHECKPOINT_MIN_DELTA_CHARS = 160
 
 # Above this stored transcript size, a mid-stream checkpoint persists only the
-# task_results/segments/event-log recovery record. Rewriting a multi-megabyte
+# task-result/event-log recovery record; an authoritative Turn owns structural
+# segments for conversation attempts. Rewriting a multi-megabyte
 # conversations.messages JSON value every five seconds creates large Python
 # objects plus PostgreSQL TOAST/WAL churn; terminal sync still writes the full
 # settled conversation once. 0 restores the legacy unlimited behaviour.

@@ -303,9 +303,7 @@ class TestCompositeKeyDiscipline:
 class TestPersistenceFailurePosture:
     def test_persist_failure_returns_false_and_does_not_raise(self, fresh_db,
                                                               monkeypatch):
-        """An ideate pass costs many LLM calls. If the DB write fails the
-        artifact must still reach the caller (who returns it to the user);
-        persistence reports False and logs, it never takes the run down."""
+        """The adapter reports a refused write; recipe policy owns settlement."""
         import lib.research.persistence as rp
 
         def _boom(*a, **k):
@@ -326,62 +324,66 @@ class TestPersistenceFailurePosture:
         assert n == 0, 'an empty direction wrote a row under a blank identity'
 
 
-# ── 5. The wiring: the recipe must actually call the persistence ──────────
+# ── 5. The terminal recipe boundary publishes the complete artifact ───────
 
 class TestRecipeIsWired:
-    """The keys existed, were exported, and had zero callers for the whole
-    life of the capability. These pin the CALL, so that cannot recur."""
+    """Publication happens after generation/evaluation checkpoints are frozen."""
 
-    def test_survey_stage_persists(self, fresh_db, monkeypatch):
+    def test_publish_stage_persists_survey_and_final_ideas(self, fresh_db):
         import lib.research.recipe as rc
         from lib.research.persistence import load_research_artifacts
 
-        monkeypatch.setattr(rc, '_build_survey', lambda *a, **k: {
-            'ok': True, 'open_gaps': _OPEN_GAPS, 'survey_md': '# Wired',
-            'inputs_used': 3})
-        art = rc._run_survey({
-            'direction': _DIRECTION, 'lang': 'en', 'user_id': 1,
-            'artifacts': {'harvest': {'arxiv_ids': ['2305.11111'],
-                                      'folder_id': 'research_x'}}})
-        assert art['survey_md'] == '# Wired'
+        evaluation = {'ok': True, 'overall_score': 4.2, 'usage': {'calls': 2}}
+        receipt = rc._run_publish({
+            'direction': _DIRECTION, 'lang': 'en',
+            'user_id': TEST_OWNER_USER_ID,
+            'artifacts': {
+                'survey': {'open_gaps': _OPEN_GAPS, 'survey_md': '# Wired',
+                           'usage': {'calls': 1}},
+                'ideate': _IDEATE_ARTIFACT,
+                'evaluate': evaluation,
+            },
+        })
+        assert receipt == {'confirmed': True, 'rows': 2}
         got = load_research_artifacts(
             _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)
-        assert got['survey_md'] == '# Wired', (
-            'the survey stage did not persist — survey_lang_key has no caller '
-            'again, which is exactly the defect this epic closed')
+        assert got['survey_md'] == '# Wired'
+        assert len(got['accepted']) == 1
+        assert got['rejected'][0]['scores']['novelty'] == 2, \
+            'the rejection audit did not reach the DB'
+        assert got['evaluation']['overall_score'] == 4.2
 
-    def test_ideate_stage_persists(self, fresh_db, monkeypatch):
+    def test_generation_stage_does_not_depend_on_repository(self, monkeypatch):
+        """A storage outage cannot force an expensive ideate stage to rerun."""
         import lib.research.recipe as rc
-        from lib.research.persistence import load_research_artifacts
 
         monkeypatch.setattr(rc, '_generate_ideas', lambda *a, **k: {
             'ok': True, **_IDEATE_ARTIFACT})
+        monkeypatch.setattr(
+            rc, '_persist_ideate',
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError('generation attempted repository publication')))
         art = rc._run_ideate({
             'direction': _DIRECTION, 'lang': 'en', 'n_ideas': 6,
             'user_id': TEST_OWNER_USER_ID,
             'artifacts': {'survey': {'open_gaps': _OPEN_GAPS}}})
         assert len(art['accepted']) == 1
-        got = load_research_artifacts(
-            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)
-        assert len(got['accepted']) == 1, 'the ideate stage did not persist'
-        assert got['rejected'][0]['scores']['novelty'] == 2, \
-            'the rejection audit did not reach the DB'
 
-    def test_persist_failure_does_not_fail_the_stage(self, fresh_db, monkeypatch):
-        """Belt-and-braces on the posture, at the stage level."""
-        import lib.research.persistence as rp
+    def test_publish_stage_refuses_unconfirmed_terminal_write(self, monkeypatch):
         import lib.research.recipe as rc
 
-        monkeypatch.setattr(rc, '_generate_ideas', lambda *a, **k: {
-            'ok': True, **_IDEATE_ARTIFACT})
-        monkeypatch.setattr(rp, '_upsert_row',
-                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('x')))
-        art = rc._run_ideate({
-            'direction': _DIRECTION, 'lang': 'en', 'n_ideas': 6,
-            'user_id': TEST_OWNER_USER_ID,
-            'artifacts': {'survey': {'open_gaps': _OPEN_GAPS}}})
-        assert len(art['accepted']) == 1, (
-            'a DB failure destroyed an expensive ideate artifact')
+        monkeypatch.setattr(rc, '_persist_survey', lambda *a, **k: True)
+        monkeypatch.setattr(rc, '_persist_ideate', lambda *a, **k: False)
+        with pytest.raises(RuntimeError, match='evaluated-ideas publication'):
+            rc._run_publish({
+                'direction': _DIRECTION, 'lang': 'en',
+                'user_id': TEST_OWNER_USER_ID,
+                'artifacts': {
+                    'survey': {'open_gaps': _OPEN_GAPS, 'survey_md': '# S'},
+                    'ideate': _IDEATE_ARTIFACT,
+                    'evaluate': {'ok': True},
+                },
+            })
 
 
 if __name__ == '__main__':

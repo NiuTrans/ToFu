@@ -1,38 +1,33 @@
 /* ══════════════════════════════════════════════════════════
-   TOFU — "Warm Reading Room" (editorial · Ma restraint · one clay accent)
-   Direction refs: iA-lineage reading-first typography, Japanese Ma /
-   MUJI negative space, warm-paper palette (never pure white).
+   TOFU — cold white / graphite reading canvas with one amber accent.
    Variable NAMES are a stable contract consumed app-wide — retune
    VALUES only; do not rename or remove.
    ══════════════════════════════════════════════════════════ */
 [data-theme="tofu"]{
-  /* Paper grounds — warm off-white, never #fff; quiet tonal steps */
-  --bg-primary:#FAF7F0;
-  --bg-secondary:#F4EFE5;
-  --bg-tertiary:#ECE6D9;
-  --bg-hover:#E5DECE;
-  --bg-active:#DBD2BF;
+  --bg-primary:#F8FAFC;
+  --bg-secondary:#F7F8FA;
+  --bg-tertiary:#EEF1F4;
+  --bg-hover:#E8ECF0;
+  --bg-active:#DDE2E7;
   /* Borders — soft, low-contrast (restraint over ruled lines) */
-  --border:#E2DAC8;
-  --border-light:#EDE6D8;
-  /* Ink — warm charcoal, high legibility on paper */
-  --text-primary:#2E2822;
-  --text-secondary:#6C6352;
-  --text-tertiary:#A69D88;
-  /* One confident clay accent (was muddy tan #BB9572) */
-  --accent:#C1794B;
-  --accent-hover:#A96536;
-  --accent-subtle:rgba(193,121,75,0.10);
+  --border:#D9DEE4;
+  --border-light:#E9EDF1;
+  --text-primary:#202327;
+  --text-secondary:#626971;
+  --text-tertiary:#949CA5;
+  --accent:#C97A1D;
+  --accent-hover:#A85E0B;
+  --accent-subtle:rgba(201,122,29,0.10);
   /* 品牌字身专用墨色 — 当前与 --accent-hover 同值,但刻意独立:品牌色不随交互态色阶演进 */
-  --brand-ink:#A96536;
-  --thinking-bg:rgba(193,121,75,0.055);
-  --thinking-border:rgba(193,121,75,0.22);
-  --thinking-text:#9A6238;
+  --brand-ink:#A85E0B;
+  --thinking-bg:rgba(201,122,29,0.05);
+  --thinking-border:rgba(201,122,29,0.22);
+  --thinking-text:#8B560F;
   --error-bg:rgba(178,96,80,0.07);
   --error-border:rgba(178,96,80,0.22);
   --error-text:#B05B48;
-  --user-bubble:#F0E8D9;
-  --shadow:0 1px 2px rgba(92,72,44,0.04),0 3px 14px rgba(92,72,44,0.06);
+  --user-bubble:#F2F4F6;
+  --shadow:0 1px 2px rgba(19,25,31,0.04),0 3px 14px rgba(19,25,31,0.06);
   /* Soft-organic corners (editorial 8–16px) */
   --radius:14px;
   --radius-sm:10px;
@@ -46,7 +41,7 @@
      BEFORE the CJK fallback only for Latin glyphs; they carry no usable
      Han glyphs, so the shared tail wins for Chinese either way. */
   --cjk-fallback:'PingFang SC','Microsoft YaHei','Hiragino Sans GB','Noto Sans SC','Noto Sans CJK SC';
-  --serif-display:'Newsreader','Iowan Old Style','Palatino Linotype',Palatino,Georgia,var(--cjk-fallback),serif;
+  --serif-display:'Inter','Plus Jakarta Sans',var(--cjk-fallback),system-ui,sans-serif;
   --sans-body:'Inter','Plus Jakarta Sans',var(--cjk-fallback),system-ui,sans-serif;
   --search-blue:#5E90AE;
   --search-cyan:#4FA3AC;
@@ -54,11 +49,11 @@
   --fetch-green:#C1794B;
   --fetch-teal:#5E9E8C;
   /* Shadow tokens — soft, warm-tinted, diffuse (no hard pixel offset) */
-  --clay-sm:0 1px 2px rgba(92,72,44,0.05);
-  --clay-md:0 2px 10px rgba(92,72,44,0.07);
-  --clay-lg:0 10px 30px rgba(92,72,44,0.10);
-  --clay-pressed:inset 0 1px 3px rgba(92,72,44,0.10);
-  --stitch:1px solid #E2DAC8
+  --clay-sm:0 1px 2px rgba(19,25,31,0.05);
+  --clay-md:0 2px 10px rgba(19,25,31,0.07);
+  --clay-lg:0 10px 30px rgba(19,25,31,0.10);
+  --clay-pressed:inset 0 1px 3px rgba(19,25,31,0.10);
+  --stitch:1px solid #D9DEE4
 }
 
 /* ── Typography: reading-optimized with CJK care ── */
@@ -323,7 +318,8 @@
 }
 @media (prefers-reduced-motion:reduce){
   [data-theme="tofu"] .sidebar-header h1:hover .sidebar-brand>span,
-  [data-theme="tofu"] .tofu-brand:hover>span{animation:none}
+  [data-theme="tofu"] .tofu-brand:hover>span,
+  [data-theme="tofu"] .tofu-brand:hover>small{animation:none}
 }
 
 
@@ -451,6 +447,18 @@
   border-radius:2px;
   border:1px solid rgba(51,144,236,0.15);
   filter:none
+}
+/* Clone provenance chip — neutral pixel tag */
+[data-theme="tofu"] .conv-copy-badge{
+  font-family:var(--sans-body);
+  font-size:8px;
+  font-weight:700;
+  letter-spacing:0.04em;
+  background:rgba(120,120,120,0.08);
+  color:var(--text-tertiary);
+  padding:1px 4px;
+  border-radius:2px;
+  border:1px solid rgba(120,120,120,0.18)
 }
 /* Pinned zone removed — replaced by folders */
 
@@ -867,6 +875,13 @@
   width:8px;height:8px;
   box-shadow:0 0 6px rgba(245,158,11,0.45)
 }
+[data-theme="tofu"] .conv-waiting-dot{
+  border-radius:50%;
+  width:8px;height:8px;
+  box-shadow:0 0 6px rgba(245,158,11,0.45);
+  animation:tofuBreathingAmber 1.5s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
+  will-change:transform,opacity
+}
 [data-theme="tofu"] .conv-streaming-dot.conv-ratelimit-dot{
   background:#eab308;
   box-shadow:0 0 5px rgba(234,179,8,0.35)
@@ -950,6 +965,9 @@
 [data-theme="tofu"] .tofu-brand:hover .tofu-brand-o1{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1);animation-delay:.07s}
 [data-theme="tofu"] .tofu-brand:hover .tofu-brand-f{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1);animation-delay:.14s}
 [data-theme="tofu"] .tofu-brand:hover .tofu-brand-u{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1);animation-delay:.21s}
+/* 落款印接在字母波浪末尾(.07s 步进的下一拍);上抬/倾角由基础层的 translate 与
+   --brand-tilt 供给,keyframes 直接可用。 */
+[data-theme="tofu"] .tofu-brand:hover>small{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1);animation-delay:.28s}
 /* ── 品牌落款印 ——「豆腐」从飘在右侧的稀疏小字(letter-spacing .34em、opacity .9,
    在 42px 主标旁读作漏排的说明文字)改为一枚微斜陶土印章:中文渊源与「奶油纸底 +
    编辑气质」的主题一致,且给品牌区第二个视觉落点,不必新增任何图形资产。
@@ -1360,4 +1378,3 @@
 [data-theme="tofu"] .hljs-meta{color:#8A78B0}
 [data-theme="tofu"] .hljs-addition{color:#6A8A5E;background:rgba(106,138,94,0.08)}
 [data-theme="tofu"] .hljs-deletion{color:#B86A5A;background:rgba(184,106,90,0.08)}
-

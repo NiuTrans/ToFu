@@ -41,9 +41,10 @@ def test_resume_is_visible_lease_bounded_and_turn_store_authoritative():
     result = _run_node(r"""
 const runtimeScope = globalThis;
 const TAB_ID = 'tab-a';
+const retainedCompositionLifecycle = {add() {}};
 let conversations = [{id:'conv-a'}];
 let activeConvId = 'conv-a';
-const calls = {identity:0, list:0, hydrate:0, invalidate:[]};
+const calls = {identity:0, list:0, wake:0, invalidate:[]};
 const listeners = {};
 const document = {
   visibilityState:'visible',
@@ -74,8 +75,8 @@ function renderConversationList() {}
 function loadConversation() {}
 function newChat() {}
 runtimeScope.ConversationTurnStore = {
-  hydrateConversation: async (conversation) => {
-    calls.hydrate += 1;
+  wakeConversation: async (conversation) => {
+    calls.wake += 1;
     return conversation;
   },
   invalidateConversation: (conversationId, cursorHint) => {
@@ -121,7 +122,7 @@ return (async () => {
         "calls": {
             "identity": 2,
             "list": 2,
-            "hydrate": 2,
+            "wake": 2,
             "invalidate": [["conv-a", "cursor-9"]],
         },
         "leaseReleased": True,
@@ -136,6 +137,103 @@ def test_invalidation_owner_has_no_editor_or_transcript_gate():
     source = runtime_section("core/conversation_invalidation.js")
     assert "_editingMsgIdx" not in source
     assert "ConversationTurnStore?.invalidateConversation?." in source
-    assert "ConversationTurnStore?.hydrateConversation?." in source
+    assert "ConversationTurnStore?.wakeConversation?." in source
+    assert "ConversationTurnStore?.hydrateConversation?." not in source
     assert "loadConversationCatalog()" in source
     assert ".messages" not in source
+
+
+def test_catalog_refresh_waits_for_turn_revision_before_using_full_list():
+    owner = runtime_section(
+        "core/conversation_invalidation.js", scope_prelude=False,
+    )
+    result = _run_node(r"""
+const runtimeScope = globalThis;
+const TAB_ID = 'tab-revision';
+const retainedCompositionLifecycle = {add() {}};
+let stateRevision = 4;
+let conversations = [{id:'conv-a', _serverRev:4}];
+let activeConvId = 'conv-a';
+const calls = {list:0, invalidate:[]};
+const timers = new Map();
+let timerId = 0;
+const document = {
+  visibilityState:'visible',
+  addEventListener() {},
+};
+const window = {addEventListener() {}};
+globalThis.BroadcastChannel = undefined;
+function setTimeout(callback, delay) {
+  const id = ++timerId;
+  timers.set(id, {callback, delay});
+  return id;
+}
+function clearTimeout(id) { timers.delete(id); }
+globalThis.setTimeout = setTimeout;
+globalThis.clearTimeout = clearTimeout;
+function runRefreshTimer() {
+  const entry = [...timers.entries()].find(([, value]) => value.delay === 150);
+  if (!entry) return false;
+  timers.delete(entry[0]);
+  entry[1].callback();
+  return true;
+}
+function loadConversationCatalog() { calls.list += 1; return Promise.resolve(); }
+function initCurrentUserId() { return Promise.resolve(1); }
+function decodeConversationInvalidation(frame) { return frame; }
+function _frameIsOurs() { return true; }
+function debugLog() {}
+function renderConversationList() {}
+function loadConversation() {}
+function newChat() {}
+function runWithConcurrency() { return Promise.resolve({completed:0, errors:[]}); }
+runtimeScope.ConversationTurnRead = {
+  state: () => ({conversationRevision:stateRevision, turnsById:{}}),
+  activeAttemptIds: () => [],
+};
+runtimeScope.ConversationTurnStore = {
+  invalidateConversation: (id) => calls.invalidate.push(id),
+  wakeConversation: () => Promise.resolve(null),
+  disposeConversation() {},
+};
+""" + owner + r"""
+return (async () => {
+  _onConvNotifyPush({type:'conv_changed', convId:'conv-a', rev:4, userId:1});
+  const selfEchoScheduled = runRefreshTimer();
+
+  _onConvNotifyPush({type:'conv_changed', convId:'conv-a', rev:5, userId:1});
+  stateRevision = 5;
+  const convergedTimerRan = runRefreshTimer();
+
+  _onConvNotifyPush({type:'conv_changed', convId:'conv-a', rev:6, userId:1});
+  const staleTimerRan = runRefreshTimer();
+
+  _onConvNotifyPush({type:'conv_changed', convId:'conv-a', userId:1});
+  const metadataTimerRan = runRefreshTimer();
+
+  _onConvNotifyPush({type:'conv_changed', convId:'conv-new', rev:1, userId:1});
+  const unknownTimerRan = runRefreshTimer();
+
+  await new Promise((resolve) => setImmediate(resolve));
+  return {
+    selfEchoScheduled,
+    convergedTimerRan,
+    staleTimerRan,
+    metadataTimerRan,
+    unknownTimerRan,
+    calls,
+  };
+})();
+""")
+
+    assert result == {
+        "selfEchoScheduled": False,
+        "convergedTimerRan": True,
+        "staleTimerRan": True,
+        "metadataTimerRan": True,
+        "unknownTimerRan": True,
+        "calls": {
+            "list": 3,
+            "invalidate": ["conv-a", "conv-a", "conv-a"],
+        },
+    }

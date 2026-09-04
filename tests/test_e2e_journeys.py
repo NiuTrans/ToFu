@@ -122,9 +122,7 @@ def test_reload_restores_active_conversation(page, assert_no_js_errors):
         timeout=15000,
     )
     page.wait_for_function(
-        """() => (!window.BackendOfflineMonitor ||
-          window.BackendOfflineMonitor.phase === 'online') &&
-          !document.querySelector('#backend-offline-banner')""",
+        "() => !document.querySelector('#backend-offline-banner')",
         timeout=15000,
     )
 
@@ -175,14 +173,15 @@ def test_settings_actions_and_theme_persist(page, assert_no_js_errors):
 
 
 def test_paper_and_orchestration_domains_boot(page, assert_no_js_errors):
-    page.route(
-        '**/api/v1/features',
-        lambda route: route.fulfill(
-            status=200,
-            content_type='application/json',
-            body='{"debug_mode":true}',
-        ),
-    )
+    # See test_visual_surfaces.py: flags piggyback on /api/v1/server-config;
+    # the /api/v1/features fallback never fires for a valid boot payload.
+    def _force_debug_flags(route):
+        response = route.fetch()
+        body = response.json()
+        body['feature_flags'] = {'debug_mode': True, 'optimizer_enabled': True}
+        route.fulfill(response=response, json=body)
+
+    page.route('**/api/v1/server-config**', _force_debug_flags)
     page.reload()
     _wait_app_ready(page)
     page.locator('#paperModeBtn').click()

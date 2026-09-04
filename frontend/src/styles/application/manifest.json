@@ -13,6 +13,12 @@
       "path": "03-paper-reader.css"
     },
     {
+      "path": "03-paper-reader-streaming.css"
+    },
+    {
+      "path": "03-paper-reader-responsive.css"
+    },
+    {
       "path": "04-paper-reader-themes.css"
     },
     {

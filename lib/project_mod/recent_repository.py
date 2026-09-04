@@ -8,6 +8,11 @@ from collections.abc import Callable
 from typing import Any
 
 from lib.identity import require_user_id
+from lib.project_recent_contract import (
+    PROJECT_RELINK_STORAGE_DEADLINE_SECONDS,
+    RECENT_PROJECT_PATH_MAX_CHARS,
+    RECENT_PROJECT_TOUCH_BATCH_LIMIT,
+)
 
 
 class RecentProjectRepository:
@@ -35,10 +40,15 @@ class RecentProjectRepository:
             "project.recent.list", {"user_id": self.owner_user_id})
         return [dict(row) for row in rows] if isinstance(rows, list) else []
 
-    def touch(self, project_path: str) -> dict:
+    @staticmethod
+    def _path(project_path: object) -> str:
         path = str(project_path or "").strip()
-        if not path:
-            raise ValueError("project_path is required")
+        if not path or len(path) > RECENT_PROJECT_PATH_MAX_CHARS:
+            raise ValueError("project_path is required and bounded")
+        return path
+
+    def touch(self, project_path: str) -> dict:
+        path = self._path(project_path)
         result = self._client(write=True).command(
             "project.recent.touch",
             {
@@ -47,6 +57,45 @@ class RecentProjectRepository:
                 "last_used": int(time.time()),
             },
             f"project.recent.touch:{uuid.uuid4().hex}",
+        )
+        return dict(result) if isinstance(result, dict) else {}
+
+    def touch_many(self, project_paths: list[str] | tuple[str, ...]) -> int:
+        if (
+            not isinstance(project_paths, (list, tuple))
+            or not project_paths
+            or len(project_paths) > RECENT_PROJECT_TOUCH_BATCH_LIMIT
+        ):
+            raise ValueError("project_paths must be a bounded non-empty list")
+        paths: list[str] = []
+        for candidate in project_paths:
+            path = self._path(candidate)
+            if path not in paths:
+                paths.append(path)
+        result = self._client(write=True).command(
+            "project.recent.touch_many",
+            {
+                "user_id": self.owner_user_id,
+                "project_paths": paths,
+                "last_used": int(time.time()),
+            },
+            f"project.recent.touch_many:{uuid.uuid4().hex}",
+        )
+        return int((result or {}).get("touched") or 0)
+
+    def relink(self, old_path: str, new_path: str) -> dict:
+        old = self._path(old_path)
+        new = self._path(new_path)
+        result = self._client(write=True).command(
+            "project.relink",
+            {
+                "user_id": self.owner_user_id,
+                "old_path": old,
+                "new_path": new,
+            },
+            f"project.relink:{uuid.uuid4().hex}",
+            priority="maintenance",
+            deadline=PROJECT_RELINK_STORAGE_DEADLINE_SECONDS,
         )
         return dict(result) if isinstance(result, dict) else {}
 

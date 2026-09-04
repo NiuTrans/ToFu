@@ -71,6 +71,17 @@ def test_wedged_task_excluded(monkeypatch):
         'a wedged running task must not block a restart'
 
 
+def test_old_pending_queue_resident_is_still_live(monkeypatch):
+    """Queue residence is not worker silence; pending work blocks restart."""
+    from lib.tasks_pkg.manager import list_running_tasks
+    now = time.time()
+    stale = now - 400
+    _install(monkeypatch, [
+        _mk('queued', 'convQueued', created=stale, status='pending'),
+    ])
+    assert [item['convId'] for item in list_running_tasks()] == ['convQueued']
+
+
 def test_fresh_event_clock_still_counted(monkeypatch):
     """REVERSE assertion: heartbeat stale but events fresh → ALIVE → counted.
 

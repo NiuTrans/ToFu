@@ -1,4 +1,4 @@
-"""Executable contract for request-scoped BYO dispatcher activation."""
+"""Executable contract for request-scoped model-routing activation."""
 
 from __future__ import annotations
 
@@ -20,13 +20,15 @@ def _run_isolated(source: str) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.unit
-def test_server_boot_does_not_load_ephemeral_dispatch_for_byo_routes():
+def test_server_boot_loads_v2_contract_but_not_legacy_or_dispatch_adapter():
     proc = _run_isolated(
         'import sys; import server; '
-        'print("BYO", "lib.byo_resolve" in sys.modules, '
+        'print("ROUTING", "lib.model_routing" in sys.modules, '
+        '"lib.byo_resolve" in sys.modules, '
+        '"lib.model_routing.dispatch_adapter" in sys.modules, '
         '"lib.llm_dispatch.ephemeral" in sys.modules)')
     assert proc.returncode == 0, proc.stderr[-1200:]
-    assert 'BYO True False' in proc.stdout
+    assert 'ROUTING True False False False' in proc.stdout
 
 
 @pytest.mark.unit

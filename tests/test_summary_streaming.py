@@ -115,6 +115,84 @@ def test_summary_no_on_delta_uses_nonstreaming(monkeypatch):
     assert called['chat'] == 1 and called['stream'] == 0, called
 
 
+def test_summary_output_preserves_model_authored_current_goal(monkeypatch):
+    """The model's own Objective survives post-processing — that is what lets
+    the receipt track goal replacement. Whether that judgment is RIGHT is the
+    prompt's job (it sees every user message verbatim); the code boundary
+    only guarantees a non-empty Objective section."""
+    import lib.llm_dispatch as ld
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+
+    def fake_chat(_messages, **_kwargs):
+        return (
+            '### Objective\nAnswer the login error.\n\n'
+            '### Pending / Next Steps\nInvestigate SSO.',
+            {'prompt_tokens': 5, 'completion_tokens': 2},
+        )
+
+    monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
+    result = summ._generate_query_aware_summary(
+        [{'role': 'assistant', 'content': 'old work'}],
+        'Unable to log in?',
+        anchor_text='Download two skills and improve both MCP tools.',
+    )
+
+    assert result.startswith('### Objective\nAnswer the login error.')
+    assert '### Pending / Next Steps\nInvestigate SSO.' in result
+
+
+def test_summary_output_fills_missing_objective_from_anchor(monkeypatch):
+    """Failure floor: a model that omits the Objective section gets the
+    earliest-request anchor — the best available evidence of the goal."""
+    import lib.llm_dispatch as ld
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+
+    def fake_chat(_messages, **_kwargs):
+        return (
+            '### Pending / Next Steps\nInvestigate SSO.',
+            {'prompt_tokens': 5, 'completion_tokens': 2},
+        )
+
+    monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
+    result = summ._generate_query_aware_summary(
+        [{'role': 'assistant', 'content': 'old work'}],
+        'Unable to log in?',
+        anchor_text='Download two skills and improve both MCP tools.',
+    )
+
+    assert result.startswith(
+        '### Objective\nDownload two skills and improve both MCP tools.')
+    assert '### Pending / Next Steps\nInvestigate SSO.' in result
+
+
+def test_summary_postprocess_failure_preserves_generated_content(monkeypatch):
+    """A local receipt-shaping bug must not discard a paid model summary."""
+    import re
+
+    import lib.llm_dispatch as ld
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+
+    generated = '### Pending / Next Steps\nInvestigate SSO.'
+
+    def fake_chat(_messages, **_kwargs):
+        return generated, {'prompt_tokens': 5, 'completion_tokens': 2}
+
+    def fail_objective_injection(*_args, **_kwargs):
+        raise re.error(r'bad escape \u')
+
+    monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
+    monkeypatch.setattr(
+        summ, '_ensure_summary_objective', fail_objective_injection)
+
+    result = summ._generate_query_aware_summary(
+        [{'role': 'assistant', 'content': 'old work'}],
+        'Continue.',
+        anchor_text=r'\u003cplan\u003e',
+    )
+
+    assert result == generated
+
+
 def test_codex_subscription_auto_summary_streams_and_pins(monkeypatch):
     """Automatic L2 compaction must not escape a stream-only Codex slot.
 
@@ -146,7 +224,8 @@ def test_codex_subscription_auto_summary_streams_and_pins(monkeypatch):
     try:
         result = summ._generate_query_aware_summary(
             [{'role': 'user', 'content': 'q'}], 'q', conv_id='codex-conv',
-            task={'convId': 'codex-conv', 'provider_id': 'oauth_codex',
+            task={'convId': 'codex-conv', '_userId': 1,
+                  'provider_id': 'oauth_codex',
                   'config': {'model': 'gpt-5.6-luna'}})
     finally:
         clear_pinned_provider()
@@ -155,6 +234,63 @@ def test_codex_subscription_auto_summary_streams_and_pins(monkeypatch):
     assert seen == {
         'chat': 0, 'stream': 1, 'pin': 'oauth_codex', 'on_content': None,
     }
+
+
+def test_summary_uses_owner_scoped_affinity_and_restores_parent(monkeypatch):
+    """Auxiliary summaries must not perturb the main conversation cache key."""
+    import lib.llm_dispatch as ld
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+    from lib.llm_dispatch.conv_affinity import (
+        conv_affinity, get_conv_affinity)
+
+    seen = []
+
+    def fake_stream(body, **_kwargs):
+        seen.append({
+            'thread_affinity': get_conv_affinity(),
+            'body_affinity': body.get('_conv_id'),
+        })
+        return ({'role': 'assistant', 'content': 'ISOLATED SUMMARY'}, 'stop',
+                {'prompt_tokens': 11, 'completion_tokens': 2})
+
+    monkeypatch.setattr(ld, 'dispatch_stream', fake_stream)
+    monkeypatch.setattr(
+        summ, '_codex_subscription_provider', lambda _task: 'oauth_codex')
+
+    task = {
+        'id': 'task-a', 'convId': 'shared-conversation', '_userId': 17,
+        'config': {'model': 'gpt-5.6-luna'},
+    }
+    with conv_affinity('main-conversation-affinity'):
+        result = summ._generate_query_aware_summary(
+            [{'role': 'user', 'content': 'q'}], 'q',
+            conv_id='shared-conversation', task=task)
+        assert get_conv_affinity() == 'main-conversation-affinity'
+
+    assert result == 'ISOLATED SUMMARY'
+    assert len(seen) == 1
+    isolated = seen[0]['thread_affinity']
+    assert isolated == seen[0]['body_affinity']
+    assert isolated.startswith('l2s-')
+    assert isolated != 'main-conversation-affinity'
+    assert 'shared-conversation' not in isolated
+
+    same_owner = summ._summary_cache_affinity_id(
+        'shared-conversation', task)
+    other_owner = summ._summary_cache_affinity_id(
+        'shared-conversation', {
+            'id': 'task-b', 'convId': 'shared-conversation', '_userId': 18,
+        })
+    assert same_owner == isolated
+    assert other_owner != isolated
+    assert get_conv_affinity() is None
+
+
+def test_invalid_summary_owner_disables_affinity(monkeypatch):
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+
+    assert summ._summary_cache_affinity_id(
+        'conversation', {'convId': 'conversation', '_userId': 0}) == ''
 
 
 def test_non_codex_provider_pin_is_never_overridden(monkeypatch):
@@ -174,7 +310,8 @@ def test_non_codex_provider_pin_is_never_overridden(monkeypatch):
     try:
         result = summ._generate_query_aware_summary(
             [{'role': 'user', 'content': 'q'}], 'q', conv_id='c',
-            task={'provider_id': 'oauth_codex', 'config': {'model': 'gpt-5.6-luna'}})
+            task={'_userId': 1, 'provider_id': 'oauth_codex',
+                  'config': {'model': 'gpt-5.6-luna'}})
     finally:
         clear_pinned_provider()
 
@@ -225,7 +362,7 @@ def test_recovered_task_infers_unique_codex_provider_from_live_slots(
         result = summ._generate_query_aware_summary(
             [{'role': 'user', 'content': 'q'}], 'q',
             conv_id='recovered-codex',
-            task={'convId': 'recovered-codex',
+            task={'convId': 'recovered-codex', '_userId': 1,
                   'config': {'model': 'gpt-logical'}})
     finally:
         clear_pinned_provider()

@@ -20,6 +20,42 @@ def _search(query: str, **kwargs):
     return search(query, user_id=TEST_OWNER_USER_ID, **kwargs)
 
 
+def test_large_document_stays_within_command_receipt_budget(
+        isolated_knowledge):
+    # Regression: mutation responses carry only the metadata projection. This
+    # body is large and poorly compressible, so a response embedding chunk
+    # content would exceed the 64KiB compressed receipt budget and 500.
+    import os
+    blob = os.urandom(300_000).hex()
+    document = isolated_knowledge.add_document(
+        f'Proof preamble {blob} watermark conclusion'.encode(), 'big.txt',
+        user_id=TEST_OWNER_USER_ID)
+    assert document['duplicate'] is False
+    assert document['text_chars'] > 500_000
+    hits = _search('watermark')
+    assert hits and hits[0]['source'] == 'big.txt'
+
+    # replace (reindex) and delete share the same receipt-safe projection.
+    reindexed = isolated_knowledge.reindex_document(
+        document['id'], user_id=TEST_OWNER_USER_ID)
+    assert reindexed is not None and reindexed['id'] == document['id']
+    assert isolated_knowledge.delete_document(
+        document['id'], user_id=TEST_OWNER_USER_ID) is True
+
+
+def test_overlong_ascii_runs_are_dropped_without_failing_ingest(
+        isolated_knowledge):
+    # Proof PDFs carry >128-char watermark/base64 runs; the sidecar knowledge
+    # contract rejects terms that long, so they must be dropped at tokenization
+    # instead of failing the whole ingest.
+    blob = 'A' * 200
+    isolated_knowledge.add_document(
+        f'Introduction {blob} watermark conclusion'.encode(), 'proof.pdf',
+        user_id=TEST_OWNER_USER_ID)
+    hits = _search('watermark')
+    assert hits and 'watermark' in hits[0]['excerpt']
+
+
 def test_empty_or_disabled_corpus_contributes_no_model_tool(isolated_knowledge):
     from lib.knowledge.tool import build_tool
     context = SimpleNamespace(owner_user_id=TEST_OWNER_USER_ID)
@@ -515,10 +551,11 @@ def test_visual_enrichment_requires_consent_and_atomically_refreshes_search(
     queued = repository.document(document['id'])['assets']
     assert queued[0]['enrichment_status'] == 'pending'
 
-    monkeypatch.setattr(enrichment, '_vision_models', lambda: ['vision-test'])
+    monkeypatch.setattr(
+        enrichment, '_vision_models', lambda *_args: ['vision-test'])
     monkeypatch.setattr(
         enrichment, '_describe',
-        lambda _raw, _mime, _row: (
+        lambda _raw, _mime, _row, **_kwargs: (
             'A yellow dependency graph labeled ATLAS-NEBULA.', 'vision-test'))
     import threading
     enrichment._run(TEST_OWNER_USER_ID, threading.Event())

@@ -202,7 +202,7 @@ def _explicit_browser_tab_error() -> str:
             'Call browser_list_tabs, choose the intended site, and retry with '
             'explicit tab_id. For read-only extraction, use '
             'browser_research_page with the full URL.'),
-    ).to_model_text()
+    ).to_envelope_text()
 
 
 def _terminal_access_error(
@@ -239,7 +239,7 @@ def _terminal_access_error(
         retryable=False,
         next_action=next_action,
         message=message,
-    ).to_model_text()
+    ).to_envelope_text()
 
 
 def execute_browser_tool(

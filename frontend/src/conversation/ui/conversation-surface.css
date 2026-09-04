@@ -93,12 +93,45 @@ details.bilingual-block[open] .bilingual-toggle{transform:rotate(180deg)}
 .conversation-queue-item.message > *{
   grid-column:2;min-width:0;max-width:var(--msg-measure);
 }
-.conversation-queue-item__header{display:flex;align-items:center;gap:8px}
+.conversation-queue-item + .conversation-queue-item{margin-top:8px}
+.conversation-queue-item__header{
+  display:flex;align-items:center;gap:6px;margin:0 2px 4px;
+  font-size:11px;color:var(--text-tertiary);
+}
+.conversation-queue-item__header .queue-item-icon{display:inline-flex;align-items:center}
+.conversation-queue-item__header .message-role{letter-spacing:.03em}
+.conversation-queue-item .queue-item-number{
+  display:inline-flex;align-items:center;height:16px;padding:0 6px;
+  border-radius:8px;background:var(--accent-subtle);color:var(--accent);
+  font-size:10px;font-weight:600;
+}
+.conversation-queue-item .queue-item-cancel{
+  margin-left:auto;border:1px solid var(--border-light);
+}
+.conversation-queue-item .queue-item-cancel:hover{
+  color:var(--warning);border-color:var(--warning);background:transparent;
+}
 .conversation-queue-item__body{
-  padding:10px 14px;border:1px dashed var(--border);border-radius:var(--radius-sm);
-  background:var(--user-bubble);white-space:pre-wrap;overflow-wrap:anywhere;
+  padding:8px 12px;border:1px solid var(--border-light);
+  border-left:3px solid var(--accent);border-radius:var(--radius-sm);
+  background:var(--bg-tertiary);color:var(--text-secondary);
+  font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;
 }
 .conversation-queue-item__body .queue-item-attachments{
   display:block;margin-top:6px;color:var(--text-tertiary);font-size:11px;
 }
-.conversation-queue-item__actions{opacity:1}
+
+.conversation-block--queue-status{margin-top:7px}
+.conversation-queue-status{
+  display:flex;align-items:center;gap:7px;min-height:32px;padding:5px 7px 5px 9px;
+  border-radius:8px;background:var(--turn-process-surface,var(--bg-tertiary));
+  color:var(--text-secondary);font-size:11px
+}
+.conversation-queue-status .queue-item-icon{display:inline-flex;color:var(--accent)}
+.conversation-queue-status__label{font-weight:650;letter-spacing:.02em}
+.conversation-queue-status .queue-item-cancel{margin-left:auto}
+@media(max-width:720px){
+  .conversation-queue-status{min-height:44px;padding:6px 8px 6px 10px}
+  .conversation-queue-status .queue-item-cancel{min-width:44px;min-height:44px}
+}

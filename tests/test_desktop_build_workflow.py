@@ -1878,7 +1878,7 @@ def test_release_pipeline_ships_deb():
     """Ratchet: the .deb must be checksummed AND attached to the release —
     an asset that is built but not shipped is invisible to users."""
     text = _WORKFLOW.read_text(encoding='utf-8')
-    assert '*.deb' in text.split('SHA256SUMS')[0] or 'files=( *.exe *.dmg *.zip *.tar.gz *.deb )' in text, (
+    assert '*.deb' in text.split('SHA256SUMS')[0] or 'files=( *.exe *.dmg *.tar.gz *.deb )' in text, (
         'SHA256SUMS does not cover *.deb'
     )
     assert 'release-assets/**/*.deb' in text, (

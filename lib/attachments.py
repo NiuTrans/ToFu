@@ -8,10 +8,9 @@ was stored:
   - **Images** live on disk under ``uploads_root()/images`` and are referenced
     from the DB by ``/api/images/<filename>`` URLs. They may also arrive as a
     ``data:`` URI or a remote ``http(s)://`` URL.
-  - **PDF / TXT / doc** uploads do NOT keep the original file — the chat send
-    path extracts text into the message row's ``pdfTexts`` list. So their only
-    re-accessible form is that stored text, located by scanning the
-    conversation messages for the matching entry.
+  - **Unified media attachments** use ``att_media_<id>`` and resolve through
+    the owner-scoped durable source/chunk authority. Legacy ``pdfTexts`` refs
+    still scan historical messages for read compatibility.
 
 Why this module exists (root cause it fixes): tools that want to re-read an
 uploaded file (e.g. ``inspect_image`` zooming into a photo) previously only
@@ -39,10 +38,42 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import threading
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Exact-name registry (ref → stored filename) ──────────────────────────────
+# The tool-display layer composes the read_files round title BEFORE the tool
+# runs and has no owner id, so it cannot query the knowledge store. The two
+# writers that DO know the exact stored name (model projection in
+# lib.media_attachments and text read-back below) publish it here; readers
+# fall back to the bare ref on a miss (e.g. post-restart before any
+# projection re-ran).
+_attachment_names: dict[str, str] = {}
+_attachment_names_lock = threading.Lock()
+_MAX_NAME_ENTRIES = 4000
+
+
+def register_attachment_name(ref: str, name: str) -> None:
+    """Record the exact stored filename for an ``att_media_``/``att_txt_`` ref."""
+    if not ref or not isinstance(ref, str) or not name:
+        return
+    with _attachment_names_lock:
+        if len(_attachment_names) >= _MAX_NAME_ENTRIES \
+                and ref not in _attachment_names:
+            _attachment_names.pop(next(iter(_attachment_names)), None)
+        _attachment_names[ref] = str(name)[:240]
+
+
+def attachment_display_name(ref: str) -> str | None:
+    """Return the registered exact filename for *ref*, or None on a miss."""
+    if not ref or not isinstance(ref, str):
+        return None
+    with _attachment_names_lock:
+        return _attachment_names.get(ref)
 
 # Reference prefixes that denote an image the resolver can fetch directly
 # (no conversation context needed).
@@ -52,6 +83,7 @@ _DIRECT_IMAGE_PREFIXES = ('/api/images/', 'data:', 'http://', 'https://')
 # hash so the SAME entry always maps to the SAME ref across turns/reloads, and
 # the resolver can locate it by re-hashing candidates in the message list.
 _TEXT_REF_PREFIX = 'att_txt_'
+_MEDIA_REF_PREFIX = 'att_media_'
 
 _IMG_EXT_MIME = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -125,7 +157,8 @@ def is_attachment_ref(ref: str) -> bool:
     # marker anywhere, not only at the start.
     if _API_IMAGES_MARKER in ref:
         return True
-    return ref.startswith(_DIRECT_IMAGE_PREFIXES) or ref.startswith(_TEXT_REF_PREFIX)
+    return (ref.startswith(_DIRECT_IMAGE_PREFIXES)
+            or ref.startswith((_TEXT_REF_PREFIX, _MEDIA_REF_PREFIX)))
 
 
 def _resolve_image_bytes(ref: str) -> dict | None:
@@ -214,6 +247,93 @@ def _resolve_image_bytes(ref: str) -> dict | None:
     logger.warning('[Attachments] Unrecognized image ref or file not found: %.80s', ref[:80])
     return None
 
+# Virtual-text hard cap for read-back: the full extracted body is materialized
+# as one string so read_files can page it by line range. 1M chars covers every
+# realistic document while keeping the in-memory spike bounded.
+_MAX_TEXT_ATTACHMENT_READ_CHARS = 1_000_000
+_CONTENT_PAGE_SIZE = 200
+
+
+def read_text_attachment_ref(
+    ref: str, *, user_id: int | None = None, messages: list | None = None,
+    max_chars: int | None = None,
+) -> dict | None:
+    """Resolve an ``att_media_``/``att_txt_`` ref to its full extracted text.
+
+    Unlike :func:`resolve_attachment` (one bounded shot for tool results),
+    this reader pages the durable chunk store until exhaustion so the whole
+    document body is addressable by line range. Owner-scoped: ``user_id`` is
+    required for ``att_media_`` refs.
+
+    Returns ``{'kind': 'text', 'name', 'text', 'pages', 'text_chars',
+    'truncated'}`` or None (unresolvable / not a text ref).
+    """
+    if not ref or not isinstance(ref, str):
+        return None
+    cap = max(1000, int(max_chars or _MAX_TEXT_ATTACHMENT_READ_CHARS))
+
+    if ref.startswith(_TEXT_REF_PREFIX):
+        resolved = _resolve_text_ref(ref, messages)
+        if resolved is None:
+            return None
+        text = str(resolved.get('text') or '')
+        truncated = len(text) > cap
+        name = str(resolved.get('name') or 'document')
+        register_attachment_name(ref, name)
+        return {
+            'kind': 'text', 'name': name,
+            'text': text[:cap] if truncated else text,
+            'pages': 0, 'text_chars': len(text), 'truncated': truncated,
+        }
+
+    if not ref.startswith(_MEDIA_REF_PREFIX):
+        return None
+    if not user_id:
+        logger.warning('[Attachments] media text read requires an owner: %s', ref)
+        return None
+    attachment_id = ref[len(_MEDIA_REF_PREFIX):]
+    if not attachment_id or len(attachment_id) > 128:
+        return None
+    from lib.knowledge import get_document_content, get_document_metadata
+
+    document = get_document_metadata(attachment_id, user_id=int(user_id))
+    if document is None:
+        return None
+    parts: list[str] = []
+    consumed = 0
+    truncated = False
+    offset = 0
+    while True:
+        page = get_document_content(
+            attachment_id, user_id=int(user_id),
+            offset=offset, limit=_CONTENT_PAGE_SIZE)
+        chunks = (page or {}).get('chunks') or []
+        if not chunks:
+            break
+        for chunk in chunks:
+            content = str(chunk.get('content') or '')
+            remaining = cap - consumed
+            if len(content) > remaining:
+                parts.append(content[:max(0, remaining)])
+                truncated = True
+                break
+            parts.append(content)
+            consumed += len(content) + 2  # '\n\n' join cost
+        has_more = bool(((page or {}).get('pagination') or {}).get('has_more'))
+        if truncated or not has_more:
+            break
+        offset += len(chunks)
+    name = str(document.get('name') or 'document')
+    register_attachment_name(ref, name)
+    return {
+        'kind': 'text', 'name': name,
+        'text': '\n\n'.join(parts),
+        'pages': int(document.get('pages') or 0),
+        'text_chars': int(document.get('text_chars') or consumed),
+        'truncated': truncated,
+        'attachment_id': attachment_id,
+    }
+
 
 def _resolve_text_ref(ref: str, messages: list | None) -> dict | None:
     """Resolve a text-attachment ref to ``{kind:'text', text, name}``.
@@ -237,7 +357,45 @@ def _resolve_text_ref(ref: str, messages: list | None) -> dict | None:
     return None
 
 
-def resolve_attachment(ref: str, *, messages: list | None = None) -> dict | None:
+def _resolve_media_ref(ref: str, *, user_id: int | None) -> dict | None:
+    if not user_id:
+        logger.warning('[Attachments] media ref requires an owner: %s', ref)
+        return None
+    attachment_id = ref[len(_MEDIA_REF_PREFIX):]
+    if not attachment_id or len(attachment_id) > 128:
+        return None
+    from lib.knowledge import (
+        get_document_content, get_document_metadata, read_source_path,
+    )
+
+    document = get_document_metadata(attachment_id, user_id=int(user_id))
+    source_path = read_source_path(attachment_id, user_id=int(user_id))
+    if document is None or source_path is None:
+        return None
+    media = document.get('media_metadata') or {}
+    if media.get('media_kind') == 'video':
+        return {
+            'kind': 'video', 'name': document.get('name') or 'video',
+            'path': str(source_path), 'metadata': dict(media),
+            'attachment_id': attachment_id,
+        }
+    page = get_document_content(
+        attachment_id, user_id=int(user_id), offset=0, limit=200)
+    text = '\n\n'.join(
+        str(chunk.get('content') or '')
+        for chunk in (page or {}).get('chunks') or [])
+    if len(text) > 200_000:
+        text = text[:200_000] + '\n[attachment text truncated]'
+    return {
+        'kind': 'text', 'text': text,
+        'name': document.get('name') or 'document',
+        'path': str(source_path), 'attachment_id': attachment_id,
+    }
+
+
+def resolve_attachment(
+    ref: str, *, messages: list | None = None, user_id: int | None = None,
+) -> dict | None:
     """Resolve a stable attachment reference to its original source.
 
     This is the single re-access entry point for uploaded files. It maps the
@@ -251,6 +409,7 @@ def resolve_attachment(ref: str, *, messages: list | None = None) -> dict | None
             - an absolute/relative local image path.
             - ``att_txt_<hash>`` — a PDF/TXT/doc text attachment, located by
               scanning *messages* for the matching stored text.
+            - ``att_media_<id>`` — owner-scoped durable document/video source.
         messages: Conversation messages (required only to resolve a text
             ``att_txt_*`` ref; ignored for image refs).
 
@@ -264,4 +423,6 @@ def resolve_attachment(ref: str, *, messages: list | None = None) -> dict | None
         return None
     if ref.startswith(_TEXT_REF_PREFIX):
         return _resolve_text_ref(ref, messages)
+    if ref.startswith(_MEDIA_REF_PREFIX):
+        return _resolve_media_ref(ref, user_id=user_id)
     return _resolve_image_bytes(ref)

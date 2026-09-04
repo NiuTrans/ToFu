@@ -13,7 +13,10 @@ __all__ = [
     # Config & State
     '_lock', '_state',
     'get_state', 'get_state_for_conv', 'get_project_path',
-    'get_recent_projects', 'save_recent_project', 'clear_recent_projects',
+    'get_recent_projects', 'save_recent_project', 'save_recent_projects',
+    'clear_recent_projects',
+
+    'relink_project_path',
     'IGNORE_DIRS',
     'IGNORE_FILES', 'BINARY_EXTENSIONS',
     'MAX_FILE_SIZE', 'MAX_SCAN_FILES', 'MAX_TREE_ENTRIES', 'MAX_READ_CHARS',
@@ -29,6 +32,8 @@ __all__ = [
     '_record_modification',
     # Scanner
     'set_project', 'set_project_paths', 'ensure_project_state', 'clear_project', 'rescan',
+
+    'find_git_root',
     'add_project_root', 'remove_project_root', 'list_roots',
     '_should_ignore', '_is_data_file', '_is_likely_data_content',
     '_fmt_size', '_safe_path',
@@ -91,8 +96,10 @@ from lib.project_mod.config import (
     get_roots,
     get_state,
     get_state_for_conv,
+    relink_project_path,
     resolve_namespaced_path,
     save_recent_project,
+    save_recent_projects,
     set_conv_roots,
 )
 
@@ -123,6 +130,8 @@ from lib.project_mod.scanner import (
     add_project_root,
     clear_project,
     ensure_project_state,
+
+    find_git_root,
     list_roots,
     remove_project_root,
     rescan,

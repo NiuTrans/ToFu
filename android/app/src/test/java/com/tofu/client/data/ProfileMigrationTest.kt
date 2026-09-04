@@ -102,9 +102,9 @@ class ProfileMigrationTest {
         try {
             val dao = db.profileDao()
             val original = runBlocking { dao.getByAlias("zw05") }!!
-            runBlocking { dao.update(original.copy(projectPath = "/home/dev/chatui")) }
+            runBlocking { dao.update(original.copy(projectPath = "/home/dev/tofu")) }
             val updated = runBlocking { dao.getByAlias("zw05") }
-            assertEquals("/home/dev/chatui", updated?.projectPath)
+            assertEquals("/home/dev/tofu", updated?.projectPath)
         } finally {
             db.close()
         }

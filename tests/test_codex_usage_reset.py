@@ -370,6 +370,76 @@ def test_daemon_capacity_is_bounded_per_owner_account(monkeypatch):
         time.sleep(0.01)
 
 
+def test_daemon_pushes_one_owner_scoped_completion_projection(monkeypatch):
+    published = []
+    delivered = threading.Event()
+    reset_offer = {
+        "state": "available",
+        "available_count": 1,
+        "captured_at": 1000,
+        "stale": False,
+        "refreshing": False,
+        "notification_key": "a" * 24,
+    }
+
+    monkeypatch.setattr(
+        codex_usage,
+        "refresh_codex_usage_reset",
+        lambda **_kwargs: reset_offer,
+    )
+    monkeypatch.setattr("lib.oauth.token_store.load_token", lambda _p: _token())
+
+    def publish(channel, task_id, payload, *, user_id):
+        published.append((channel, task_id, payload, user_id))
+        delivered.set()
+
+    monkeypatch.setattr("lib.agent_core.push.push_event", publish)
+
+    assert codex_usage.trigger_codex_usage_reset_refresh(user_id="owner-42") is True
+    assert delivered.wait(timeout=5)
+    identity = codex_usage._identity(_token(), "owner-42")
+    assert identity is not None
+    deadline = time.monotonic() + 5
+    while codex_usage._is_refreshing(identity["cache_key"]):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert published == [(
+        codex_usage.CODEX_USAGE_RESET_PUSH_CHANNEL,
+        codex_usage.CODEX_USAGE_RESET_PUSH_TASK_ID,
+        {
+            "type": codex_usage.CODEX_USAGE_RESET_PUSH_EVENT_TYPE,
+            "provider": "codex",
+            "reset_offer": reset_offer,
+        },
+        "owner-42",
+    )]
+    assert codex_usage._is_refreshing(identity["cache_key"]) is False
+
+
+def test_completion_push_failure_cannot_strand_refresh_state(monkeypatch):
+    delivered = threading.Event()
+    monkeypatch.setattr(
+        codex_usage,
+        "refresh_codex_usage_reset",
+        lambda **_kwargs: {"state": "none"},
+    )
+    monkeypatch.setattr("lib.oauth.token_store.load_token", lambda _p: _token())
+
+    def fail_publish(*_args, **_kwargs):
+        delivered.set()
+        raise RuntimeError("injected push outage")
+
+    monkeypatch.setattr("lib.agent_core.push.push_event", fail_publish)
+    assert codex_usage.trigger_codex_usage_reset_refresh(user_id="owner-42") is True
+    assert delivered.wait(timeout=5)
+    identity = codex_usage._identity(_token(), "owner-42")
+    assert identity is not None
+    deadline = time.monotonic() + 5
+    while codex_usage._is_refreshing(identity["cache_key"]):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
 def test_capacity_deferral_returns_a_bounded_retry_hint():
     with codex_usage._state_lock:
         codex_usage._refreshing_keys.update({"occupied-a", "occupied-b"})

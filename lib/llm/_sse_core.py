@@ -18,7 +18,7 @@ only what genuinely differs:
 Public surface
 --------------
   - ``prepare_request(body, *, attempt, log_prefix, api_key, base_url,
-    extra_headers) -> RequestPlan`` — the identical pre-flight (cache
+    extra_headers, owner_user_id) -> RequestPlan`` — the identical pre-flight (cache
     breakpoints, extended-TTL header, wire-protocol translation, header build,
     URL resolution, RawSSEDumper start).
   - ``classify_status_error(status_code, err_text, *, body, log_prefix,
@@ -58,6 +58,11 @@ from lib.llm.stream_result import (
     classify_provider_stream_state,
 )
 from lib.cost import canonicalize_usage_cache_keys, normalize_usage
+from lib.context_telemetry import (
+    TOOL_SCHEMA_EVIDENCE_KEY,
+    record_tool_schema_fingerprint,
+    reusable_tool_schema_metrics,
+)
 from lib.llm_errors import (
     ModelLimitError,
     PromptTooLongError,
@@ -66,6 +71,7 @@ from lib.llm_errors import (
     _ERR_BODY_LIMIT,
     _GATEWAY_THROTTLE_STATUS,
     _classify_http_error,
+    _has_outbound_credential,
     _is_prompt_too_long,
     repair_mojibake,
 )
@@ -76,11 +82,18 @@ from lib.model_info import (
     is_claude,
     is_minimax,
 )
+from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
 
 logger = get_logger(__name__)
 
 _INTERNAL_TOOL_PREFIXES = ('antml:', 'anthropic.', '__')
 _MAX_CONSECUTIVE_PARSE_ERRORS = 10
+# Tool-call indices are response-local positions, not sparse storage keys. A
+# larger value cannot describe a plausible bounded provider batch and must not
+# feed arbitrary-precision parsing/log growth on the streaming hot path.
+_MAX_TOOL_CALL_INDEX = 4095
+_MAX_TOOL_CALL_ID_CHARS = 512
+_MAX_TOOL_PROGRESS_KEY_CHARS = 560
 
 # ── Cache byte-probe (diagnostic, default OFF, zero production impact) ──
 # When TOFU_CACHE_BYTE_PROBE is set to a conv-id prefix, prepare_request dumps
@@ -225,6 +238,13 @@ class RequestPlan:
     tool_search_backend: str = ''
     programmatic_backend: str = ''
     multi_agent_backend: str = ''
+    native_compaction_mode: str = ''
+    # Boolean evidence only; credential values never cross the transport
+    # boundary into error classification or diagnostics.
+    credential_present: bool = False
+    # Optional bounded durable Request Inspector capture. The transport shells
+    # feed raw response bytes and commit it best-effort on every exit path.
+    raw_archive_capture: Any = None
 
 
 def activate_native_tool_search_fallback(
@@ -308,21 +328,25 @@ def activate_native_orchestration_fallback(
 
 def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                     base_url=None, extra_headers=None,
-                    api_protocol='openai', oauth='') -> RequestPlan:
+                    api_protocol='openai', oauth='',
+                    owner_user_id=None) -> RequestPlan:
     """Identical pre-flight for both transports.
 
-    Mutates ``body`` in place (cache breakpoints, internal-key stripping,
-    wire-protocol translation) exactly as the inline code did, then returns
-    the plan.
+    Copies and transforms ``body`` (cache breakpoints, internal-key stripping,
+    wire-protocol translation), then returns the plan. ``owner_user_id`` is
+    preserved through OAuth token refresh and desktop-agent routing; it is
+    deliberately not inferred in this transport layer.
     """
     # Keep the canonical task body intact across transport retries and
     # provider failover.  The tool-search surface below is protocol-specific;
     # reusing an already-trimmed wire body would silently lose the immutable
     # executable catalog on the next attempt.
     body = dict(body)
+    _raw_archive_context = body.get('_raw_archive_context')
     _request_activity_sink = body.get('_request_activity_sink')
     if not callable(_request_activity_sink):
         _request_activity_sink = None
+    _tool_schema_evidence = body.get(TOOL_SCHEMA_EVIDENCE_KEY)
 
     def _provider_tool_name(tool):
         if not isinstance(tool, dict):
@@ -348,6 +372,44 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         body.get('_responses_feature_profile')
         or 'compatible').strip().lower()
     _responses_state_key = str(body.get('_task_id') or '')
+
+    # Resolve native context management from the concrete selected route, not
+    # from model-name folklore. Public API feature profiles may opt in; OAuth
+    # subscription backends are intentionally excluded by the resolver.
+    _native_compaction_mode = ''
+    try:
+        from lib.llm_dispatch.compaction_policy import (
+            ANTHROPIC_MESSAGES_COMPACTION,
+            native_compaction_mode_for_route,
+        )
+        _native_compaction_mode = native_compaction_mode_for_route(
+            protocol=api_protocol,
+            model=body.get('model') or '',
+            responses_profile=_responses_feature_profile,
+            base_url=base_url or '',
+            oauth=oauth or '',
+        )
+        if (_native_compaction_mode == ANTHROPIC_MESSAGES_COMPACTION
+                and int(body.get('_working_set_tokens') or 0) > 0):
+            body['_anthropic_native_compaction'] = True
+            # Anthropic server compaction is a distinct public API beta. Keep
+            # it off the Claude Code subscription cloak unless that product's
+            # own captured contract explicitly adopts it.
+            extra_headers = dict(extra_headers or {})
+            _beta_key = next(
+                (key for key in extra_headers
+                 if str(key).lower() == 'anthropic-beta'),
+                'anthropic-beta',
+            )
+            _betas = [part.strip() for part in
+                      str(extra_headers.get(_beta_key) or '').split(',')
+                      if part.strip()]
+            if 'compact-2026-01-12' not in _betas:
+                _betas.append('compact-2026-01-12')
+            extra_headers[_beta_key] = ','.join(_betas)
+    except Exception as exc:
+        logger.debug('%s native compaction route resolution failed: %s',
+                     log_prefix, exc)
 
     # Resolve discovery at the last common boundary before cache markers and
     # protocol translation.  Authorization continues to use the task-owned
@@ -482,12 +544,28 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             eligible_present=bool(body.get('_programmatic_eligible_tools')))
     body['_resolved_programmatic_backend'] = _ptc_backend
     _orchestration_sink = body.get('_tool_orchestration_decision_sink')
+    _programmatic_exposure = str(
+        body.get('_programmatic_exposure') or 'additive').strip().lower()
     _record_orchestration_v2_evidence = (
         isinstance(_orchestration_sink, dict)
         and body.get('_tool_orchestration_policy_version')
         == 'tool-orchestration/v2')
     if isinstance(_orchestration_sink, dict):
         _orchestration_sink['programmaticBackend'] = _ptc_backend
+        if '_programmatic_exposure' in body:
+            _orchestration_sink['programmaticExposure'] = (
+                _programmatic_exposure)
+            _visible_names = {
+                str((tool.get('function') or {}).get('name') or '')
+                for tool in (body.get('tools') or ())
+                if isinstance(tool, dict)
+                and isinstance(tool.get('function'), dict)
+            }
+            _orchestration_sink['programmaticHiddenDirectToolCount'] = (
+                len(_visible_names - {'execute_tools'})
+                if (_ptc_backend == 'local'
+                    and _programmatic_exposure == 'gateway_only')
+                else 0)
         if _record_orchestration_v2_evidence and _ptc_backend != 'off':
             from lib.orchestration_adoption import (
                 record_orchestration_projection)
@@ -498,7 +576,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         from lib.tools.gateway import ptc_local_wire_tools
         body['tools'] = ptc_local_wire_tools(
             body['tools'], tier=body.get('_programmatic_tier') or 'program',
-            eligible=body.get('_programmatic_eligible_tools') or ())
+            eligible=body.get('_programmatic_eligible_tools') or (),
+            exposure=_programmatic_exposure)
 
     # Multi-agent is an independent control plane.  Resolve it after PTC so
     # both lanes may be active in one request: local models see execute_tools
@@ -597,17 +676,10 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # 400s kimi ("unknown tool type: ").  Clean arrays pass through by
     # identity, so the prompt-cache hot path is untouched.
     if isinstance(body.get('tools'), list):
-        from lib.tools.gateway import sanitize_wire_tools
-        body['tools'] = sanitize_wire_tools(
-            body['tools'], log_prefix=log_prefix,
+        from lib.tools.gateway import preflight_wire_tool_body
+        preflight_wire_tool_body(
+            body, log_prefix=log_prefix,
             on_tool_isolated=_request_activity_sink)
-        if not body['tools']:
-            # Some OpenAI-compatible providers reject an empty tools array,
-            # and a tool_choice without a surviving tool is necessarily
-            # invalid. A request whose only malformed tool was isolated must
-            # still be able to continue as an ordinary model request.
-            body.pop('tools', None)
-            body.pop('tool_choice', None)
 
     add_cache_breakpoints(body, log_prefix, api_protocol=api_protocol)
 
@@ -634,7 +706,10 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # the body translation below reads messages / builds headers.
     if oauth:
         from lib.oauth.outbound import resolve_oauth_request
-        api_key, extra_headers, body = resolve_oauth_request(oauth, body, extra_headers)
+        from lib.llm._transport import transport_owner_scope
+        owner_scope = transport_owner_scope(owner_user_id)
+        api_key, extra_headers, body = resolve_oauth_request(
+            oauth, body, extra_headers, user_id=owner_scope)
 
     # Wire-protocol translation at the HTTP boundary. SINGLE GATE:
     # ``api_protocol`` (provider config; the dispatcher coerces
@@ -706,9 +781,11 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # them and is idempotent on the next attempt.
         _internal_keys = {
             '_task_id', '_conv_id', '_working_set_tokens',
+            ADMITTED_INPUT_TOKENS_KEY,
             '_gpt56_breakpoint_mode', '_programmatic_tool_calling',
             '_programmatic_stage', '_programmatic_tier',
             '_programmatic_eligible_tools', '_programmatic_serial_chain',
+            '_programmatic_exposure',
             '_resolved_programmatic_backend', '_force_local_programmatic',
             '_tool_search_mode', '_frontend_selected_tool_names',
             '_tool_schema_budget_tokens',
@@ -730,7 +807,10 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             '_tool_orchestration_composition', '_safety_identifier',
             '_tool_orchestration_decision_sink',
             '_request_activity_sink',
+            '_raw_archive_context',
+            TOOL_SCHEMA_EVIDENCE_KEY,
             '_responses_feature_profile',
+            '_anthropic_native_compaction',
         }
         body = {key: value for key, value in body.items()
                 if key not in _internal_keys}
@@ -746,6 +826,33 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                  if isinstance(msg, dict) else msg)
                 for msg in body.get('messages') or ()
             ]
+        url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
+
+        # Strict OpenAI-compatible gateways (sankuai AIGC validation stage,
+        # probed 2026-08-31 with MiniMax-M2) hard-reject list-form message
+        # content with HTTP 400 even for a single text part — only bare
+        # strings pass. Collapse text-only part lists (no cache_control or
+        # non-text keys) into one joined string; parts carrying markers or
+        # multimodal blocks keep the list form. Build copies so the caller's
+        # canonical dict (reused on transport retries) stays untouched.
+        _collapsed = False
+        _new_messages = []
+        for _msg in body.get('messages') or ():
+            _content = _msg.get('content') if isinstance(_msg, dict) else None
+            if (isinstance(_content, list) and _content and all(
+                    isinstance(part, dict)
+                    and part.get('type') == 'text'
+                    and set(part) <= {'type', 'text'}
+                    for part in _content)):
+                _new_messages.append({
+                    **_msg,
+                    'content': ''.join(part['text'] for part in _content),
+                })
+                _collapsed = True
+            else:
+                _new_messages.append(_msg)
+        if _collapsed:
+            body['messages'] = _new_messages
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
 
     attempt_tag = f' (attempt {attempt+1})' if attempt > 0 else ''
@@ -785,6 +892,21 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                 tool_schema_fingerprint, tool_schema_tokens)
             _provider_tools = (
                 body.get('tools') if isinstance(body.get('tools'), list) else [])
+            _schema_tokens, _schema_fingerprint = reusable_tool_schema_metrics(
+                _tool_schema_evidence,
+                _provider_tools,
+                model=body.get('model') or '',
+            )
+            if _schema_tokens is None:
+                _schema_tokens = tool_schema_tokens(
+                    _provider_tools, model=body.get('model') or '')
+            if _schema_fingerprint is None:
+                _schema_fingerprint = tool_schema_fingerprint(_provider_tools)
+                record_tool_schema_fingerprint(
+                    _tool_schema_evidence,
+                    _provider_tools,
+                    _schema_fingerprint,
+                )
             _request_activity_sink({
                 'kind': 'wire_projection',
                 'model': body.get('model') or '',
@@ -794,13 +916,12 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                     if name
                 ],
                 'toolCount': len(_provider_tools),
-                'schemaTokens': tool_schema_tokens(
-                    _provider_tools, model=body.get('model') or ''),
+                'schemaTokens': _schema_tokens,
                 # Exact, cache-relevant provider projection fingerprint.  Names
                 # and token counts can stay unchanged while a description or
                 # parameter byte changes; this bounded digest makes that drift
                 # visible without persisting the full schema.
-                'schemaFingerprint': tool_schema_fingerprint(_provider_tools),
+                'schemaFingerprint': _schema_fingerprint,
                 'schemaBudgetTokens': _final_schema_budget,
                 'budgetDroppedNames': _budget_dropped_names,
                 'compactedNames': _budget_compacted_names,
@@ -840,12 +961,12 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     raw_dumper.wire_region = None
     try:
         from lib.tasks_pkg.wire_fingerprint import (
-            canonical_messages, marker_signature, static_prefix_hash,
-            system_fingerprint, wire_byte_field_prefix, wire_byte_prefix,
-            wire_byte_region,
+            capture_wire_message_evidence, marker_signature,
+            static_prefix_hash, system_fingerprint, wire_byte_region,
         )
         _wire_items = body.get('messages') or body.get('input') or []
-        raw_dumper.wire_fp = canonical_messages(_wire_items)
+        _message_evidence = capture_wire_message_evidence(_wire_items)
+        raw_dumper.wire_fp = _message_evidence.canonical
         raw_dumper.wire_static = static_prefix_hash(_wire_items)
         # TRUE-byte prefix: hash the ACTUAL serialized bytes per message (only
         # cache_control stripped). canonical_messages is lossy (drops
@@ -854,14 +975,13 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # detect_cache_break REFUSE a false "byte-identical eviction" claim when
         # the real bytes diverged (reasoning_details rebuild / same-role merge /
         # protocol switch) — see wire_byte_prefix's docstring.
-        raw_dumper.wire_bytes = wire_byte_prefix(_wire_items)
+        raw_dumper.wire_bytes = _message_evidence.message_bytes
         # FIELD-GRANULAR true bytes: names the EXACT top-level field that
         # flipped on a canonical-invisible <bytes> divergence (reasoning_details
         # rebuild / tool_calls arg re-serialization / content / field-order),
         # so detect_cache_break can log the proven field instead of only the
         # message. See wire_byte_field_prefix.
-        raw_dumper.wire_field_bytes = wire_byte_field_prefix(
-            _wire_items)
+        raw_dumper.wire_field_bytes = _message_evidence.field_bytes
         # TRUE-byte hash of the HOISTED system + tools region. system_fingerprint
         # is ITSELF lossy (runs _text_of + sort_keys on params), so a system
         # BLOCK REORDER / wrapping flip / per-turn re-serialization — the
@@ -949,6 +1069,20 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
 
     _maybe_dump_cache_probe(body, _task_id_for_latch, log_prefix, routing=_routing)
 
+    _raw_archive_capture = None
+    try:
+        from lib.raw_archive import RawArchiveCapture
+
+        _raw_archive_capture = RawArchiveCapture.create(
+            _raw_archive_context,
+            body,
+            transport_attempt=attempt,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        logger.debug('%s raw archive initialization failed: %s',
+                     log_prefix, exc)
+
     return RequestPlan(url=url, hdrs=hdrs, body=body, trace_id=trace_id,
                        raw_dumper=raw_dumper, wire_translator=wire_translator,
                        t0=t0, responses_transport=_responses_transport,
@@ -956,10 +1090,14 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                        responses_profile=_responses_profile,
                        tool_search_backend=_tool_search_backend,
                        programmatic_backend=_ptc_backend,
-                       multi_agent_backend=_multi_agent_backend)
+                       multi_agent_backend=_multi_agent_backend,
+                       native_compaction_mode=_native_compaction_mode,
+                       credential_present=_has_outbound_credential(hdrs),
+                       raw_archive_capture=_raw_archive_capture)
 
 
-def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper):
+def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper,
+                          credential_present=False):
     """Shared non-200 handling. Caller reads the body text per-transport.
 
     Always raises (via ``_classify_http_error``) — never returns normally
@@ -976,7 +1114,8 @@ def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper
     if raw_dumper.enabled:
         raw_dumper.line(f'[HTTP-{status_code}] {err_text[:_ERR_BODY_LIMIT]}')
     _classify_http_error(status_code, err_msg, body.get('model', ''),
-                         log_prefix, max_tokens=body.get('max_tokens', 0))
+                         log_prefix, max_tokens=body.get('max_tokens', 0),
+                         credential_present=credential_present)
 
 
 def _wire_tool_names(tools) -> set[str]:
@@ -1100,16 +1239,6 @@ class SSEAccumulator:
         self.progress.mark_client_aborted()
         logger.debug('%s Stream aborted by client after %d chunks',
                      self.log_prefix, self.chunk_count)
-
-    @property
-    def has_actionable_output(self) -> bool:
-        """Whether this attempt has produced deliverable text or a tool call.
-
-        Reasoning and protocol keep-alives intentionally do not count. They
-        prove the socket is alive, but they cannot advance the task or give the
-        user a final answer.
-        """
-        return bool(self.content or self.tool_calls_acc)
 
     def mark_semantic_progress_timeout(
             self, timeout_s: float, *, diagnostics=None) -> None:
@@ -1268,20 +1397,47 @@ class SSEAccumulator:
             self._handle_sse_error(chunk['error'])
 
         if chunk.get('usage'):
-            self.usage = chunk['usage']
+            if isinstance(chunk['usage'], dict):
+                self.usage = chunk['usage']
+            else:
+                self.record_malformed_frames(
+                    1, ('invalid_usage: expected an object',))
 
         choices = chunk.get('choices', [])
+        if not isinstance(choices, list):
+            self.record_malformed_frames(
+                1, ('invalid_choices: expected an array',))
+            return
         if not choices:
             return
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            self.record_malformed_frames(
+                1, ('invalid_choice: expected an object',))
+            return
 
-        delta = choices[0].get('delta', {})
-        fr = choices[0].get('finish_reason')
+        delta = choice.get('delta', {})
+        if delta is None:
+            delta = {}
+        elif not isinstance(delta, dict):
+            self.record_malformed_frames(
+                1, ('invalid_delta: expected an object',))
+            delta = {}
+        fr = choice.get('finish_reason')
         if fr:
-            self.finish_reason = fr
-            self.saw_finish_reason = True
-            self.progress.mark_provider_finish()
-        if choices[0].get('usage'):
-            self.usage = choices[0]['usage']
+            if isinstance(fr, str):
+                self.finish_reason = fr
+                self.saw_finish_reason = True
+                self.progress.mark_provider_finish()
+            else:
+                self.record_malformed_frames(
+                    1, ('invalid_finish_reason: expected a string',))
+        if choice.get('usage'):
+            if isinstance(choice['usage'], dict):
+                self.usage = choice['usage']
+            else:
+                self.record_malformed_frames(
+                    1, ('invalid_choice_usage: expected an object',))
 
         self._handle_delta(delta)
 
@@ -1436,10 +1592,27 @@ class SSEAccumulator:
     def _handle_delta(self, delta):
         """Accumulate thinking / content / tool-call deltas from one chunk."""
         # Thinking / reasoning delta
-        td = (delta.get('thinking')
-              or delta.get('reasoning_content')
-              or (delta.get('content', '')
-                  if delta.get('role') == 'thinking' else ''))
+        td = ''
+        for reasoning_key in ('thinking', 'reasoning_content'):
+            reasoning_value = delta.get(reasoning_key)
+            if reasoning_value is None:
+                continue
+            if isinstance(reasoning_value, str):
+                if reasoning_value:
+                    td = reasoning_value
+                    break
+            else:
+                self.record_malformed_frames(
+                    1, (f'invalid_{reasoning_key}: expected a string',))
+        if not td and delta.get('role') == 'thinking':
+            thinking_content = delta.get('content')
+            if thinking_content is None:
+                pass
+            elif isinstance(thinking_content, str):
+                td = thinking_content
+            else:
+                self.record_malformed_frames(
+                    1, ('invalid_thinking_content: expected a string',))
         # OpenRouter-style ``reasoning_details`` carry both the thinking text
         # and the opaque Claude signature, in separate chunks:
         #   [{"type":"thinking","thinking":"…"}]    ← text delta
@@ -1449,12 +1622,32 @@ class SSEAccumulator:
         rd_parts = delta.get('reasoning_details')
         if isinstance(rd_parts, list):
             if not td:
-                td = ''.join(
-                    (d.get('thinking') or d.get('text') or '')
-                    for d in rd_parts if isinstance(d, dict))
+                reasoning_text_parts = []
+                for detail in rd_parts:
+                    if not isinstance(detail, dict):
+                        self.record_malformed_frames(
+                            1, ('invalid_reasoning_detail: expected an object',))
+                        continue
+                    detail_text = detail.get('thinking') or detail.get('text')
+                    if detail_text is None:
+                        continue
+                    if isinstance(detail_text, str):
+                        reasoning_text_parts.append(detail_text)
+                    else:
+                        self.record_malformed_frames(
+                            1, ('invalid_reasoning_text: expected a string',))
+                td = ''.join(reasoning_text_parts)
             for d in rd_parts:
-                if isinstance(d, dict) and d.get('signature'):
+                if not isinstance(d, dict) or not d.get('signature'):
+                    continue
+                if isinstance(d['signature'], str):
                     self.thinking_signature += d['signature']
+                else:
+                    self.record_malformed_frames(
+                        1, ('invalid_reasoning_signature: expected a string',))
+        elif rd_parts is not None:
+            self.record_malformed_frames(
+                1, ('invalid_reasoning_details: expected an array',))
         if td:
             self.thinking_text += td
             self._notify_reasoning_progress(td)
@@ -1466,11 +1659,23 @@ class SSEAccumulator:
         # needed to replay the thinking block on a later tool-use turn.
         _tsig = delta.get('thinking_signature')
         if _tsig:
-            self.thinking_signature += _tsig
+            if isinstance(_tsig, str):
+                self.thinking_signature += _tsig
+            else:
+                self.record_malformed_frames(
+                    1, ('invalid_thinking_signature: expected a string',))
 
         # Content delta
         if 'content' in delta and delta.get('role') != 'thinking':
-            cd = delta['content'] or ''
+            raw_content = delta['content']
+            if raw_content is None:
+                cd = ''
+            elif isinstance(raw_content, str):
+                cd = raw_content
+            else:
+                self.record_malformed_frames(
+                    1, ('invalid_content_delta: expected a string',))
+                cd = ''
             if cd:
                 if self._mm_mode:
                     self._feed_minimax(cd)
@@ -1482,18 +1687,87 @@ class SSEAccumulator:
                         self.on_content(cd)
 
         # Tool call deltas
-        _tc_list = delta.get('tool_calls') or []
+        _raw_tc_list = delta.get('tool_calls')
+        if _raw_tc_list is None:
+            _tc_list = []
+        elif isinstance(_raw_tc_list, list):
+            _tc_list = _raw_tc_list
+        else:
+            self.record_malformed_frames(
+                1, ('invalid_tool_calls: expected an array',))
+            _tc_list = []
         if _tc_list:
             for tc in _tc_list:
                 if not isinstance(tc, dict):
                     self.record_malformed_frames(
                         1, ('invalid_tool_delta: tool delta was not an object',))
                     continue
-                _progress_fn = tc.get('function')
-                if not isinstance(_progress_fn, dict):
+                _raw_incoming_id = tc.get('id')
+                if (_raw_incoming_id is not None
+                        and not isinstance(_raw_incoming_id, str)):
+                    self.record_malformed_frames(
+                        1, ('invalid_tool_id: expected a string, got '
+                            f'{type(_raw_incoming_id).__name__}',))
+                    tc = dict(tc)
+                    tc['id'] = ''
+                elif (isinstance(_raw_incoming_id, str)
+                      and len(_raw_incoming_id) > _MAX_TOOL_CALL_ID_CHARS):
+                    self.record_malformed_frames(
+                        1, ('invalid_tool_id: identifier exceeded '
+                            f'{_MAX_TOOL_CALL_ID_CHARS} characters',))
+                    tc = dict(tc)
+                    tc['id'] = ''
+                _incoming_id = tc.get('id') or ''
+
+                _raw_progress_fn = tc.get('function')
+                if _raw_progress_fn is None:
                     _progress_fn = {}
-                _progress_key = str(
-                    tc.get('id') or f'index:{tc.get("index", "missing")}')
+                elif not isinstance(_raw_progress_fn, dict):
+                    self.record_malformed_frames(
+                        1, ('invalid_tool_function: expected an object, got '
+                            f'{type(_raw_progress_fn).__name__}',))
+                    _progress_fn = {}
+                else:
+                    _progress_fn = _raw_progress_fn
+                _caller_present = 'caller' in tc
+                _raw_caller = tc.get('caller')
+                if (_caller_present and _raw_caller is not None
+                        and not isinstance(_raw_caller, dict)):
+                    self.record_malformed_frames(
+                        1, ('invalid_tool_caller: expected an object, got '
+                            f'{type(_raw_caller).__name__}',))
+                _caller_value = (
+                    dict(_raw_caller)
+                    if isinstance(_raw_caller, dict) else _raw_caller
+                )
+                _raw_progress_name = _progress_fn.get('name')
+                _raw_progress_arguments = _progress_fn.get('arguments')
+                if (_raw_progress_name is not None
+                        and not isinstance(_raw_progress_name, str)):
+                    self.record_malformed_frames(
+                        1, ('invalid_tool_name: expected a string, got '
+                            f'{type(_raw_progress_name).__name__}',))
+                    _progress_fn = dict(_progress_fn)
+                    _progress_fn['name'] = ''
+                if (_raw_progress_arguments is not None
+                        and not isinstance(_raw_progress_arguments, str)):
+                    self.record_malformed_frames(
+                        1, ('invalid_tool_arguments_delta: expected a string, '
+                            f'got {type(_raw_progress_arguments).__name__}',))
+                    _progress_fn = dict(_progress_fn)
+                    _progress_fn['arguments'] = None
+                if _incoming_id:
+                    _progress_key = _incoming_id
+                else:
+                    _raw_progress_index = tc.get('index', 'missing')
+                    if isinstance(_raw_progress_index, (str, int)):
+                        _progress_index = str(_raw_progress_index)[
+                            :_MAX_TOOL_PROGRESS_KEY_CHARS]
+                    else:
+                        _progress_index = (
+                            f'<{type(_raw_progress_index).__name__}>')
+                    _progress_key = f'index:{_progress_index}'
+                _progress_key = _progress_key[:_MAX_TOOL_PROGRESS_KEY_CHARS]
                 # An id-only/empty function shell is protocol scaffolding, not
                 # semantic progress. A non-blank function name opens the tool;
                 # subsequent non-empty argument deltas renew the same clock.
@@ -1518,32 +1792,73 @@ class SSEAccumulator:
                     if self._tc_obs_index_absent == 1:
                         logger.warning(
                             '%s [tool_calls-shape] delta without "index" field '
-                            '— defaulting to slot 0 (collision risk): '
+                            '— routing through one active unindexed slot: '
                             'has_id=%s name=%r model=%s trace=%s',
-                            self.log_prefix, bool(tc.get('id')),
-                            (tc.get('function') or {}).get('name'),
+                            self.log_prefix, bool(_incoming_id),
+                            _progress_fn.get('name'),
                             self.body.get('model', ''), self.trace_id)
                         self.raw_dumper.dump_anomaly(
                             'tool_call_index_absent',
                             model=self.body.get('model', ''),
                             trace=self.trace_id,
                             chunks=self.chunk_count)
-                # An absent ``index`` must NOT default to slot 0 — that merges
-                # every unindexed call in the stream into one. Give it the next
-                # free slot so distinct calls stay distinct.
-                if 'index' in tc:
-                    _upstream_idx = tc['index']
+                # An absent ``index`` must NOT blindly default every frame to
+                # slot 0. Retain one active unindexed slot; the id/name state
+                # machine below opens a new slot only on positive evidence.
+                _raw_upstream_idx = tc.get('index') if 'index' in tc else None
+                _valid_upstream_idx = False
+                if (isinstance(_raw_upstream_idx, int)
+                        and not isinstance(_raw_upstream_idx, bool)
+                        and 0 <= _raw_upstream_idx <= _MAX_TOOL_CALL_INDEX):
+                    _upstream_idx = _raw_upstream_idx
+                    _valid_upstream_idx = True
+                elif (isinstance(_raw_upstream_idx, str)
+                        and _raw_upstream_idx.strip().isdigit()):
+                    _index_digits = (
+                        _raw_upstream_idx.strip().lstrip('0') or '0'
+                    )
+                    if len(_index_digits) <= len(str(_MAX_TOOL_CALL_INDEX)):
+                        _candidate_index = int(_index_digits)
+                        if _candidate_index <= _MAX_TOOL_CALL_INDEX:
+                            _upstream_idx = _candidate_index
+                            _valid_upstream_idx = True
+                else:
+                    _upstream_idx = None
+                if not _valid_upstream_idx:
+                    _upstream_idx = None
+                    if 'index' in tc:
+                        self.record_malformed_frames(
+                            1,
+                            ('invalid_tool_index: expected an integer between '
+                             f'0 and {_MAX_TOOL_CALL_INDEX}, got '
+                             f'{type(_raw_upstream_idx).__name__}',),
+                        )
+                        _index_preview = repr(_raw_upstream_idx)
+                        if len(_index_preview) > 120:
+                            _index_preview = _index_preview[:117] + '...'
+                        logger.warning(
+                            '%s [tool_calls-shape] invalid index=%s; '
+                            'routing diagnostically through the unindexed '
+                            'state machine and marking the stream malformed '
+                            '(model=%s trace=%s)',
+                            self.log_prefix, _index_preview,
+                            self.body.get('model', ''), self.trace_id)
+                if _valid_upstream_idx:
                     idx = self._tc_index_map.get(_upstream_idx, _upstream_idx)
                 else:
                     _upstream_idx = None
                     idx = self._tc_unindexed_slot
-                    if idx is None or self.tool_calls_acc.get(idx, {}).get(
-                            'function', {}).get('name'):
-                        # No open unindexed slot yet, or the current one is
-                        # already named and this delta starts a new call.
-                        if (tc.get('function') or {}).get('name') or idx is None:
-                            idx = (max(self.tool_calls_acc) + 1
-                                   if self.tool_calls_acc else 0)
+                    if idx is None:
+                        idx = (max(self.tool_calls_acc) + 1
+                               if self.tool_calls_acc else 0)
+                    # Do not open a slot merely because another frame repeats
+                    # a name.  The name/id state machine below can distinguish
+                    # a new id, a different complete name, and a real name
+                    # fragment.  Pre-splitting here bypassed that logic and
+                    # turned a retransmitted unindexed full frame into N exact
+                    # tool calls.  Two same-name/no-id calls are inherently
+                    # ambiguous, so retaining one active slot fails closed
+                    # instead of authorizing duplicate physical execution.
                     self._tc_unindexed_slot = idx
                 if idx not in self.tool_calls_acc:
                     if self.on_tool_call_ready and idx > 0 and (idx - 1) in self.tool_calls_acc:
@@ -1562,13 +1877,51 @@ class SSEAccumulator:
                 # told apart from an upstream re-issue of the same call, and
                 # the overwrite would erase that evidence.
                 _slot_id_before = self.tool_calls_acc[idx].get('id')
-                if tc.get('id'):
-                    self.tool_calls_acc[idx]['id'] = tc['id']
+                # Some broken compatibility gateways reuse/omit ``index`` and
+                # emit the next call's id in an id-only frame, with its name in
+                # a later frame. Splitting only inside the name branch loses
+                # that evidence: the id overwrites the old slot first, then the
+                # later same-name frame looks like a retransmit and its args
+                # are appended to the previous call. A differing non-blank id
+                # is already conclusive identity, so open its slot NOW.
+                if (_incoming_id and _slot_id_before
+                        and _incoming_id != _slot_id_before):
+                    self._tc_obs_slot_split += 1
+                    logger.warning(
+                        '%s [tool_calls-shape] second tool id in slot %s '
+                        '— opening a NEW slot before name/arguments: '
+                        'prev_id=%r incoming_id=%r model=%s trace=%s chunk=%d',
+                        self.log_prefix, idx, _slot_id_before, _incoming_id,
+                        self.body.get('model', ''), self.trace_id,
+                        self.chunk_count)
+                    self.raw_dumper.dump_anomaly(
+                        'tool_call_slot_split',
+                        model=self.body.get('model', ''),
+                        trace=self.trace_id,
+                        slot=idx,
+                        previous_id=_slot_id_before,
+                        incoming_id=_incoming_id,
+                        chunks=self.chunk_count)
+                    idx = max(self.tool_calls_acc) + 1
+                    self._tc_unindexed_slot = idx
+                    if _upstream_idx is not None:
+                        self._tc_index_map[_upstream_idx] = idx
+                    self.tool_calls_acc[idx] = {
+                        'id': _incoming_id, 'type': 'function',
+                        'function': {'name': '', 'arguments': ''},
+                    }
+                    _slot_id_before = ''
+                elif _incoming_id:
+                    self.tool_calls_acc[idx]['id'] = _incoming_id
                 if tc.get('extra_content'):
                     self.tool_calls_acc[idx]['extra_content'] = tc['extra_content']
-                if isinstance(tc.get('caller'), dict):
-                    self.tool_calls_acc[idx]['caller'] = dict(tc['caller'])
-                fn = tc.get('function', {})
+                if _caller_present:
+                    # Preserve invalid attribution too. Silently dropping a
+                    # non-object caller would make the downstream authority
+                    # gate see an unattributed direct/root call.
+                    self.tool_calls_acc[idx]['caller'] = _caller_value
+                fn = _progress_fn
+                _ignore_reissued_arguments = False
                 if fn.get('name'):
                     _prev_name = self.tool_calls_acc[idx]['function']['name']
                     # A tool NAME is a one-shot identifier, not an incremental
@@ -1585,13 +1938,25 @@ class SSEAccumulator:
                     #   * a DIFFERENT full name — a second call landed in this
                     #     slot; it gets its own slot instead of being appended.
                     _incoming = fn['name']
-                    _new_id = bool(tc.get('id')) and bool(_slot_id_before) \
-                        and tc['id'] != _slot_id_before
+                    _new_id = bool(_incoming_id) and bool(_slot_id_before) \
+                        and _incoming_id != _slot_id_before
                     if not _prev_name:
                         self.tool_calls_acc[idx]['function']['name'] = _incoming
                     elif _prev_name == _incoming and not _new_id:
                         # Upstream re-issued the whole name for the SAME call
-                        # (non-incremental semantics) — idempotent.
+                        # (non-incremental semantics) — idempotent.  When that
+                        # frame also repeats the complete arguments accumulated
+                        # so far, suppress those bytes too; otherwise an exact
+                        # SSE retransmission turns one valid JSON object into
+                        # ``{...}{...}`` and rejects a call that was already
+                        # fully known.
+                        _incoming_arguments = fn.get('arguments')
+                        if (isinstance(_incoming_arguments, str)
+                                and _incoming_arguments
+                                and _incoming_arguments ==
+                                self.tool_calls_acc[idx]['function'].get(
+                                    'arguments', '')):
+                            _ignore_reissued_arguments = True
                         pass
                     elif not _new_id and self._tc_is_name_fragment(
                             _prev_name, _incoming, tc, idx):
@@ -1604,7 +1969,7 @@ class SSEAccumulator:
                             'prev=%r incoming=%r incoming_id=%r model=%s '
                             'trace=%s chunk=%d',
                             self.log_prefix, idx, _prev_name, _incoming,
-                            tc.get('id'), self.body.get('model', ''),
+                            _incoming_id, self.body.get('model', ''),
                             self.trace_id, self.chunk_count)
                         self.raw_dumper.dump_anomaly(
                             'tool_call_slot_split',
@@ -1617,6 +1982,11 @@ class SSEAccumulator:
                         # slot; give it back its own id before moving on.
                         if _slot_id_before:
                             self.tool_calls_acc[idx]['id'] = _slot_id_before
+                        elif _incoming_id:
+                            # The old slot had no id; assigning the incoming
+                            # call's id before the name-based split must not
+                            # leave the same correlation token on both calls.
+                            self.tool_calls_acc[idx]['id'] = ''
                         idx = max(self.tool_calls_acc) + 1
                         self._tc_unindexed_slot = idx
                         if _upstream_idx is not None:
@@ -1624,14 +1994,15 @@ class SSEAccumulator:
                             # the call's own argument deltas follow it.
                             self._tc_index_map[_upstream_idx] = idx
                         self.tool_calls_acc[idx] = {
-                            'id': tc.get('id') or '', 'type': 'function',
+                            'id': _incoming_id, 'type': 'function',
                             'function': {'name': _incoming, 'arguments': ''},
                         }
                         if tc.get('extra_content'):
                             self.tool_calls_acc[idx]['extra_content'] = tc['extra_content']
-                        if isinstance(tc.get('caller'), dict):
-                            self.tool_calls_acc[idx]['caller'] = dict(tc['caller'])
-                if fn.get('arguments') is not None:
+                        if _caller_present:
+                            self.tool_calls_acc[idx]['caller'] = _caller_value
+                if (fn.get('arguments') is not None
+                        and not _ignore_reissued_arguments):
                     self.tool_calls_acc[idx]['function']['arguments'] += fn.get('arguments', '')
 
     def _tc_is_name_fragment(self, prev_name, incoming, tc, idx):
@@ -1762,18 +2133,18 @@ class SSEAccumulator:
 
         # Pre-filter count — the tool_calls_no_payload anomaly check below
         # uses this to tell "the GATEWAY never sent any tool_call delta" (0)
-        # apart from "OUR phantom filter dropped every accumulated entry"
-        # (>0 — its per-entry WARNINGs then exist in the log).
+        # apart from "every accumulated entry was a proven internal transport
+        # artefact" (>0 — its per-entry diagnostics then exist in the log).
         _tool_calls_seen = len(self.tool_calls_acc)
 
-        # Filter out spurious tool calls
+        # Filter only proven internal transport artefacts. A distinct provider
+        # id with empty arguments is still a real call occurrence: it may be a
+        # legal no-arg invocation or an invalid call that deserves the normal
+        # schema receipt. Inferring a "phantom duplicate" merely because a
+        # same-named sibling has arguments discards model intent and makes the
+        # transport layer a second, lossy execution authority.
         if self.tool_calls_acc:
             _filtered = {}
-            _names_with_args = {
-                tc['function']['name']
-                for tc in self.tool_calls_acc.values()
-                if (tc['function'].get('arguments', '') or '').strip()
-            }
             for idx, tc_entry in self.tool_calls_acc.items():
                 fn_name = tc_entry['function']['name']
                 fn_args_str = tc_entry['function'].get('arguments', '')
@@ -1781,16 +2152,9 @@ class SSEAccumulator:
                     logger.debug('%s Filtering spurious internal tool call: %s',
                                  self.log_prefix, fn_name)
                     continue
-                if not fn_args_str.strip() and fn_name in _names_with_args:
-                    logger.warning(
-                        '%s Filtering phantom tool call: %s (tc_id=%s) has '
-                        'empty arguments — duplicate of another %s call with real args',
-                        self.log_prefix, fn_name, tc_entry.get('id', '?')[:12], fn_name,
-                    )
-                    continue
                 # ── Normalize empty/whitespace arguments to '{}' ──
                 # A genuine no-arg tool call (or one whose args delta never
-                # arrived) survives the phantom filter above with arguments=''.
+                # arrived) reaches the contract validator with arguments=''.
                 # OpenAI/Anthropic tolerate that (the executor does
                 # ``json.loads(args or '{}')``), but Gemini's OpenAI-compat
                 # proxy REJECTS a replayed assistant tool_call with empty
@@ -2059,8 +2423,8 @@ class SSEAccumulator:
         # ``_tool_calls_void``). ``cause`` separates the two worlds:
         #   'gateway_no_payload' — pre-filter count 0: the wire itself
         #     carried no tool_call deltas (upstream loss);
-        #   'filtered' — pre-filter count >0: OUR phantom filter dropped
-        #     every entry (its per-entry WARNINGs are then in the log).
+        #   'filtered' — pre-filter count >0: every entry was a proven internal
+        #     transport artefact (its diagnostics are then in the log).
         _tool_calls_void = None
         if (not aborted and provider_finish_reason in ('tool_calls', 'tool_use')
                 and not tool_calls_acc and chunk_count > 0):

@@ -167,8 +167,8 @@ class TestWorkerLostFirstClass(unittest.TestCase):
         self.assertIn('worker_lost', _TITLES)
 
     def test_frontend_chip_label_present(self):
-        with open(os.path.join(ROOT, 'frontend', 'src', 'runtime',
-                               'app-runtime.js'), encoding='utf-8') as f:
+        with open(os.path.join(ROOT, 'frontend', 'src',
+                               'error-presentation.ts'), encoding='utf-8') as f:
             src = f.read()
         self.assertIn("worker_lost:", src,
                       'ERROR_KIND_LABELS missing worker_lost — the chip '

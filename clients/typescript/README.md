@@ -10,10 +10,10 @@ browsers, Cloudflare Workers, Vercel Edge, Deno, and Bun.
 npm install @rangehow/tofu-sdk
 ```
 
-## Managed-model quick start
+## Structured-model quick start
 
-Configure endpoint/key/model once on the Tofu sidecar. Application code keeps
-only the Tofu URL/token and may omit `model`:
+Configure the owner-scoped `tofu.model-routing/v2` aggregate once, then select
+the official model independently from its provider:
 
 ```ts
 import { Tofu } from '@rangehow/tofu-sdk';
@@ -25,29 +25,33 @@ const tofu = new Tofu({
 
 const result = await tofu.agents.run({
   messages: [{ role: 'user', content: 'Research this issue' }],
+  model: { creator_id: 'anthropic', model_id: 'claude-opus-4-7' },
   config: { thinking: 'high', tools: ['search', 'fetch'] },
 });
 console.log(result.content);
 ```
 
-For a request-owned model, provide exactly one block:
+Provider preference is orthogonal to model identity:
 
 ```ts
 const result = await tofu.agents.run({
   messages: [{ role: 'user', content: 'Evaluate this model' }],
-  provider: {
-    endpoint: 'https://models.example/v1',
-    api_key: 'sk-...',
-    model: 'model-name',
-  },
+  model: { creator_id: 'anthropic', model_id: 'claude-opus-4-7' },
+  routing: { preferred_provider_id: 'provider-cluster-a' },
 });
 ```
+
+Native calls reject plain model strings, `model@provider`, and inline
+secret-bearing provider blocks. A standalone `tofu-agent` that advertises a
+configured default in `/api/v1/capabilities` may omit `model`; full ChatUI
+native endpoints require the structured identity.
 
 ## Resumable streaming
 
 ```ts
 for await (const event of tofu.agents.stream({
   messages: [{ role: 'user', content: 'Inspect this project' }],
+  model: { creator_id: 'anthropic', model_id: 'claude-opus-4-7' },
   config: { tools: ['search', 'fetch'] },
 })) {
   console.log(event);

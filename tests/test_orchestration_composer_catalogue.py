@@ -43,7 +43,7 @@ def test_composer_inherits_the_default_runtime_loop_ceiling():
     _, controls = composer_catalogue()
     loop = next(line for line in controls.splitlines()
                 if line.startswith('  - loop:'))
-    assert 'max_iterations (int >=1<=12)' in loop
+    assert 'max_iterations (int >=1<=64)' in loop
     assert 'verdict:STOP' in loop
     assert 'no_new_findings' not in loop
     assert 'max_only' not in loop

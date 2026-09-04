@@ -18,33 +18,16 @@ dependencies = [
     "urllib3>=1.26.19",
     "Jinja2>=3.1.6",
     "psutil>=5.9",
-    "tofu-search>=0.10.3",
-    "trafilatura>=1.6",
-    "Pillow>=10.0",
-    "python-pptx>=0.6.21",
-    "fontTools>=4.40",
-    "lxml>=5.3",
-    "lxml_html_clean>=0.4",
     "beautifulsoup4>=4.12",
     "python-dateutil>=2.8",
-    "python-docx>=1.0",
-    "openpyxl>=3.1",
-    "xlrd>=2.0",
-    "olefile>=0.46",
     "mcp>=2,<3",
     "httpx>=0.28",
     "orjson>=3.9",
     "pydantic>=2.7,<3",
     "tiktoken>=0.7",
-    # pymupdf4llm exact-pins the other two packages; move this trio together.
-    "pymupdf==1.27.2.3",
-    "pymupdf_layout==1.27.2.3",
-    "pymupdf4llm==1.27.2.3",
     "markdown>=3.5",
     "markdown-it-py>=3.0",
     "PyYAML>=6.0",
-    "zhconv>=1.4",
-    "qrcode>=7.4",
 ]
 
 [project.urls]
@@ -57,9 +40,34 @@ Issues = "https://github.com/rangehow/ToFu/issues"
 tofu-agent = "tofu_agent.cli:main"
 
 [project.optional-dependencies]
-# The published default is the complete agent/tool/network runtime. Durable
-# application storage and the updater are deliberately separate so embedding
-# Tofu never implies PostgreSQL or a checked-out web application.
+# The published default is the slim headless/agent runtime: LLM loop, tools,
+# network and MCP — installable fast into eval containers. Document/media/
+# search parsing (pymupdf, Office formats, trafilatura, tofu-search, …) is
+# lazy-imported by the features that need it and lives in the `full` extra,
+# so `pip install tofu-agent` stays light while `tofu-agent[full]` restores
+# the complete tool surface. Durable application storage and the updater are
+# deliberately separate so embedding Tofu never implies PostgreSQL or a
+# checked-out web application.
+full = [
+    "tofu-search>=0.10.3",
+    "trafilatura>=1.6",
+    "Pillow>=10.0",
+    "python-pptx>=0.6.21",
+    "fontTools>=4.40",
+    "brotli>=1.1",
+    "lxml>=5.3",
+    "lxml_html_clean>=0.4",
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "olefile>=0.46",
+    # pymupdf4llm exact-pins the other two packages; move this trio together.
+    "pymupdf==1.27.2.3",
+    "pymupdf_layout==1.27.2.3",
+    "pymupdf4llm==1.27.2.3",
+    "zhconv>=1.4",
+    "qrcode>=7.4",
+]
 storage = [
     "psycopg[binary,pool]>=3.2",
 ]
@@ -72,9 +80,29 @@ release = [
     "setuptools>=77,<81",
     "wheel>=0.45,<1",
 ]
+# The full application needs the complete document/media/search tool
+# surface; `full` entries are duplicated here because a project cannot
+# depend on its own optional extra in a portable uv lock.
 app = [
     "psycopg[binary,pool]>=3.2",
     "uv>=0.4",
+    "tofu-search>=0.10.3",
+    "trafilatura>=1.6",
+    "Pillow>=10.0",
+    "python-pptx>=0.6.21",
+    "fontTools>=4.40",
+    "brotli>=1.1",
+    "lxml>=5.3",
+    "lxml_html_clean>=0.4",
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "olefile>=0.46",
+    "pymupdf==1.27.2.3",
+    "pymupdf_layout==1.27.2.3",
+    "pymupdf4llm==1.27.2.3",
+    "zhconv>=1.4",
+    "qrcode>=7.4",
 ]
 # `test` is the extra CI installs (`pip install -e ".[test]"`). It carries the
 # full-app storage dependencies plus the test runner/plugins, but no linters.
@@ -108,6 +136,25 @@ test = [
     # (parses styles.css rules instead of regex). Without it that module died at
     # COLLECTION with ModuleNotFoundError in every CI lane (2026-08-05).
     "tinycss2>=1.2",
+    # The repository suite exercises document/media/search parsing too, so it
+    # needs the `full` surface (duplicated — extras cannot compose).
+    "tofu-search>=0.10.3",
+    "trafilatura>=1.6",
+    "Pillow>=10.0",
+    "python-pptx>=0.6.21",
+    "fontTools>=4.40",
+    "brotli>=1.1",
+    "lxml>=5.3",
+    "lxml_html_clean>=0.4",
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "olefile>=0.46",
+    "pymupdf==1.27.2.3",
+    "pymupdf_layout==1.27.2.3",
+    "pymupdf4llm==1.27.2.3",
+    "zhconv>=1.4",
+    "qrcode>=7.4",
 ]
 dev = [
     # Superset of `test` plus the linter — kept explicit because a project
@@ -123,6 +170,24 @@ dev = [
     "uv>=0.4",
     "ruff",
     "pyright>=1.1.403",
+    # Same `full` duplication as `test`.
+    "tofu-search>=0.10.3",
+    "trafilatura>=1.6",
+    "Pillow>=10.0",
+    "python-pptx>=0.6.21",
+    "fontTools>=4.40",
+    "brotli>=1.1",
+    "lxml>=5.3",
+    "lxml_html_clean>=0.4",
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "olefile>=0.46",
+    "pymupdf==1.27.2.3",
+    "pymupdf_layout==1.27.2.3",
+    "pymupdf4llm==1.27.2.3",
+    "zhconv>=1.4",
+    "qrcode>=7.4",
 ]
 # Browser automation is a worker capability. The API image intentionally
 # omits both this Python package and the Chromium payload; the personal image
@@ -138,6 +203,16 @@ worker = [
 scale = [
     "redis>=4.3",
 ]
+
+# The Git repository is the source authority for all first-party Python
+# artifacts. Each member keeps independent build metadata and release version;
+# workspace resolution only replaces published dependencies in development.
+[tool.uv.workspace]
+members = ["packages/tofu-search", "plugins/tofu-trading"]
+
+[tool.uv.sources]
+tofu-search = { workspace = true }
+
 [tool.setuptools.packages.find]
 # Ship the importable Python packages. The in-process façade (`tofu`) and the
 # kernel it calls (`lib.tasks_pkg.entry`) require `lib*` to be importable;
@@ -166,6 +241,14 @@ include-package-data = false
 "lib.motion_video" = ["guide/*.md", "guide/*.html"]
 "lib.slides" = ["guide/*.md"]
 "lib.design_sys" = ["bibles/*.md"]
+
+[tool.ruff]
+# The legacy in-tree undo store can contain tens of thousands of session
+# directories under an explicitly linted `lib/` path. It is mutable user state,
+# never Python source, and already has the same scoped Git/project-tool ignore.
+# Keep this path exact: user projects may legitimately own another directory
+# named `.project_sessions` outside Tofu's runtime authority.
+extend-exclude = ["lib/.project_sessions", "packages", "plugins"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

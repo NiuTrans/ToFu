@@ -216,19 +216,6 @@ def test_tools_panel_header_is_global_catalogue_not_state_filter():
         'stale refreshes could overwrite newer snapshots')
 
 
-def test_tools_panel_is_owned_by_the_lazy_settings_domain():
-    root = Path(ROOT)
-    runtime = (root / 'frontend/src/runtime/app-runtime.js').read_text()
-    settings = (root / 'frontend/src/features/settings.ts').read_text()
-    main = (root / 'frontend/src/main.ts').read_text()
-    misc = (root / 'frontend/src/features/misc.ts').read_text()
-
-    assert 'migrated source: tools_panel.js' not in runtime
-    assert "import './settings/tools-inventory'" in settings
-    assert "'populateToolsInventory', 'searchToolsInventory'" in main
-    assert 'tools_panel.js' not in misc
-
-
 def test_every_builtin_family_and_tool_has_bilingual_catalogue_copy():
     """A backend-added built-in may render via fallback, but CI must require
     intentional zh/en catalogue copy before it ships."""

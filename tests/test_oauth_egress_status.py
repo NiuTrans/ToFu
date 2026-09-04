@@ -3,7 +3,7 @@
 Covers:
   * egress_status 五态（direct / agent / agent_no_capability / unavailable /
     unknown）——页面加载路径绝不发起探测（只读缓存 + 异步触发）
-  * 选择器端点 GET/POST oauth_egress_agents.json（多 agent 时 pin 生效）
+  * 选择器端点 GET/POST 的 owner/在线/capability 边界与严格 JSON 解析
   * provider_probe claude 路按路由走 direct/egress
   * provider_probe codex 路从 SKIPPED 升级为流式真探测（open_stream 分类）
   * 前端卡片出口行 harness（状态行渲染 + capability-off 指引）
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.unit
 from lib.desktop import egress
 
 
-def _agent(agent_id='a1', user_id='', cap=True, name='box'):
+def _agent(agent_id='a1', user_id='1', cap=True, name='box'):
     return {'agent_id': agent_id, 'name': name, 'platform': 'win32',
             'capabilities': {'egress': cap}, 'user_id': user_id,
             'last_seen': time.time()}
@@ -54,7 +54,7 @@ class TestEgressStatus(unittest.TestCase):
                 self._saved_network_fail)
 
     def _status(self, host='api.anthropic.com', verdict=None, agents=(),
-                user_id=''):
+                user_id='1'):
         if verdict:
             egress._probe_cache.set(host, verdict)
         with mock.patch('lib.desktop.online_agents', return_value=list(agents)):
@@ -133,7 +133,7 @@ class TestEgressStatus(unittest.TestCase):
 
     def test_tenant_scoping(self):
         st = self._status(verdict='geo_blocked',
-                          agents=[_agent(user_id='u2')], user_id='u1')
+                          agents=[_agent(user_id='2')], user_id='1')
         self.assertEqual(st['state'], 'unavailable')
 
     def test_bg_probe_hits_real_api_endpoint_not_web_root(self):
@@ -175,7 +175,7 @@ class TestPinnedSelector(unittest.TestCase):
     def test_pin_write_and_read_roundtrip(self):
         from lib.desktop import egress as eg
         with mock.patch('lib.desktop.egress._pinned_agent', return_value='a2'):
-            self.assertEqual(eg._pinned_agent('u1'), 'a2')
+            self.assertEqual(eg._pinned_agent('1'), 'a2')
 
     def test_route_request_uses_pin_among_many(self):
         with mock.patch('lib.desktop.online_agents',
@@ -185,7 +185,76 @@ class TestPinnedSelector(unittest.TestCase):
              mock.patch.object(egress, '_pinned_agent', return_value='a2'):
             self.assertEqual(
                 egress.route_request('https://api.anthropic.com/v1/x',
-                                     user_id=''), 'a2')
+                                     user_id='1'), 'a2')
+
+
+@pytest.mark.api
+def test_pin_endpoint_uses_strict_shared_body_parsing(
+        flask_client, monkeypatch):
+    """Invalid bodies/devices never mutate the owner's Sidecar preference."""
+    from lib.api_keys import create_key
+
+    _row, token = create_key(
+        owner_user_id=1, name='oauth-egress-pin', scopes=['chat'])
+    headers = {'Authorization': f'Bearer {token}'}
+    monkeypatch.setattr(
+        'lib.desktop.online_agents',
+        lambda: [
+            _agent('a1', user_id='1'),
+            _agent('no-egress', user_id='1', cap=False),
+            _agent('other-owner', user_id='2'),
+        ],
+    )
+
+    baseline = flask_client.post(
+        '/api/v1/oauth/egress-agent',
+        json={'agent_id': 'a1'},
+        headers=headers,
+    )
+    assert baseline.status_code == 200, baseline.get_data(as_text=True)
+    assert baseline.get_json()['pinned'] == 'a1'
+
+    invalid_requests = (
+        {'json': ['not', 'an', 'object']},
+        {'json': {'agent_id': ['a1']}},
+    )
+    for request_kwargs in invalid_requests:
+        response = flask_client.post(
+            '/api/v1/oauth/egress-agent',
+            headers=headers,
+            **request_kwargs,
+        )
+        assert response.status_code == 400, response.get_data(as_text=True)
+        assert response.get_json()['ok'] is False
+
+    malformed = flask_client.post(
+        '/api/v1/oauth/egress-agent',
+        data='{"agent_id":',
+        headers={**headers, 'Content-Type': 'application/json'},
+    )
+    assert malformed.status_code == 400, malformed.get_data(as_text=True)
+    assert malformed.get_json()['ok'] is False
+
+    for ineligible in ('no-egress', 'other-owner', 'offline'):
+        response = flask_client.post(
+            '/api/v1/oauth/egress-agent',
+            json={'agent_id': ineligible},
+            headers=headers,
+        )
+        assert response.status_code == 400, response.get_data(as_text=True)
+        assert response.get_json()['field'] == 'agent_id'
+
+    selected = flask_client.get(
+        '/api/v1/oauth/egress-agent', headers=headers)
+    assert selected.status_code == 200, selected.get_data(as_text=True)
+    assert selected.get_json()['pinned'] == 'a1'
+    assert selected.get_json()['agents'] == [{
+        'agent_id': 'a1',
+        'name': 'box',
+        'platform': 'win32',
+        'capabilities': {'egress': True},
+        'online': True,
+    }]
 
 
 class TestProviderProbeRouting(unittest.TestCase):

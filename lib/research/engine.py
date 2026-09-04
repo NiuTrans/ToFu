@@ -37,7 +37,8 @@ def _emit(task: dict, event: dict) -> None:
 
 #: Task fields persisted so a crashed process can re-spawn this job.
 _MANIFEST_FIELDS = (
-    'task_id', 'user_id', 'direction', 'lang', 'n_ideas', 'conv_id', 'workdir')
+    'task_id', 'user_id', 'direction', 'lang', 'n_ideas', 'seed_arxiv_ids',
+    'conv_id', 'workdir')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -57,12 +58,18 @@ def run_research_task(task: dict) -> None:
         _research_runtime.mark_running(task_id)
         _emit(task, build_phase(Phase.START,
                                 direction=task.get('direction', '')))
-        result = build_research_from_direction(
-            task['direction'], task['workdir'], lang=task.get('lang') or 'en',
-            user_id=int(task['user_id']), n_ideas=task.get('n_ideas') or 6,
-            seed_arxiv_ids=task.get('seed_arxiv_ids'),
-            abort_event=task.get('abort_event'),
-            emit=lambda ev: _emit(task, {'type': 'stage', **ev}))
+        from lib.llm_dispatch.conv_affinity import conv_affinity
+        # Background production threads do not inherit the chat conversation's
+        # dispatcher affinity. Give all rounds of this job their own bounded,
+        # task-scoped key so a multi-key provider can reuse prompt prefixes.
+        with conv_affinity(f'production-research:{task_id}'):
+            result = build_research_from_direction(
+                task['direction'], task['workdir'],
+                lang=task.get('lang') or 'en',
+                user_id=int(task['user_id']), n_ideas=task.get('n_ideas'),
+                seed_arxiv_ids=task.get('seed_arxiv_ids'),
+                abort_event=task.get('abort_event'),
+                emit=lambda ev: _emit(task, {'type': 'stage', **ev}))
 
         task['result'] = result
         # A degraded run produced a VALID artifact from a SICK pipeline — it is
@@ -98,12 +105,18 @@ def resume_interrupted_research() -> int:
     from lib.research.runtime import _new_research_task, _research_runtime
 
     def _respawn(task_id: str, workdir: str, m: dict) -> None:
+        from lib.research.contracts import normalize_research_request
         user_id = int(m['user_id'])
         if user_id < 1:
             raise ValueError('research manifest has no valid owner')
+        request = normalize_research_request(
+            m.get('direction') or '', lang=m.get('lang') or 'en',
+            n_ideas=m.get('n_ideas'),
+            seed_arxiv_ids=m.get('seed_arxiv_ids'))
         task = _new_research_task(
-            task_id, direction=m.get('direction') or '', workdir=workdir,
-            lang=m.get('lang') or 'en', n_ideas=m.get('n_ideas') or 6,
+            task_id, direction=request.direction, workdir=workdir,
+            lang=request.lang, n_ideas=request.n_ideas,
+            seed_arxiv_ids=request.seed_arxiv_ids,
             conv_id=m.get('conv_id') or '', user_id=user_id)
         _research_runtime.spawn(task_id, run_research_task, task)
 
@@ -125,19 +138,32 @@ def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
     from lib.research.runtime import (_claim_research_task,
                                       _cleanup_stale_research_tasks,
                                       _research_runtime, _research_task_id)
+    from lib.identity import require_user_id
+    from lib.research.contracts import normalize_research_request
 
     _cleanup_stale_research_tasks()
-    key = (user_id, direction.strip(), lang)
+    owner_user_id = require_user_id(user_id, context='produce research')
+    request = normalize_research_request(
+        direction, lang=lang, n_ideas=n_ideas,
+        seed_arxiv_ids=seed_arxiv_ids)
+    key = request.dedup_key(owner_user_id)
     tid = _research_task_id()
     wd = os.path.join(research_root(), 'jobs', tid)
     task, existing = _claim_research_task(
-        key, tid, direction=direction.strip(), workdir=wd,
-        lang=lang, n_ideas=n_ideas, conv_id=conv_id, user_id=user_id)
+        key, tid, direction=request.direction, workdir=wd,
+        lang=request.lang, n_ideas=request.n_ideas,
+        seed_arxiv_ids=request.seed_arxiv_ids,
+        conv_id=conv_id, user_id=owner_user_id)
     if existing:
         return {'task_id': existing, 'deduped': True}
-    os.makedirs(wd, exist_ok=True)
-    if seed_arxiv_ids:
-        task['seed_arxiv_ids'] = list(seed_arxiv_ids)
-    _research_runtime.spawn(tid, run_research_task, task)
-    logger.info('[Research] started %s direction=%r lang=%s', tid, direction[:60], lang)
+    try:
+        os.makedirs(wd, exist_ok=True)
+        _research_runtime.spawn(tid, run_research_task, task)
+    except Exception as exc:
+        _research_runtime.finish(
+            tid, error=exc, error_context='research:start')
+        raise
+    logger.info('[Research] started %s direction=%r lang=%s ideas=%d seeds=%d',
+                tid, request.direction[:60], request.lang, request.n_ideas,
+                len(request.seed_arxiv_ids))
     return {'task_id': tid, 'deduped': False}

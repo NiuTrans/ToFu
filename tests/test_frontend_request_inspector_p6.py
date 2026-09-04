@@ -122,6 +122,13 @@ const INJECT  = { roundNum: 9000001, llmRound: 1, _inboxInject: true, status: 'd
  * same-numbered state mirror. */
 const VU_ROUND = { roundNum: 1, llmRound: 0, toolName: 'run_command', status: 'done',
   _turnId: 'turn-VU' };
+/* One durable Turn after resume: old and current tasks both have round zero.
+ * The old row intentionally has no _taskId decoration; attemptId alone must
+ * resolve its producing task instead of falling through to the latest task. */
+const RESUMED_OLD_ROUND = {
+  roundNum: 1, llmRound: 0, toolName: 'search_tools', status: 'done',
+  attemptId: 'attempt-old', _turnId: 'turn-T1',
+};
 
 global.conversations = win.conversations = [{ id: 'conv-1', _serverTurnCount: 2 }];
 global.ConversationTurnRead = win.ConversationTurnRead = {
@@ -131,7 +138,10 @@ global.ConversationTurnRead = win.ConversationTurnRead = {
       'turn-VU': { turnId: 'turn-VU', actor: 'virtual_user' },
     },
     attemptsById: {
-      'attempt-T1': { turnId: 'turn-T1', taskId: 'task-T1', createdAt: 1 },
+      'attempt-old': { attemptId: 'attempt-old', turnId: 'turn-T1',
+        taskId: 'task-old', createdAt: 1 },
+      'attempt-T1': { attemptId: 'attempt-T1', turnId: 'turn-T1',
+        taskId: 'task-T1', createdAt: 3 },
       'attempt-VU': { turnId: 'turn-VU', taskId: 'task-VU', createdAt: 2 },
     },
   }),
@@ -256,6 +266,13 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   check('worker_twin_still_resolves',
     win.__anchor(ROUND_A).indexOf("openToolDebugPanel('task-T1',1") !== -1);
 
+  /* ── 8. Resume boundary: attempt ownership wins over latest-turn task. ── */
+  check('resumed_old_round_resolves_old_task',
+    _riTaskIdForRound(RESUMED_OLD_ROUND) === 'task-old');
+  check('resumed_old_anchor_targets_old_task',
+    win.__anchor(RESUMED_OLD_ROUND)
+      .indexOf("openToolDebugPanel('task-old',1") !== -1);
+
   console.log(out.join('\n'));
 })().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); });
 """
@@ -336,7 +353,9 @@ def test_neuter_wrong_round_mapping_flips_red():
                     reason='node + jsdom dev-deps not installed')
 def test_neuter_vu_role_guard_flips_red():
     """Removing the typed actor guard exposes a virtual-user task anchor."""
-    shipped = os.path.join(JS_DIR, 'core', 'request_inspector.js')
+    # The task-identity resolver is boot-critical row authority and now rides
+    # in the retained debug-state prefix composed into this legacy panel view.
+    shipped = os.path.join(JS_DIR, 'core', 'debug_panel.js')
     with open(shipped, encoding='utf-8') as f:
         src = f.read()
     anchor = "    if (!turn || turn.actor === 'virtual_user') return '';"
@@ -349,9 +368,10 @@ def test_neuter_vu_role_guard_flips_red():
     with open(tmp, 'w', encoding='utf-8') as f:
         f.write(neutered)
     try:
-        # The harness extracts request_inspector.js from the path it is given.
+        # Replace the composed debug/state source while keeping the real lazy
+        # Request Inspector source unchanged.
         harness = _HARNESS.replace(
-            "path.join(ROOT,'static','js','core','request_inspector.js')",
+            "path.join(ROOT,'static','js','core','debug_panel.js')",
             "process.argv[2]")
         hpath = os.path.join(HERE, '_ri_p6_vu_nc_harness.js')
         with open(hpath, 'w') as f:
@@ -367,7 +387,7 @@ def test_neuter_vu_role_guard_flips_red():
     finally:
         os.remove(tmp)
     with open(shipped, encoding='utf-8') as f:
-        assert f.read() == src, 'shipped request_inspector.js must be byte-identical'
+        assert f.read() == src, 'shipped debug panel view must be byte-identical'
 
 
 def test_anchor_is_wired_at_the_single_render_chokepoint():

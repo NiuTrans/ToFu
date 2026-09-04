@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 import pytest
@@ -21,8 +22,12 @@ class _Execution:
         self.request = request
         self.task_id = task_id
         self.request_id = request.request_id or f'run-{task_id}'
-        self.model = request.model or (
-            request.provider.model if request.provider else 'managed-model')
+        selected = request.model
+        self.model = (
+            str(selected.get('model_id') or selected.get('offering_id') or '')
+            if isinstance(selected, Mapping)
+            else 'managed-model'
+        ) or 'managed-model'
         self.status = 'done'
 
     @property
@@ -60,8 +65,15 @@ class _Execution:
 class _Runtime:
     def __init__(self):
         self.principal = SimpleNamespace(subject_id='test:owner')
-        self.default_model = 'managed-model'
-        self.provider = None
+        self.default_model = {
+            'creator_id': 'test-creator', 'model_id': 'managed-model'}
+        self.model_routing = SimpleNamespace(public_dict=lambda: {
+            'model_routing': {'contract_version': 'tofu.model-routing/v2'},
+            'model': dict(self.default_model),
+            'routing': {},
+            'credential_secret_hints': {},
+        })
+        self.model_routing_source = 'runtime'
         self.closed = False
         self.capacity = 4
         self.in_flight = 0
@@ -161,11 +173,11 @@ def test_remote_sidecar_is_default_deny_and_health_hides_provider():
         assert capabilities.status_code == 200
         capability_body = await capabilities.get_json()
         assert capability_body['features']['frontend'] is False
-        assert capability_body['features']['provider_setup_ui'] is True
-        assert capability_body['provider']['required_fields'] == [
-            'base_url', 'model',
-        ]
-        assert 'api_key' in capability_body['provider']['optional_fields']
+        assert capability_body['features']['model_routing_setup_ui'] is True
+        assert capability_body['model_routing']['contract_version'] == \
+            'tofu.model-routing/v2'
+        assert capability_body['model_routing']['required_fields'] == [
+            'model_routing', 'model', 'credential_secrets']
 
     _run(scenario())
 
@@ -196,8 +208,8 @@ def test_managed_model_idempotency_and_async_handle():
         assert (await first.get_json())['task_id'] == 'task-1'
         assert (await replay.get_json())['task_id'] == 'task-1'
         assert len(runtime.started) == 1
-        assert runtime.started[0].model == ''
-        assert runtime.started[0].provider is None
+        assert runtime.started[0].model is None
+        assert runtime.started[0].model_routing is None
 
         conflict = await client.post(
             '/api/v1/agent/run', headers=headers,
@@ -220,7 +232,7 @@ def test_managed_model_idempotency_and_async_handle():
 
 
 @pytest.mark.unit
-def test_request_provider_only_needs_endpoint_key_and_model():
+def test_inline_provider_block_is_explicitly_removed():
     from tofu_agent.server import HeadlessServerConfig, create_app
 
     runtime = _Runtime()
@@ -239,11 +251,11 @@ def test_request_provider_only_needs_endpoint_key_and_model():
                 'model': 'provider-model',
             },
         })
-        assert response.status_code == 200
-        request = runtime.started[0]
-        assert request.provider.base_url == 'https://models.example/v1'
-        assert request.provider.model == 'provider-model'
-        assert 'secret' not in await response.get_data(as_text=True)
+        assert response.status_code == 400
+        body = await response.get_json()
+        assert body['error']['kind'] == 'invalid_request'
+        assert 'model-routing/v2' in body['error']['message']
+        assert runtime.started == []
 
     _run(scenario())
 

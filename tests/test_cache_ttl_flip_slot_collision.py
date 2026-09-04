@@ -4,7 +4,7 @@ Production evidence (2026-07-26, 7-day apiRounds scan, epic pt_6ac5febf):
 ``markers_ttl_flipped`` reported 358 "cache TTL marker flipped" breaks, ALL on
 one slot key ``msg:tool_result(toolu_bdrk)`` and ALL on aws.claude-opus-4.8.
 
-Root cause is NOT a ttl flip. ``_brief`` keys a tool_result slot on
+Root cause is NOT a ttl flip. The tool_result slot key took
 ``tool_use_id[:10]``, and AWS Bedrock mints ids shaped ``toolu_bdrk_01ABC…`` —
 so the first 10 chars are IDENTICAL for every tool_result on that line and all
 of them collapse into ONE slot key. The stable mid marker (ttl='1h') and the
@@ -30,7 +30,7 @@ Fix under test: slot keys must be collision-resistant (full tool id, not a
 import pytest
 
 from lib.tasks_pkg.wire_fingerprint import (
-    _brief,
+    _canonical_message_entry,
     marker_signature,
     markers_ttl_flipped,
 )
@@ -55,9 +55,13 @@ def _tool_msg(tool_id, *, ttl=None):
 
 
 def test_distinct_aws_tool_ids_get_distinct_slot_keys():
-    """Two different AWS tool_results must not collapse into one slot key."""
-    key_a = _brief(_tool_msg(_AWS_ID_A))
-    key_b = _brief(_tool_msg(_AWS_ID_B))
+    """Two different AWS tool_results must not collapse into one slot key.
+
+    Uses ``_canonical_message_entry`` — the exact key builder
+    ``marker_signature`` slots message markers on.
+    """
+    key_a = _canonical_message_entry(_tool_msg(_AWS_ID_A))['key']
+    key_b = _canonical_message_entry(_tool_msg(_AWS_ID_B))['key']
     assert key_a != key_b, (
         f'slot-key collision: both AWS tool_results keyed as {key_a!r} — '
         'the 10-char id prefix is entirely consumed by the vendor prefix '

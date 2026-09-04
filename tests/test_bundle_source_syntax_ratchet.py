@@ -74,3 +74,18 @@ def test_boot_reports_module_failures_instead_of_dead_clicking_silently():
     assert 'Promise.all([i18nReady(), runtimeReady])' in main
     assert "new CustomEvent('tofu:app-ready'" in main
     assert "new CustomEvent('tofu:app-failed'" in main
+
+
+def test_restart_availability_bridge_is_published_after_runtime_scope_exists():
+    """Keep the main bundle executable: an early write is a production TDZ."""
+    prelude = (
+        ROOT / 'frontend/src/runtime/sections/_prelude.js'
+    ).read_text(encoding='utf-8')
+    declaration = 'const runtimeScope = Object.create(null);'
+    publication = (
+        'runtimeScope.BackendAvailabilityRestartScope = '
+        'backendAvailabilityRestartScope;'
+    )
+    assert prelude.count(declaration) == 1
+    assert prelude.count(publication) == 1
+    assert prelude.index(declaration) < prelude.index(publication)

@@ -36,6 +36,7 @@ NEUTER evidence expected:
 
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -128,6 +129,28 @@ def test_description_carries_recovery_rule():
     assert 'Re-spawn the same task' in _DESC, (
         'recovery rule must say: re-spawn the task with a covering role '
         "('general'), not work around or abandon")
+
+
+def test_catalogue_has_one_prompt_owner_and_bounded_control_prose():
+    from lib.tasks_pkg.context_composer._providers import _swarm_guidance
+    from lib.token_counter import count_text
+    from lib.tools.gateway import tool_schema_tokens
+
+    catalogue = format_role_catalogue()
+    guidance = _swarm_guidance(SimpleNamespace(task={
+        'config': {'orchestration': {'multiAgent': 'read_only'}},
+    }), 'parallel research')
+    assert catalogue in _DESC
+    assert catalogue not in guidance
+    assert 'tool schema is the sole authority' in guidance
+    for contract in (
+        '2+ independent', 'trivial or sequential', 'fire-and-forget',
+        'do not poll/sleep', 'predict results', 'output_file', 'depends_on',
+        'await_agents', 'get_agent_result', 'root synthesizes',
+    ):
+        assert contract in _DESC
+    assert tool_schema_tokens([SPAWN_AGENTS_TOOL], model='kimi-k3') <= 1_050
+    assert count_text(guidance, model='kimi-k3') <= 128
 
 
 if __name__ == '__main__':

@@ -38,9 +38,14 @@ from lib.tasks_pkg.manager import (
     append_event,
     persist_task_result,
     reset_task_text,
+    stamp_chat_task_terminal,
     stream_llm_response,
 )
 from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
+from lib.tasks_pkg.llm_fallback._usage import (
+    _emit_round_usage,
+    project_usage_for_round_record,
+)
 from lib.tasks_pkg.commit_round._commit import (  # noqa: E402
     _spawn_async_commit_round,
 )
@@ -48,6 +53,7 @@ from lib.tasks_pkg.commit_round._profile import (  # noqa: E402
     _spawn_async_profile_consolidation,
 )
 from lib.tasks_pkg.tool_dispatch._labels import tool_label
+from lib.tasks_pkg.tool_dispatch._pipeline import bounded_search_results_text
 
 
 
@@ -582,7 +588,8 @@ def _maybe_append_sources_footer(task: dict[str, Any], all_search_results_text: 
     if not all_search_results_text:
         return
     # URLs the model actually saw (format.py emits "URL: <url>" per result).
-    seen = _SRC_URL_RE.findall('\n'.join(all_search_results_text))
+    seen = _SRC_URL_RE.findall(
+        bounded_search_results_text(all_search_results_text, separator='\n'))
     if not seen:
         return
 
@@ -687,7 +694,7 @@ def _run_post_loop_fallback(
 ) -> tuple[Any, Any, ProviderStreamResult | None]:
     """Synthesize a terminal answer when tools returned data but prose did not."""
     tid = task['id'][:8]
-    combined = '\n\n---\n\n'.join(all_search_results_text)
+    combined = bounded_search_results_text(all_search_results_text)
     fallback_messages = list(original_messages)
     fallback_messages.append({
         'role': 'assistant',
@@ -741,10 +748,9 @@ def _run_post_loop_fallback(
             api_rounds.append({
                 'round': 'fallback',
                 'model': model,
-                'usage': dict(usage),
+                'usage': project_usage_for_round_record(usage),
                 'tag': 'FALLBACK',
             })
-            from lib.tasks_pkg.llm_fallback._usage import _emit_round_usage
             _emit_round_usage(
                 task, 'fallback', model, usage, tag='FALLBACK')
             # Every processed FloorRetry resend is billed even when discarded.
@@ -762,12 +768,14 @@ def _run_post_loop_fallback(
                 api_rounds.append({
                     'round': 'fallback',
                     'model': billed_model,
-                    'usage': dict(billed_usage),
+                    'usage': project_usage_for_round_record(billed_usage),
                     'tag': billed_tag,
+                    'responseAuthoring': False,
                 })
                 _emit_round_usage(
                     task, 'fallback', billed_model, billed_usage,
                     tag=billed_tag,
+                    response_authoring=False,
                 )
     except Exception as error:
         logger.error(
@@ -834,6 +842,8 @@ def _build_done_event_base(
         done_event['todoState'] = public_todo_state(task['_todoState'])
     if task.get('_todo_blocked'):
         done_event['todoBlocked'] = task['_todo_blocked']
+    if task.get('_waiting_on'):
+        done_event['waitingOn'] = task['_waiting_on']
     return done_event
 
 
@@ -875,6 +885,21 @@ def _settle_post_loop_finish_reason(
                     'finished but BEFORE the response was fully rendered.',
                     tid, loop_exit_reason, model, pre_abort_finish,
                 )
+    elif (last_finish_reason in ('tool_use', 'tool_calls')
+            and not task.get('error')
+            and task.get('_toolLoopCleanFinish')):
+        # The success-poll breaker ended the turn deliberately: the loop
+        # stopped on a tool round, but the verified state is the result,
+        # not a dangling tool call.
+        last_finish_reason = 'stop'
+        logger.info(
+            '[%s] Tool-loop breaker clean finish (%s) at round %s — '
+            'settling finishReason=stop model=%s.',
+            tid,
+            (task.get('_toolLoopCleanFinish') or {}).get('reason'),
+            (task.get('_toolLoopCleanFinish') or {}).get('round'),
+            model,
+        )
     elif last_finish_reason in ('tool_use', 'tool_calls') and not task.get('error'):
         last_finish_reason = 'error'
         from lib.error_envelope import make_envelope as _make_env
@@ -888,6 +913,96 @@ def _settle_post_loop_finish_reason(
                  'without further tool execution'),
         )
     return last_finish_reason
+
+
+def _log_terminal_runtime_stats(
+    task,
+    *,
+    tid,
+    last_finish_reason,
+    tool_call_happened,
+    model,
+    loop_exit_reason,
+    round_num,
+    api_rounds,
+    abort_detected_phase,
+):
+    """Clean bounded terminal caches and emit one lifecycle diagnostic."""
+    conv_id = task.get('convId', '')
+    if conv_id:
+        from lib.tasks_pkg.manager import task_user_id
+        session_stats = get_session_cache_stats(
+            conv_id, user_id=task_user_id(task))
+        if session_stats and session_stats['calls'] > 1:
+            logger.info(
+                '[CacheSession] %s conv=%s END — %d calls, '
+                'total_read=%d total_write=%d overall_hit=%d%% '
+                'breaks=%d duration=%.1fs model=%s',
+                tid, conv_id[:8], session_stats['calls'],
+                session_stats['total_cache_read'],
+                session_stats['total_cache_write'],
+                session_stats['overall_hit_pct'],
+                session_stats['total_breaks'],
+                session_stats['session_duration_s'],
+                session_stats['model'],
+            )
+    try:
+        cleanup_stale_cache_states(max_age_s=3600)
+    except Exception as exc:
+        logger.debug('[Orchestrator] stale cache cleanup failed: %s', exc,
+                     exc_info=True)
+
+    for label, cache_key, eviction_key in (
+        ('DedupCache', '_tool_result_cache', '_tool_result_cache_evictions'),
+        ('UnchangedResult', '_unchanged_tool_result_receipts',
+         '_unchanged_tool_result_receipt_evictions'),
+    ):
+        cache = task.get(cache_key)
+        try:
+            evictions = max(0, int(task.get(eviction_key) or 0))
+        except (TypeError, ValueError, OverflowError):
+            evictions = 0
+        if isinstance(cache, dict) and (cache or evictions > 0):
+            logger.info(
+                '[%s] %s conv=%s task END — %d entries, %d evicted',
+                label, tid, conv_id[:8] if conv_id else '???', len(cache),
+                evictions,
+            )
+
+    content_len = len(task.get('content') or '')
+    thinking_len = len(task.get('thinking') or '')
+    elapsed = time.time() - task.get('created_at', time.time())
+    logger.debug(
+        '[Orchestrator] Task %s conv=%s COMPLETED — content=%dchars '
+        'thinking=%dchars error=%s elapsed=%.1fs finishReason=%s toolCalls=%s',
+        task['id'][:8], conv_id, content_len, thinking_len,
+        task.get('error') or 'none', elapsed, last_finish_reason,
+        'yes' if tool_call_happened else 'no')
+    if (content_len == 0 and thinking_len == 0 and not task.get('error')
+            and not task.get('aborted')):
+        logger.warning(
+            '[Orchestrator] Task %s conv=%s ⚠️ COMPLETED WITH EMPTY CONTENT '
+            'and no error! This will appear as a blank message to the user.',
+            task['id'][:8], conv_id)
+    logger.debug(
+        '[Orchestrator] Task %s LIFECYCLE SUMMARY:\n'
+        '  loop_exit_reason   = %s\n'
+        '  last_finish_reason = %s\n'
+        '  rounds_completed   = %d\n'
+        '  tool_call_happened = %s\n'
+        '  content_length     = %d\n'
+        '  thinking_length    = %d\n'
+        '  error              = %s\n'
+        '  model              = %s\n'
+        '  elapsed            = %.1fs\n'
+        '  api_rounds         = %d\n'
+        '  aborted            = %s\n'
+        '  abort_phase        = %s',
+        tid, loop_exit_reason, last_finish_reason, round_num + 1,
+        tool_call_happened, content_len, thinking_len,
+        task.get('error') or 'none', model, elapsed, len(api_rounds),
+        task.get('aborted', False), abort_detected_phase or 'n/a')
+    return content_len, thinking_len, elapsed
 
 
 def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, thinking_depth: str | None, cfg: dict[str, Any],
@@ -1095,15 +1210,26 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         _comp_usage = pop_compaction_usage(task.get('convId', ''))
         if _comp_usage:
             task['compactionUsage'] = _comp_usage
-            _u = task['usage'] or {}
-            for _k, _v in _comp_usage.items():
-                if _k == 'n_calls':
+            from lib.tasks_pkg.compaction._compaction_usage import (
+                merge_compaction_usage_into_total,
+            )
+            _merged_usage = merge_compaction_usage_into_total(
+                task.get('usage') or {}, _comp_usage)
+            accumulated_usage.clear()
+            accumulated_usage.update(_merged_usage)
+            task['usage'] = accumulated_usage
+            for _index, _call in enumerate(_comp_usage.get('calls') or [], 1):
+                if not isinstance(_call, dict) or not _call.get('usage'):
                     continue
-                if isinstance(_v, (int, float)) and isinstance(_u.get(_k), (int, float)):
-                    _u[_k] = _u[_k] + _v
-                elif isinstance(_v, (int, float)) and _k not in _u:
-                    _u[_k] = _v
-            task['usage'] = _u
+                api_rounds.append({
+                    'round': f'compaction-{_index}',
+                    'kind': 'compaction',
+                    'model': _call.get('model') or model,
+                    'provider_id': (_call.get('provider_id')
+                                    or task.get('provider_id') or ''),
+                    'usage': project_usage_for_round_record(_call['usage']),
+                    'tag': f'COMPACTION-{str(_call.get("kind") or "SUMMARY").upper()}',
+                })
             logger.info('[Usage] conv=%s folded compaction usage (%d calls) into total: %s',
                         (task.get('convId') or '')[:8], _comp_usage.get('n_calls', 0),
                         {k: v for k, v in _comp_usage.items() if k != 'n_calls'})
@@ -1126,32 +1252,11 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         # on the index yet, so a premature LATE done would close the stream
         # with no successor on the wire (see lib/chat_dispatch.py branch 3).
         task['_finalize_started_at'] = time.time()
-        task['status'] = 'done'
-
-    # ── Project-brain Activity Feed: 'completed' / 'aborted' pulse ──
-    #   Emitted at the terminal seam, EXCEPT for autopilot follow-up turns
-    #   (config.autopilotRunId set) — those collapse to one 'run_concluded'
-    #   event at run close-out, mirroring the 'started' suppression in
-    #   create_task. Best-effort: a feed failure must NEVER break finalization.
-    try:
-        _cfg_feed = task.get('config') or {}
-        _proj_feed = (project_path or '').strip() if project_enabled else ''
-        if (_proj_feed and task.get('convId')
-                and not (_cfg_feed.get('autopilotRunId') or '').strip()):
-            from lib.agent_core.activity import emit_activity_event
-            from lib.tasks_pkg.manager import task_user_id
-            _kind_feed = (
-                'aborted' if task.get('aborted') else
-                ('blocked' if task.get('_todo_blocked') else 'completed'))
-            emit_activity_event(
-                _proj_feed, task['convId'], _kind_feed,
-                (task.get('lastUserQuery') or '').strip() or ('Turn ' + _kind_feed),
-                user_id=int(task_user_id(task)),
-                task_id=task['id'],
-                payload={'todoBlocked': task.get('_todo_blocked')}
-                if task.get('_todo_blocked') else None)
-    except Exception as _feed_e:
-        logger.debug('[%s] project-feed terminal emit skipped: %s', tid, _feed_e)
+        stamp_chat_task_terminal(
+            task,
+            status='done',
+            finish_reason=str(last_finish_reason or 'unknown'),
+        )
 
     # ── Cleanup reactive compact tracking (prevent memory leak) ──
     from lib.tasks_pkg.llm_fallback._state import cleanup_reactive_compact_state
@@ -1198,79 +1303,44 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             logger.info('[Orchestrator] swarm DETACHED on normal turn end — '
                         'still running, will deliver on later turns (key=%s)',
                         _swarm_key)
+
+            if not task.get('aborted') and not task.get('error') and (task.get('_todo_blocked') or last_finish_reason == 'incomplete'):
+                try:
+                    from lib.swarm.integration import SWARM_AUTOCONTINUE_ENABLED
+                    _agents_raw = []
+                    try:
+                        _st = _swarm_sess.get_status()
+                        if isinstance(_st, dict):
+                            for _aid, _ainfo in list(_st.items())[:8]:
+                                if isinstance(_ainfo, dict):
+                                    _agents_raw.append({
+                                        'id': str(_aid),
+                                        'role': str(_ainfo.get('role', '')),
+                                        'status': str(_ainfo.get('status', '')),
+                                    })
+                    except Exception as _agent_err:
+                        logger.debug('[Orchestrator] swarm get_status snapshot failed: %s', _agent_err)
+                    task['_waiting_on'] = {
+                        'kind': 'swarm',
+                        'swarmKey': _swarm_key,
+                        'autoResume': bool(SWARM_AUTOCONTINUE_ENABLED),
+                        'agents': _agents_raw,
+                    }
+                except Exception as _wait_err:
+                    logger.warning('[Orchestrator] waitingOn construction failed: %s', _wait_err, exc_info=True)
     except Exception as _e:
         logger.warning('[Orchestrator] swarm/inbox cleanup on task end failed: %s', _e, exc_info=True)
 
-    # ── Log session-level aggregate cache stats ──
-    _conv_id = task.get('convId', '')
-    if _conv_id:
-        from lib.tasks_pkg.manager import task_user_id
-        _session_stats = get_session_cache_stats(
-            _conv_id, user_id=task_user_id(task))
-        if _session_stats and _session_stats['calls'] > 1:
-            logger.info(
-                '[CacheSession] %s conv=%s END — %d calls, '
-                'total_read=%d total_write=%d overall_hit=%d%% '
-                'breaks=%d duration=%.1fs model=%s',
-                tid, _conv_id[:8],
-                _session_stats['calls'],
-                _session_stats['total_cache_read'],
-                _session_stats['total_cache_write'],
-                _session_stats['overall_hit_pct'],
-                _session_stats['total_breaks'],
-                _session_stats['session_duration_s'],
-                _session_stats['model'],
-            )
-
-    # ── Periodic stale cache state cleanup (every task completion) ──
-    # Lightweight: only scans and removes entries older than 1 hour.
-    try:
-        cleanup_stale_cache_states(max_age_s=3600)
-    except Exception as e:
-        logger.debug('[Orchestrator] stale cache cleanup failed: %s', e)
-
-    # ── Tool dedup cache stats (logged at task completion) ──
-    _dedup_cache = task.get('_tool_result_cache')
-    if _dedup_cache:
-        _dedup_size = len(_dedup_cache)
-        if _dedup_size > 0:
-            logger.info(
-                '[DedupCache] %s conv=%s task END — %d cached entries',
-                tid, _conv_id[:8] if _conv_id else '???', _dedup_size)
-
-    # ── Diagnostic: log completion stats ──
-    _content_len = len(task.get('content') or '')
-    _thinking_len = len(task.get('thinking') or '')
-    _elapsed = time.time() - task.get('created_at', time.time())
-    logger.debug('[Orchestrator] Task %s conv=%s COMPLETED — content=%dchars thinking=%dchars '
-                  'error=%s elapsed=%.1fs finishReason=%s toolCalls=%s',
-                 task['id'][:8], task.get('convId', ''), _content_len, _thinking_len,
-                 task.get('error') or 'none', _elapsed, last_finish_reason,
-                 'yes' if tool_call_happened else 'no')
-    if _content_len == 0 and _thinking_len == 0 and not task.get('error') and not task.get('aborted'):
-        logger.warning('[Orchestrator] Task %s conv=%s ⚠️ COMPLETED WITH EMPTY CONTENT '
-                      'and no error! This will appear as a blank message to the user.',
-                      task['id'][:8], task.get('convId', ''))
-
-    logger.debug(
-        '[Orchestrator] Task %s LIFECYCLE SUMMARY:\n'
-        '  loop_exit_reason   = %s\n'
-        '  last_finish_reason = %s\n'
-        '  rounds_completed   = %d\n'
-        '  tool_call_happened = %s\n'
-        '  content_length     = %d\n'
-        '  thinking_length    = %d\n'
-        '  error              = %s\n'
-        '  model              = %s\n'
-        '  elapsed            = %.1fs\n'
-        '  api_rounds         = %d\n'
-        '  aborted            = %s\n'
-        '  abort_phase        = %s',
-        tid, _loop_exit_reason, last_finish_reason, round_num + 1,
-        tool_call_happened, _content_len, _thinking_len,
-        task.get('error') or 'none', model, _elapsed,
-        len(api_rounds), task.get('aborted', False),
-        _abort_detected_phase or 'n/a',
+    _content_len, _thinking_len, _elapsed = _log_terminal_runtime_stats(
+        task,
+        tid=tid,
+        last_finish_reason=last_finish_reason,
+        tool_call_happened=tool_call_happened,
+        model=model,
+        loop_exit_reason=_loop_exit_reason,
+        round_num=round_num,
+        api_rounds=api_rounds,
+        abort_detected_phase=_abort_detected_phase,
     )
 
     # ── Flag suspicious completions ──
@@ -1300,24 +1370,10 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         model=model,
         thinking_depth=thinking_depth,
     )
-    # ── Turn-ctx capsule fact-card contract ────────────────────────────
-    # The per-turn note in the message gutter (static/js/info-rail.js) is
-    # captured from the LIVE toolbar at send time — model / depth / modes
-    # are a client-side SNAPSHOT that goes stale the moment the user
-    # switches a preset in the pause between send and stream-start (or
-    # when the dispatcher falls back to a different provider). Ship the
-    # server-authoritative FACT for this turn so the frontend can
-    # overwrite the capsule at done time and stop misleading the user.
-    #
-    # `actualModel` = the model the answer actually came from — the
-    # mid-turn fallback wins over the initial pick, mirroring the
-    # existing `fallbackModel` semantics one level up.
-    # `actualDepth` = the thinking depth actually applied.
-    # `actualModes` = the run-mode set that was live server-side
-    # (Autopilot / Swarm / Flow name), same shape the info-rail
-    # capsule renders ({label, tone:'mode'}). The frontend reconcile
-    # OVERWRITES `snap.model` / `snap.depth` / `snap.modes` from these
-    # — see info-rail.js::reconcileTurnCtxCapsule.
+    # The toolbar capsule is only a send-time client snapshot. Project the
+    # server-authoritative model/depth/modes at done so mid-turn fallback or a
+    # preset switch cannot leave the durable turn labelled with stale facts;
+    # the info-rail reducer replaces, rather than merges, these values.
     done_evt['actualModel'] = task.get('_fallback_model') or model
     if thinking_depth:
         done_evt['actualDepth'] = thinking_depth
@@ -1487,21 +1543,17 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                        'a VU successor', _ap_arm_err, exc_info=True)
 
     # ── Stamp cost snapshot on the done event ──
-    # Cost depends only on usage + model + provider + the active pricing table,
-    # all of which
-    # are final at this point. Sending it on the done event eliminates the
+    # Cost depends only on each round's usage + model + provider + the active
+    # pricing table, all of which are final at this point. Price each round
+    # before folding the display total so compaction/fallback models cannot be
+    # silently repriced as the terminal model. Sending it on the done event eliminates the
     # per-render `/api/v1/messages/cost` round-trips on the LIVE path —
     # the persisted-cost write covers reload paths.
     try:
-        from lib.cost import compute_cost as _compute_cost
-        if done_evt.get('usage'):
-            _msg_cost = _compute_cost(
-                done_evt['usage'],
-                model_id=done_evt.get('model') or task.get('model') or '',
-                provider_id=task.get('provider_id') or None,
-            )
-            if _msg_cost:
-                done_evt['cost'] = _msg_cost
+        from lib.cost import (
+            compute_api_rounds_cost as _compute_api_rounds_cost,
+            compute_cost as _compute_cost,
+        )
         for _rd in done_evt.get('apiRounds') or []:
             if not isinstance(_rd, dict) or _rd.get('cost'):
                 continue
@@ -1517,6 +1569,20 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             )
             if _rc:
                 _rd['cost'] = _rc
+        _msg_cost = _compute_api_rounds_cost(
+            done_evt.get('apiRounds'),
+            fallback_model_id=(
+                done_evt.get('model') or task.get('model') or ''),
+            fallback_provider_id=task.get('provider_id') or None,
+        )
+        if _msg_cost is None and done_evt.get('usage'):
+            _msg_cost = _compute_cost(
+                done_evt['usage'],
+                model_id=done_evt.get('model') or task.get('model') or '',
+                provider_id=task.get('provider_id') or None,
+            )
+        if _msg_cost:
+            done_evt['cost'] = _msg_cost
     except Exception as _ce:
         logger.warning('[Cost] done-event stamp failed (non-fatal): %s', _ce)
 
@@ -1680,15 +1746,14 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                 tid,
                 _project_settlement_error,
             )
-    # persist_task_result already ran BEFORE the autopilot hook (see above);
-    # the heavy-state release was deferred because the VU inherits
-    # task['messages'] — release it here, at the same point the old trailing
-    # persist would have released.
-    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
-    _release_heavy_task_state(task)
-
+    # Capture the commit observer's one tool-round fact before release.
     _spawn_async_commit_round(task, project_enabled, project_path,
                               project_paths=cfg.get('projectPaths'))
+
+    # The deferred release follows autopilot/done and commit admission; the
+    # authority predicate excludes synchronous inline/headless carriers.
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
+    _release_heavy_task_state(task)
 
     # Layer-3 preference consolidation — OFF the hot path.
     #   Mirrors _spawn_async_commit_round: runs AFTER the done event +

@@ -30,12 +30,12 @@ Both reference subsystems prove the gap:
   state, but still falls back to the **same global** `tool_registry` for
   handler resolution. There is no per-task handler override anywhere.
 
-Meanwhile the **BYO-model ephemeral-slot** path (`lib/llm_dispatch/ephemeral.py`
-+ `lib/byo_resolve.py`) already solved the *lifecycle* half of this exact
-problem: mint-per-request → isolate-by-uniqueness → **dispose-on-terminal**,
-with idempotent disposal, a bounded handle table, and synchronous cleanup on
-every error path. That machinery is registry-agnostic and reused verbatim
-here.
+Meanwhile the **model-routing v2 route-group** path
+(`lib/model_routing/dispatch_adapter.py` + `lib/llm_dispatch/ephemeral.py`)
+already solved the *lifecycle* half of this exact problem: mint-per-request →
+isolate-by-uniqueness → **dispose-on-terminal**, with idempotent disposal, a
+bounded handle table, and synchronous cleanup on every error path. That
+machinery is registry-agnostic and reused verbatim here.
 
 So the design reduces to **one missing seam**: invert handler resolution to
 be per-request, and wrap it in the ephemeral lifecycle.
@@ -150,7 +150,7 @@ The tool declares `{url, auth, headers, timeout_s}`. On a call, the server
 POSTs `{tool, arguments}` to the URL and returns the response body as the tool
 result. Risk shifts from code-exec to **SSRF**, closed by
 `lib.byo_egress.validate_egress_url` at **both** mint time and call time
-(defeats DNS rebinding) — the same guard the BYO-model path uses
+(defeats DNS rebinding) — the same guard ProviderAccess routes use
 (`169.254.169.254` / link-local always blocked; private ranges gated by
 `TOFU_BYO_BLOCK_PRIVATE`).
 
@@ -177,6 +177,10 @@ Mirrors `lib/llm_dispatch/ephemeral.py`:
   (polls `task['status']` until terminal, 1-hour ceiling), exactly like
   `dispose_after_terminal` for slots.
 * `dispose_tool_env` is **idempotent**.
+* Client-result waiters are capped from the launch-time in-flight-task budget
+  (32–512 process-wide), and callback IDs/results are bounded before entering
+  the registry. This matters because a callback can otherwise retain its full
+  request body while the tool thread is waiting to be scheduled.
 
 A custom tool therefore cannot outlive its one task.
 
@@ -202,8 +206,10 @@ A custom tool therefore cannot outlive its one task.
    `task['_tool_env']`, never by mutating the global method (the MCP
    anti-pattern). ✅
 7. **Resource exhaustion** — `ToolLimits`: `max_tools`,
-   `max_total_schema_bytes`, `per_call_timeout_s`, `max_result_chars`; handle
-   table bounded like the slot pool. ✅
+   `max_total_schema_bytes`, `per_call_timeout_s`, `max_result_chars`; both the
+   handle table and the client-result waiter table are bounded. The callback
+   contract enforces a 128-character call ID and 200,000-character result
+   before the result becomes retained process state. ✅
 8. **SSRF (webhook)** — egress-validated at mint *and* call time. ✅
 9. **RCE (sandbox)** — disabled unless the operator opts in. ✅
 10. **Ambient authority** — custom tools receive only their own args; they get
@@ -216,7 +222,8 @@ A custom tool therefore cannot outlive its one task.
 ```jsonc
 POST /api/v1/agent/run
 {
-  "model": "gpt-x@prov_abc",
+  "model": {"creator_id":"openai","model_id":"gpt-x"},
+  "routing": {"preferred_provider_id":"provider-abc"},
   "messages": [...],
   "tools": [
     { "type": "function",

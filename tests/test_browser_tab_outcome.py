@@ -124,6 +124,21 @@ def test_receipt_detects_new_tab_and_auto_follows():
     assert _resolve.current_work_tab(_ROUTE_KEY) == 2
 
 
+def test_receipt_forgets_a_disappeared_work_tab():
+    import lib.browser._resolve as _resolve
+
+    _resolve.remember_work_tab(_ROUTE_KEY, 7)
+    line = _resolve.action_receipt(
+        7,
+        ('Old', 'https://old.example/', {7}),
+        route_key=_ROUTE_KEY,
+        send=_fake_send({'list_tabs': ([], None)}),
+    )
+
+    assert 'tab no longer exists' in line
+    assert _resolve.current_work_tab(_ROUTE_KEY) is None
+
+
 def test_receipt_new_tab_prefers_the_active_one():
     import lib.browser._resolve as _resolve
     send = _fake_send({'list_tabs': (
@@ -432,6 +447,34 @@ def test_extension_pointer_sweep_shipped():
     # Outermost-only rule — without it every card floods the list with its
     # own inherited-cursor children.
     assert 'cursor INHERITS' in src
+
+
+def test_extension_navigate_guard_protects_the_client_tab():
+    """Incident 2026-08-28: browser_navigate replaced the Tofu client tab
+    itself (opening dev.internal.example.com yanked the chat). The extension now
+    flags own-server tabs via isClient and refuses to navigate them —
+    it opens a new tab and tells the server to re-bind instead."""
+    from tests._browser_extension_probe import run_extension_probe
+    probe = run_extension_probe('navigateGuard')
+
+    client_row = next(t for t in probe['listTabs'] if t['id'] == 1)
+    assert client_row['isClient'] is True
+    assert next(t for t in probe['listTabs']
+                if t['id'] == 2)['isClient'] is False
+
+    # Client tab targeted: a NEW tab is opened; tabs.update never fires.
+    assert probe['clientResult']['redirectedToNewTab'] is True
+    assert probe['clientResult']['protectedTabId'] == 7
+    assert probe['clientResult']['url'] == 'https://dev.example.test/'
+    assert probe['clientOps'] == ['tabs.create:https://dev.example.test/']
+
+    # A normal tab still navigates in place, with no redirect marker.
+    assert probe['normalOps'] == ['tabs.update:https://dev.example.test/']
+    assert 'redirectedToNewTab' not in probe['normalResult']
+
+    # Pre-pairing (no SERVER_URL) there is nothing to protect.
+    assert probe['unpairedOps'] == ['tabs.update:https://dev.example.test/']
+    assert 'redirectedToNewTab' not in probe['unpairedResult']
 
 
 def test_extension_version_bumped_for_protocol_v2():

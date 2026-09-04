@@ -45,6 +45,7 @@ from lib.model_info import (
 from lib.llm.body._clamp import _clamp_completion_to_context_window
 from lib.llm.body._images import (
     _downscale_oversized_images,
+    _project_images_for_text_model,
     _validate_image_blocks,
 )
 from lib.llm.body._canonical_wire import canonicalize_messages_inplace
@@ -61,7 +62,8 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
                thinking_enabled=False, preset='medium', effort=None,
                thinking_depth=None, tools=None, response_format=None,
                stream=True, extra=None, thinking_format='',
-               provider_id=''):
+               provider_id='', precomputed_input_tokens=None,
+               vision_fallback_from=''):
     """Build a model-aware request body for /chat/completions.
 
     Handles provider-specific parameters automatically:
@@ -105,18 +107,26 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
                  model, _effort, thinking_enabled, thinking_depth, effort, preset)
     max_tokens = _clamp_max_tokens(model, max_tokens)
     max_tokens = _clamp_completion_to_context_window(
-        model, messages, max_tokens, provider_id=provider_id)
+        model,
+        messages,
+        max_tokens,
+        provider_id=provider_id,
+        precomputed_input_tokens=precomputed_input_tokens,
+    )
 
-    clean_messages = _strip_non_api_fields(messages)
+    clean_messages = _strip_non_api_fields(
+        messages, carry_same_role_seam_hints=True)
     # Protocol-private assistant state is not an OpenAI API field, but native
     # protocol converters need it after the generic body builder has run.
     # Restore it onto the canonical in-process body here; the final OpenAI
     # serialization branch strips it, while Responses/Anthropic consume their
     # respective sidecar during conversion.  This also closes the historical
     # restart/rebuild hole for Responses output items.
-    for _source_msg, _clean_msg in zip(messages, clean_messages):
-        if not isinstance(_source_msg, dict):
-            continue
+    _valid_source_messages = [
+        message for message in messages if isinstance(message, dict)
+    ]
+    for _source_msg, _clean_msg in zip(
+            _valid_source_messages, clean_messages):
         for _sidecar in ('_responses_items', '_anthropic_content_blocks'):
             if _source_msg.get(_sidecar):
                 _clean_msg[_sidecar] = copy.deepcopy(_source_msg[_sidecar])
@@ -145,47 +155,27 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     clean_messages = _drop_empty_assistant_messages(clean_messages)
     clean_messages = _merge_consecutive_same_role(clean_messages)
 
-    _validate_image_blocks(clean_messages)
-    _downscale_oversized_images(clean_messages, model)
-
-    # Strip images for non-vision models
-    if not model_supports_vision(model):
-        _stripped_img_count = 0
-        for msg in clean_messages:
-            content = msg.get('content')
-            if not isinstance(content, list):
-                continue
-            new_blocks = []
-            for block in content:
-                if isinstance(block, dict) and block.get('type') == 'image_url':
-                    _stripped_img_count += 1
-                else:
-                    new_blocks.append(block)
-            if len(new_blocks) < len(content):
-                if len(new_blocks) == 1 and new_blocks[0].get('type') == 'text':
-                    msg['content'] = new_blocks[0]['text']
-                elif len(new_blocks) == 0:
-                    msg['content'] = ''
-                else:
-                    msg['content'] = new_blocks
-        if _stripped_img_count:
-            logger.warning('[build_body] Stripped %d image(s) from messages — '
-                          'model %s does not support vision', _stripped_img_count, model)
-            _last_user = None
-            for msg in reversed(clean_messages):
-                if msg.get('role') == 'user':
-                    _last_user = msg
-                    break
-            if _last_user:
-                notice = ('[System notice: %d image(s) were attached but removed '
-                          'because model %s does not support vision/image inputs. '
-                          'Please inform the user and suggest switching to a '
-                          'vision-capable model.]' % (_stripped_img_count, model))
-                content = _last_user.get('content', '')
-                if isinstance(content, list):
-                    content.append({'type': 'text', 'text': notice})
-                elif isinstance(content, str):
-                    _last_user['content'] = content + '\n\n' + notice
+    if model_supports_vision(model):
+        _validate_image_blocks(clean_messages)
+        _downscale_oversized_images(clean_messages, model)
+    else:
+        # Projection runs before validation/resolution so a text-only request
+        # never reads local image files, expands them to base64, or pays image
+        # processing cost for bytes it cannot send. The operation is confined
+        # to ``clean_messages`` (a deep request copy), preserving the durable
+        # multimodal transcript for a later switch back to a VLM.
+        _projected_image_count = _project_images_for_text_model(
+            clean_messages,
+            model,
+            fallback_from=vision_fallback_from,
+        )
+        if _projected_image_count:
+            logger.warning(
+                '[build_body] Projected %d image(s) into bounded text markers '
+                'for non-vision model %s (fallback_from=%s); durable history '
+                'unchanged',
+                _projected_image_count, model,
+                vision_fallback_from or 'none')
 
     _fix_empty_user_messages(clean_messages)
     _inject_gemini_thought_signatures(clean_messages, model)

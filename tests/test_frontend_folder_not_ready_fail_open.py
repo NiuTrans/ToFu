@@ -62,6 +62,8 @@ const { document, check, report } = setup({
     activeStreams: new Map(),
     pendingMessageQueue: new Map(),
     streamBufs: new Map(),
+    _conversationDisplayTitle: (title, fallback) => title || fallback,
+    conversationTimestampLabels: () => null,
   },
 });
 

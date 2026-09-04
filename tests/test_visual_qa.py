@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 
 import pytest
 
@@ -113,6 +114,7 @@ class TestDegrade:
         assert 'gateway 500' in out['reason']
 
     def test_happy_path_with_theme(self, tmp_path, monkeypatch):
+        monkeypatch.setenv('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', '7')
         img = tmp_path / 'f.png'
         img.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\0' * 100)
         monkeypatch.setattr(vqa, '_vision_model', lambda: 'vlm-x')
@@ -123,6 +125,7 @@ class TestDegrade:
 
         def _dispatch(messages, **kw):
             seen['msg'] = messages
+            seen['kwargs'] = kw
             return ('{"findings": [{"check": "overflow", "element": "标题", '
                     '"issue": "标题溢出", "severity": "blocker", "fix": "缩短"}]}',
                     {})
@@ -138,6 +141,124 @@ class TestDegrade:
         assert any('逐条从标注文字沿线检查到端点' in (p.get('text') or '')
                    for p in parts)
         assert any(p.get('type') == 'image_url' for p in parts)
+        assert seen['kwargs']['max_retries'] == 2
+        assert seen['kwargs']['max_429_attempts'] == 7
+
+    def test_abort_during_dispatch_discards_late_vlm_reply(
+            self, tmp_path, monkeypatch):
+        img = tmp_path / 'f.png'
+        img.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\0' * 100)
+        monkeypatch.setattr(vqa, '_vision_model', lambda: 'vlm-x')
+        monkeypatch.setattr(
+            'lib.model_info._capabilities.model_supports_vision',
+            lambda m: True)
+        abort_event = threading.Event()
+
+        def late_reply(messages, **kwargs):
+            assert kwargs['abort_check']() is False
+            abort_event.set()
+            return '{"findings": []}', {}
+
+        monkeypatch.setattr('lib.llm_dispatch.api.dispatch_chat', late_reply)
+        out = vqa.qa_frame(
+            str(img), abort_check=abort_event.is_set,
+            max_429_attempts=7)
+
+        assert out['skipped'] and not out['ok']
+        assert out['reason'] == 'aborted after visual QA'
+
+    def test_oversized_frame_is_rejected_before_dispatch(
+            self, tmp_path, monkeypatch):
+        img = tmp_path / 'large.png'
+        img.write_bytes(b'x' * 101)
+        monkeypatch.setattr(vqa, '_MAX_QA_IMAGE_BYTES', 100)
+        monkeypatch.setattr(vqa, '_vision_model', lambda: 'vlm-x')
+        calls = []
+        monkeypatch.setattr(
+            'lib.llm_dispatch.api.dispatch_chat',
+            lambda *args, **kwargs: calls.append('dispatch'))
+
+        out = vqa.qa_frame(str(img))
+
+        assert out['skipped'] and 'limit' in out['reason']
+        assert calls == []
+
+    def test_input_digest_matches_dispatch_and_changes_with_pixels(
+            self, tmp_path, monkeypatch):
+        img = tmp_path / 'frame.png'
+        img.write_bytes(b'frame-v1')
+        monkeypatch.setattr(
+            'lib.model_info._capabilities.model_supports_vision',
+            lambda _model: True)
+        monkeypatch.setattr(
+            'lib.llm_dispatch.api.dispatch_chat',
+            lambda *_args, **_kwargs: ('{"findings": []}', {}))
+
+        identity = vqa.qa_frame_input_sha256(
+            str(img), subject='幻灯片页面', model='vlm-x')
+        result = vqa.qa_frame(
+            str(img), subject='幻灯片页面', model='vlm-x')
+        assert result['input_sha256'] == identity
+
+        img.write_bytes(b'frame-v2')
+        changed = vqa.qa_frame_input_sha256(
+            str(img), subject='幻灯片页面', model='vlm-x')
+        assert changed != identity
+        assert vqa.qa_frame_input_sha256(
+            str(img), subject='different', model='vlm-x') != changed
+        assert vqa.qa_frame_input_sha256(
+            str(img), subject='幻灯片页面', model='vlm-y') != changed
+
+    def test_shared_visual_cache_roundtrip_rejects_tampering(self, tmp_path):
+        cache_path = tmp_path / 'visual-cache.json'
+        identity = 'a' * 64
+        cache = vqa.load_visual_qa_cache(
+            str(cache_path), version='test-v1', max_entries=1,
+            max_bytes=64 * 1024)
+        result = {
+            'ok': True, 'skipped': False, 'reason': '',
+            'findings': [{'check': 'contrast', 'element': 'title',
+                          'issue': 'low contrast', 'severity': 'major',
+                          'fix': 'darken'}],
+            'has_blocker': False, 'summary': '1 finding(s)',
+            'input_sha256': identity,
+        }
+
+        assert vqa.remember_visual_qa_result(
+            cache, str(cache_path), 'frame', identity, result,
+            max_entries=1, max_bytes=64 * 1024, max_findings=8)
+        loaded = vqa.load_visual_qa_cache(
+            str(cache_path), version='test-v1', max_entries=1,
+            max_bytes=64 * 1024)
+        reused = vqa.cached_visual_qa_result(
+            loaded['entries']['frame'], identity, max_findings=8)
+        assert reused and reused['reused'] is True
+        assert reused['findings'][0]['issue'] == 'low contrast'
+        assert vqa.cached_visual_qa_result(
+            loaded['entries']['frame'], 'b' * 64, max_findings=8) is None
+
+        loaded['entries']['frame']['result']['findings'][0]['issue'] = 'fake'
+        assert vqa.cached_visual_qa_result(
+            loaded['entries']['frame'], identity, max_findings=8) is None
+
+    def test_shared_visual_cache_refuses_one_result_over_file_budget(
+            self, tmp_path):
+        cache_path = tmp_path / 'tiny-cache.json'
+        identity = 'c' * 64
+        cache = {'version': 'test-v1', 'entries': {}}
+        result = {
+            'ok': True,
+            'findings': [{'check': 'contrast', 'element': 'title',
+                          'issue': 'x' * 400, 'severity': 'major',
+                          'fix': 'y' * 400}],
+            'input_sha256': identity,
+        }
+
+        assert not vqa.remember_visual_qa_result(
+            cache, str(cache_path), 'frame', identity, result,
+            max_entries=1, max_bytes=128, max_findings=8)
+        assert cache['entries'] == {}
+        assert not cache_path.exists()
 
 
 # ── author extra_findings channel ─────────────────────────
@@ -230,6 +351,12 @@ class TestEngineRound:
                           'fix': '换色'}],
             'has_blocker': False, 'summary': '1'})
         seen = {}
+        prompt_context = object()
+        context_calls = []
+
+        def _context_provider():
+            context_calls.append('prepare')
+            return prompt_context
 
         def _author(sc, sd, **kw):
             seen.update(kw)
@@ -248,8 +375,11 @@ class TestEngineRound:
         out = engine._visual_qa_round(
             task, scene, scene_dir, index_path, html,
             width=1080, height=1440, duration=5.0, scene_index=1,
-            total_scenes=1)
+            total_scenes=1,
+            author_prompt_context_provider=_context_provider)
         assert seen.get('extra_findings'), 'repair got no QA findings'
+        assert seen.get('prompt_context') is prompt_context
+        assert context_calls == ['prepare']
         assert '对比不足' in seen['extra_findings'][0]
         # Repaired HTML is sealed to the local runtime *before* the sole
         # guarded commit (no prior index.html → no regression).
@@ -270,11 +400,120 @@ class TestEngineRound:
             'findings': [{'severity': 'minor', 'issue': 'x', 'fix': '',
                           'check': '', 'element': ''}],
             'has_blocker': False, 'summary': ''})
+        context_calls = []
         out = engine._visual_qa_round(
             {}, scene, str(tmp_path), str(tmp_path / 'index.html'), html,
             width=1080, height=1440, duration=5.0, scene_index=1,
-            total_scenes=1)
+            total_scenes=1,
+            author_prompt_context_provider=lambda: context_calls.append(
+                'unexpected'))
         assert out == html
+        assert context_calls == []
+
+    def test_motion_visual_qa_reuses_exact_pixels_and_reruns_changes(
+            self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        from lib.motion_video import engine
+
+        scene = self._scene()
+        scene_dir = str(tmp_path)
+        html = '<html>authored composition with a graphic</html>'
+        pixels = {'value': b'contact-sheet-v1'}
+        calls = []
+        monkeypatch.setattr(vqa, 'visual_qa_available', lambda: (True, ''))
+
+        def _capture(_scene_dir, output, **_kwargs):
+            Path(output).write_bytes(pixels['value'])
+            return output
+
+        def _qa(path, **kwargs):
+            calls.append(kwargs['label'])
+            identity = vqa.qa_frame_input_sha256(
+                path, theme=kwargs.get('theme'),
+                subject=kwargs.get('subject', '视频帧'),
+                model=kwargs.get('model', ''),
+                max_tokens=kwargs.get('max_tokens', 1500))
+            return {
+                'ok': True, 'skipped': False, 'reason': '', 'findings': [],
+                'has_blocker': False, 'summary': '0 finding(s)',
+                'input_sha256': identity,
+            }
+
+        monkeypatch.setattr(tqa, 'screenshot_timeline_contact_sheet',
+                            _capture)
+        monkeypatch.setattr(vqa, 'qa_frame', _qa)
+
+        for _ in range(2):
+            task = {'qa_model': 'vlm-x'}
+            out = engine._visual_qa_round(
+                task, scene, scene_dir, str(tmp_path / 'index.html'), html,
+                width=1080, height=1440, duration=5.0, scene_index=1,
+                total_scenes=1)
+            assert out == html
+        assert calls == ['scene-001']
+
+        pixels['value'] = b'contact-sheet-v2'
+        engine._visual_qa_round(
+            {'qa_model': 'vlm-x'}, scene, scene_dir,
+            str(tmp_path / 'index.html'), html, width=1080, height=1440,
+            duration=5.0, scene_index=1, total_scenes=1)
+        assert calls == ['scene-001', 'scene-001']
+
+    def test_cached_actionable_motion_findings_still_enter_repair(
+            self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        from lib.motion_video import _scene_author as sa
+        from lib.motion_video import engine
+
+        scene = self._scene()
+        html = '<html>authored composition with a graphic</html>'
+        qa_calls = []
+        author_calls = []
+        monkeypatch.setattr(vqa, 'visual_qa_available', lambda: (True, ''))
+        monkeypatch.setattr(engine, '_emit', lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            tqa, 'screenshot_timeline_contact_sheet',
+            lambda _scene_dir, output, **_kwargs: (
+                Path(output).write_bytes(b'unchanged-pixels') or output))
+
+        def _qa(path, **kwargs):
+            qa_calls.append(kwargs['label'])
+            identity = vqa.qa_frame_input_sha256(
+                path, theme=kwargs.get('theme'),
+                subject=kwargs.get('subject', '视频帧'),
+                model=kwargs.get('model', ''))
+            return {
+                'ok': True, 'skipped': False, 'reason': '',
+                'findings': [{'check': 'contrast', 'element': 'title',
+                              'issue': 'low contrast', 'severity': 'major',
+                              'fix': 'darken'}],
+                'has_blocker': False, 'summary': '1 finding(s)',
+                'input_sha256': identity,
+            }
+
+        def _author(*_args, **kwargs):
+            author_calls.append(kwargs['extra_findings'])
+            return {'mode': 'template', 'html': html,
+                    'rounds': 1, 'tokens': 0}
+
+        monkeypatch.setattr(vqa, 'qa_frame', _qa)
+        monkeypatch.setattr(sa, 'author_scene', _author)
+        monkeypatch.setattr(sa, 'save_draft', lambda *_args: None)
+
+        for _ in range(2):
+            out = engine._visual_qa_round(
+                {'qa_model': 'vlm-x'}, scene, str(tmp_path),
+                str(tmp_path / 'index.html'), html, width=1080, height=1440,
+                duration=5.0, scene_index=1, total_scenes=1,
+                author_prompt_context_provider=lambda: object())
+            assert out == html
+
+        assert qa_calls == ['scene-001']
+        assert len(author_calls) == 2
+        assert all('low contrast' in findings[0]
+                   for findings in author_calls)
 
     def test_recipe_anchors_drive_temporal_capture_and_vlm_brief(
             self, tmp_path, monkeypatch):

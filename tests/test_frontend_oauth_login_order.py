@@ -40,7 +40,7 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 OAUTH_JS = runtime_section_path('settings/oauth.js')
 NODE = shutil.which('node')
 
-_ENTRY_NEEDLE = "  _serverExchange(provider, code, state)\n    .then(function(data) {"
+_ENTRY_NEEDLE = "  _serverExchange(provider, code, state, manual)\n    .then(function(data) {"
 
 _HARNESS_JS = r"""
 const fs = require('fs');

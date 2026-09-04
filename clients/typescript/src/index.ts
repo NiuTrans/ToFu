@@ -28,9 +28,25 @@ export interface ChatMessage {
   tool_call_id?: string;
 }
 
+export type NativeModelSelection =
+  | { creator_id: string; model_id: string }
+  | { provider_id: string; offering_id: string };
+
+export interface RoutingPolicy {
+  preferred_provider_id?: string;
+  required_context?: number;
+  price_budget?: {
+    max_input?: number;
+    max_output?: number;
+    currency?: 'USD' | 'CNY';
+  };
+  cache_affinity_connection_id?: string;
+}
+
 export interface ChatRequest {
   messages: ChatMessage[];
-  model?: string;
+  model: NativeModelSelection;
+  routing?: RoutingPolicy;
   config?: Record<string, unknown>;
   temperature?: number;
   max_tokens?: number;
@@ -44,22 +60,13 @@ export interface ChatRequest {
   timeout_s?: number;
 }
 
-export interface AgentProvider {
-  base_url?: string;
-  /** Friendly alias accepted by tofu-agent. */
-  endpoint?: string;
-  api_key?: string;
-  model?: string;
-  extra_headers?: Record<string, string>;
-  thinking_format?: string;
-  capabilities?: string[];
-}
-
 export interface AgentRunRequest {
   messages: ChatMessage[];
-  /** Optional when the deployment or provider block supplies a default. */
-  model?: string;
-  provider?: AgentProvider;
+  /** Optional only when a standalone runtime advertises a configured default. */
+  model?: NativeModelSelection;
+  routing?: RoutingPolicy;
+  /** One-request standalone v2 access envelope; never an inline provider. */
+  model_routing?: Record<string, unknown>;
   config?: Record<string, unknown>;
   capabilities?: Record<string, unknown>;
   /** Request-local OpenAI function schemas. */
@@ -68,7 +75,6 @@ export interface AgentRunRequest {
   timeout_s?: number;
   conversation_id?: string;
   id?: string;
-  [key: string]: unknown;
 }
 
 export interface AgentRunResult {
@@ -78,6 +84,7 @@ export interface AgentRunResult {
   task_id: string;
   status: 'pending' | 'running' | 'done' | 'error' | 'aborted';
   model: string;
+  provider_id?: string;
   finish_reason: string;
   content: string;
   thinking: string;
@@ -153,6 +160,55 @@ function newIdempotencyKey(): string {
   const cryptoValue = globalThis.crypto as Crypto | undefined;
   if (cryptoValue?.randomUUID) return cryptoValue.randomUUID();
   return `tofu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function normalizeNativeModelSelection(value: unknown): NativeModelSelection {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(
+      'model must be {creator_id, model_id} or {provider_id, offering_id}');
+  }
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source).sort();
+  const official = keys.join(',') === 'creator_id,model_id';
+  const providerScoped = keys.join(',') === 'offering_id,provider_id';
+  if (!official && !providerScoped) {
+    throw new TypeError(
+      'model must contain exactly creator_id+model_id or provider_id+offering_id');
+  }
+  const normalized = Object.fromEntries(
+    keys.map(key => [key, String(source[key] ?? '').trim()]),
+  ) as Record<string, string>;
+  if (Object.values(normalized).some(valuePart => !valuePart)) {
+    throw new TypeError('model identity fields must be non-empty strings');
+  }
+  return normalized as NativeModelSelection;
+}
+
+function nativeRequest<T extends {
+  model?: NativeModelSelection;
+  routing?: RoutingPolicy;
+}>(
+  request: T,
+  options: { modelRequired: boolean },
+): T {
+  const wire = { ...request } as T & Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(wire, 'provider')) {
+    throw new TypeError(
+      'inline provider blocks were removed; configure model-routing v2');
+  }
+  if (wire.model === undefined) {
+    if (options.modelRequired) throw new TypeError('model is required');
+  } else {
+    wire.model = normalizeNativeModelSelection(wire.model);
+  }
+  if (wire.routing !== undefined) {
+    if (!wire.routing || typeof wire.routing !== 'object'
+        || Array.isArray(wire.routing)) {
+      throw new TypeError('routing must be an object');
+    }
+    wire.routing = { ...(wire.routing as Record<string, unknown>) };
+  }
+  return wire;
 }
 
 async function* parseSSE(response: Response): AsyncIterable<Record<string, unknown>> {
@@ -317,13 +373,18 @@ export class Tofu {
 
   chat(req: ChatRequest): Promise<ChatCompletion> {
     return this._json<ChatCompletion>(
-      'POST', '/api/v1/chat/completions', { json: req });
+      'POST', '/api/v1/chat/completions', {
+        json: nativeRequest(req, { modelRequired: true }),
+      });
   }
 
   /** Stream chat completion as parsed SSE events. */
   async *stream(req: ChatRequest): AsyncIterable<Record<string, unknown>> {
     const resp = await this._request('POST', '/api/v1/chat/completions', {
-      json: { ...req, stream: true },
+      json: {
+        ...nativeRequest(req, { modelRequired: true }),
+        stream: true,
+      },
       headers: { Accept: 'text/event-stream' },
     });
     if (!resp.ok) {
@@ -473,7 +534,10 @@ export class AgentsAPI {
     const key = opts.idempotencyKey || newIdempotencyKey();
     return this.c._jsonWithRetry<AgentRunResult>(
       'POST', '/api/v1/agent/run', {
-        json: { ...request, stream: false },
+        json: {
+          ...nativeRequest(request, { modelRequired: false }),
+          stream: false,
+        },
         headers: { 'Idempotency-Key': key },
       }, opts.maxRetries ?? 3);
   }
@@ -486,7 +550,10 @@ export class AgentsAPI {
     const key = opts.idempotencyKey || newIdempotencyKey();
     return this.c._jsonWithRetry(
       'POST', '/api/v1/agent/run', {
-        json: { ...request, async: true },
+        json: {
+          ...nativeRequest(request, { modelRequired: false }),
+          async: true,
+        },
         headers: {
           'Idempotency-Key': key,
           Prefer: 'respond-async',

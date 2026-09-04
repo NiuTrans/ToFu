@@ -72,7 +72,8 @@ async def motion_status():
     env = mv.probe_env()
     try:
         import lib.tts as _tts
-        env['tts_available'] = bool(_tts.tts_available())
+        env['tts_available'] = bool(_tts.tts_available(
+            owner_user_id=int(request_user_id())))
     except Exception as e:
         logger.debug('[Motion.v1] tts probe failed: %s', e)
         env['tts_available'] = False
@@ -121,7 +122,7 @@ async def motion_audio_contract():
 @require_auth
 @api_meta(summary='Start (or join) a motion-video task',
           description='Dedup key covers source, voice, alignment, aspect, '
-                      'narration, quality, model and audio-plan content. A '
+                      'narration, quality, model, creative mode and audio-plan content. A '
                       'second identical POST joins the in-flight task.',
           tags=['motion'])
 async def start_motion_task():
@@ -151,6 +152,12 @@ async def start_motion_task():
     lang = (body.get('lang') or 'zh').strip()
     if lang not in ('zh', 'en'):
         return api_bad_request('lang must be zh|en', field='lang')
+    from lib.production.contracts import CREATIVE_MODES, normalise_creative_mode
+    creative_raw = str(body.get('creative_mode') or '').strip().lower()
+    if creative_raw and creative_raw not in CREATIVE_MODES:
+        return api_bad_request(
+            'creative_mode must be director|standard', field='creative_mode')
+    creative_mode = normalise_creative_mode(body.get('creative_mode'))
     try:
         max_scenes = int(body.get('max_scenes') or 8)
     except (TypeError, ValueError):
@@ -253,8 +260,9 @@ async def start_motion_task():
         audio_material = ''
     audio_sha = hashlib.sha256(
         audio_material.encode('utf-8')).hexdigest()[:12]
-    key = (owner_user_id, srt_sha, voice, alignment, aspect, narration, quality, burn_in,
-           model, audio_sha)
+    creative_identity = creative_mode if topic else ''
+    key = (owner_user_id, srt_sha, voice, alignment, aspect, narration, quality,
+           burn_in, model, creative_identity, audio_sha)
     existing = _motion_index_get(key)
     if existing:
         logger.info('[Motion.v1] dedup join: %s', existing)
@@ -298,6 +306,7 @@ async def start_motion_task():
         task['topic'] = topic
         task['lang'] = lang
         task['max_scenes'] = max_scenes
+        task['creative_mode'] = creative_mode
         task['kind'] = 'topic'
     _motion_index_register(key, task_id)
     _motion_runtime.spawn(task_id, run_motion_task, task)
@@ -329,6 +338,7 @@ def serve_motion_file(task_id):
         'srt': ('final.srt', 'application/x-subrip'),
         'audio-plan': ('audio_plan.json', 'application/json'),
         'audio-attribution': ('audio_attribution.txt', 'text/plain'),
+        'media-attribution': ('media_attribution.txt', 'text/plain'),
     }
     if part not in part_files:
         return api_not_found('not_found')
@@ -339,6 +349,7 @@ def serve_motion_file(task_id):
             'srt': result.get('srt_path'),
             'audio-plan': result.get('audio_plan_path'),
             'audio-attribution': result.get('audio_attribution_path'),
+            'media-attribution': result.get('media_attribution_path'),
         }.get(part)
     else:
         # P-UX4: task gone from memory (restart / TTL) — serve from the

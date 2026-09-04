@@ -31,6 +31,8 @@ _LLM_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 180.0)
 _ROUND_BUCKETS = (1, 2, 3, 4, 6, 8, 12, 20, 40, 80)
 _TOKEN_BUCKETS = (1_000, 4_000, 16_000, 32_000, 64_000, 128_000, 256_000)
 _COST_BUCKETS = (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 20.0)
+_CGROUP_RELIEF_BUCKETS = (0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
+                          0.25, 0.5, 1.0, 2.5, 5.0)
 _METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'})
 _TRANSPORTS = frozenset({'sse', 'ws'})
 _CONNECTION_OUTCOMES = frozenset({'completed', 'disconnected', 'error'})
@@ -40,6 +42,12 @@ _STREAM_ADMISSION_OUTCOMES = frozenset({
 _BACKGROUND_JOB_KINDS = frozenset({'pricing_refresh'})
 _BACKGROUND_JOB_OUTCOMES = frozenset({'success', 'error', 'cancelled'})
 _RUNTIME_PROBE_SOURCES = frozenset({'loadavg', 'cgroup_memory'})
+_EXECUTION_OUTCOMES = frozenset({
+    'completed', 'failed', 'cancelled', 'timed_out',
+})
+_EXECUTION_RESOURCE_DISPOSITIONS = frozenset({
+    'released', 'deferred', 'failed',
+})
 _DYNAMIC_SEGMENT = re.compile(
     r'^(?:\d+|[0-9a-f]{8,}|[A-Za-z0-9_-]{16,})$', re.IGNORECASE)
 
@@ -195,6 +203,54 @@ def record_runtime_probe_failure(source: Any) -> None:
     _STORE.inc('tofu_runtime_probe_failures_total', source=source_label)
 
 
+def record_cgroup_relief(
+    *,
+    duration_s: float,
+    cgroup_reclaimed_bytes: int | None,
+    process_rss_reclaimed_bytes: int | None,
+    cgroup_cache_reclaimed_bytes: int | None,
+    heap_window_reclaimed_bytes: int | None,
+    log_window_reclaimed_bytes: int | None,
+    cache_entries_dropped: int,
+    log_files_advised: int,
+    log_bytes_advised: int,
+) -> None:
+    """Record one relief pass without claiming shared deltas are causal.
+
+    ``process_rss`` is process-owned. The remaining byte sources are observed
+    shared-cgroup counter windows and can include concurrent sibling activity;
+    their closed labels make that distinction explicit and cardinality finite.
+    """
+    _STORE.inc('tofu_cgroup_relief_attempts_total')
+    sources = {
+        'shared_cgroup': cgroup_reclaimed_bytes,
+        'process_rss': process_rss_reclaimed_bytes,
+        'cgroup_cache': cgroup_cache_reclaimed_bytes,
+        'heap_window': heap_window_reclaimed_bytes,
+        'log_window': log_window_reclaimed_bytes,
+    }
+    for source, raw_value in sources.items():
+        if raw_value is None:
+            continue
+        value = max(0.0, float(raw_value))
+        _STORE.inc(
+            'tofu_cgroup_relief_reclaimed_bytes_total', value, source=source)
+        _STORE.set(
+            'tofu_cgroup_relief_reclaimed_bytes_latest', value, source=source)
+    _STORE.inc(
+        'tofu_cgroup_relief_cache_entries_dropped_total',
+        max(0, int(cache_entries_dropped)))
+    _STORE.inc(
+        'tofu_cgroup_relief_log_files_advised_total',
+        max(0, int(log_files_advised)))
+    _STORE.inc(
+        'tofu_cgroup_relief_log_bytes_advised_total',
+        max(0, int(log_bytes_advised)))
+    _STORE.observe(
+        'tofu_cgroup_relief_duration_seconds', duration_s,
+        _CGROUP_RELIEF_BUCKETS)
+
+
 def record_task_queue_wait(kind: Any, seconds: float) -> None:
     _STORE.observe('tofu_task_queue_wait_seconds', seconds, _WAIT_BUCKETS,
                    kind=_bounded(kind, fallback='chat', limit=48))
@@ -312,6 +368,80 @@ def record_task_event_eviction(kind: Any, count: int = 1) -> None:
             'tofu_task_event_evictions_total', amount,
             kind=_bounded(kind, fallback='unknown', limit=48),
         )
+
+
+def record_execution_started(kind: Any, phase: Any = 'created') -> None:
+    """Account one active resource-owning execution without identity labels."""
+    labels = {
+        'kind': _bounded(kind, fallback='execution', limit=64),
+        'phase': _bounded(phase, fallback='created', limit=32),
+    }
+    _STORE.inc('tofu_execution_sessions_started_total', kind=labels['kind'])
+    _STORE.add_gauge('tofu_execution_sessions_active', 1, **labels)
+
+
+def record_execution_phase_transition(kind: Any, source: Any, target: Any) -> None:
+    kind_label = _bounded(kind, fallback='execution', limit=64)
+    source_label = _bounded(source, fallback='unknown', limit=32)
+    target_label = _bounded(target, fallback='unknown', limit=32)
+    _STORE.add_gauge(
+        'tofu_execution_sessions_active', -1,
+        kind=kind_label, phase=source_label,
+    )
+    if target_label not in _EXECUTION_OUTCOMES:
+        _STORE.add_gauge(
+            'tofu_execution_sessions_active', 1,
+            kind=kind_label, phase=target_label,
+        )
+
+
+def record_execution_resource_release(
+    kind: Any,
+    resource: Any,
+    disposition: Any,
+) -> None:
+    disposition_text = str(disposition)
+    disposition_label = (
+        disposition_text
+        if disposition_text in _EXECUTION_RESOURCE_DISPOSITIONS else 'failed'
+    )
+    _STORE.inc(
+        'tofu_execution_resource_releases_total',
+        kind=_bounded(kind, fallback='execution', limit=64),
+        resource=_bounded(resource, fallback='unknown', limit=64),
+        disposition=disposition_label,
+    )
+
+
+def record_execution_terminal(
+    kind: Any,
+    outcome: Any,
+    invariants_satisfied: bool,
+    duration_seconds: float,
+) -> None:
+    outcome_text = str(outcome)
+    outcome_label = outcome_text if outcome_text in _EXECUTION_OUTCOMES else 'failed'
+    labels = {
+        'kind': _bounded(kind, fallback='execution', limit=64),
+        'outcome': outcome_label,
+        'invariants': 'satisfied' if invariants_satisfied else 'failed',
+    }
+    _STORE.add_gauge(
+        'tofu_execution_sessions_active', -1,
+        kind=labels['kind'], phase='settling',
+    )
+    _STORE.inc('tofu_execution_sessions_terminal_total', **labels)
+    _STORE.observe(
+        'tofu_execution_session_duration_seconds', duration_seconds,
+        _LLM_BUCKETS, **labels,
+    )
+
+
+def record_execution_deadline(kind: Any) -> None:
+    _STORE.inc(
+        'tofu_execution_deadlines_total',
+        kind=_bounded(kind, fallback='execution', limit=64),
+    )
 
 
 def background_job_started(kind: Any) -> None:
@@ -506,11 +636,98 @@ class InstrumentedThreadPoolExecutor(ThreadPoolExecutor):
                    pool=self.metric_pool)
 
 
+def publish_executor_state(
+    pool: str,
+    *,
+    workers: int,
+    queued: int,
+    active: int,
+    resident_threads: int,
+    abandoned: int = 0,
+) -> None:
+    """Publish one internally-consistent executor scheduling snapshot.
+
+    The ordinary sync pool updates these gauges incrementally above.  The
+    recoverable agent executor owns a logical worker set that may temporarily
+    include a quarantined, physically-stuck thread, so it publishes the full
+    bounded snapshot after each state transition instead.
+    """
+    metric_pool = _bounded(pool, limit=32)
+    _STORE.set('tofu_executor_workers', max(0, int(workers)), pool=metric_pool)
+    _STORE.set('tofu_executor_queued', max(0, int(queued)), pool=metric_pool)
+    _STORE.set('tofu_executor_active', max(0, int(active)), pool=metric_pool)
+    _STORE.set(
+        'tofu_executor_resident_threads',
+        max(0, int(resident_threads)),
+        pool=metric_pool,
+    )
+    _STORE.set(
+        'tofu_executor_abandoned', max(0, int(abandoned)), pool=metric_pool,
+    )
+
+
+def observe_executor_queue_wait(pool: str, seconds: float) -> None:
+    """Record how long one accepted executor job waited before entry."""
+    _STORE.observe(
+        'tofu_executor_queue_wait_seconds',
+        max(0.0, float(seconds)),
+        _WAIT_BUCKETS,
+        pool=_bounded(pool, limit=32),
+    )
+
+
+def record_executor_rejection(pool: str, *, reason: str) -> None:
+    """Record one bounded-executor refusal without exposing job identity."""
+    metric_pool = _bounded(pool, limit=32)
+    _STORE.inc(
+        'tofu_executor_rejected_total', pool=metric_pool,
+    )
+    _STORE.inc(
+        'tofu_executor_rejection_reasons_total',
+        pool=metric_pool,
+        reason=_bounded(reason, limit=32),
+    )
+
+
+def record_executor_abandonment(
+    pool: str,
+    *,
+    recovered: bool,
+    failure_reason: str = 'budget_exhausted',
+) -> None:
+    """Record whether a wedged physical worker received a logical replacement."""
+    _STORE.inc(
+        'tofu_executor_abandonments_total',
+        pool=_bounded(pool, limit=32),
+        outcome=(
+            'recovered' if recovered
+            else _bounded(failure_reason or 'unknown', limit=32)
+        ),
+    )
+
+
+def record_executor_idle_retirement(pool: str, resident_threads: int) -> None:
+    """Record one owner-approved idle generation retirement."""
+    metric_pool = _bounded(pool, limit=32)
+    retired = max(0, int(resident_threads))
+    _STORE.inc('tofu_executor_idle_retirements_total', pool=metric_pool)
+    _STORE.inc(
+        'tofu_executor_idle_retired_threads_total', retired, pool=metric_pool,
+    )
+
+
 _HELP = {
     'tofu_http_requests_total': 'HTTP requests grouped by method, route template and status.',
     'tofu_http_request_duration_seconds': 'HTTP request duration in seconds.',
     'tofu_event_loop_lag_seconds': 'Latest measured event-loop scheduling lag.',
     'tofu_runtime_probe_failures_total': 'Best-effort runtime host probe failures.',
+    'tofu_cgroup_relief_attempts_total': 'Process-local memory relief passes.',
+    'tofu_cgroup_relief_reclaimed_bytes_total': 'Observed bytes reclaimed during memory relief.',
+    'tofu_cgroup_relief_reclaimed_bytes_latest': 'Latest observed bytes reclaimed during memory relief.',
+    'tofu_cgroup_relief_cache_entries_dropped_total': 'TTL cache entries dropped by memory relief.',
+    'tofu_cgroup_relief_log_files_advised_total': 'Log files given a DONTNEED page-cache hint.',
+    'tofu_cgroup_relief_log_bytes_advised_total': 'Apparent log bytes covered by DONTNEED hints.',
+    'tofu_cgroup_relief_duration_seconds': 'Memory relief pass duration in seconds.',
     'tofu_task_queue_wait_seconds': 'Task queue wait before a worker starts.',
     'tofu_llm_first_token_seconds': 'LLM time to first token.',
     'tofu_llm_tasks_total': 'Terminal LLM tasks by bounded outcome.',
@@ -530,11 +747,20 @@ _HELP = {
     'tofu_stream_admission_total': 'Bounded stream admission and ownership decisions.',
     'tofu_task_registry_evictions_total': 'Tasks removed from an in-process registry.',
     'tofu_task_event_evictions_total': 'Task replay events removed at the retention limit.',
+    'tofu_execution_sessions_started_total': 'Resource-owning execution sessions started.',
+    'tofu_execution_sessions_active': 'Active execution sessions by monotonic phase.',
+    'tofu_execution_sessions_terminal_total': 'Execution terminal outcomes and invariant verdicts.',
+    'tofu_execution_session_duration_seconds': 'Execution lifetime through terminal resource settlement.',
+    'tofu_execution_resource_releases_total': 'Execution resources released, deferred to recovery, or failed.',
+    'tofu_execution_deadlines_total': 'Execution deadlines that requested owner cancellation.',
     'tofu_executor_workers': 'Configured executor worker capacity.',
     'tofu_executor_resident_threads': 'Currently materialized executor worker threads.',
     'tofu_executor_active': 'Executor jobs currently running.',
     'tofu_executor_queued': 'Executor jobs waiting to start.',
-    'tofu_executor_rejected_total': 'Executor submissions rejected during shutdown.',
+    'tofu_executor_abandoned': 'Wedged executor jobs quarantined behind replacement workers.',
+    'tofu_executor_rejected_total': 'Executor submissions rejected before acceptance.',
+    'tofu_executor_rejection_reasons_total': 'Executor submission refusals grouped by bounded reason.',
+    'tofu_executor_abandonments_total': 'Wedged executor jobs grouped by bounded recovery outcome.',
     'tofu_executor_queue_wait_seconds': 'Executor queue wait before work starts.',
     'tofu_executor_idle_retirements_total': 'Idle executor generations retired.',
     'tofu_executor_idle_retired_threads_total': 'Worker threads released by idle retirement.',
@@ -601,8 +827,15 @@ __all__ = [
     'background_job_finished', 'background_job_started',
     'instrument_sse', 'normalize_route_template', 'prometheus_lines',
     'record_http_request', 'record_llm_first_token', 'record_llm_task',
+    'observe_executor_queue_wait', 'publish_executor_state',
+    'record_executor_abandonment', 'record_executor_idle_retirement',
+    'record_executor_rejection',
     'record_registry_eviction', 'record_replay', 'record_task_event_eviction',
     'record_stream_admission',
+    'record_execution_deadline', 'record_execution_phase_transition',
+    'record_execution_resource_release', 'record_execution_started',
+    'record_execution_terminal',
+    'record_cgroup_relief',
     'record_runtime_probe_failure',
     'record_task_queue_wait', 'reset_for_tests', 'route_template_for_request',
     'set_event_loop_lag',

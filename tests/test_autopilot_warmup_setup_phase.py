@@ -41,7 +41,13 @@ def _wire(monkeypatch, captured):
 
     # Capture every event the pre-stream path emits (via the lazy import inside
     # _emit_vu_setup_phase: `from lib.tasks_pkg.manager import append_event`).
-    monkeypatch.setattr(mgr, 'append_event', lambda task, event: captured.append(event))
+    def append_event(task, event):
+        transform = task.get('_vu_event_transform')
+        projected = transform(task, event) if callable(transform) else event
+        if projected is not None:
+            captured.append(projected)
+
+    monkeypatch.setattr(mgr, 'append_event', append_event)
     # No DB read for the objective.
     monkeypatch.setattr(ap, '_get_or_persist_objective', lambda cid, msgs, *, user_id: '')
 

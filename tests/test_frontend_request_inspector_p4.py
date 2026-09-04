@@ -11,7 +11,7 @@ Drives the REAL shipped debug_panel.js + request_inspector.js under jsdom:
   1. Turn-tagged request rows render turn badges (Worker/Critic via i18n)
      and data-turn attributes.
   2. Selecting a tagged round passes the turn through to the payload fetch.
-  3. coverageReason='endpoint-untagged' renders the AMBIGUOUS chip text
+  3. coverageReason='flow-untagged' renders the AMBIGUOUS chip text
      (not the old "not captured" one).
   4. Swarm sub-agent task rows render indented with the agent badge.
   5. The bubble anchor prefers the planner row for an _isEndpointPlanner
@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
@@ -192,15 +193,26 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     tEP.rounds['planning|1'].messages[0].content === 'p1');
 
   console.log(out.join('\n'));
-})().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); });
+})().catch(e => {
+  console.log('FAIL harness_exception ' + (e && e.stack || e));
+}).finally(() => {
+  /* openRequestInspector installs a recursive idle poll.  Leaving it open
+   * keeps Node alive until Python's 60 s timeout and can orphan the process
+   * when a pytest worker is interrupted first. */
+  try { closeRequestInspector(); } catch (_) { /* setup may have failed */ }
+  dom.window.close();
+});
 """
 
 _HARNESS_AMBIG = None  # second fixture handled by a python-level variant
 
 
 def _run(expect_fail=None):
-    harness = os.path.join(HERE, '_ri_p4_harness.js')
-    with open(harness, 'w') as f:
+    with tempfile.NamedTemporaryFile(
+        'w', suffix='_ri_p4_harness.js', delete=False,
+        encoding='utf-8',
+    ) as f:
+        harness = f.name
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
@@ -235,12 +247,12 @@ def test_p4_turn_badges_and_swarm_rows():
 
 
 def test_coverage_ambiguous_chip_text():
-    """coverageReason='endpoint-untagged' must render the AMBIGUOUS chip
+    """coverageReason='flow-untagged' must render the AMBIGUOUS chip
     text, not the old 'not captured' one (source-level pin: the chip picks
     its i18n key by coverageReason)."""
     src = open(os.path.join(JS_DIR, 'core', 'request_inspector.js'),
                encoding='utf-8').read()
-    assert "fold.coverageReason === 'endpoint-untagged'" in src
+    assert "fold.coverageReason === 'flow-untagged'" in src
     assert "'ri.coverageAmbiguous'" in src
 
 

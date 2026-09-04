@@ -11,10 +11,8 @@ different places:
   * EXECUTION   — the upstream HTTP call / MCP server / subprocess was slow;
   * TRANSPORT   — the tool finished but the event sat in a queue, or SSE was
                   buffered by a proxy, or the round waited on a barrier;
-  * RENDER      — the frame arrived and the browser did not paint it.
-                  ``health_stream_timer.js`` logs ``[twFlush-skip]`` and DROPS
-                  a render outright when the conv/DOM guards do not line up, so
-                  this is a real, measured failure mode, not a hypothetical.
+  * RENDER      — the frame arrived and the browser did not paint its updated
+                  authoritative Turn projection promptly.
 
 The original defect made all three indistinguishable because tool lifecycle
 events carried no clocks. The executable contracts below now keep that defect

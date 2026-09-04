@@ -50,7 +50,6 @@ class OrchestrationChatTurnPersistence:
         try:
             self._store_turns(self._task, turns)
             self._sync_turns(self._task, turns)
-            return True
         except Exception as exc:
             logger.warning(
                 '[FlowChat] per-turn DB sync failed '
@@ -58,6 +57,24 @@ class OrchestrationChatTurnPersistence:
                 str(self._task.get('id') or '')[:8], exc,
             )
             return False
+        # Goal mode is a frontend surface, not a background swarm: each
+        # settled worker/VU turn gets its own translation trigger here
+        # instead of waiting for the whole run's terminal event (and
+        # surviving that coordinator missing a turn entirely). Swarm
+        # sub-agents never pass through this boundary.
+        try:
+            from lib.translate.terminal import (
+                schedule_settled_visible_turn_translations,
+            )
+
+            schedule_settled_visible_turn_translations(self._task)
+        except Exception as exc:
+            logger.debug(
+                '[FlowChat] settled-turn translate schedule failed '
+                '(non-fatal) task=%s: %s',
+                str(self._task.get('id') or '')[:8], exc,
+            )
+        return True
 
     def finalize(self) -> bool:
         """Persist the final turn snapshot before the terminal event."""

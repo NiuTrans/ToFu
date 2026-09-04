@@ -9,6 +9,7 @@ import sys as _sys
 
 from lib.log import get_logger
 
+from lib.key_stats._admission import is_strict_billing_stop_admission
 from lib.key_stats._state import (
     MIN_ATTEMPTS,
     MIN_SUCCESS_RATE,
@@ -156,10 +157,14 @@ def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
             is futile, the dispatcher should fall back to another model.
 
     Precedence (in order):
-      1. Manual override wins EVERYTHING, including billing-stops — user
-         supremacy. (The Settings card surfaces the override-vs-stop
-         conflict so a stale manual ON doesn't silently defeat a fresh
-         quota error.)
+      0. Inside ``strict_billing_stop_admission()``, an already-recorded
+         key-wide or matching per-model billing stop wins. Optional work uses
+         this request-local policy to avoid repeatedly spending calls on a
+         known quota-dead route; it also prevents last-resort promotion.
+      1. Otherwise, manual override wins EVERYTHING, including billing-stops
+         — user supremacy. (The Settings card surfaces the override-vs-stop
+         conflict so a stale manual ON doesn't silently defeat a fresh quota
+         error.)
       2. Per-model stop (when *model* given) — disable for that model only.
       3. Raw key-wide check — exhausted flag > success-rate ≥ threshold.
       4. Explicit user override ``False`` always wins, even if this would
@@ -186,11 +191,15 @@ def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
 
     with _lock:
         _ensure_fresh_unlocked()
+        entry = _cache['stats'].get(pk) or {}
+        if is_strict_billing_stop_admission() and (
+                entry.get('exhausted')
+                or (model and model in (entry.get('exhausted_models') or {}))):
+            return False
         # Per-model billing-stop gate. Skip when an override exists — the
         # raw check below already lets the override win, and consulting it
         # twice would double the precedence paths.
         if model and pk not in _cache['overrides']:
-            entry = _cache['stats'].get(pk) or {}
             if model in (entry.get('exhausted_models') or {}):
                 return False
         if _raw_enabled_unlocked(pk):

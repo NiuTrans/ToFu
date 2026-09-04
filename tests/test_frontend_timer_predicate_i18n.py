@@ -1,6 +1,6 @@
 """tests/test_frontend_timer_predicate_i18n.py — the two owner-reported timer
-card defects from the poll-log screenshot, policed under jsdom against the REAL
-shipped ``tool_rounds.js`` + ``i18n.js``.
+card defects from the poll-log screenshot, policed under jsdom against the real
+retained tool-round renderers and Vite-owned locale catalog.
 
 WHY
 ---
@@ -42,6 +42,9 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+SOURCE_ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ZH_CATALOG = os.path.join(
+    SOURCE_ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
 
 
 def _node_deps_available() -> bool:
@@ -50,18 +53,17 @@ def _node_deps_available() -> bool:
     return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
-# argv: [node, harness, tool_rounds.js, tool_rounds_rich.js, i18n.js, ROOT, mode]
+# argv: [node, harness, tool_rounds.js, tool_rounds_rich.js, zh.json, ROOT, mode]
 #   mode = live | neuter_reason | neuter_kind
-# The timer watcher block (predicate render) moved to the DEFERRED
-# tool_rounds_rich.js (Epic-E split 2026-08-01); tool_rounds.js keeps the
-# _renderUnifiedToolLine dispatcher. Concatenated in ONE eval so top-level
-# consts the rich block closes over stay in scope.
+# The Timer Watcher renderer is in the retained section immediately following
+# tool_rounds.js. Concatenate both in one eval to preserve their production
+# lexical-scope contract.
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const TR = process.argv[2];
 const RICH = process.argv[3];
-const I18N = process.argv[4];
+const CATALOG = process.argv[4];
 const ROOT = process.argv[5];
 const MODE = process.argv[6] || 'live';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
@@ -73,10 +75,18 @@ global.navigator = win.navigator;
 global.console = console;
 global.localStorage = win.localStorage = { getItem: () => null, setItem: () => {} };
 
-// Load the REAL i18n.js so t() and setLanguage() are the shipped ones.
-eval(fs.readFileSync(I18N, 'utf8'));
-win.t = global.t = t;
-if (typeof setLanguage === 'function') setLanguage('zh');
+// Source visible text from the real Vite-owned catalog. The native i18n
+// owner's fetch/lifecycle contract is exercised separately; this renderer
+// fixture needs its synchronous Translator port and production placeholders.
+const messages = JSON.parse(fs.readFileSync(CATALOG, 'utf8'));
+win.t = global.t = (key, vars) => {
+  let text = Object.prototype.hasOwnProperty.call(messages, key)
+    ? String(messages[key]) : String(key);
+  for (const [name, value] of Object.entries(vars || {})) {
+    text = text.split('{' + name + '}').join(String(value == null ? '' : value));
+  }
+  return text;
+};
 
 // Minimal globals the renderer touches.
 win.escapeHtml = global.escapeHtml = (s) =>
@@ -110,7 +120,6 @@ if (MODE === 'neuter_kind') {
 }
 
 eval(trSrc + '\n' + richSrc);
-if (win._timerCountdownTicker) { clearInterval(win._timerCountdownTicker); }
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -142,7 +151,7 @@ const html = container.innerHTML;
 check('no_raw_predicate_note', html.indexOf('predicate no match') < 0);
 check('no_bare_exit_token', html.indexOf('exit=1') < 0);
 
-// 2. The translated plain verdict IS shown (zh string from i18n.js) with the
+// 2. The translated plain verdict IS shown (zh catalog string) with the
 //    exit code substituted.
 const zhWait = t('timerBlock.predicateWait').replace('{code}', '1');
 check('translated_verdict_shown', html.indexOf(zhWait) >= 0);
@@ -179,7 +188,7 @@ def _run(mode: str):
             ['node', harness,
              os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),       # argv[2]
              os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'),  # argv[3]
-             os.path.join(JS_DIR, 'i18n.js'),                    # argv[4]
+             ZH_CATALOG,                                         # argv[4]
              ROOT,                                               # argv[5]
              mode,                                               # argv[6]
              ],

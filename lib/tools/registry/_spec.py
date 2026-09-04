@@ -21,7 +21,7 @@ the built-in builders import it, never the reverse.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any
@@ -258,9 +258,18 @@ class ToolSpec:
         derive write/idempotent partitioning downstream.  Optional — purely
         informational; the schemas returned by ``build`` are authoritative.
     write_tools / idempotent_tools:
-        Subsets of :attr:`provides` that mutate state / are safe to cache.
-        Consumed by ``tool_dispatch`` to keep its concurrency + dedup
-        partitions in sync without a second hand-maintained list.
+        Subsets of :attr:`provides` that mutate state / may be retried without
+        changing their semantic effect.  Idempotency is a contract property;
+        it is deliberately not the cache policy.
+    cacheable_tools:
+        Subset of :attr:`provides` whose successful result may be reused
+        within one task. ``None`` preserves the legacy plugin convention that
+        idempotent tools are cacheable; an explicit empty set opts a mutable
+        observer (for example a live browser page) out of result caching.
+    unchanged_receipt_tools:
+        Subset of :attr:`provides` whose fresh byte-identical observations may
+        use a compact model projection while the prior full projection remains
+        in active context. Execution is never skipped by this policy.
     confirmation_tools:
         Subset of :attr:`write_tools` that always requires an attended human
         confirmation, independent of the conversation's ordinary Auto/Manual
@@ -330,6 +339,12 @@ class ToolSpec:
         metadata of names in :attr:`provides`. Core execution reaches this
         callable through :func:`build_tool_result_meta`; it never imports the
         concrete tool family that owns the metadata shape.
+    result_recovery_by_name:
+        Per-tool overflow recovery policy. ``source`` means the observation is
+        cheaply reconstructible from its original arguments and must not be
+        copied into the generic artifact store; ``artifact`` is the safe
+        default for volatile or expensive results; ``none`` exposes only a
+        bounded preview. This is execution policy, not presentation metadata.
     """
 
     key: str
@@ -370,6 +385,17 @@ class ToolSpec:
     # Appended for positional compatibility. These are writes whose authority
     # can only be minted by the attended approval UI for this exact call.
     confirmation_tools: frozenset[str] = field(default_factory=frozenset)
+    # Appended for positional compatibility. Idempotency describes retry
+    # semantics; this field independently controls same-task result reuse.
+    cacheable_tools: frozenset[str] | None = None
+    # Appended for positional compatibility. These request-router signals are
+    # owned by the family instead of duplicated as key-specific exceptions in
+    # lib.tools.routing. Any matching signal exposes this eager family.
+    native_route_groups: frozenset[str] = field(default_factory=frozenset)
+    # Appended for positional compatibility. Keys must be declared in provides.
+    result_recovery_by_name: dict[str, str] = field(default_factory=dict)
+    # Appended for positional compatibility. Fresh reads only; never a cache.
+    unchanged_receipt_tools: frozenset[str] = field(default_factory=frozenset)
 
 
 # ── Module-level registry ─────────────────────────────────
@@ -380,15 +406,18 @@ _SPEC_LOCK = RLock()
 
 def _ordinary_claims(spec: ToolSpec) -> set[str]:
     # Policy tables are dispatch authority too. In particular, marking a core
-    # write tool idempotent would make repeated calls cacheable even without
-    # replacing its schema or handler, so those names participate in the same
-    # collision arbitration as ordinary bindings.
+    # write tool cacheable (or relying on the legacy idempotent=>cacheable
+    # default) would make repeated calls reusable without replacing its schema
+    # or handler, so those names participate in ordinary collision arbitration.
     claims = (
         set(spec.provides)
         | set(spec.write_tools)
         | set(spec.idempotent_tools)
+        | set(spec.cacheable_tools or ())
+        | set(spec.unchanged_receipt_tools)
         | set(spec.programmatic_tools)
         | set(spec.confirmation_tools)
+        | set(spec.result_recovery_by_name)
     )
     if spec.handler is not None and not spec.handler_special:
         claims.update(spec.handler_names)
@@ -438,12 +467,32 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
         raise ValueError(
             f'ToolSpec {spec.key!r} has a handler but no dispatch names')
     for policy_name in (
-            'idempotent_tools', 'programmatic_tools', 'confirmation_tools'):
+            'idempotent_tools', 'programmatic_tools', 'confirmation_tools',
+            'unchanged_receipt_tools'):
         undeclared = set(getattr(spec, policy_name)) - set(spec.provides)
         if undeclared:
             raise ValueError(
                 f'ToolSpec {spec.key!r} {policy_name} contains undeclared '
                 f'tool names: {sorted(undeclared)}')
+    if spec.cacheable_tools is not None:
+        undeclared_cache = set(spec.cacheable_tools) - set(spec.provides)
+        if undeclared_cache:
+            raise ValueError(
+                f'ToolSpec {spec.key!r} cacheable_tools contains undeclared '
+                f'tool names: {sorted(undeclared_cache)}')
+    undeclared_recovery = set(spec.result_recovery_by_name) - set(spec.provides)
+    if undeclared_recovery:
+        raise ValueError(
+            f'ToolSpec {spec.key!r} result_recovery_by_name contains '
+            f'undeclared tool names: {sorted(undeclared_recovery)}')
+    invalid_recovery = {
+        name: policy for name, policy in spec.result_recovery_by_name.items()
+        if policy not in {'artifact', 'source', 'none'}
+    }
+    if invalid_recovery:
+        raise ValueError(
+            f'ToolSpec {spec.key!r} has invalid result recovery policies: '
+            f'{invalid_recovery}')
     non_writes = set(spec.confirmation_tools) - set(spec.write_tools)
     if non_writes:
         raise ValueError(
@@ -740,7 +789,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         execution_scope = normalized_tools['executionScope']
         if native_mode == 'routed':
             from lib.tools.routing import routed_native_spec_keys
-            selected_native = routed_native_spec_keys(ctx)
+            selected_native = routed_native_spec_keys(ctx, specs=specs)
             ctx.routed_spec_keys.update(selected_native)
     except Exception as exc:
         # Routing is experimental and must fail open to full exposure and the
@@ -770,6 +819,15 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         if isinstance(func, dict):
             return str(func.get('name') or '')
         return str(tool.get('name') or '')
+
+    # ToolContext is normally fresh, but seed from its current authority for
+    # compatibility with callers that prepopulate or deliberately reassemble
+    # one. Keep this index in lockstep with appends so a large MCP/plugin
+    # contribution never rescans the growing catalog once per tool.
+    executable_tool_names = {
+        name for tool in ctx.executable_tool_catalog
+        if (name := _schema_name(tool))
+    }
 
     def _validated_contribution(
             spec: ToolSpec, contributed: list[dict]) -> list[dict]:
@@ -835,9 +893,9 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                 continue
             if execution_scope == 'selected_only' and not exposed:
                 continue
-            if name not in {_schema_name(row)
-                            for row in ctx.executable_tool_catalog}:
+            if name not in executable_tool_names:
                 ctx.executable_tool_catalog.append(tool)
+                executable_tool_names.add(name)
             is_active_mcp = spec.key == 'mcp' and name in active_mcp
             ctx.discovery_policy_by_name[name] = (
                 'eager' if is_active_mcp else (
@@ -848,7 +906,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                 spec.key, spec.category, spec.description,
                 str(spec.search_hints.get(name) or ''),
             ]
-            if spec.key == 'mcp' and isinstance(mcp_search_text, dict):
+            if spec.key == 'mcp' and isinstance(mcp_search_text, Mapping):
                 search_parts.append(str(mcp_search_text.get(name) or ''))
             ctx.search_text_by_name[name] = ' '.join(
                 part for part in search_parts if part)
@@ -868,6 +926,9 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                             'non_idempotent' if name in spec.write_tools else
                             'read_only'),
                         ptc_eligible=name in spec.programmatic_tools,
+                        result_recovery=str(
+                            spec.result_recovery_by_name.get(
+                                name, 'artifact')),
                     )
                 document = contract.search_document()
                 ctx.tool_contract_documents_by_name[name] = document

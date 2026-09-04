@@ -274,14 +274,14 @@ def _record_built_artifact(dist: str, version: str, sha: str, log_fh) -> None:
 def _tofu_search_source() -> str:
     """Where this server gets tofu-search from, in install.sh's order.
 
-    A sibling checkout (the deploy reality here — the running env's own
-    tofu-search is an editable install of it), then a bundled vendor wheel,
-    then the bare package name for hosts whose index DOES carry the floor.
+    The monorepo member, then a bundled vendor wheel, then the bare package
+    name for source exports whose index carries the required floor.
     """
     import glob
-    sibling = os.path.join(_REPO_ROOT, '..', 'tofu-search')
-    if os.path.isfile(os.path.join(sibling, 'pyproject.toml')):
-        return os.path.abspath(sibling)
+    workspace_member = os.path.join(
+        _REPO_ROOT, 'packages', 'tofu-search')
+    if os.path.isfile(os.path.join(workspace_member, 'pyproject.toml')):
+        return os.path.abspath(workspace_member)
     wheels = sorted(glob.glob(
         os.path.join(_REPO_ROOT, 'vendor', 'tofu_search-*.whl')))
     if wheels:

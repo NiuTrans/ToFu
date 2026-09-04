@@ -53,6 +53,17 @@ def test_every_available_domain_is_described_in_the_prose():
 
 
 @pytest.mark.unit
+def test_runtime_search_schema_stays_within_token_budget():
+    """Loading vertical metadata must not duplicate enough prose to make the
+    paper task's required tool floor exceed its 4k schema budget."""
+    from lib.tools.gateway import tool_schema_tokens
+
+    configure(rollinggo_api_key='mcp_test')
+    tool = build_search_tool()
+    assert tool_schema_tokens([tool], model='kimi-k3') <= 1_000
+
+
+@pytest.mark.unit
 def test_travel_is_advertised_and_names_both_capabilities():
     configure(rollinggo_api_key='mcp_test')
     tool = build_search_tool()

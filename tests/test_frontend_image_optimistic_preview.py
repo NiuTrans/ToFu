@@ -68,6 +68,7 @@ win.debugLog = global.debugLog = () => {};
 win.t = global.t = (k) => (k === 'upload.processing' ? '处理中…' : k);
 win.config = global.config = {};
 win.pendingImages = global.pendingImages = [];
+win.runtimeScope = global.runtimeScope = win;
 // URL.createObjectURL / revokeObjectURL don't exist in jsdom → stub.
 let _revoked = [];
 win.URL.createObjectURL = global.URL.createObjectURL = () => 'blob:mock-object-url';
@@ -77,7 +78,7 @@ let src = fs.readFileSync(SRC, 'utf8');
 if (NEUTER) {
   // Remove the optimistic push so the chip only appears AFTER compress.
   src = src.replace(
-    '  pendingImages.push(imgObj);\n  renderImagePreviews();\n  if (typeof _igUpdateGenButton === \'function\') _igUpdateGenButton();\n  await _processPendingImage(f, imgObj);',
+    '  pendingImages.push(imgObj);\n  renderImagePreviews();\n  if (typeof runtimeScope._igUpdateGenButton === \'function\') {\n    runtimeScope._igUpdateGenButton();\n  }\n  await _processPendingImage(f, imgObj);',
     '  await _processPendingImage(f, imgObj);\n  pendingImages.push(imgObj);\n  renderImagePreviews();');
 }
 eval(src);

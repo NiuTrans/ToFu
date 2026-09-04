@@ -1,8 +1,7 @@
 """lib/optimizer/analyzer/_logs.py — app.log / error.log readers.
 
-Log-tail helpers plus the ``app.log`` signal miner and the ``error.log``
-excerpt collector.  These functions deliberately look up the mutable log
-path constants (``APP_LOG`` / ``ERROR_LOG``) through the facade package
+Log-tail helpers plus the ``app.log`` signal miner. These functions
+deliberately look up the mutable ``APP_LOG`` path through the facade package
 object so that ``monkeypatch.setattr(analyzer, "APP_LOG", ...)`` in tests
 (and any hot-reload of the constants) is observed here byte-identically to
 the pre-split single-module behaviour.
@@ -13,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter
+from collections.abc import Sequence
 from datetime import datetime
 
 from lib.log import get_logger
@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 
 
 _APP_LOG_TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})')
+_APP_LOG_FAST_MARKER_CHARACTER_LIMIT = 8 * 1024
 
 
 def _safe_tail_lines(path: str, max_bytes: int = 4 * 1024 * 1024) -> list[str]:
@@ -56,19 +57,11 @@ def _parse_app_log_ts(line: str) -> datetime | None:
         return None
 
 
-def _collect_error_log_excerpts(cutoff_local: datetime, max_lines: int = 40) -> list[str]:
-    excerpts: list[str] = []
-    for line in reversed(_safe_tail_lines(_facade.ERROR_LOG, max_bytes=2 * 1024 * 1024)):
-        ts = _parse_app_log_ts(line)
-        if ts is None or ts < cutoff_local:
-            continue
-        excerpts.append(line[:300])
-        if len(excerpts) >= max_lines:
-            break
-    return list(reversed(excerpts))
-
-
-def _collect_app_log_signals(cutoff_local: datetime) -> dict:
+def _collect_app_log_signals(
+    cutoff_local: datetime,
+    *,
+    log_lines: Sequence[str] | None = None,
+) -> dict:
     """Mine logs/app.log for tool / fetch / LLM signals in the window."""
     tool_calls: Counter = Counter()
     tool_errors: Counter = Counter()
@@ -98,36 +91,88 @@ def _collect_app_log_signals(cutoff_local: datetime) -> dict:
                              re.IGNORECASE)
     compaction_re = re.compile(r'\[Compaction\]|compaction_trigger|compact(ed|ing)',
                                re.IGNORECASE)
+    candidate_marker_re = re.compile(
+        r'\[Search\]|\[Fetch\]|429|rate|PromptTooLong|context|compact',
+        re.IGNORECASE,
+    )
+    search_marker_re = re.compile(r'\[Search\]', re.IGNORECASE)
+    fetch_marker_re = re.compile(r'\[Fetch\]', re.IGNORECASE)
+    rate_marker_re = re.compile(r'429|rate', re.IGNORECASE)
+    prompt_marker_re = re.compile(r'PromptTooLong', re.IGNORECASE)
+    context_marker_re = re.compile(r'context', re.IGNORECASE)
+    compaction_marker_re = re.compile(r'compact', re.IGNORECASE)
 
-    for line in _safe_tail_lines(_facade.APP_LOG):
+    lines = log_lines
+    if lines is None:
+        lines = _safe_tail_lines(_facade.APP_LOG)
+    for line in lines:
+        has_tool_marker = '[Tool:' in line
+        may_add_warning = (
+            ' WARNING ' in line
+            and any(tag in line for tag in (
+                '[Search]', '[Fetch]', '[Tool:', '[LLM]', '[Compaction]',
+                '[Dispatch]',
+            ))
+        )
+        if len(line) <= _APP_LOG_FAST_MARKER_CHARACTER_LIMIT:
+            lower_line = line.lower()
+            has_search_marker = '[search]' in lower_line
+            has_fetch_marker = '[fetch]' in lower_line
+            has_rate_marker = '429' in line or 'rate' in lower_line
+            has_prompt_marker = 'prompttoolong' in lower_line
+            has_context_marker = 'context' in lower_line
+            has_compaction_marker = 'compact' in lower_line
+            if not any((
+                has_tool_marker,
+                has_search_marker,
+                has_fetch_marker,
+                has_rate_marker,
+                has_prompt_marker,
+                has_context_marker,
+                has_compaction_marker,
+                may_add_warning,
+            )):
+                continue
+        else:
+            if (not has_tool_marker
+                    and candidate_marker_re.search(line) is None
+                    and not may_add_warning):
+                continue
+            has_search_marker = search_marker_re.search(line) is not None
+            has_fetch_marker = fetch_marker_re.search(line) is not None
+            has_rate_marker = rate_marker_re.search(line) is not None
+            has_prompt_marker = prompt_marker_re.search(line) is not None
+            has_context_marker = context_marker_re.search(line) is not None
+            has_compaction_marker = compaction_marker_re.search(line) is not None
         ts = _parse_app_log_ts(line)
         if ts is None or ts < cutoff_local:
             continue
-        m = tool_call_re.search(line)
-        if m:
-            tool_calls[m.group(1)] += 1
-        m = tool_fail_re.search(line)
-        if m:
-            tool_errors[m.group(1)] += 1
-        m = dropped_re.search(line)
-        if m:
-            irrelevant_dropped[m.group(1).lower()] += 1
-        if fetch_timeout_re.search(line):
+        if has_tool_marker:
+            match = tool_call_re.search(line)
+            if match:
+                tool_calls[match.group(1)] += 1
+            match = tool_fail_re.search(line)
+            if match:
+                tool_errors[match.group(1)] += 1
+        if has_search_marker:
+            match = dropped_re.search(line)
+            if match:
+                irrelevant_dropped[match.group(1).lower()] += 1
+        if has_fetch_marker and fetch_timeout_re.search(line):
             fetch_timeout += 1
-        if fetch_fail_re.search(line):
+        if has_fetch_marker and fetch_fail_re.search(line):
             fetch_failure += 1
-        if rl_re.search(line):
+        if has_rate_marker and rl_re.search(line):
             rate_limit_429 += 1
-        if prompt_too_long_re.search(line):
+        if ((has_prompt_marker or has_context_marker)
+                and prompt_too_long_re.search(line)):
             prompt_too_long += 1
-        if ctx_full_re.search(line):
+        if has_context_marker and ctx_full_re.search(line):
             context_near_full += 1
-        if compaction_re.search(line):
+        if has_compaction_marker and compaction_re.search(line):
             compaction_trigger += 1
-        if ' WARNING ' in line and len(warn_excerpts) < 30:
-            if any(tag in line for tag in ('[Search]', '[Fetch]', '[Tool:',
-                                           '[LLM]', '[Compaction]', '[Dispatch]')):
-                warn_excerpts.append(line[:300])
+        if may_add_warning and len(warn_excerpts) < 30:
+            warn_excerpts.append(line[:300])
 
     top_dropped = [
         {'domain': d, 'count': n}

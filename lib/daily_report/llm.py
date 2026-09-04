@@ -53,22 +53,26 @@ def _run_llm_analysis(user_prompt, conv_count):
     Returns ``(streams_list, tomorrow_list, yesterday_done_list, error_msg|None)``.
     """
     try:
+        from lib.key_stats import strict_billing_stop_admission
         from lib.llm_dispatch import smart_chat
+        from lib.production.llm_policy import optional_llm_max_429_attempts
 
         messages = [
             {'role': 'system', 'content': _ANALYSIS_SYSTEM},
             {'role': 'user', 'content': user_prompt},
         ]
 
-        content, usage = smart_chat(
-            messages,
-            max_tokens=128000,
-            temperature=0.3,
-            capability='text',
-            log_prefix='[DailyReport]',
-            max_retries=3,
-            timeout=90,
-        )
+        with strict_billing_stop_admission():
+            content, usage = smart_chat(
+                messages,
+                max_tokens=128000,
+                temperature=0.3,
+                capability='text',
+                log_prefix='[DailyReport]',
+                max_retries=3,
+                max_429_attempts=optional_llm_max_429_attempts(),
+                timeout=90,
+            )
 
         dispatch_info = usage.get('_dispatch', {}) if isinstance(usage, dict) else {}
         logger.info('[DailyReport] LLM via %s:%s in %dms',

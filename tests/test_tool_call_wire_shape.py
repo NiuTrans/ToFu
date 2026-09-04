@@ -36,6 +36,7 @@ import json
 import logging
 import pathlib
 import re
+from copy import deepcopy
 
 import pytest
 
@@ -345,6 +346,109 @@ def test_valid_tool_call_id_untouched_and_claim_consumed():
     assert out[2]['tool_call_id'] == 'call_1'
 
 
+@pytest.mark.unit
+def test_duplicate_truthy_ids_are_reminted_with_positional_receipts():
+    """Legacy positional ids must not collapse distinct execution facts."""
+    assistant = {
+        'role': 'assistant', 'content': '',
+        'tool_calls': [
+            {
+                'id': 'reused', 'type': 'function',
+                'function': {'name': 'read_files',
+                             'arguments': '{"path":"old.py"}'},
+            },
+            {
+                'id': 'reused', 'type': 'function',
+                'function': {'name': 'read_files',
+                             'arguments': '{"path":"new.py"}'},
+            },
+        ],
+    }
+    source = [
+        assistant,
+        _tool_msg('reused', 'old bytes'),
+        _tool_msg('reused', 'new bytes'),
+    ]
+
+    first = _fix_tool_call_wire_shape(deepcopy(source))
+    second = _fix_tool_call_wire_shape(deepcopy(source))
+    call_ids = [call['id'] for call in first[0]['tool_calls']]
+
+    assert call_ids[0] == 'reused'
+    assert call_ids[1] != 'reused'
+    assert call_ids == [call['id'] for call in second[0]['tool_calls']]
+    assert [message['tool_call_id'] for message in first[1:]] == call_ids
+    assert [message['content'] for message in first[1:]] == [
+        'old bytes', 'new bytes',
+    ]
+    assert _fix_orphaned_tool_calls(first) == first
+
+
+@pytest.mark.unit
+def test_duplicate_tool_result_is_dropped_by_occurrence():
+    source = [
+        _assistant_tc('call-a', 'read_files', '{"path":"a.py"}'),
+        _tool_msg('call-a', 'first result'),
+        _tool_msg('call-a', 'replayed result'),
+    ]
+
+    out = _fix_orphaned_tool_calls(source)
+
+    assert [message.get('role') for message in out] == ['assistant', 'tool']
+    assert out[1]['content'] == 'first result'
+
+
+@pytest.mark.unit
+def test_nonadjacent_result_never_borrows_equal_id_across_boundary():
+    source = [
+        {
+            **_assistant_tc('reused', 'read_files', '{"path":"old.py"}'),
+            'content': 'keep this assistant text',
+        },
+        {'role': 'user', 'content': 'semantic boundary'},
+        _tool_msg('reused', 'late result must not move backwards'),
+    ]
+
+    out = _fix_orphaned_tool_calls(source)
+
+    assert [message.get('role') for message in out] == ['assistant', 'user']
+    assert 'tool_calls' not in out[0]
+    assert out[0]['content'] == 'keep this assistant text'
+
+
+@pytest.mark.unit
+def test_recycled_ids_pair_independently_in_adjacent_runs():
+    source = [
+        _assistant_tc('positional-0', 'read_files', '{"path":"old.py"}'),
+        _tool_msg('positional-0', 'old bytes'),
+        {'role': 'user', 'content': 'continue'},
+        _assistant_tc('positional-0', 'read_files', '{"path":"new.py"}'),
+        _tool_msg('positional-0', 'new bytes'),
+    ]
+
+    out = _fix_orphaned_tool_calls(source)
+
+    assert [message['content'] for message in out
+            if message.get('role') == 'tool'] == ['old bytes', 'new bytes']
+
+
+@pytest.mark.unit
+def test_reasoning_only_assistant_survives_orphan_strip():
+    source = [{
+        **_assistant_tc('missing', 'read_files', '{"path":"a.py"}'),
+        'content': '',
+        'reasoning_content': 'signed reasoning payload',
+        'thinking_signature': 'signature',
+    }]
+
+    out = _fix_orphaned_tool_calls(source)
+
+    assert len(out) == 1
+    assert 'tool_calls' not in out[0]
+    assert out[0]['reasoning_content'] == 'signed reasoning payload'
+    assert out[0]['thinking_signature'] == 'signature'
+
+
 # ────────────────────────────────────────────────────────────
 #  chain interplay: healer runs BEFORE the orphan fixer
 # ────────────────────────────────────────────────────────────
@@ -429,6 +533,20 @@ def test_build_body_heals_the_incident_shape():
     receipts = [m for m in wire if m.get('role') == 'tool']
     assert len(receipts) == 2
     assert all(r.get('tool_call_id') for r in receipts)
+
+
+@pytest.mark.unit
+def test_build_body_isolates_non_object_history_message():
+    body = build_body('kimi-k3', [
+        {'role': 'user', 'content': 'before'},
+        'corrupt persisted carrier',
+        {'role': 'assistant', 'content': 'after'},
+    ])
+
+    assert body['messages'] == [
+        {'role': 'user', 'content': 'before'},
+        {'role': 'assistant', 'content': 'after'},
+    ]
 
 
 @pytest.mark.unit

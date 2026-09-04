@@ -23,14 +23,14 @@ Standard task dict shape:
         'id':           str,        # unique task ID
         '_userId':      int,        # explicit owning principal
         'kind':         str,        # 'paper-report', 'translate', etc.
-        'status':       str,        # 'pending'|'running'|'done'|'error'|'aborted'
+        'status':       str,        # pending/running or a shared terminal status
         'artifact_quality': dict|None,  # PRODUCT-quality axis, orthogonal to status
         'events':       list[dict], # append-only, each gets a 'seq'
         'events_lock':  Lock,
         'abort_event':  threading.Event,
         'result':       Any,
         'error':        dict | None, # error envelope
-        'created_at':   float,      # true start — surfaced by poll()
+        'created_at':   float,      # task acceptance — surfaced by poll()
         'updated_at':   float,      # last proof of life — surfaced by poll()
         'finished_at':  float | None,
         'meta':         dict,        # caller-supplied custom fields
@@ -69,22 +69,40 @@ quality dimensions get a new KEY inside ``artifact_quality`` — never a new
 """
 
 import asyncio
+import json
 import threading
 import time
 from typing import Any, Callable, Optional
 
+from lib.agent_core.task_runtime_policy import (
+    resolve_task_runtime_retention_budget,
+)
+from lib.agent_core.execution_session import (
+    ExecutionPhase,
+    ExecutionSession,
+    execution_session_for_task,
+)
 from lib.ids import short_id
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import bind_log_context, get_logger, req_id, set_req_id
 from lib.task_replay import (
     TASK_REPLAY_EVENT_SEQUENCE_FIELD,
     TASK_REPLAY_EVENT_TYPE_FIELD,
+    TASK_REPLAY_TERMINAL_STATUSES,
     missing_replay_page,
     task_memory_replay_page,
     task_terminal_event_type,
 )
 
 logger = get_logger(__name__)
+
+try:
+    import orjson as _orjson
+except ImportError:  # pragma: no cover - minimal embedded installations
+    _orjson = None
+
+
+_TASK_RUNTIME_RETENTION_BUDGET = resolve_task_runtime_retention_budget()
 
 
 _STALE_ATTEMPT_REJECTION_SUFFIX = (
@@ -97,12 +115,16 @@ _RUNTIME_OWNED_TASK_FIELDS = frozenset({
     '_userId',
     '_principalContext',
     '_requestId',
+    '_executionSession',
     'kind',
     'status',
     'artifact_quality',
     'events',
     '_eventBaseSeq',
     '_eventNextSeq',
+    '_eventRetainedBytes',
+    '_eventRetainedSizes',
+    '_eventOversizeWarned',
     'events_lock',
     'abort_event',
     'result',
@@ -128,7 +150,7 @@ def _epoch_ms(seconds) -> Optional[int]:
     established contract is **epoch milliseconds** under camelCase names
     (``createdAt`` — see ``lib/chat_dispatch.py`` and
     ``routes/chat_poll_abort.py``), because that is what JS ``Date.now()``
-    speaks and what ``_seedStreamTimerStart`` consumes.
+    and the typed client clock adopters consume.
 
     Feeding a SECONDS value into that frontend seam is not a visible failure:
     the min-guard happily accepts it (a seconds epoch is ~1000x smaller than
@@ -148,6 +170,31 @@ def _epoch_ms(seconds) -> Optional[int]:
         return None
 
 
+def _serialized_event_bytes(event: dict) -> int:
+    """Return compact UTF-8 bytes retained by one replay event."""
+    if _orjson is not None:
+        try:
+            return len(_orjson.dumps(event))
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            # The stdlib accepts a few mappings that orjson deliberately
+            # rejects. Try the canonical replay serializer before failing.
+            pass
+    return len(json.dumps(
+        event, ensure_ascii=False, separators=(',', ':'),
+    ).encode('utf-8'))
+
+
+def _bounded_runtime_limit(value: Optional[int], policy_limit: int) -> int:
+    """Let a composition lower, but never widen, a process policy limit."""
+    if value is None:
+        return policy_limit
+    try:
+        requested = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return policy_limit
+    return max(1, min(policy_limit, requested))
+
+
 class TaskRuntime:
     """Per-kind task registry with unified lifecycle, polling, and push.
 
@@ -165,7 +212,10 @@ class TaskRuntime:
     """
 
     def __init__(self, kind: str, *, ttl: int = 3600,
-                 max_tasks: int = 1024, max_events: int = 2048,
+                 max_tasks: Optional[int] = None,
+                 max_events: Optional[int] = None,
+                 max_event_buffer_bytes: Optional[int] = None,
+                 max_event_bytes: Optional[int] = None,
                  push_channel: Optional[str] = None,
                  error_source: str = '',
                  stall_timeout: float = 0):
@@ -179,6 +229,12 @@ class TaskRuntime:
             max_events: Maximum replay events retained per task. Sequence
                 numbers remain absolute after old events are trimmed and poll
                 responses mark a cursor reset when a client fell behind.
+            max_event_buffer_bytes: Target serialized-byte ceiling for the
+                retained replay tail. One individually valid event may occupy
+                the window alone up to ``max_event_bytes``.
+            max_event_bytes: Maximum serialized bytes for one event retained
+                in memory. Larger/unencodable events still cross the existing
+                persistence/live-delivery seams but reset the memory window.
             push_channel: WebSocket push channel name. If set, all events
                 are also pushed via lib.agent_core.push.push_event(channel, task_id, event).
                 If None, defaults to ``kind``.
@@ -192,8 +248,15 @@ class TaskRuntime:
         """
         self.kind = kind
         self.ttl = ttl
-        self.max_tasks = max(1, int(max_tasks or 1))
-        self.max_events = max(1, int(max_events or 1))
+        budget = _TASK_RUNTIME_RETENTION_BUDGET
+        self.max_tasks = _bounded_runtime_limit(
+            max_tasks, budget.task_capacity)
+        self.max_events = _bounded_runtime_limit(
+            max_events, budget.event_capacity)
+        self.max_event_buffer_bytes = _bounded_runtime_limit(
+            max_event_buffer_bytes, budget.replay_byte_capacity)
+        self.max_event_bytes = _bounded_runtime_limit(
+            max_event_bytes, budget.event_max_bytes)
         self.stall_timeout = float(stall_timeout or 0)
         self.push_channel = push_channel if push_channel is not None else kind
         self.error_source = error_source or f'task_runtime.{kind}'
@@ -257,6 +320,8 @@ class TaskRuntime:
             'events': [],
             '_eventBaseSeq': 0,
             '_eventNextSeq': 0,
+            '_eventRetainedBytes': 0,
+            '_eventRetainedSizes': [],
             'events_lock': threading.Lock(),
             'abort_event': threading.Event(),
             'result': None,
@@ -270,6 +335,15 @@ class TaskRuntime:
             # Correlation is captured at ingress before work moves to a pool.
             # It is deliberately task data, not a Prometheus label.
             '_requestId': request_id,
+            # Operational resource ownership is private and orthogonal to the
+            # durable/user-visible task status. Routes bind leases to this
+            # session; terminal paths settle it before publishing success.
+            '_executionSession': ExecutionSession(
+                execution_id=task_id,
+                kind=self.kind,
+                owner_user_id=owner_user_id,
+                request_id=request_id,
+            ),
         }
         capacity_evicted = []
         over_capacity = False
@@ -277,7 +351,7 @@ class TaskRuntime:
             if task_id not in self._tasks and len(self._tasks) >= self.max_tasks:
                 terminal = sorted(
                     (item for item in self._tasks.values()
-                     if item.get('status') in ('done', 'error', 'aborted')),
+                     if item.get('status') in TASK_REPLAY_TERMINAL_STATUSES),
                     key=lambda item: float(item.get('finished_at')
                                            or item.get('created_at') or 0),
                 )
@@ -378,6 +452,14 @@ class TaskRuntime:
             task['status'] = 'running'
             task.update(custom_fields)
             task['updated_at'] = time.time()
+        try:
+            execution_session_for_task(task).mark_dispatch_started()
+        except (RuntimeError, ValueError) as exc:
+            logger.error(
+                '[TaskRuntime:%s] execution start invariant failed task=%s: %s',
+                self.kind, task_id[:8], exc,
+            )
+            return False
         return True
 
     def update_fields(
@@ -488,7 +570,7 @@ class TaskRuntime:
         task_id = str((task or {}).get('id') or '')
         if not task_id:
             return False
-        if task.get('status') in ('done', 'error', 'aborted'):
+        if task.get('status') in TASK_REPLAY_TERMINAL_STATUSES:
             return False
         if task.get('_discarded_at'):
             return False
@@ -533,6 +615,10 @@ class TaskRuntime:
         task.setdefault('events', [])
         task.setdefault('_eventBaseSeq', 0)
         task.setdefault('_eventNextSeq', 0)
+        # Adoption accepts legacy/external task dictionaries. Rebuild their
+        # private accounting once instead of trusting caller-supplied totals.
+        task['_eventRetainedBytes'] = None
+        task['_eventRetainedSizes'] = None
         if 'events_lock' not in task:
             task['events_lock'] = threading.Lock()
         if 'abort_event' not in task:
@@ -564,8 +650,36 @@ class TaskRuntime:
             return [t for t in self._tasks.values()
                     if t['status'] in ('pending', 'running')]
 
+    def _reconcile_event_retention(
+        self,
+        task: dict,
+        events: list,
+    ) -> tuple[list[int], int]:
+        """Repair private byte accounting for a legacy/mutated task window."""
+        raw_sizes = task.get('_eventRetainedSizes')
+        raw_retained_bytes = task.get('_eventRetainedBytes')
+        if (isinstance(raw_sizes, list)
+                and len(raw_sizes) == len(events)
+                and isinstance(raw_retained_bytes, int)
+                and raw_retained_bytes >= 0):
+            retained_bytes = raw_retained_bytes
+        else:
+            raw_sizes = []
+            for retained_event in events:
+                try:
+                    retained_bytes_for_event = _serialized_event_bytes(
+                        retained_event)
+                except (TypeError, ValueError, OverflowError, RecursionError):
+                    retained_bytes_for_event = self.max_event_bytes + 1
+                raw_sizes.append(retained_bytes_for_event)
+            retained_bytes = sum(raw_sizes)
+            task['_eventRetainedSizes'] = raw_sizes
+        task['_eventRetainedBytes'] = retained_bytes
+        return raw_sizes, retained_bytes
+
     def append_event(self, task_id: str, event: dict,
-                     *, before_push: Optional[Callable[[int], None]] = None) -> Optional[int]:
+                     *, before_push: Optional[Callable[[int], None]] = None,
+                     deliver_push: bool = True) -> Optional[int]:
         """Append an event to the task. Auto-assigns 'seq'.
 
         Also pushes to the WebSocket channel (non-blocking, thread-safe).
@@ -580,6 +694,12 @@ class TaskRuntime:
         reconstruct the COMPLETE stream. Legacy non-terminal persistence stays
         best-effort; an authoritative turn/attempt frame is withheld on any
         callback failure because its persistent cursor is the protocol.
+
+        ``deliver_push=False`` retains the event in the bounded task replay
+        buffer but skips synchronous push listeners/bus publication.  The chat
+        task manager uses this only while it is draining an upstream provider
+        stream: browser/webhook observers must not delay model ingress, and
+        the first post-ingress authoritative event converges delivery again.
 
         Tolerant of legacy task dicts inserted directly into ``_tasks``
         (e.g. older test code) that may not have all the standard fields.
@@ -596,11 +716,15 @@ class TaskRuntime:
         # The stall-reap clock: every event is proof of life.
         task['updated_at'] = time.time()
         trimmed = 0
+        oversized_event_bytes = 0
+        serialization_error = None
         with task['events_lock']:
             events = task.setdefault('events', [])
+            retained_sizes, retained_bytes = self._reconcile_event_retention(
+                task, events)
             try:
                 hinted_next_seq = int(task.get('_eventNextSeq'))
-            except (TypeError, ValueError, OverflowError) as exc:
+            except (TypeError, ValueError, OverflowError, RecursionError) as exc:
                 logger.debug('[TaskRuntime:%s] invalid next event sequence '
                              'task=%s: %s', self.kind, task_id[:8], exc)
                 hinted_next_seq = -1
@@ -625,12 +749,46 @@ class TaskRuntime:
             else:
                 next_seq = hinted_next_seq if hinted_next_seq >= 0 else 0
             event[TASK_REPLAY_EVENT_SEQUENCE_FIELD] = next_seq
+            try:
+                event_bytes = _serialized_event_bytes(event)
+            except (TypeError, ValueError, OverflowError) as exc:
+                # An unencodable object has no finite replay wire shape. Treat
+                # it as oversized so the task never retains an unaccounted
+                # object graph; the existing persistence/push seams still own
+                # their normal typed failure and reconciliation behavior.
+                event_bytes = self.max_event_bytes + 1
+                serialization_error = exc
             events.append(event)
+            retained_sizes.append(event_bytes)
+            retained_bytes += event_bytes
             seq = next_seq
             task['_eventNextSeq'] = seq + 1
-            if len(events) > self.max_events:
-                trimmed = len(events) - self.max_events
+            if event_bytes > self.max_event_bytes:
+                # A rolling replay window must remain one contiguous suffix.
+                # Dropping only the newest event would make next_cursor move
+                # backwards, so an individually oversized event resets the
+                # entire reconstructible window at its next absolute seq.
+                oversized_event_bytes = event_bytes
+                trimmed = len(events)
+                events.clear()
+                retained_sizes.clear()
+                retained_bytes = 0
+            else:
+                trimmed = max(0, len(events) - self.max_events)
+                retained_after_trim = retained_bytes - sum(
+                    retained_sizes[:trimmed])
+                # Keep at least the newest valid event intact even when it is
+                # larger than the ordinary tail target. Its separate finite
+                # single-event ceiling remains the hard per-task bound.
+                while (retained_after_trim > self.max_event_buffer_bytes
+                       and trimmed < len(events) - 1):
+                    retained_after_trim -= retained_sizes[trimmed]
+                    trimmed += 1
+                if trimmed:
+                    del retained_sizes[:trimmed]
+                    retained_bytes = retained_after_trim
                 del events[:trimmed]
+            task['_eventRetainedBytes'] = retained_bytes
             if events:
                 try:
                     task['_eventBaseSeq'] = int(events[0].get(
@@ -642,6 +800,19 @@ class TaskRuntime:
                     task['_eventBaseSeq'] = seq + 1 - len(events)
             else:
                 task['_eventBaseSeq'] = seq + 1
+            if oversized_event_bytes and not task.get('_eventOversizeWarned'):
+                task['_eventOversizeWarned'] = True
+                if serialization_error is not None:
+                    logger.warning(
+                        '[TaskRuntime:%s] unencodable event reset memory replay '
+                        'task=%s seq=%s: %s', self.kind, task_id[:8], seq,
+                        serialization_error)
+                else:
+                    logger.warning(
+                        '[TaskRuntime:%s] event bytes=%d exceed max=%d; reset '
+                        'memory replay task=%s seq=%s', self.kind,
+                        oversized_event_bytes, self.max_event_bytes,
+                        task_id[:8], seq)
         if trimmed:
             try:
                 from lib.observability import record_task_event_eviction
@@ -698,7 +869,7 @@ class TaskRuntime:
                     return seq
                 logger.debug('[TaskRuntime:%s] before_push failed task=%s: %s',
                              self.kind, task_id[:8], e)
-        if self.push_channel:
+        if self.push_channel and deliver_push:
             try:
                 from lib.agent_core.push import push_event
                 push_event(
@@ -740,8 +911,31 @@ class TaskRuntime:
             return False
         envelope = _make_envelope(error, context=error_context or self.kind,
                                   source=self.error_source)
+        requested_outcome = (
+            ExecutionPhase.CANCELLED
+            if task['abort_event'].is_set() and envelope is None
+            else ExecutionPhase.FAILED if envelope
+            else ExecutionPhase.COMPLETED
+        )
+        try:
+            execution_receipt = execution_session_for_task(task).settle(
+                requested_outcome,
+                cause=(str((envelope or {}).get('kind') or '')
+                       if envelope else ''),
+            )
+        except ValueError:
+            # Adopted legacy/test carriers may predate the private session.
+            execution_receipt = None
+        if (execution_receipt is not None
+                and not execution_receipt.invariants_satisfied
+                and envelope is None):
+            envelope = _make_envelope(
+                RuntimeError('terminal resource invariant failed'),
+                context=error_context or self.kind,
+                source=self.error_source,
+            )
         with self._lock:
-            if task['status'] in ('done', 'error', 'aborted'):
+            if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
                 return False
             if task['abort_event'].is_set() and envelope is None:
                 task['status'] = 'aborted'
@@ -797,7 +991,7 @@ class TaskRuntime:
         # decide done-vs-aborted). Without this an abort racing a finish could
         # be lost, marking a cancelled task 'done'.
         with self._lock:
-            if task['status'] in ('done', 'error', 'aborted'):
+            if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
                 return False
             task['abort_event'].set()
         logger.info('[TaskRuntime:%s] abort requested for task %s',
@@ -814,7 +1008,7 @@ class TaskRuntime:
             task = self._tasks.get(task_id)
             if task is None or int(task.get('_userId') or 0) != user_id:
                 return False
-            if task['status'] in ('done', 'error', 'aborted'):
+            if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
                 return False
             task['abort_event'].set()
         logger.info('[TaskRuntime:%s] owner abort requested for task %s',
@@ -850,7 +1044,14 @@ class TaskRuntime:
         the removed record lets the manager tombstone it against re-adoption.
         """
         with self._lock:
-            return self._tasks.pop(task_id, None)
+            task = self._tasks.pop(task_id, None)
+        if task is not None:
+            try:
+                execution_session_for_task(task).settle(
+                    ExecutionPhase.CANCELLED, cause='task_discarded')
+            except ValueError:
+                pass
+        return task
 
     # ── Stall reaping (read-side, opt-in via stall_timeout) ────
 
@@ -902,7 +1103,7 @@ class TaskRuntime:
                 'cursor': {'requested': N, 'next': N, 'reset': bool},
                 'status': 'pending'|'running'|'done'|'error'|'aborted',
                 'done': bool,
-                'createdAt': int,   # true job start, epoch MILLISECONDS
+                'createdAt': int,   # task acceptance, epoch MILLISECONDS
                 'updatedAt': int,   # last proof of life, epoch MILLISECONDS
                 'result': ... (when done),
                 'error': ... (when error),
@@ -910,7 +1111,7 @@ class TaskRuntime:
             }
 
         UNIT: the clock fields are epoch **milliseconds** under camelCase
-        names, matching this project's existing task-start contract
+        names, matching this project's existing task-clock contract
         (``lib/chat_dispatch.py``, ``routes/chat_poll_abort.py``). The task
         dict's own ``created_at`` / ``updated_at`` stay float SECONDS; the
         camelCase/snake_case split is the unit marker. Never emit the raw
@@ -918,14 +1119,13 @@ class TaskRuntime:
 
         ``createdAt`` / ``updatedAt`` exist so a client that RE-ATTACHES to
         a running job (page refresh, tab switch, conversation switch) can
-        continue the elapsed clock from the real start instead of restarting
+        continue the elapsed clock from server acceptance instead of restarting
         it at zero, and can render "last activity" from server truth. A client
         minting those locally re-mints them on every refresh, which not only
         shows a wrong elapsed but **washes an already-silent job into looking
-        healthy** — the dangerous half. Mirrors the chat stream's
-        server-authoritative rewind (``_seedStreamTimerStart``); clients MUST
-        apply the same min-guard (only ever move the start EARLIER, ignore a
-        future timestamp) so the display can never jump backward.
+        healthy** — the dangerous half. Clients MUST preserve the shared
+        server-authoritative clock rule (only ever move the start EARLIER and
+        ignore a future timestamp) so the display can never jump backward.
 
         If the task doesn't exist, returns {'ok': False, 'error': 'not_found'}
         with no clocks — a task that does not exist has no start time.
@@ -980,35 +1180,47 @@ class TaskRuntime:
         with self._lock:
             tasks = list(self._tasks.values())
         event_count = 0
+        event_retained_bytes = 0
         for task in tasks:
             lock = task.get('events_lock')
             if lock is None:
-                event_count += len(task.get('events') or [])
+                events = task.get('events') or []
+                event_count += len(events)
+                _, retained_bytes = self._reconcile_event_retention(
+                    task, events)
+                event_retained_bytes += retained_bytes
                 continue
             with lock:
-                event_count += len(task.get('events') or [])
+                events = task.get('events') or []
+                event_count += len(events)
+                _, retained_bytes = self._reconcile_event_retention(
+                    task, events)
+                event_retained_bytes += retained_bytes
         return {
             'tasks': len(tasks),
             'max_tasks': self.max_tasks,
             'ttl_seconds': self.ttl,
             'events': event_count,
+            'event_retained_bytes': event_retained_bytes,
             'max_events_per_task': self.max_events,
+            'event_buffer_byte_capacity_per_task': (
+                self.max_event_buffer_bytes),
+            'event_max_bytes': self.max_event_bytes,
+            'event_retention_hard_capacity_per_task': max(
+                self.max_event_buffer_bytes, self.max_event_bytes),
             'over_capacity': max(0, len(tasks) - self.max_tasks),
         }
 
     # ── Spawning ───────────────────────────────────────────────
 
-    def spawn(self, task_id: str, fn: Callable, *args, **kwargs) -> None:
-        """Spawn a worker function for the task.
-
-        Inside an asyncio event loop: runs via asyncio.to_thread (tracked
-        as an asyncio task, cancellable, awaitable).
-        Outside: falls back to a daemon thread.
-
-        The worker function receives whatever args are passed. It is the
-        worker's responsibility to call runtime.append_event(...) and
-        runtime.finish(...) appropriately.
-        """
+    def _build_worker_callable(
+        self,
+        task_id: str,
+        fn: Callable,
+        args: tuple,
+        kwargs: dict,
+    ) -> Callable[[], None]:
+        """Build the one context/error/lifecycle boundary for worker entry."""
         task = self.get(task_id)
         worker_request_id = ''
         if task is not None:
@@ -1057,6 +1269,62 @@ class TaskRuntime:
                 # the next unrelated background task.
                 set_req_id(previous_request_id)
 
+        return _wrapper
+
+    def submit_worker(
+        self,
+        task_id: str,
+        submitter: Callable[[str, int, Callable[[], None]], Any],
+        fn: Callable,
+        *args,
+        **kwargs,
+    ) -> Any:
+        """Submit through an injected bounded scheduler.
+
+        ``submitter`` receives ``(task_id, owner_user_id, worker_callable)``.
+        This preserves the same request-context isolation, correlation, queue
+        timing, and crash settlement as :meth:`spawn` while allowing a domain
+        owner to enforce finite capacity and owner-fair scheduling. Admission
+        exceptions propagate so that owner can map saturation explicitly.
+        """
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(f'unknown {self.kind} task: {task_id}')
+        owner_user_id = int(task.get('_userId') or 0)
+        if owner_user_id <= 0:
+            raise ValueError(
+                f'{self.kind} task {task_id} has no positive owner')
+        worker = self._build_worker_callable(
+            task_id, fn, tuple(args), dict(kwargs))
+
+        def _isolated_worker() -> None:
+            # A submitter may execute inline, create a thread from inside a
+            # request, or reuse a long-lived pool thread. Make isolation a
+            # TaskRuntime guarantee instead of relying on any scheduler's
+            # ContextVar inheritance defaults.
+            import contextvars
+            contextvars.Context().run(worker)
+
+        return submitter(task_id, owner_user_id, _isolated_worker)
+
+    def spawn(self, task_id: str, fn: Callable, *args, **kwargs) -> None:
+        """Spawn a worker function for the task.
+
+        Inside an asyncio event loop: runs via asyncio.to_thread (tracked
+        as an asyncio task, cancellable, awaitable).
+        Outside: falls back to a daemon thread.
+
+        The worker function receives whatever args are passed. It is the
+        worker's responsibility to call runtime.append_event(...) and
+        runtime.finish(...) appropriately.
+        """
+        _wrapper = self._build_worker_callable(
+            task_id, fn, tuple(args), dict(kwargs))
+
+        def _isolated_wrapper() -> None:
+            import contextvars
+            contextvars.Context().run(_wrapper)
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as _e_audit:
@@ -1068,17 +1336,14 @@ class TaskRuntime:
             # A background task must not inherit request-scoped authentication,
             # correlation, or framework context, so run it inside a deliberately
             # fresh context while retaining to_thread's tracked lifecycle.
-            import contextvars
-            worker_context = contextvars.Context()
-
             async def _async_wrapper():
-                await asyncio.to_thread(worker_context.run, _wrapper)
+                await asyncio.to_thread(_isolated_wrapper)
             bg = asyncio.ensure_future(_async_wrapper())
             self._bg_tasks.add(bg)
             bg.add_done_callback(self._bg_tasks.discard)
         else:
             threading.Thread(
-                target=_wrapper,
+                target=_isolated_wrapper,
                 name=f'{self.kind}-{task_id[:8]}',
                 daemon=True,
             ).start()
@@ -1098,7 +1363,7 @@ class TaskRuntime:
         expired = []
         with self._lock:
             for tid, task in list(self._tasks.items()):
-                if task['status'] in ('done', 'error', 'aborted'):
+                if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
                     finished = task.get('finished_at') or task.get('created_at', 0)
                     if now - finished > ttl:
                         expired.append(tid)

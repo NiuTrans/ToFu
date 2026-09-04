@@ -1,3 +1,6 @@
+import { escapeHtml } from '../../html-safety';
+import { t as i18nTranslate } from '../../i18n';
+import { resolveOrchestrationApiClient } from './api-client';
 import { orchestrationRegistry } from './registry';
 type Port = Record<string, unknown>;
 
@@ -12,10 +15,7 @@ export interface TaskModeServicesOptions extends Port {
 }
 
 type TaskModeServicesWindow = Window & {
-  resolveOrchestrationApiClient?: () => unknown;
   _orchStudioApi?: Port | null;
-  t?: (key: string, params?: unknown) => unknown;
-  escapeHtml?: (value: unknown) => unknown;
   formatOrchestrationRichCopy?: (value: unknown) => unknown;
   showToast?: (message: unknown, kind: string) => unknown;
   showConfirm?: (message: unknown, config: unknown) => unknown;
@@ -40,9 +40,12 @@ export function createTaskModeServices(options: TaskModeServicesOptions = {}) {
     if (typeof provider === 'function') return (provider as () => unknown)();
     return provider == null ? fallback : provider;
   };
+  // The default is the typed i18n catalog, not the raw key: an embedding
+  // that forgets to inject a translator still renders localized copy.
   const translate = (key: string, params?: unknown): unknown =>
     typeof options.translate === 'function'
-      ? options.translate(key, params) : key;
+      ? options.translate(key, params)
+      : i18nTranslate(key as never, params as never);
   const escape = (value: unknown): unknown =>
     typeof options.escape === 'function'
       ? options.escape(value) : String(value == null ? '' : value);
@@ -60,9 +63,7 @@ export function createTaskModeServices(options: TaskModeServicesOptions = {}) {
     document: doc,
     window: win,
     api: () => {
-      const resolver = (orchestrationRegistry as unknown as TaskModeServicesWindow)
-        .resolveOrchestrationApiClient;
-      return provided('api', typeof resolver === 'function' ? resolver() : null);
+      return provided('api', resolveOrchestrationApiClient());
     },
     studio: () => provided('studio', null),
     translate,
@@ -96,18 +97,17 @@ bridge._tmServices = createTaskModeServices({
   document: typeof document !== 'undefined' ? document : null,
   window: typeof window !== 'undefined' ? window : null,
   studio: () => bridge._orchStudioApi || null,
+  // Direct import: the registry is module-private (Object.create(null)) and
+  // nothing publishes `t` on it, so late-binding here fell back to raw keys
+  // and English status codes in the timeline.
   translate: (key: string, params?: unknown) =>
-    typeof bridge.t === 'function' ? bridge.t(key, params) : key,
-  escape: (value: unknown) => typeof bridge.escapeHtml === 'function'
-    ? bridge.escapeHtml(value == null ? '' : value)
-    : String(value == null ? '' : value),
+    i18nTranslate(key as never, params as never),
+  escape: (value: unknown) => escapeHtml(value == null ? '' : value),
   richCopy: (value: unknown) => {
     if (typeof bridge.formatOrchestrationRichCopy === 'function') {
       return bridge.formatOrchestrationRichCopy(value);
     }
-    return typeof bridge.escapeHtml === 'function'
-      ? bridge.escapeHtml(value == null ? '' : value)
-      : String(value == null ? '' : value);
+    return escapeHtml(value == null ? '' : value);
   },
   toast: (message: unknown, isError: unknown) => {
     const studio = bridge._orchStudioApi;

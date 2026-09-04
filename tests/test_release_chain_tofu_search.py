@@ -9,7 +9,7 @@ in the comment block above the pin). Recent floors are on NO pip index:
 public PyPI topped at 0.5.1 (measured 2026-07-31, pinned by
 tests/test_requirements_public_resolvable.py — RED until the publish), and
 the internal mirror carries none. The only verified artifacts live in the
-sibling repo's ``dist/``.
+monorepo member's ``dist/``.
 
 So the chain must carry the floor itself, at all three of its points:
 
@@ -51,17 +51,16 @@ _REQUIREMENTS = _ROOT / 'requirements.txt'
 
 def _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.3-py3-none-any.whl',),
                floor='0.5.3', src_version='0.5.3'):
-    """A minimal ROOT/sibling/dest tree around the REAL bundling function."""
+    """A minimal ROOT/workspace/dest tree around the bundling function."""
     internal = pytest.importorskip(
         'export_pkg._internal', reason='export internals not shipped in opensource')
-    root = tmp_path / 'chatui'
-    sibling = tmp_path / 'tofu-search'
-    (sibling / 'dist').mkdir(parents=True)
-    (sibling / 'pyproject.toml').write_text(
+    root = tmp_path / 'tofu'
+    member = root / 'packages' / 'tofu-search'
+    (member / 'dist').mkdir(parents=True)
+    (member / 'pyproject.toml').write_text(
         f'[project]\nversion = "{src_version}"\n', encoding='utf-8')
     for w in wheels:
-        (sibling / 'dist' / w).write_bytes(b'WHEEL:' + w.encode())
-    root.mkdir()
+        (member / 'dist' / w).write_bytes(b'WHEEL:' + w.encode())
     (root / 'requirements.txt').write_text(
         f'tofu-search>={floor}\n', encoding='utf-8')
     dest = tmp_path / 'dest'
@@ -111,7 +110,7 @@ def test_a_missing_dist_dir_is_a_clean_skip(tmp_path, monkeypatch):
     gets no wheel (and install.sh then reports the gap loudly)."""
     internal = pytest.importorskip(
         'export_pkg._internal', reason='export internals not shipped in opensource')
-    root = tmp_path / 'chatui'
+    root = tmp_path / 'tofu'
     root.mkdir()
     (root / 'requirements.txt').write_text('tofu-search>=0.5.3\n',
                                            encoding='utf-8')

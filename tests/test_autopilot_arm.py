@@ -199,17 +199,18 @@ def test_arm_only_targets_matching_conv(put_task):
 # ── HTTP route: POST /api/v1/chat/autopilot/arm ────────────────────────
 
 @pytest.mark.api
-def test_arm_endpoint_flips_live_task(flask_client, put_task):
-    """The arm endpoint flips the live task's config and returns armed=True."""
+def test_arm_endpoint_defers_without_mutating_live_standard_task(
+    flask_client, put_task,
+):
+    """A running standard turn cannot change interpreter at settlement."""
     put_task(_running_task('t-http-1', 'conv-http-1'))
     resp = flask_client.post('/api/v1/chat/autopilot/arm',
                              json={'convId': 'conv-http-1'})
-    assert resp.status_code == 200
+    assert resp.status_code == 404
     body = resp.get_json()
-    assert body['armed'] is True
-    assert 't-http-1' in body['taskIds']
+    assert body['error'] == 'conversation_not_found'
     from tests.support.chat_tasks import chat_task_registry as tasks
-    assert tasks['t-http-1']['config']['autopilot'] is True
+    assert tasks['t-http-1']['config']['autopilot'] is False
 
 
 @pytest.mark.api
@@ -221,15 +222,39 @@ def test_arm_endpoint_requires_conv_id(flask_client):
 
 @pytest.mark.api
 def test_arm_endpoint_no_live_task(flask_client):
-    """No live task → armed=True via the persistent marker (new contract)."""
-    clear_autopilot_marker('conv-nonexistent-xyz', user_id=1)
+    """No live task defers to the next turn without a classic marker."""
+    from tests._seed import seed_conversation
+
+    conversation_id = 'conv-idle-goal-mode'
+    seed_conversation(
+        conversation_id,
+        user_id=1,
+        title='Idle Goal Mode',
+        messages=[],
+    )
+    clear_autopilot_marker(conversation_id, user_id=1)
     resp = flask_client.post('/api/v1/chat/autopilot/arm',
-                             json={'convId': 'conv-nonexistent-xyz'})
+                             json={'convId': conversation_id})
     assert resp.status_code == 200
     body = resp.get_json()
     assert body['armed'] is True
     assert body['taskIds'] == []
-    clear_autopilot_marker('conv-nonexistent-xyz', user_id=1)
+    assert body['deferred'] is True
+    assert body['markerAdded'] is False
+    assert has_autopilot_marker('conv-nonexistent-xyz', user_id=1) is False
+    assert body['settingPersisted'] is True
+    assert body['modeEnabled'] is True
+    clear_autopilot_marker(conversation_id, user_id=1)
+
+
+@pytest.mark.api
+def test_arm_endpoint_does_not_claim_missing_conversation(flask_client):
+    resp = flask_client.post(
+        '/api/v1/chat/autopilot/arm',
+        json={'convId': 'conv-goal-missing'},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()['error'] == 'conversation_not_found'
 
 
 @pytest.mark.api

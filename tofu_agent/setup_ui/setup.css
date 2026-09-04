@@ -250,3 +250,17 @@ button:disabled { cursor: wait; opacity: .55; transform: none !important; box-sh
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+
+/* model-routing/v2 editor */
+main { width: min(100% - 36px, 1180px); margin: 0 auto 64px; }
+.hero { display: block; }
+.wide-field { width: 100%; grid-column: 1 / -1; }
+.field textarea {
+  width: 100%; resize: vertical; border: 1.5px solid var(--line);
+  border-radius: 9px; background: #fffdf8; padding: 13px 14px;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.field textarea:focus { outline: 0; box-shadow: 0 0 0 3px rgba(158,220,255,.55); }
+.button-row { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+#message { margin: 0; color: var(--muted); }
+#message.is-error { color: var(--danger); }

@@ -136,6 +136,8 @@ def _set_run_font(run, family: str) -> None:
     edition)."""
     if not family:
         return
+    from lib.design_sys.fonts import canonical_font_family
+    family = canonical_font_family(family, fallback='MiSans')
     from pptx.oxml.ns import qn
     run.font.name = family
     rPr = run._r.get_or_add_rPr()
@@ -515,17 +517,40 @@ def _add_freeform(slide, points_pt, el, deck, *, close: bool = False):
         shp.fill.background()
     _apply_border(shp.line, el.get('border'), deck.theme)
     shp.shadow.inherit = False
-    arrow = el.get('arrow')
+    _apply_arrowheads(shp.line, el.get('arrow'))
+
+
+def _apply_arrowheads(line, arrow) -> None:
+    """Apply PPTD [start, end] markers to one DrawingML line.
+
+    DrawingML calls the start marker ``headEnd`` and the end marker
+    ``tailEnd``. Keeping that counter-intuitive mapping in one place prevents
+    browser/PPTX arrow direction from drifting between shape writers.
+    """
     if arrow and any(arrow):
         from pptx.oxml.ns import qn
         from lxml import etree
-        ln = shp.line._get_or_add_ln()
+        ln = line._get_or_add_ln()
         if arrow[0]:
             he = etree.SubElement(ln, qn('a:headEnd'))
             he.set('type', 'triangle')
         if len(arrow) > 1 and arrow[1]:
             te = etree.SubElement(ln, qn('a:tailEnd'))
             te.set('type', 'triangle')
+
+
+def _add_straight_connector(slide, points_pt, el: dict, deck: Deck) -> None:
+    """Export a two-point line as a native connector with exact endpoints."""
+    from pptx.enum.shapes import MSO_CONNECTOR
+    from pptx.util import Emu
+    (x1, y1), (x2, y2) = points_pt
+    connector = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        Emu(_emu(x1)), Emu(_emu(y1)), Emu(_emu(x2)), Emu(_emu(y2)))
+    connector.name = str(el.get('elementId') or 'line')
+    _apply_border(connector.line, el.get('border'), deck.theme)
+    _apply_arrowheads(connector.line, el.get('arrow'))
+    connector.shadow.inherit = False
 
 
 def _add_line(slide, el: dict, deck: Deck) -> None:
@@ -560,8 +585,11 @@ def _add_line(slide, el: dict, deck: Deck) -> None:
                                 + 3 * mt * t**2 * c2[1] + t**3 * p2[1]))
         pts = sampled
     sx, sy = w / float(vb[0] or w), h / float(vb[1] or h)
-    _add_freeform(slide, [(px * sx + x, py * sy + y) for px, py in pts],
-                  el, deck, close=False)
+    points_pt = [(px * sx + x, py * sy + y) for px, py in pts]
+    if len(points_pt) == 2:
+        _add_straight_connector(slide, points_pt, el, deck)
+    else:
+        _add_freeform(slide, points_pt, el, deck, close=False)
 
 
 # ── Images ────────────────────────────────────────────────
@@ -665,13 +693,8 @@ def _download_media(deck: Deck, url: str) -> str:
     """Remote media → cached local file (export must be offline-reproducible)."""
     try:
         from lib.design_sys._store import store_bytes
-        from lib.http_client import http_get
-        resp = http_get(url, timeout=60)
-        data = getattr(resp, 'content', b'') or b''
-        if getattr(resp, 'status_code', 0) != 200 or not data:
-            logger.warning('[Slides→PPTX] media fetch HTTP %s: %s',
-                           getattr(resp, 'status_code', '?'), url)
-            return ''
+        from lib.slides._media_io import download_bytes_bounded
+        data, _content_type = download_bytes_bounded(url, timeout=60)
         ext = os.path.splitext(url.split('?')[0])[1].lower()
         if ext not in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'):
             ext = '.png'
@@ -878,7 +901,8 @@ def _apply_cell_borders(cell, border, theme) -> None:
 
 _CHART_XL = {
     'column': 'COLUMN_CLUSTERED', 'bar': 'BAR_CLUSTERED',
-    'line': 'LINE', 'pie': 'PIE',
+    'line': 'LINE', 'pie': 'PIE', 'area': 'AREA',
+    'doughnut': 'DOUGHNUT', 'radar': 'RADAR_MARKERS',
 }
 
 
@@ -925,7 +949,7 @@ def _add_chart(slide, el: dict, deck: Deck) -> None:
         chart.legend.font.size = Pt(max(9.0, h * 0.036))
     # De-default discipline: no heavy gridlines; hairline category axis only.
     try:
-        if ctype != 'pie':
+        if ctype not in ('pie', 'doughnut'):
             value_axis = chart.value_axis
             value_axis.has_major_gridlines = False
             value_axis.format.line.color.rgb = _rgb(
@@ -983,7 +1007,8 @@ def _set_background(slide, page: Page, deck: Deck) -> None:
 
 
 def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
-                embed_fonts: bool = True) -> dict:
+                embed_fonts: bool = True,
+                require_embedded_fonts: bool = False) -> dict:
     """Write the deck to a PPTX. Returns a summary dict.
 
     ``embed_fonts`` writes the deck's used typefaces as fntdata parts so the
@@ -993,6 +1018,9 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
     names the real family names regardless, so a machine with the faces
     installed renders them natively either way.
     """
+    if require_embedded_fonts and not embed_fonts:
+        raise ExportError(
+            'require_embedded_fonts cannot be used with embed_fonts=False')
     from pptx import Presentation
     from pptx.util import Emu
 
@@ -1034,8 +1062,12 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
     patched = 0
     if transition == 'fade':
         patched = _patch_fade_transitions(out_path)
-    font_summary = {'typefaces': 0, 'parts': 0, 'bytes': 0, 'glyphs': 0,
-                    'subset': False}
+    font_summary = {
+        'typefaces': 0, 'parts': 0, 'bytes': 0, 'glyphs': 0,
+        'subset': False, 'used_families': [], 'embedded_families': [],
+        'missing_families': [], 'used_slots': [], 'embedded_slots': [],
+        'missing_slots': [],
+    }
     if embed_fonts:
         try:
             font_summary = _embed_fonts(out_path, deck)
@@ -1045,6 +1077,13 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
             # with the faces installed still render them).
             logger.warning('[Slides→PPTX] font embedding failed, shipping '
                            'unembedded: %s', e, exc_info=True)
+            if require_embedded_fonts:
+                raise ExportError(
+                    f'portable font embedding failed: {e}') from e
+    if require_embedded_fonts and font_summary['missing_slots']:
+        raise ExportError(
+            'portable font embedding incomplete; unregistered or unavailable '
+            'family/style slots: ' + ', '.join(font_summary['missing_slots']))
     summary = _verify(out_path)
     summary.update({'output': out_path, 'slides': len(deck.pages),
                     'fadeTransitions': patched,
@@ -1052,7 +1091,14 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
                     'embeddedFontParts': font_summary['parts'],
                     'embeddedFontBytes': font_summary['bytes'],
                     'embeddedGlyphs': font_summary['glyphs'],
-                    'fontSubsetting': font_summary['subset']})
+                    'fontSubsetting': font_summary['subset'],
+                    'fontFamiliesUsed': font_summary['used_families'],
+                    'embeddedFontFamilies': font_summary['embedded_families'],
+                    'unembeddedFontFamilies': font_summary['missing_families'],
+                    'fontStyleSlotsUsed': font_summary['used_slots'],
+                    'embeddedFontStyleSlots': font_summary['embedded_slots'],
+                    'unembeddedFontStyleSlots': font_summary['missing_slots'],
+                    'fontEmbeddingComplete': not font_summary['missing_slots']})
     logger.info('[Slides→PPTX] %s: %d slides, %d fade transitions, %d bytes',
                 out_path, len(deck.pages), patched, summary['bytes'])
     return summary
@@ -1076,7 +1122,8 @@ _FONT_SLOT_TARGETS = {
 def _font_family_name(value) -> str:
     if isinstance(value, dict):
         value = value.get('ea') or value.get('latin')
-    return str(value or 'MiSans')
+    from lib.design_sys.fonts import canonical_font_family
+    return canonical_font_family(value, fallback='MiSans')
 
 
 def _font_slot(*, bold: bool, italic: bool) -> str:
@@ -1364,14 +1411,14 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> dict:
     """
     import lib.design_sys.fonts as _fonts
     usage = _collect_font_usage(deck)
-    by_family = {}
-    for face in _fonts.FONT_REGISTRY:
-        by_family[face.family] = face
-        by_family[face.id] = face
+    used_slots = sorted(
+        f'{family}:{slot}'
+        for family, slots in usage.items()
+        for slot in slots)
     embeds: list = []                    # [(family, {slot: bytes}, metrics)]
     any_subset = False
     for fam in sorted(usage):
-        face = by_family.get(fam)
+        face = _fonts.resolve_font(fam)
         if face is None:
             continue
         slots: dict = {}
@@ -1394,7 +1441,11 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> dict:
             embeds.append((fam, slots, glyph_counts))
     if not embeds:
         return {'typefaces': 0, 'parts': 0, 'bytes': 0, 'glyphs': 0,
-                'subset': False}
+                'subset': False, 'used_families': sorted(usage),
+                'embedded_families': [],
+                'missing_families': sorted(usage),
+                'used_slots': used_slots, 'embedded_slots': [],
+                'missing_slots': used_slots}
 
     with zipfile.ZipFile(pptx_path, 'r') as z:
         items = {i.filename: z.read(i.filename)
@@ -1482,9 +1533,21 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> dict:
                 '%d glyphs / %d bytes: %s', len(embeds), total_parts,
                 total_glyphs, total_bytes,
                 ', '.join(f for f, _slots, _counts in embeds))
+    embedded_families = [family for family, _slots, _counts in embeds]
+    embedded_slots = sorted(
+        f'{family}:{slot}'
+        for family, slots, _counts in embeds
+        for slot in slots)
+    missing_slots = sorted(set(used_slots) - set(embedded_slots))
+    missing_families = sorted({item.rsplit(':', 1)[0]
+                               for item in missing_slots})
     return {'typefaces': len(embeds), 'parts': total_parts,
             'bytes': total_bytes, 'glyphs': total_glyphs,
-            'subset': any_subset}
+            'subset': any_subset, 'used_families': sorted(usage),
+            'embedded_families': embedded_families,
+            'missing_families': missing_families,
+            'used_slots': used_slots, 'embedded_slots': embedded_slots,
+            'missing_slots': missing_slots}
 
 
 # ── Transitions + verification ────────────────────────────

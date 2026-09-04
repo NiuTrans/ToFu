@@ -50,6 +50,40 @@ def _force_reset(st):
 
 @pytest.mark.unit
 class TestStreamRetryStateDurable:
+    def test_route_missing_model_survives_reset_and_is_not_healable(self):
+        from lib.llm_dispatch.api import _StreamRetryState
+        from lib.llm_dispatch._api_stream_state import _cycling_can_ever_serve
+        from lib.llm_errors import ModelRouteMissingError
+
+        route_error = ModelRouteMissingError(
+            '不支持的模型类型(model=moonshotai/kimi-k3)',
+            'moonshotai/kimi-k3')
+        st = _StreamRetryState()
+        st.note_route_missing_model('moonshotai/kimi-k3', route_error)
+        _force_reset(st)
+        st.maybe_reset_exclusions('[t]', 'dispatch_stream')
+
+        assert 'moonshotai/kimi-k3' in (st.eff_exclude_models() or set())
+        assert st.last_err is route_error
+        assert st.first_bad_request_err is None, (
+            'an unserved wire route is routing noise, not the first payload '
+            '400 that should win terminal error selection')
+
+        class _OnlyDeadRoute:
+            def has_capable_slots(self, capability, *, exclude_models=None,
+                                  **kwargs):
+                return 'moonshotai/kimi-k3' not in set(exclude_models or ())
+
+        assert not _cycling_can_ever_serve(
+            _OnlyDeadRoute(), 'text',
+            initial_exclude_models=st._initial_exclude_models,
+            durable_models=st.exclude_models_durable,
+            durable_keys=st.exclude_keys_durable,
+            durable_pairs=st.exclude_pairs_durable,
+            strict_model=True, prefer_model='kimi-k3'), (
+                'route-missing is deterministic for this wire id; the wait '
+                'loop must terminate instead of resurrecting it after 60s')
+
     def test_permission_pair_survives_reset_transient_cleared(self):
         from lib.llm_dispatch.api import _StreamRetryState
         st = _StreamRetryState()

@@ -9,7 +9,6 @@ language detection and model work never delay the chat terminal frame.
 from __future__ import annotations
 
 import threading
-import time
 import uuid
 from typing import Any
 
@@ -42,6 +41,127 @@ def schedule_terminal_turn_translations(task: dict[str, Any]) -> bool:
     return True
 
 
+def schedule_settled_visible_turn_translations(task: dict[str, Any]) -> int:
+    """Eagerly translate each newly settled Flow-visible turn (goal mode).
+
+    Goal mode is NOT a background async swarm — the human watches every
+    worker/virtual-user reply land in the frontend live.  Scheduling
+    translation ONLY from the parent task's terminal event had two failure
+    modes for it:
+
+      1. Every intermediate reply stayed untranslated for the whole run
+         (a goal-mode run lasts minutes), so the reader watched English the
+         entire time even with auto-translate on.
+      2. Any turn the terminal coordinator's candidate snapshot missed — a
+         stale ``_turnVisibleRunTurnIds`` read, a turn not yet settled at
+         snapshot time, or a terminal event whose authority outcome was
+         falsy — stayed untranslated FOREVER (proven 2026-08-29 on conv
+         mtcrt05s turn 7a17881c: English flow_node reply, auto-translate
+         on, zero translation trace in storage or logs).
+
+    The flow turn-persistence boundary calls this after each per-turn sync,
+    so every settled visible CHILD turn owns its own translation trigger.
+    The root turn is deliberately excluded: it settles with the task's own
+    terminal event and remains the terminal coordinator's job (a running
+    root's projection CAS must never race a translation write).
+
+    Ordinary swarm sub-agents never reach this path — they are not
+    conversation attempts and carry no ``_turnId`` — so background
+    sub-agent content stays untranslated and free, exactly as intended.
+    Returns the number of turns this call admitted (spawn or no-op mark).
+    """
+    if not task.get("convId") or not task.get("_turnId"):
+        return 0
+
+    from lib.conv_config import resolve_auto_translate
+
+    if not resolve_auto_translate(task.get("config") or {}):
+        return 0
+
+    root_turn_id = str(task["_turnId"])
+    visible_ids = [
+        str(value)
+        for value in (task.get("_turnVisibleRunTurnIds") or [])
+        if value
+    ]
+    scheduled = task.setdefault("_visibleTurnTranslationsScheduled", set())
+    admitted = 0
+    for turn_id in dict.fromkeys(visible_ids):
+        if turn_id == root_turn_id or turn_id in scheduled:
+            continue
+        outcome = _schedule_one_settled_visible_turn(task, turn_id)
+        if outcome:
+            # Only settled, actionable turns are marked scheduled.  A turn
+            # still running (or unreadable) stays eligible so the next
+            # per-turn sync — or the terminal backstop — retries it.
+            scheduled.add(turn_id)
+            admitted += 1
+    return admitted
+
+
+def _schedule_one_settled_visible_turn(
+    task: dict[str, Any],
+    turn_id: str,
+) -> bool:
+    """Translate (or no-op mark) one settled visible child turn.
+
+    Returns True when the turn was actionable — a whole-turn translation was
+    spawned or the already-target verdict was committed — so the caller can
+    mark it scheduled.  Any failure is logged and non-fatal: the terminal
+    coordinator remains the backstop for everything this declines.
+    """
+    try:
+        from lib.conv_config import resolve_translate_target, target_lang_code
+        from lib.tasks_pkg.manager._registry import task_user_id
+        from lib.turn_lifecycle import get_turn
+
+        conversation_id = str(task["convId"])
+        user_id = task_user_id(task)
+        turn = get_turn(conversation_id, turn_id, user_id=user_id)
+        if turn.get("status") in {"pending", "running", "waiting_for_user"}:
+            return False
+        projection = turn.get("projection") or {}
+        content = str(projection.get("content") or "").strip()
+        if (not content or projection.get("translatedContent")
+                or projection.get("_translateDone")):
+            # Already terminal in translation terms: no work remains, but
+            # treat as admitted so later syncs stop re-reading it.
+            return True
+        target = resolve_translate_target(task.get("config") or {})
+        target_code = target_lang_code(target)
+
+        from lib.translate.skip_policy import (
+            should_skip_automatic_translation,
+        )
+
+        if should_skip_automatic_translation(content, target, target_code):
+            from lib.translate.commit import mark_turn_translation_complete
+
+            mark_turn_translation_complete(
+                conversation_id, turn_id, user_id=user_id)
+            _push_noop(conversation_id, turn_id, "", user_id=user_id)
+            return True
+        _spawn_whole_turn_translation(
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            content=content,
+            target=target,
+            user_id=user_id,
+            message_id="",
+        )
+        logger.info(
+            "[AutoTranslate] scheduled settled flow turn conv=%s turn=%s",
+            conversation_id[:8], turn_id[:8],
+        )
+        return True
+    except Exception as exc:
+        logger.debug(
+            "[AutoTranslate] settled flow turn schedule failed turn=%s: %s",
+            str(turn_id)[:8], exc,
+        )
+        return False
+
+
 def _translate_settled_turns(task: dict[str, Any]) -> None:
     from lib.conv_config import resolve_translate_target, target_lang_code
     from lib.tasks_pkg.manager._registry import task_user_id
@@ -56,6 +176,10 @@ def _translate_settled_turns(task: dict[str, Any]) -> None:
     candidate_ids = [root_turn_id]
     candidate_ids.extend(task.get("_turnVisibleRunTurnIds") or [])
     candidate_ids = list(dict.fromkeys(str(value) for value in candidate_ids if value))
+    # Turns the per-turn persistence boundary already admitted own their
+    # translation trigger; re-spawning here would double the spend.  The
+    # root turn is never in that set (it only settles with this event).
+    eagerly_scheduled = task.get("_visibleTurnTranslationsScheduled") or set()
     incremental_handoff = False
 
     # The terminal round's reasoning closed with the turn: queue it BEFORE
@@ -76,6 +200,8 @@ def _translate_settled_turns(task: dict[str, Any]) -> None:
 
     try:
         for turn_id in candidate_ids:
+            if turn_id != root_turn_id and turn_id in eagerly_scheduled:
+                continue
             try:
                 turn = get_turn(conversation_id, turn_id, user_id=user_id)
             except Exception as exc:
@@ -91,9 +217,11 @@ def _translate_settled_turns(task: dict[str, Any]) -> None:
             if not content or projection.get("translatedContent"):
                 continue
 
-            from lib.text_lang import detect_language
+            from lib.translate.skip_policy import (
+                should_skip_automatic_translation,
+            )
 
-            if detect_language(content, force_fasttext=True).code == target_code:
+            if should_skip_automatic_translation(content, target, target_code):
                 from lib.translate.commit import mark_turn_translation_complete
 
                 mark_turn_translation_complete(
@@ -150,9 +278,10 @@ def _spawn_whole_turn_translation(
         _do_translate,
         _translate_runtime,
     )
+    from lib.translate.execution import submit_translation_task
 
     task_id = uuid.uuid4().hex[:12]
-    task = _translate_runtime.create(
+    _translate_runtime.create(
         user_id=int(user_id),
         task_id=task_id,
         meta={
@@ -165,10 +294,7 @@ def _spawn_whole_turn_translation(
             "textLen": len(content),
         },
     )
-    task.update({
-        "status": "running",
-        "result": None,
-        "error": None,
+    _translate_runtime.update_fields(task_id, fields={
         "model": None,
         "progress": None,
         "convId": conversation_id,
@@ -178,10 +304,10 @@ def _spawn_whole_turn_translation(
         "field": "translatedContent",
         "targetLang": target,
         "textLen": len(content),
-        "created_at": time.time(),
         "completed_at": None,
     })
-    _translate_runtime.spawn(
+    submit_translation_task(
+        _translate_runtime,
         task_id,
         _do_translate,
         task_id,
@@ -191,6 +317,7 @@ def _spawn_whole_turn_translation(
         conversation_id,
         turn_id,
         "translatedContent",
+        running_fields={"model": None, "progress": None},
         user_id=user_id,
         message_id=message_id,
     )
@@ -230,4 +357,7 @@ def _cancel_incremental(task: dict[str, Any]) -> None:
         logger.debug("[AutoTranslate] incremental cancel failed: %s", exc)
 
 
-__all__ = ["schedule_terminal_turn_translations"]
+__all__ = [
+    "schedule_terminal_turn_translations",
+    "schedule_settled_visible_turn_translations",
+]

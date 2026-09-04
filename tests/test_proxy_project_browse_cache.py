@@ -37,6 +37,16 @@ def test_project_browse_cache_is_bounded_and_late_results_cannot_repaint():
         coordinatorModule, coordinatorModule.exports);
       global.createProjectBrowseCoordinator =
         coordinatorModule.exports.createProjectBrowseCoordinator;
+      // This harness targets the coordinator seam; the typed presentation
+      // owner has its own executable behavior contract.
+      global.createProjectDirectoryBrowser = () => ({
+        setFilter(){}, clearFilter(){}, filterValue(){return '';},
+        resetForNavigation(){return false;},
+        render(data) {
+          return data.dirs.map((entry) =>
+            '<div class="folder-item">' + entry.name + '</div>').join('');
+        },
+      });
       const stored = new Map();
       global.sessionStorage = {
         getItem: (key) => stored.has(key) ? stored.get(key) : null,

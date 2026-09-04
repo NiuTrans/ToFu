@@ -202,6 +202,28 @@ def test_no_cache_activity_passes_input_through_unchanged():
     assert split_input_tokens(None) == (0, 0)
 
 
+def test_cache_only_payload_without_prompt_field_has_nonzero_total():
+    """A provider reporting cache tokens but NO prompt field must not total 0.
+
+    The Kimi/sankuai gateway reports the auto-cache hit in ``cached_tokens``
+    while leaving ``prompt_tokens`` / ``input_tokens`` absent (or pinned to 0).
+    Pre-fix, ``split_input_tokens`` returned ``(0, 0)`` there, so the frontend
+    rendered the contradictory "总输入 0 · 缓存读 39.2k" and ``compute_cost``
+    priced the round at a 0-token tier. The total cannot be smaller than the
+    cache tokens it read/wrote, so fall back to that sum.
+    """
+    u = {'completion_tokens': 931, 'cached_tokens': 39200,
+         'cache_read_tokens': 0}
+    assert usage_cache_convention(u) == 'openai'
+    assert split_input_tokens(u) == (0, 39200)
+    cc = compute_cost(u, model_id='kimi-k3')
+    assert cc['totalInputTokens'] == 39200
+    assert cc['inputTokens'] == 0
+    assert cc['cacheReadTokens'] == 39200
+    assert cc['cacheSavingsCny'] > 0, (
+        'a fully-cached round must report cache savings, not ¥0')
+
+
 # ── Defect 2 + 3: the per-round log line ────────────────────────────────
 
 class _Capture(logging.Handler):

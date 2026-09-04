@@ -298,7 +298,7 @@ class TestOpenStream(unittest.TestCase):
         # EgressUnavailable BY DESIGN — there is nothing to assert about the
         # enqueue shape through a path that cannot exist here.
         verdict = egress._probe_host(url)
-        if verdict != 'ok' and not egress._online_egress_agents(''):
+        if verdict != 'ok' and not egress._online_egress_agents('1'):
             pytest.skip(
                 f'egress probe api.anthropic.com → {verdict} and no '
                 'egress-capable desktop agent online — EgressUnavailable is '
@@ -312,11 +312,11 @@ class TestOpenStream(unittest.TestCase):
                         return_value=([(1, 'meta', meta)], False)):
             r = egress.open_stream('https://api.anthropic.com/v1/messages',
                                    headers={'x': 'y'}, body=b'{"m":1}',
-                                   user_id='u1')
+                                   user_id='1')
         args, kwargs = enq.call_args
         self.assertEqual(args[0], 'egress_http_stream')
         self.assertEqual(kwargs['target_agent_id'], 'agent-9')
-        self.assertEqual(kwargs['user_id'], 'u1')
+        self.assertEqual(kwargs['user_id'], '1')
         self.assertEqual(kwargs['ttl'], 1800)
         params = args[1]
         self.assertEqual(params['stream_id'], kwargs['cmd_id'])
@@ -407,15 +407,22 @@ class TestTransportIntegration(unittest.TestCase):
         reader = self._sse_reader(lines)
         db.register_agent('agent-1', {'capabilities': {'egress': True}})
         self.addCleanup(lambda: db._agents.pop('agent-1', None))
-        with mock.patch('lib.desktop.egress.route_request', return_value='agent-1'), \
-             mock.patch('lib.desktop.egress.open_stream', return_value=reader):
+        with mock.patch(
+                'lib.desktop.egress.route_request',
+                return_value='agent-1') as route, \
+             mock.patch(
+                 'lib.desktop.egress.open_stream',
+                 return_value=reader) as open_stream:
             msg, finish, usage = _stream_chat_once(
                 {'model': 'gpt-x', 'messages': [{'role': 'user', 'content': 'hi'}],
                  'stream': True},
-                api_key='k', base_url='https://api.anthropic.com/v1')
+                api_key='k', base_url='https://api.anthropic.com/v1',
+                owner_user_id=41)
         self.assertEqual(msg['content'], 'Hello')
         self.assertEqual(msg.get('role'), 'assistant')
         self.assertEqual(finish, 'stop')
+        self.assertEqual(route.call_args.kwargs['user_id'], '41')
+        self.assertEqual(open_stream.call_args.kwargs['user_id'], '41')
 
     def test_raw_desktop_chunks_share_utf8_and_crlf_framing(self):
         from lib.llm.stream import _stream_chat_once

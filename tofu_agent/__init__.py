@@ -1,8 +1,8 @@
 """Developer-facing Tofu agent runtime.
 
-The public package intentionally contains no database or ChatUI application
-lifecycle.  It composes the same orchestrator used by the full application and
-ships a small Provider setup control plane for the ``tofu-agent`` sidecar.
+The public package intentionally contains no database or full Tofu application
+lifecycle. It composes the same orchestrator and model-routing v2 contract used
+by the full application.
 """
 
 from lib.identity import PERSONAL_USER_ID, PrincipalContext
@@ -15,10 +15,10 @@ from tofu_agent.models import (
     AgentRuntimeError,
     AgentTimeoutError,
     CUSTOM_TOOLS_MODES,
-    ProviderConfig,
+    ModelRoutingConfig,
 )
 from tofu_agent.runtime import AgentExecution, AgentRuntime
-from tofu_agent.provider_store import ProviderSettingsStore
+from tofu_agent.provider_store import ModelRoutingSettingsStore
 
 try:
     from lib.version import __version__
@@ -40,8 +40,8 @@ __all__ = [
     'CUSTOM_TOOLS_MODES',
     'PERSONAL_USER_ID',
     'PrincipalContext',
-    'ProviderConfig',
-    'ProviderSettingsStore',
+    'ModelRoutingConfig',
+    'ModelRoutingSettingsStore',
     '__api_version__',
     '__version__',
 ]

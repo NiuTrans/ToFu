@@ -99,6 +99,36 @@ class TestMessageQueueAPI:
             f'/api/v1/chat/queue/{conversation_id}').get_json()['items']
         assert [item['text'] for item in items] == ['Keep me']
 
+    def test_v1_remove_adapts_linked_turn_pair_cancellation(self, flask_client):
+        from lib.turn_lifecycle import create_turn_pair, list_turns
+
+        conversation_id = _create_conversation()
+        queue_id = f'linked-{time.time_ns()}'
+        queued = create_turn_pair(
+            conversation_id,
+            command_id=f'command-{time.time_ns()}',
+            input_projection={'content': 'Restore this draft'},
+            config={'model': 'test-model'},
+            user_id=USER_ID,
+            queue_binding={
+                'queueId': queue_id,
+                'kind': 'real',
+                'priority': 100,
+                'message': {'text': 'Restore this draft'},
+            },
+        )
+
+        response = flask_client.delete(
+            f'/api/v1/chat/queue/{conversation_id}/{queue_id}')
+
+        assert response.status_code == 200
+        turns = list_turns(conversation_id, user_id=USER_ID)['turns']
+        turn_ids = {turn['turnId'] for turn in turns}
+        assert queued['submittedTurn']['turnId'] not in turn_ids
+        assert queued['turn']['turnId'] not in turn_ids
+        assert flask_client.get(
+            f'/api/v1/chat/queue/{conversation_id}').get_json()['items'] == []
+
     def test_remove_unknown_is_404(self, flask_client):
         conversation_id = _create_conversation()
         response = flask_client.delete(

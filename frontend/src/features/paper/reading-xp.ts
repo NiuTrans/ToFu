@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
 type JsonObject = Record<string, unknown>;
 
@@ -72,7 +73,6 @@ type PaperXPWindow = Window & {
   _activePaperId?: string;
   _i18nLang?: string;
   t?: (key: string) => string;
-  escapeHtml?: (value: unknown) => string;
   renderMarkdown?: (markdown: string) => string;
   formatCny?: (value: number) => string;
   showToast?: (message: string) => void;
@@ -106,14 +106,6 @@ type PaperXPWindow = Window & {
 
 function globals(): PaperXPWindow {
   return featureRegistry as unknown as PaperXPWindow;
-}
-
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (typeof helper === 'function') return helper(value);
-  const span = document.createElement('span');
-  span.textContent = value == null ? '' : String(value);
-  return span.innerHTML;
 }
 
 function translate(key: I18nKey, fallback: string = key): string {

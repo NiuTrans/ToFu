@@ -4,8 +4,16 @@
 list from the per-root modifications journal (conversation-isolated via
 taskId stamping).  Called by ``_finalize_and_emit_done``.
 
-Dependency is one-directional: this module reads ``lib.project_mod`` only,
-never the orchestration loop.
+``note_live_file_change`` is the mid-run complement: the journal writer
+(``lib.project_mod.modifications``) notifies it on every task-stamped record
+so the live task's ``modifiedFileList`` grows DURING the turn and the
+``fileChanges`` projection block renders before settlement.  Settlement
+still rebuilds the authoritative list from the journal and overwrites the
+presentation value.
+
+Dependency is one-directional: this module reads ``lib.project_mod`` and
+(lazily, inside the live stamp) the task registry — never the orchestration
+loop.
 """
 
 from __future__ import annotations
@@ -109,3 +117,63 @@ def derive_round_modified_files(task: dict, project_path: str | None,
     # the "files changed" card headlines this number above the deduped list,
     # and a file edited five times must read as one changed file, not five.
     return file_list, len(file_list), used_ts_fallback
+
+
+def merge_live_file_entry(files: list[dict], entry: dict) -> list[dict]:
+    """Fold ``entry`` into ``files``, last-write-wins by ``(root, path)``.
+
+    Copy-on-write: returns a fresh list so a projection fold iterating the
+    task's previous list mid-stamp never sees a torn sequence.  An
+    already-listed file keeps its first-seen position (the settlement
+    ordering) with the newest action; a new file appends.
+    """
+    key = (entry.get('root', '') or '', entry.get('path', '') or '')
+    merged: list[dict] = []
+    replaced = False
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        if (item.get('root', '') or '', item.get('path', '') or '') == key:
+            if not replaced:
+                merged.append(dict(entry))
+                replaced = True
+            continue
+        merged.append(item)
+    if not replaced:
+        merged.append(dict(entry))
+    return merged
+
+
+def note_live_file_change(task_id: str | None, entry: dict) -> bool:
+    """Fold one journaled file change into the LIVE task's file list.
+
+    Best-effort presentation: never raises, never creates tasks, and refuses
+    terminal/aborted tasks so a late tool callback cannot rewrite a settled
+    list.  Seeds from ``_checkpointModifiedFileList`` so a continued turn
+    shows its full-round list live, not only the current executor's edits.
+    """
+    if not task_id or not isinstance(entry, dict) or not entry.get('path'):
+        return False
+
+    def _apply(task: dict) -> None:
+        existing = task.get('modifiedFileList')
+        if not isinstance(existing, list):
+            existing = task.get('_checkpointModifiedFileList') or []
+        merged = merge_live_file_entry(existing, entry)
+        task['modifiedFileList'] = merged
+        task['modifiedFiles'] = len(merged)
+
+    try:
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        stamped = chat_task_runtime.update_matching(
+            predicate=lambda task: (
+                task.get('id') == task_id
+                and task.get('status') in ('pending', 'running')
+                and not task.get('aborted')
+            ),
+            updater=_apply,
+        )
+        return bool(stamped)
+    except Exception as e:  # presentation only — the journal stays authoritative
+        logger.debug('[Derive] live file-change stamp skipped for %s: %s', task_id, e)
+        return False

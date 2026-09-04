@@ -9,6 +9,7 @@
 const _TRANSLATE_POLL_FAST_DELAY = 1000;
 const _TRANSLATE_POLL_SLOW_DELAY = 2500;
 const _translationTasksByTurn = new Map();
+const _translationPollersByTask = new Map();
 
 const _UILANG_TO_TARGET = {
   zh: 'Chinese', 'zh-cn': 'Chinese', 'zh-tw': 'Chinese',
@@ -164,17 +165,19 @@ async function _settleTranslationTask(conv, turnId, taskId, result) {
   return false;
 }
 
-async function _pollTranslationUntilSettled({
+async function _runTranslationPollLoop({
   conv, turnId, taskId, field, sourceLang, targetLang,
 }) {
+  const taskKey = _translationTaskKey(conv.id, turnId);
   let pollCount = 0;
-  while (_translationTasksByTurn.get(
-    _translationTaskKey(conv.id, turnId),
-  )?.taskId === taskId) {
+  while (_translationTasksByTurn.get(taskKey)?.taskId === taskId) {
     const delay = pollCount < 5
       ? _TRANSLATE_POLL_FAST_DELAY : _TRANSLATE_POLL_SLOW_DELAY;
     pollCount += 1;
     await new Promise((resolve) => setTimeout(resolve, delay));
+    // A terminal push may settle the task while this poller is sleeping.
+    // Re-check ownership before issuing a redundant request.
+    if (_translationTasksByTurn.get(taskKey)?.taskId !== taskId) return;
     const result = await _pollTranslateTask(taskId);
     if (result?.status === 'running') {
       _setTranslationActivity(
@@ -189,6 +192,24 @@ async function _pollTranslationUntilSettled({
     await _settleTranslationTask(conv, turnId, taskId, result);
     return;
   }
+}
+
+function _pollTranslationUntilSettled(options) {
+  const taskId = options?.taskId;
+  const existing = _translationPollersByTask.get(taskId);
+  if (existing) return existing;
+
+  const poller = _runTranslationPollLoop(options);
+  _translationPollersByTask.set(taskId, poller);
+  const release = () => {
+    if (_translationPollersByTask.get(taskId) === poller) {
+      _translationPollersByTask.delete(taskId);
+    }
+  };
+  // Attach both handlers so cleanup itself cannot create an unhandled
+  // rejection. The original poller remains the caller-visible authority.
+  void poller.then(release, release);
+  return poller;
 }
 
 async function _markTranslationSkipped(conv, turn, targetLanguage) {
@@ -237,8 +258,8 @@ async function _runTranslationPipeline(conv, turnId, options) {
     return;
   }
 
-  if (!options?.existingTaskId && typeof translateClaim === 'function'
-      && !translateClaim(conv.id, turnId)) return;
+  if (!options?.existingTaskId
+      && !TRANSLATION_CLAIMS.claim(conv.id, turnId)) return;
 
   try {
     const taskId = options?.existingTaskId || await _startTranslateTask(
@@ -268,9 +289,7 @@ async function _runTranslationPipeline(conv, turnId, options) {
     });
     if (typeof showToast === 'function') showToast(messageText, 'error');
   } finally {
-    if (typeof translateRelease === 'function') {
-      translateRelease(conv.id, turnId);
-    }
+    TRANSLATION_CLAIMS.release(conv.id, turnId);
   }
 }
 
@@ -331,10 +350,20 @@ async function _resumePendingTranslations(convId) {
         return;
       }
       if (frame.status === 'error' || frame.type === 'error') {
+        _translationTasksByTurn.delete(
+          _translationTaskKey(frame.convId, frame.turnId),
+        );
         const error = _translationErrorText(frame);
         _setTranslationActivity(frame.convId, frame.turnId, {
           status: 'failed', message: error, error,
         });
+        return;
+      }
+      if (frame.status === 'aborted' || frame.type === 'aborted') {
+        _translationTasksByTurn.delete(
+          _translationTaskKey(frame.convId, frame.turnId),
+        );
+        _setTranslationActivity(frame.convId, frame.turnId, null);
       }
     } catch (error) {
       console.debug(

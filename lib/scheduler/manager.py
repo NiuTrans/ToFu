@@ -97,6 +97,13 @@ def _application_managed_storage_backups_enabled() -> bool:
         return False
 
 
+def _storage_backup_timeout_seconds() -> int:
+    """Resolve one launch-probed, explicitly bounded full-backup deadline."""
+    from runtime_guards import storage_backup_timeout_seconds
+
+    return storage_backup_timeout_seconds()
+
+
 def _run_daily_report_backfill(task: dict) -> tuple[bool, str]:
     """Execute the typed report action with only its row owner's authority."""
     try:
@@ -786,7 +793,6 @@ class ScheduledTaskManager:
 
     def _check_and_run_due_tasks(self):
         """Check all tasks and run any that are due."""
-        process_principal = self._background_principal()
         now = datetime.now()
         tasks = _scheduler_client().query(
             "scheduler.task.list_all", {"limit": 1000, "enabled_only": True}
@@ -845,47 +851,6 @@ class ScheduledTaskManager:
                 continue
 
             self._dispatch_claimed_task(task)
-
-        # ── Project Brain heartbeat (Pillar #5 sweep) ──
-        #   After the due-task pass, dispatch any genuinely-pickable board epics
-        #   on idle projects — this is what STARTS work when nothing just
-        #   completed and no human is typing (incl. the cold-start first epic).
-        #   Reuses THIS existing 30s tick (no new thread/global); idempotent via
-        #   claim-on-dispatch + busy-guard; best-effort so a sweep failure can
-        #   never break the scheduler loop.
-        personal_owner_user_id = process_principal.owner_user_id
-        if personal_owner_user_id is not None:
-            try:
-                from lib.conversations.project_dispatch import (
-                    sweep_all_active_projects,
-                )
-
-                sweep_all_active_projects(user_id=personal_owner_user_id)
-            except Exception as e:
-                logger.warning(
-                    "[Scheduler] project-brain dispatch sweep skipped: %s", e)
-
-        # ── Peer-message idle-drain (Pillar #6 Symptom-A fix) ──
-        #   The workflow sweep above only reconciles KIND_WORKFLOW kickoffs. A
-        #   KIND_PEER_MSG row that landed in an IDLE, non-board conversation is
-        #   drained by nothing in steady state — it would sit in the queue
-        #   widget forever, shown but never rendered as a turn. This drains one
-        #   such row per idle conv via the same dispatch_next_queued seam, so an
-        #   advisory peer note to an idle sibling wakes a fresh turn (rendered
-        #   with the .peer-msg-banner). Global scan (the queue has no project
-        #   column; the per-(sender,target) send-time rate cap already bounds
-        #   how many peer rows can exist). Best-effort.
-        # TODO(enterprise): authorize the global scan with a queue:dispatch
-        # system principal. Until then an ownerless distributed scheduler must
-        # fail closed instead of acquiring ambient cross-owner authority.
-        if personal_owner_user_id is not None:
-            try:
-                from lib.message_queue import drain_idle_peer_messages
-
-                drain_idle_peer_messages()
-            except Exception as e:
-                logger.warning(
-                    "[Scheduler] peer-message idle-drain skipped: %s", e)
 
     def _run_and_record(self, task):
         """Run task and record result in DB."""
@@ -1017,7 +982,10 @@ class ScheduledTaskManager:
                 outcome.llm_agreed,
             )
         else:
-            should_act, reason, tokens_used = poll_decision(task)
+            should_act, reason, tokens_used = poll_decision(
+                task,
+                status_snapshot=status_snapshot,
+            )
             if kind == "hybrid":
                 # LLM authoritative; reconcile the predicate alongside so the
                 # condition can auto-promote to `code` after enough agreements.
@@ -1176,7 +1144,7 @@ class ScheduledTaskManager:
                 description="Nightly verified Sidecar snapshot with a durable "
                 "checksum manifest under data/backups/. "
                 "Auto-registered by lib.scheduler.manager.",
-                max_runtime=1800,
+                max_runtime=_storage_backup_timeout_seconds(),
             )
             if created:
                 logger.info(

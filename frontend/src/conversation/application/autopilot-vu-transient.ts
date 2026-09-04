@@ -183,6 +183,7 @@ export function createAutopilotVuTransientTurn(
   projection.timestamp = timestamp;
   return {
     turnId: autopilotVuTransientTurnId(input.vuMsgId),
+    presentationId: autopilotVuTransientTurnId(input.vuMsgId),
     conversationId: input.conversationId,
     laneId: 'main',
     parentTurnId: null,
@@ -246,6 +247,84 @@ function phasePresentation(
   });
 }
 
+const TOOL_PROGRESS_BOUNDED_CHARS = 100_000;
+const TOOL_PROGRESS_TRUNCATION_MARKER = '\n\n… [live output truncated] …\n\n';
+const TOOL_PROGRESS_TRUNCATION_TAIL_RE =
+  /… \[live output truncated[^\]]*\] …\n\n([\s\S]*)$/;
+
+/** Recover the live tail after a bounded truncation marker (frontend or
+ *  backend spelling). Progress is presentation-only, so once a call exceeds
+ *  the bound we keep only a sliding tail — never the unbounded transcript. */
+function progressTail(value: unknown): string {
+  const existing = text(value);
+  const match = TOOL_PROGRESS_TRUNCATION_TAIL_RE.exec(existing);
+  return match ? match[1] : existing;
+}
+
+function progressStatus(
+  truncated: boolean,
+  spooling: boolean,
+  terminalReason: string,
+): string {
+  if (terminalReason === 'cancelling') return 'cancelling';
+  if (terminalReason === 'cancelled' || terminalReason === 'cancelled-partial') {
+    return 'cancelled-partial';
+  }
+  if (truncated) return 'overflow-loss';
+  if (spooling) return 'spooling';
+  return 'running';
+}
+
+/** Apply one ``tool_progress`` frame to its round with per-call seq
+ *  dedupe/out-of-order rejection and a bounded reconnect-safe buffer.
+ *
+ *  ``seq`` is the versioned per-call monotonic sequence (1-based) declared by
+ *  ``tofu.tool-progress/v1``. A frame whose seq does not advance the round's
+ *  high-water mark is a duplicate or out-of-order replay and is dropped. A
+ *  legacy frame without seq is applied unconditionally (defensive parity with
+ *  the retained report stream). The final tool result remains authoritative;
+ *  these fields only describe the presentation side-channel. */
+function applyToolProgress(
+  round: UnknownRecord,
+  inner: UnknownRecord,
+): UnknownRecord {
+  const seq = number(inner.seq);
+  const lastSeq = number(round._partialOutputSeq) ?? 0;
+  if (seq != null && seq <= lastSeq) return round;
+
+  const next: UnknownRecord = { ...round };
+  const chunk = text(inner.chunk);
+  const existingTotal = number(next._partialOutputTotalChars)
+    ?? progressTail(next._partialOutput).length;
+  const totalChars = existingTotal + chunk.length;
+  const truncated = next._partialOutputTruncated === true
+    || inner.truncated === true
+    || totalChars > TOOL_PROGRESS_BOUNDED_CHARS;
+  const spooling = inner.spooling === true;
+  const terminalReason = text(inner.terminalReason);
+
+  if (!truncated) {
+    next._partialOutput = text(next._partialOutput) + chunk;
+  } else {
+    const suffixLimit = TOOL_PROGRESS_BOUNDED_CHARS
+      - Math.floor(TOOL_PROGRESS_BOUNDED_CHARS * 3 / 4);
+    const tail = (progressTail(next._partialOutput) + chunk).slice(-suffixLimit);
+    next._partialOutput = TOOL_PROGRESS_TRUNCATION_MARKER + tail;
+  }
+  next._partialOutputTotalChars = totalChars;
+  next._partialOutputTruncated = truncated;
+  next._partialOutputStatus = progressStatus(truncated, spooling, terminalReason);
+  if (seq != null) next._partialOutputSeq = seq;
+  if (inner.contractVersion != null) {
+    next._partialOutputContractVersion = text(inner.contractVersion);
+  }
+  if (inner.stream != null) next._partialOutputStream = text(inner.stream);
+  if (spooling) next._partialOutputSpooling = true;
+  if (terminalReason) next._partialOutputTerminalReason = terminalReason;
+  if (inner.grepSearchIntercepted === true) next.grepSearchIntercepted = true;
+  return next;
+}
+
 export function reduceAutopilotVuTransientTurn(
   current: TransientTurnRecord,
   event: AutopilotVuLifecycleEvent,
@@ -294,6 +373,8 @@ export function reduceAutopilotVuTransientTurn(
       toolName: text(inner.toolName),
       toolCallId: text(inner.toolCallId),
       toolArgs: inner.toolArgs ?? null,
+      attentionKind: text(inner.attentionKind),
+      parentToolCallId: text(inner.parentToolCallId),
       llmRound: number(inner.llmRound) ?? null,
     };
     const match = matchingToolRoundIndex(rounds, inner);
@@ -321,19 +402,27 @@ export function reduceAutopilotVuTransientTurn(
             if (Object.prototype.hasOwnProperty.call(inner, key)) next[key] = inner[key];
           }
         } else if (type === 'tool_progress') {
-          next._partialOutput = text(next._partialOutput) + text(inner.chunk);
-          if (inner.grepSearchIntercepted === true) next.grepSearchIntercepted = true;
+          return applyToolProgress(next, inner);
         } else if (type === 'tool_complete') {
           next.toolContent = inner.toolContent ?? null;
+          if (inner.toolResultEvidence != null) {
+            next.toolResultEvidence = inner.toolResultEvidence;
+          }
           next.status = text(inner.status) || 'done';
           if (inner.toolTokens != null) next.toolTokens = inner.toolTokens;
           for (const key of ['rejection', '_rejected']) {
             if (Object.prototype.hasOwnProperty.call(inner, key)) next[key] = inner[key];
           }
         } else {
+          if (inner.compactedContent != null) {
+            next.toolContent = inner.compactedContent;
+          }
+          if (inner.toolResultEvidence != null) {
+            next.toolResultEvidence = inner.toolResultEvidence;
+          }
           next.compactionLayer = text(inner.compactionLayer)
             || text(next.compactionLayer) || 'L1';
-          for (const key of ['compactedFromChars', 'compactedToChars', 'toolTokens']) {
+          for (const key of ['compactedFromChars', 'compactedToChars', 'toolTokens', 'rawToolTokens']) {
             if (inner[key] != null) next[key] = inner[key];
           }
         }

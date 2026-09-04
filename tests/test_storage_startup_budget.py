@@ -14,13 +14,16 @@ pytestmark = pytest.mark.unit
 
 
 def test_ordinary_storage_keeps_existing_short_startup_budgets(monkeypatch):
-    environment = {'TOFU_STORAGE_FASTPATH': 'off'}
+    environment = {
+        'TOFU_STORAGE_FASTPATH': 'off',
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': '1800',
+    }
 
     assert storage_startup_timeout(environment) == 30.0
-    assert lifespan_startup_timeout(environment) == 60.0
+    assert lifespan_startup_timeout(environment) == 1860.0
     config = build_hypercorn_config(
         '127.0.0.1', 8000, keep_alive_timeout=5, environ=environment)
-    assert config.startup_timeout == 60.0
+    assert config.startup_timeout == 1860.0
 
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
     assert StorageSupervisor()._startup_timeout == 30.0
@@ -30,13 +33,14 @@ def test_fastpath_seed_budget_reaches_sidecar_and_outer_lifespan(monkeypatch):
     environment = {
         'TOFU_STORAGE_FASTPATH': 'auto',
         'TOFU_STORAGE_FASTPATH_STARTUP_TIMEOUT_S': '240',
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': '1800',
     }
 
     assert storage_startup_timeout(environment) == 240.0
-    assert lifespan_startup_timeout(environment) == 300.0
+    assert lifespan_startup_timeout(environment) == 1860.0
     config = build_hypercorn_config(
         '127.0.0.1', 8000, keep_alive_timeout=5, environ=environment)
-    assert config.startup_timeout == 300.0
+    assert config.startup_timeout == 1860.0
 
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'auto')
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH_STARTUP_TIMEOUT_S', '240')
@@ -52,8 +56,22 @@ def test_fastpath_seed_budget_has_lean_fallback_and_hard_ceiling():
     excessive = {
         'TOFU_STORAGE_FASTPATH': 'auto',
         'TOFU_STORAGE_FASTPATH_STARTUP_TIMEOUT_S': '999999',
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': '1800',
     }
 
     assert storage_startup_timeout(malformed) == 900.0
     assert storage_startup_timeout(excessive) == 3600.0
     assert lifespan_startup_timeout(excessive) == 3660.0
+
+
+def test_backup_deadline_outlives_hypercorn_lifespan_cancellation():
+    environment = {
+        'TOFU_STORAGE_FASTPATH': 'auto',
+        'TOFU_STORAGE_FASTPATH_STARTUP_TIMEOUT_S': '900',
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': '21600',
+    }
+
+    assert lifespan_startup_timeout(environment) == 21660.0
+    config = build_hypercorn_config(
+        '127.0.0.1', 8000, keep_alive_timeout=5, environ=environment)
+    assert config.startup_timeout == 21660.0

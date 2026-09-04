@@ -4,7 +4,7 @@
     "scripts/activate_sqlite_cutover.py": 2,
     "scripts/migrate_pg_to_sqlite.py": 37,
     "scripts/migrate_sqlite_to_postgres.py": 24,
-    "scripts/storage_deep_clean.py": 16
+    "scripts/storage_deep_clean.py": 43
   },
-  "total": 79
+  "total": 106
 }

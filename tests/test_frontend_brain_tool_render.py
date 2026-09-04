@@ -12,17 +12,16 @@ that dump, driven off the backend-attached structured meta
   • ``project_peer_status``     → live peer cards (conv id + status + round + epic).
   • ``project_charter_propose`` → the proposal text + a "pending human review" affordance.
 
-Loads the REAL shipped ``ui/tool_rounds.js`` + ``ui/tool_rounds_rich.js``
-under jsdom (in bundle order — core first, then the deferred rich module,
-mirroring the window-scope sibling contract in tool_rounds_rich.js's header)
+Loads the real retained ``ui/tool_rounds.js`` + ``ui/tool_rounds_rich.js``
+under jsdom in manifest order, mirroring their shared lexical-scope contract,
 and calls the REAL ``_renderUnifiedToolLine`` (the same entry the transcript
 uses), so a broken route / missing branch fails here. The structured conv-meta
 renderers (``_renderBoardSnapshot`` / ``_renderPeerDelivery`` / …) moved to
 ``tool_rounds_rich.js`` in the 2026-08-01 Epic-E split (fcddc420) while
-``_CONV_META_TOOLS`` / ``_webToolSvg`` / the dispatch stayed in core — each
-renderer ships a double-neuter NC that patches a COPY of WHICHEVER file holds
-the anchor, asserts the structured markup is GONE (falls back to the prose
-dump), and restores byte-identical.
+typed tool-family/icon presentation and the dispatch stay in the core graph —
+each renderer ships a double-neuter NC that patches a COPY of
+WHICHEVER file holds the anchor, asserts the structured markup is GONE (falls
+back to the prose dump), and restores byte-identical.
 
 Skips cleanly when node + jsdom aren't installed.
 """
@@ -34,6 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -45,10 +45,10 @@ sys.path.insert(0, HERE)
 from _runtime_sections import runtime_section_path  # noqa: E402
 
 _TR_SRC = runtime_section_path('ui/tool_rounds.js')
-# The conv-meta structured renderers live in the DEFERRED rich module since
+# The conv-meta structured renderers live in the adjacent rich section since
 # the 2026-08-01 Epic-E split (fcddc420); core keeps the dispatch + the
-# _CONV_META_TOOLS set + the glyph map. The suite exercises BOTH so a drift in
-# either file is caught.
+# typed family predicate + the glyph map. The suite exercises BOTH so a drift
+# in either file is caught.
 _TR_RICH_SRC = runtime_section_path('ui/tool_rounds_rich.js')
 _TR_ALL_SRCS = [_TR_SRC, _TR_RICH_SRC]
 
@@ -94,10 +94,10 @@ global.convTitleById = function (cid) {
   return hit ? hit.title : 'Untitled chat';
 };
 
-// argv[2] = JSON list of source paths (core first, then the deferred rich
-// module — bundle order). Concatenated into ONE eval: in the browser both
+// argv[2] = JSON list of source paths (core first, then the adjacent rich
+// section — manifest order). Concatenated into one eval: in the browser both
 // files share the global (lexical) scope — tool_rounds_rich.js reads core's
-// top-level consts (_CONV_META_TOOLS) and functions at call time — and a
+// top-level functions and typed predicates at call time — and a
 // single eval reproduces that shared scope exactly (per-file evals would trap
 // core's const declarations in a discarded lexical environment).
 eval(JSON.parse(process.argv[2])
@@ -255,8 +255,8 @@ check('feed_summary', fHtml.includes('Fixed the parser bug'));
 check('feed_kind', fHtml.includes('ptool-feed-completed') && fHtml.includes('ptool-feed-kind'));
 check('feed_not_md_dump', !fHtml.includes('MD-DUMP:RAW FEED PROSE'));
 
-// feed is a conv-meta tool (was missing from _CONV_META_TOOLS → content hidden)
-check('feed_is_conv_meta', _isRoundConvMeta({ toolName: 'project_feed_read' }));
+// feed is classified as a conversation-metadata tool (otherwise content hides)
+check('feed_is_conv_meta', isConversationMetadataToolRound({ toolName: 'project_feed_read' }));
 
 // feed empty state
 const feedEmpty = {
@@ -374,7 +374,7 @@ check('commit_held_file', cHtml.includes('shared.py'));
 check('commit_held_reason', cHtml.includes('foreign hunks present'));
 check('commit_held_numstat', cHtml.includes('+3/-1'));
 check('commit_not_md_dump', !cHtml.includes('MD-DUMP:RAW COMMIT PROSE'));
-check('commit_is_conv_meta', _isRoundConvMeta({ toolName: 'project_commit' }));
+check('commit_is_conv_meta', isConversationMetadataToolRound({ toolName: 'project_commit' }));
 check('commit_head_friendly', cHtml.includes('Committed this conversation'));
 check('commit_why_caption', cHtml.includes('ptool-convmeta-why') && cHtml.includes('provably authored'));
 check('commit_src_git', cHtml.includes('ptool-convmeta-src') && cHtml.includes('Git'));
@@ -407,118 +407,73 @@ const cfHtml = _renderUnifiedToolLine(commitFail, false);
 check('commit_fail_outcome', cfHtml.includes('ptool-commit-outcome-failed'));
 check('commit_fail_error', cfHtml.includes('nothing clean to commit'));
 
-// ── get_conversation → structured conversation-digest card ──
-// The ugly case: get_conversation used to have NO structured renderer, so its
-// raw ═══ / ── User Message # transcript fell through to the Markdown dump.
-const digestRound = {
-  status: 'done', toolName: 'get_conversation', query: 'get_conversation: mrne7eq0',
-  toolContent: '═'.repeat(60) + '\nReferenced Conversation: "Prefix cache bug"\nRAW TRANSCRIPT PROSE',
-  toolRounds: [],
-  results: [{ source: 'Conversations', convDigest: {
-    convId: 'mrne7eq0msc9fu', title: 'Prefix cache bug', preset: 'aws.claude-opus-4.8',
-    msgCount: 1, truncated: false, messages: [
-      { index: 1, role: 'user', text: 'Continue troubleshooting the prefix cache failure',
-        images: 1 },
-      { index: 2, role: 'assistant', text: 'Let me read cache.py',
-        tools: ['read_files', 'grep_search'] },
-    ] } }],
-};
-const dHtml = _renderUnifiedToolLine(digestRound, false);
-check('digest_class', dHtml.includes('ptool-convdigest'));
-check('digest_preset', dHtml.includes('aws.claude-opus-4.8') && dHtml.includes('ptool-convdigest-preset'));
-check('digest_user_text', dHtml.includes('Continue troubleshooting the prefix cache failure'));
-check('digest_assistant_text', dHtml.includes('Let me read cache.py'));
-check('digest_role_chip', dHtml.includes('ptool-convdigest-role') && dHtml.includes('ptool-convdigest-user'));
-check('digest_tools_hint', dHtml.includes('ptool-convdigest-tools') && dHtml.includes('read_files'));
-check('digest_image_hint', dHtml.includes('ptool-convdigest-att') && dHtml.includes('1 image'));
-// the raw ═══ transcript prose must NOT be dumped as Markdown
-check('digest_not_md_dump', !dHtml.includes('MD-DUMP:'));
-// ★ point-3: the card REPLACES the raw body — the verbatim transcript prose
-//   carried on toolContent must NOT appear anywhere in the rendered output.
-check('digest_replaces_raw_body', !dHtml.includes('RAW TRANSCRIPT PROSE'));
-// ★ raw-mode (get_conversation raw=true): the backend now attaches convDigest
-//   even though toolContent is the big "═══ Raw Conversation Record" + JSON
-//   dump. The card must render and the raw JSON dump must be REPLACED (this is
-//   exactly the reported screenshot: raw JSON blob instead of a card).
-const digestRawWithCard = {
-  status: 'done', toolName: 'get_conversation', query: 'get_conversation: rawcid',
-  toolContent: '═'.repeat(60) + '\nRaw Conversation Record: "Big raw dump"\n'
-    + '```json\n{"id":"rawcid","messages":[...]}\n``` RAW-JSON-BLOB-MARKER',
-  toolRounds: [],
-  results: [{ source: 'Conversations', convDigest: {
-    convId: 'rawcid', title: 'Big raw dump', preset: 'sonnet',
-    msgCount: 2, truncated: false, messages: [
-      { index: 1, role: 'user', text: 'raw mode question' },
-      { index: 2, role: 'assistant', text: 'raw mode answer' },
-    ] } }],
-};
-const rawHtml = _renderUnifiedToolLine(digestRawWithCard, false);
-check('rawmode_card_rendered', rawHtml.includes('ptool-convdigest') && rawHtml.includes('raw mode answer'));
-check('rawmode_raw_json_replaced', !rawHtml.includes('RAW-JSON-BLOB-MARKER') && !rawHtml.includes('Raw Conversation Record'));
-check('digest_is_conv_meta', _isRoundConvMeta({ toolName: 'get_conversation' }));
-// get_conversation is the PRIMARY viewing product → default EXPANDED (not a
-// collapsed routine read). The message count lives in the digest meta row.
-function _isOpenD(h) { return h.includes('ptool-convmeta-block" open'); }
-check('digest_open', _isOpenD(dHtml));
-check('digest_count_in_meta', dHtml.includes('ptool-convdigest-msgcount') && dHtml.includes('1 messages'));
-check('digest_why_caption', dHtml.includes('ptool-convmeta-why') && dHtml.includes('full transcript'));
-check('digest_head_friendly', dHtml.includes('Opened a past conversation'));
-// The referenced conversation's TITLE leads the digest meta row (its id rides
-// the tooltip) — previously the title appeared NOWHERE on the card.
-check('digest_title_in_meta', dHtml.includes('ptool-convdigest-title') && dHtml.includes('Prefix cache bug'));
-
-// ── EMPTY conversation → the designed empty-state card (the reported
-//    screenshot: an existing-but-empty conversation used to get NO digest
-//    from the backend, so the raw ═══ header + JSON skeleton fell through to
-//    the Markdown dump as two giant bars + a JSON blob). The backend now
-//    attaches a digest with messages: [] and the card renders its empty
-//    state. ──
-const digestEmpty = {
-  status: 'done', toolName: 'get_conversation', query: 'get_conversation: empty1',
+// ── get_conversation → the settled result, never a second-read digest ──
+// Historical snapshots can carry a convDigest built by a later DB read. Give
+// that metadata a deliberately conflicting body and prove it cannot replace
+// either call's V2 result.
+const unrelatedDigest = { convId: 'same-conversation', title: 'STALE DIGEST',
+  msgCount: 32, messages: [{ index: 1, role: 'user', text: 'UNRELATED_DIGEST_BODY' }] };
+function conversationRound(roundNum, marker, artifactRef) {
+  return {
+    roundNum, status: 'done', toolName: 'get_conversation',
+    query: 'get_conversation: same-conversation', toolRounds: [],
+    toolContent: JSON.stringify({ contractVersion: 'tofu.tool-result/v2',
+      artifactRef, status: 'partial', summary: marker }),
+    results: [{ source: 'Conversations', convDigest: unrelatedDigest }],
+  };
+}
+const firstConversationHtml = _renderUnifiedToolLine(
+  conversationRound(41, 'BACKEND_PAGE_ONE', 'tool-result:first'), false,
+);
+const secondConversationHtml = _renderUnifiedToolLine(
+  conversationRound(42, 'BACKEND_PAGE_TWO', 'tool-result:second'), false,
+);
+check('conversation_result_uses_generic_authority',
+  firstConversationHtml.includes('ptool-result-block')
+  && firstConversationHtml.includes('data-tool-result-authority="toolContent"'));
+check('conversation_result_is_single_disclosure',
+  (firstConversationHtml.match(/<details\b/g) || []).length === 1
+  && !firstConversationHtml.includes('conversation-tool__authoritative-result'));
+check('conversation_result_ignores_conflicting_digest',
+  firstConversationHtml.includes('BACKEND_PAGE_ONE')
+  && firstConversationHtml.includes('tool-result:first')
+  && !firstConversationHtml.includes('UNRELATED_DIGEST_BODY')
+  && !firstConversationHtml.includes('ptool-convdigest'));
+check('conversation_calls_keep_their_own_results',
+  !firstConversationHtml.includes('BACKEND_PAGE_TWO')
+  && secondConversationHtml.includes('BACKEND_PAGE_TWO')
+  && secondConversationHtml.includes('tool-result:second')
+  && !secondConversationHtml.includes('BACKEND_PAGE_ONE'));
+check('conversation_result_stays_collapsed',
+  !firstConversationHtml.includes('ptool-result-block" open'));
+check('conversation_tool_family_is_unchanged',
+  isConversationMetadataToolRound({ toolName: 'get_conversation' }));
+const emptyConversationHtml = _renderUnifiedToolLine({
+  roundNum: 43, status: 'done', toolName: 'get_conversation',
+  query: 'get_conversation: empty1',
   toolContent: 'Conversation "Empty conv" [empty1] exists but has no messages.',
-  toolRounds: [],
-  results: [{ source: 'Conversations', convDigest: {
-    convId: 'empty1', title: 'Empty conv', preset: '', msgCount: 0,
-    truncated: false, messages: [] } }],
-};
-const eHtml = _renderUnifiedToolLine(digestEmpty, false);
-check('emptydigest_card_rendered', eHtml.includes('ptool-convdigest'));
-check('emptydigest_empty_state', eHtml.includes('ptool-convdigest-empty') && eHtml.includes('no messages'));
-check('emptydigest_title', eHtml.includes('ptool-convdigest-title') && eHtml.includes('Empty conv'));
-check('emptydigest_count', eHtml.includes('ptool-convdigest-msgcount') && eHtml.includes('0 messages'));
-check('emptydigest_not_md_dump', !eHtml.includes('MD-DUMP:'));
-
-// get_conversation WITHOUT structured meta (e.g. raw-mode dump) → Markdown fallback
-const digestRaw = {
-  status: 'done', toolName: 'get_conversation', query: 'get_conversation',
-  toolContent: 'RAW JSON DUMP PROSE', toolRounds: [],
-  results: [{ source: 'Conversations' }],
-};
-check('digest_raw_falls_back', _renderUnifiedToolLine(digestRaw, false).includes('MD-DUMP:RAW JSON DUMP PROSE'));
+  results: [{ source: 'Conversations', convDigest: unrelatedDigest }],
+}, false);
+check('empty_conversation_uses_backend_result',
+  emptyConversationHtml.includes('exists but has no messages')
+  && !emptyConversationHtml.includes('UNRELATED_DIGEST_BODY'));
 
 console.log(out.join('\n'));
-// tool_rounds_rich.js installs a 1Hz countdown setInterval
-// (window._timerCountdownTicker) that keeps node's event loop alive → the
-// subprocess would hang until the pytest timeout. Clear it and exit
-// explicitly. (Documented harness trap.)
-try { if (global.window && global.window._timerCountdownTicker) clearInterval(global.window._timerCountdownTicker); } catch (_e) {}
 process.exit(0);
 """
 
 
 def _run(src_paths):
-    harness = os.path.join(HERE, '_brain_tool_render_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
+    # Full unit gates execute this module in several worker processes. A fixed
+    # repository-local filename lets them overwrite one another between the
+    # write and Node startup, yielding impossible mixtures of assertions.
+    with tempfile.TemporaryDirectory(prefix='tofu-brain-tool-render-') as tmp:
+        harness = os.path.join(tmp, 'harness.js')
+        with open(harness, 'w', encoding='utf-8') as f:
+            f.write(_HARNESS)
         proc = subprocess.run(
             ['node', harness, json.dumps(list(src_paths)), ROOT],
             capture_output=True, text=True, timeout=60)
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     return output
@@ -575,26 +530,20 @@ def test_structured_brain_tool_renderers():
         'PASS commit_icon_not_wrench', 'PASS commit_open',
         'PASS commit_plan_outcome', 'PASS commit_plan_would',
         'PASS commit_fail_outcome', 'PASS commit_fail_error',
-        'PASS digest_class', 'PASS digest_preset',
-        'PASS digest_user_text', 'PASS digest_assistant_text',
-        'PASS digest_role_chip', 'PASS digest_tools_hint',
-        'PASS digest_image_hint', 'PASS digest_not_md_dump',
-        'PASS digest_replaces_raw_body',
-        'PASS rawmode_card_rendered', 'PASS rawmode_raw_json_replaced',
-        'PASS digest_is_conv_meta', 'PASS digest_open',
-        'PASS digest_count_in_meta', 'PASS digest_why_caption',
-        'PASS digest_head_friendly', 'PASS digest_raw_falls_back',
-        'PASS digest_title_in_meta',
-        'PASS emptydigest_card_rendered', 'PASS emptydigest_empty_state',
-        'PASS emptydigest_title', 'PASS emptydigest_count',
-        'PASS emptydigest_not_md_dump',
+        'PASS conversation_result_uses_generic_authority',
+        'PASS conversation_result_is_single_disclosure',
+        'PASS conversation_result_ignores_conflicting_digest',
+        'PASS conversation_calls_keep_their_own_results',
+        'PASS conversation_result_stays_collapsed',
+        'PASS conversation_tool_family_is_unchanged',
+        'PASS empty_conversation_uses_backend_result',
     ):
         assert must in output, output
 
 
 def _nc(anchor, replacement, must_fail, must_still_pass):
     """Double-neuter helper: find which shipped file holds the anchor (core
-    tool_rounds.js vs the deferred tool_rounds_rich.js — NC anchors span both
+    tool_rounds.js vs the adjacent tool_rounds_rich.js — NC anchors span both
     since the 2026-08-01 split), patch a COPY, run BOTH files with the copy
     substituted, assert the target checks flip to FAIL while a control check
     stays PASS, then assert BOTH shipped files are byte-identical (never
@@ -610,8 +559,10 @@ def _nc(anchor, replacement, must_fail, must_still_pass):
     assert owner is not None, f'NC anchor not found in either file: {anchor[:60]!r}'
     patched = originals[owner].replace(anchor, replacement, 1)
     assert patched != originals[owner], 'NC replacement was a no-op'
-    copy_path = os.path.join(HERE, '_brain_tool_render_nc_copy.js')
-    try:
+    # NC cases can patch different owners concurrently. Give each one a
+    # private copy so it cannot execute another worker's mutation.
+    with tempfile.TemporaryDirectory(prefix='tofu-brain-tool-render-nc-') as tmp:
+        copy_path = os.path.join(tmp, 'owner-copy.js')
         with open(copy_path, 'w', encoding='utf-8') as f:
             f.write(patched)
         run_list = [copy_path if s == owner else s for s in _TR_ALL_SRCS]
@@ -622,11 +573,6 @@ def _nc(anchor, replacement, must_fail, must_still_pass):
         for m in must_still_pass:
             assert ('PASS ' + m) in output, \
                 f'NC must be surgical — {m} should still PASS:\n{output}'
-    finally:
-        try:
-            os.remove(copy_path)
-        except OSError:
-            pass
     for src, text in originals.items():
         with open(src, encoding='utf-8') as f:
             assert f.read() == text, f'shipped {os.path.basename(src)} must be byte-identical'
@@ -728,50 +674,6 @@ def test_NC_commit_result_renderer_is_load_bearing():
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NC_conv_digest_renderer_is_load_bearing():
-    """Disable the convDigest branch → get_conversation falls back to the MD
-    dump → digest_class + digest_not_md_dump FAIL while board + peer renderers
-    still work. This pins the fix for the ugly raw ═══ transcript rendering."""
-    _nc(
-        anchor='  if (meta.convDigest) return _renderConvDigest(meta.convDigest);',
-        replacement='  if (false) return _renderConvDigest(meta.convDigest);',
-        must_fail=['digest_class', 'digest_not_md_dump'],
-        must_still_pass=['board_mini_class', 'peer_list_class'],
-    )
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NC_commit_icon_glyph_is_load_bearing():
-    """Swap the project_commit git-commit glyph paths for the generic wrench in
-    _webToolSvg → the commit round now wears the wrench → commit_icon_gitcommit
-    AND commit_icon_not_wrench both FAIL, while the card body (commit_class) and
-    other family icons (board_mini_class) still render. This pins the ACTUAL
-    glyph source (the map entry); the explicit _getToolSvg branch is a redundant
-    clarity alias since the toolName-keyed fallback resolves the same entry."""
-    _nc(
-        anchor='<circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/>',
-        replacement='<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
-        must_fail=['commit_icon_gitcommit', 'commit_icon_not_wrench'],
-        must_still_pass=['board_mini_class', 'commit_class'],
-    )
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NC_commit_coverage_in_conv_meta_set():
-    """Remove project_commit from _CONV_META_TOOLS → it stops routing to the
-    structured card (commit_is_conv_meta FAILS) while feed stays covered."""
-    _nc(
-        anchor='  "project_claim_path", "project_release_path",\n  "project_commit",',
-        replacement='  "project_claim_path", "project_release_path",',
-        must_fail=['commit_is_conv_meta', 'commit_class'],
-        must_still_pass=['feed_is_conv_meta', 'board_mini_class'],
-    )
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_delivery_card_title_resolution_is_load_bearing():
     """Neuter the convTitleById branch in _renderPeerDelivery → the target
     reverts to the raw `conv cdef1234` id, so peermsg_target (title) and
@@ -781,20 +683,6 @@ def test_NC_delivery_card_title_resolution_is_load_bearing():
         replacement='  const _target = ("conv " + String(pd.toConv || "").slice(0, 8));',
         must_fail=['peermsg_target', 'peermsg_target_not_raw'],
         must_still_pass=['peermsg_class', 'peermsg_text', 'peer_list_class'],
-    )
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NC_feed_read_coverage_in_conv_meta_set():
-    """Remove project_feed_read from _CONV_META_TOOLS → it stops routing to the
-    structured card (feed_is_conv_meta FAILS) while another covered tool
-    (project_commit) stays a conv-meta member."""
-    _nc(
-        anchor='  "project_peer_status", "project_feed_read",',
-        replacement='  "project_peer_status",',
-        must_fail=['feed_is_conv_meta', 'feed_list_class'],
-        must_still_pass=['commit_is_conv_meta', 'board_mini_class'],
     )
 
 

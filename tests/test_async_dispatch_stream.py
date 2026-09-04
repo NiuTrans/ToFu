@@ -1,4 +1,4 @@
-"""Tests for the native-async ``async_dispatch_stream`` (lib/llm_dispatch/api.py).
+"""Tests for the native-async ``async_dispatch_stream`` (lib/llm_dispatch/_api_stream.py; facade lib/llm_dispatch/api.py).
 
 Stage-1 of the native-async migration replaced the old
 ``await asyncio.to_thread(dispatch_stream, ...)`` stopgap with a genuine async
@@ -71,7 +71,7 @@ class TestAsyncDispatchStreamIsNative:
         # the sync `requests` transport).
         import ast
 
-        from lib.llm_dispatch import api
+        from lib.llm_dispatch import _api_stream as api
         # Slice the current file by AST instead of reusing the imported
         # function's potentially stale line number. Concurrent source writers
         # can shift that line number while an xdist worker remains alive.
@@ -167,6 +167,115 @@ class TestAsyncDispatchStreamRetry:
         # First slot saw a rate-limit error recorded; second slot succeeded.
         assert slot1.total_errors >= 1
         assert slot2.last_success_time > 0
+
+    def test_429_after_partial_output_fires_attempt_restart(self, monkeypatch):
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+
+        slots = [_make_slot(key='partial'), _make_slot(key='success')]
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: _FakeDispatcher(slots))
+
+        async def _no_sleep(_seconds, abort_check=None):
+            return None
+
+        calls = 0
+
+        async def _partial_then_success(_body, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                kwargs['on_content']('discarded')
+                raise RateLimitError('slow down', status_code=429)
+            kwargs['on_content']('authoritative')
+            return 'authoritative', 'stop', {}
+
+        monkeypatch.setattr(
+            'lib.llm._transport.async_abortable_sleep', _no_sleep)
+        monkeypatch.setattr(
+            'lib.llm.astream.async_stream_chat', _partial_then_success)
+        chunks = []
+        restarts = []
+
+        result = _run(api.async_dispatch_stream(
+            [{'role': 'user', 'content': 'hi'}],
+            on_content=chunks.append,
+            on_attempt_restart=lambda reason='': restarts.append(reason),
+            max_429_attempts=2,
+        ))
+
+        assert result.message == 'authoritative'
+        assert chunks == ['discarded', 'authoritative']
+        assert restarts == ['rate limited (429) — rotating slot']
+
+    def test_429_attempt_budget_matches_sync_dispatch(self, monkeypatch):
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+
+        slots = [_make_slot(key=f'k{i}') for i in range(3)]
+        disp = _FakeDispatcher(slots)
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+
+        async def _no_sleep(_seconds, abort_check=None):
+            return None
+
+        async def _always_limited(_body, **_kwargs):
+            raise RateLimitError('slow down', status_code=429)
+
+        monkeypatch.setattr(
+            'lib.llm._transport.async_abortable_sleep', _no_sleep)
+        monkeypatch.setattr(
+            'lib.llm.astream.async_stream_chat', _always_limited)
+
+        with pytest.raises(api.DispatchRateLimitBudgetExceeded) as raised:
+            _run(api.async_dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}],
+                max_429_attempts=3,
+                log_prefix='[budget]',
+            ))
+
+        assert (raised.value.attempts, raised.value.limit) == (3, 3)
+        assert disp.picks == 3
+
+    def test_credential_delivery_anomaly_has_same_four_response_cap(
+            self, monkeypatch):
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+
+        slot = _make_slot(model='kimi-k3', key='kA')
+        dispatcher = _FakeDispatcher([slot, slot, slot, slot])
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+        monkeypatch.setattr(
+            'lib.key_stats.record_gateway_error', lambda *a, **kw: None)
+
+        async def _no_sleep(_seconds, abort_check=None):
+            return None
+
+        async def _missing_key(_body, **_kwargs):
+            raise RateLimitError(
+                'API HTTP 401: missing api key',
+                is_gateway=True,
+                is_credential_delivery_anomaly=True,
+                reason='credential_delivery_anomaly',
+                status_code=401,
+            )
+
+        monkeypatch.setattr(
+            'lib.llm._transport.async_abortable_sleep', _no_sleep)
+        monkeypatch.setattr(
+            'lib.llm.astream.async_stream_chat', _missing_key)
+
+        with pytest.raises(RateLimitError) as raised:
+            _run(api.async_dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}],
+                prefer_model='kimi-k3', strict_model=True,
+                log_prefix='[auth-delivery]',
+            ))
+
+        assert dispatcher.picks == 4
+        assert raised.value.credential_delivery_anomaly_attempts == 4
+        assert slot.gateway_errors == 4
+        assert slot.total_errors == 0
+        assert slot.inflight == 0
 
 
 @pytest.mark.unit

@@ -26,6 +26,7 @@ pytestmark = pytest.mark.unit
 
 from lib.tasks_pkg.plan_mode import (
     PLAN_MODE_EXTRA_BAN,
+    interaction_mode_generated_turn_identity,
     extract_proposed_plan,
     plan_mode_banned_names,
     plan_mode_enabled,
@@ -39,6 +40,25 @@ from lib.tasks_pkg.plan_mode import (
 
 
 class TestPlanModeFlag(unittest.TestCase):
+
+    def test_generated_turn_identity_follows_normalized_mode(self):
+        self.assertEqual(
+            interaction_mode_generated_turn_identity({'planMode': True}),
+            ('planner', 'plan'),
+        )
+        self.assertEqual(
+            interaction_mode_generated_turn_identity({'activeFlow': 'review'}),
+            ('assistant', 'flow_node'),
+        )
+        self.assertEqual(
+            interaction_mode_generated_turn_identity({'autopilot': True}),
+            ('assistant', 'reply'),
+        )
+        self.assertEqual(
+            interaction_mode_generated_turn_identity({'planMode': False}),
+            ('assistant', 'reply'),
+        )
+
     def test_enabled_only_on_explicit_true(self):
         self.assertTrue(plan_mode_enabled({'planMode': True}))
         self.assertFalse(plan_mode_enabled({'planMode': False}))

@@ -1,22 +1,19 @@
 /* ===== migrated source: ui/tool_rounds_rich.js ===== */
-/* ui/tool_rounds_rich.js — DEFERRED rich tool-round renderers (Epic-E
- *  sub-4, split out of ui/tool_rounds.js 2026-08-01).
+/* ui/tool_rounds_rich.js — retained rich tool-round renderers, split out of
+ * ui/tool_rounds.js for a bounded model context and composed immediately after
+ * that core section.
  *
  * Contents: the conv-meta rich-render family (Project Brain board/charter/
  * feed/peer/digest/commit cards, ~40KB), the checklist card, and the Timer
- * Watcher block + its 1 Hz countdown ticker (~18KB). These render structured
- * tool payloads that are not needed for the first paint of an ordinary chat.
+ * Watcher block. Its countdown shares the typed, demand-scoped clock composed
+ * by tool_rounds.js; this section creates no boot timer or listener.
  *
- * Degradation contract: tool_rounds.js's _renderUnifiedToolLine dispatches
- * to _renderConvMetaBlock / _renderTodoBlock / _renderTimerWatcherBlock
- * through typeof guards;
- * while this module is in flight (idle prefetch ~2s) those rounds render
- * as the generic one-line summary, and the upgrade pass below re-renders
- * the active conversation once on arrival. Window-scope sibling of
- * tool_rounds.js — every symbol it calls (escapeHtml / Icon / t /
- * _isRoundConvMeta / _CONV_META_TOOLS / _TD_SVG / _rowRightControls /
- * _localizeInspectOps …) lives in the core bundle and resolves at CALL
- * time; nothing here is read at load except literals.
+ * Residency contract: the runtime manifest keeps this section adjacent to
+ * tool_rounds.js in the main graph. Core dispatch retains typeof guards only
+ * for isolated fixtures and a safe future split; there is no prefetch window
+ * or boot-time upgrade scan. Every sibling symbol it calls (escapeHtml / Icon / t /
+ * typed tool-round predicates / _rowRightControls …) lives in the shared
+ * module graph and resolves at call time.
  */
 
 function _timerWatcherToggle(el, ev) {
@@ -91,17 +88,17 @@ function _renderTodoBlock(round, svg, q, badgeHtml) {
       ).join('<i>›</i>')}</div>`
     : "";
   let stateNotice = "";
-  if (meta.todoRejected) {
-    stateNotice = `<div class="ptool-todo-notice is-rejected">${escapeHtml(_t("todo.rejected", "Update rejected"))}: ${escapeHtml(meta.todoRejectReason || "")}</div>`;
-  } else if (meta.todoNoop) {
-    stateNotice = `<div class="ptool-todo-notice">${escapeHtml(_t("todo.unchanged", "Duplicate update ignored; no new revision."))}</div>`;
+  if (meta.todoRejected || meta.todoNoop) {
+    /* Rejection reasons are model protocol (stable ids, sync/replan rules),
+     * not user copy. The human projection reports only the observable outcome
+     * and keeps rendering the last accepted checklist state. */
+    stateNotice = `<div class="ptool-todo-notice">${escapeHtml(_t("todo.unchanged", "Checklist unchanged"))}</div>`;
   } else if (Array.isArray(meta.todoAutoPopped) && meta.todoAutoPopped.length) {
     stateNotice = `<div class="ptool-todo-notice is-restored">${escapeHtml(_t("todo.parentRestored", "Child complete; returned to the parent checklist."))}</div>`;
   }
   const historyHtml = displayHistory.length > 1
     ? `<details class="ptool-todo-history"><summary>${escapeHtml(_t("todo.history", { n: displayHistory.length }))}</summary><div>${displayHistory.map((h) => {
-        const state = h.rejected ? _t("todo.historyRejected", "rejected")
-          : (h.noOp ? _t("todo.historyNoop", "unchanged") : `${h.done}/${h.total}`);
+        const state = `${h.done}/${h.total}`;
         const rev = h.revision ? ` · r${h.revision}` : "";
         return `<span><code>${escapeHtml(h.operation || "sync")}</code>${escapeHtml(rev)} · ${escapeHtml(state)}</span>`;
       }).join("")}</div></details>`
@@ -189,8 +186,6 @@ function _convMetaPurpose(round, tFn) {
       "Clears a previously-held file/path reservation so sibling conversations may edit those paths again."],
     project_commit: ["brainWhy.commit",
       "Commits ONLY the files this conversation provably authored (byte-identical to its own last edit); files also carrying a sibling's uncommitted changes are held back, never swept in."],
-    get_conversation: ["brainWhy.getConv",
-      "Opens the full transcript of another past conversation — its messages, tool calls, and results — so the agent can reuse decisions or context from earlier work."],
     list_conversations: ["brainWhy.listConvs",
       "Searches your other conversations by title and content to find a relevant past discussion to reference."],
   };
@@ -207,6 +202,22 @@ function _convMetaPurpose(round, tFn) {
    return an inner-HTML string (the body of the convmeta card), or '' to fall
    back to the generic Markdown dump. */
 
+/* RAW/debug badge for a get_conversation(raw=true) read — inline SVG per
+   §3.4 (no emoji/glyph), the record `rev` appended when present. Rendered in
+   the card's always-visible summary row (see _renderConvMetaBlock) so a raw
+   read is identifiable without expanding; the per-message low-level metadata
+   chips stay in the body as the raw-only richness. */
+function _convDigestRawBadge(cd) {
+  if (!cd || !cd.raw) return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const revTxt = (cd.rev != null)
+    ? " · " + _t("convDigest.rev", "rev") + " " + cd.rev : "";
+  const bugSvg = '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
+  return `<span class="ptool-convdigest-rawbadge icon-box" title="${escapeHtml(
+    _t("convDigest.rawTip", "Raw debug read — shows per-message low-level metadata (model, tokens, finish reason, id)."))}">` +
+    bugSvg + `<span class="ptool-convdigest-rawbadge-lbl">${escapeHtml(
+      _t("convDigest.raw", "RAW · debug"))}${escapeHtml(revTxt)}</span></span>`;
+}
 /** Conversation digest for get_conversation: a clean, scannable transcript
  *  card (title + preset + message count meta row, then one row per message with
  *  a role chip, text preview, and tool/attachment hints) — the HUMAN view that
@@ -222,13 +233,9 @@ function _renderConvDigest(cd) {
     return escapeHtml(r || "");
   };
   // ── Meta row: title + preset + message count + last-updated time. ──
+  // The title and RAW/debug badge lead the card's always-visible summary row
+  // (_renderConvMetaBlock); the body meta row keeps the preset/count/time.
   const metaBits = [];
-  // The referenced conversation's TITLE leads the meta row (its id rides the
-  // tooltip) — for an empty conversation the title is the whole answer, and
-  // even a full digest never showed it anywhere on the card.
-  if (cd.title) {
-    metaBits.push(`<span class="ptool-convdigest-title" title="${escapeHtml(cd.convId || "")}">${escapeHtml(cd.title)}</span>`);
-  }
   if (cd.preset) {
     metaBits.push(`<span class="ptool-convdigest-preset">${escapeHtml(cd.preset)}</span>`);
   }
@@ -241,20 +248,7 @@ function _renderConvDigest(cd) {
       _convMetaAbsTime(cd.updatedAt))}">${escapeHtml(
       _t("convDigest.updated", "updated {t}").replace("{t}", updRel))}</span>`);
   }
-  // ── RAW/debug badge: only for a get_conversation(raw=true) read. Marks the
-  //    card as the debug view (per-message low-level metadata chips below) so
-  //    a raw read is visibly RICHER than a normal read — inline SVG per §3.4
-  //    (no emoji/glyph). A `rev` is appended when present. ──
   const isRaw = !!cd.raw;
-  if (isRaw) {
-    const revTxt = (cd.rev != null)
-      ? " · " + _t("convDigest.rev", "rev") + " " + cd.rev : "";
-    const bugSvg = '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
-    metaBits.push(`<span class="ptool-convdigest-rawbadge icon-box" title="${escapeHtml(
-      _t("convDigest.rawTip", "Raw debug read — shows per-message low-level metadata (model, tokens, finish reason, id)."))}">` +
-      bugSvg + `<span class="ptool-convdigest-rawbadge-lbl">${escapeHtml(
-        _t("convDigest.raw", "RAW · debug"))}${escapeHtml(revTxt)}</span></span>`);
-  }
   let html = `<div class="ptool-convdigest">` +
     `<div class="ptool-convdigest-meta">${metaBits.join("")}</div>` +
     `<div class="ptool-convdigest-msgs">`;
@@ -558,7 +552,10 @@ function _renderFeedActivity(fa) {
   const _t = (typeof t === "function") ? t : (k, d) => d;
   const events = fa.events || [];
   if (!events.length) {
-    return `<div class="ptool-feed-empty">${escapeHtml(_t("projectBrain.activityEmpty", "No activity yet"))}</div>`;
+    const hiddenNote = Number(fa.hiddenSelf || 0) > 0
+      ? ` ${escapeHtml(_t("projectBrain.feedHiddenSelf", "{n} from this conversation hidden").replace("{n}", Number(fa.hiddenSelf)))}`
+      : "";
+    return `<div class="ptool-feed-empty">${escapeHtml(_t("projectBrain.activityEmpty", "No activity yet"))}${hiddenNote}</div>`;
   }
   let html = '<div class="ptool-feed-list">';
   for (const ev of events) {
@@ -571,21 +568,28 @@ function _renderFeedActivity(fa) {
       || (ev.convId && typeof convTitleById === "function"
         ? convTitleById(ev.convId)
         : (ev.convId ? "conv " + String(ev.convId).slice(0, 8) : ""));
-    const mine = ev.mine
-      ? `<span class="ptool-feed-mine">${escapeHtml(_t("projectBrain.thisConv", "this conversation"))}</span>` : "";
     const when = _convMetaRelTime(ev.ts);
     const summary = (ev.summary || "").trim();
     html += `<div class="ptool-feed-row ptool-feed-${escapeHtml(kind)}">` +
       `<span class="ptool-feed-kind">${escapeHtml(kindLabel)}</span>` +
       `<div class="ptool-feed-body">` +
       `<div class="ptool-feed-head">` +
-      (who ? `<span class="ptool-feed-who">${escapeHtml(who)}</span>` : "") + mine +
+      (who ? `<span class="ptool-feed-who">${escapeHtml(who)}</span>` : "") +
       (when ? `<span class="ptool-feed-when">${escapeHtml(when)}</span>` : "") +
       `</div>` +
       (summary ? `<div class="ptool-feed-summary">${escapeHtml(summary)}</div>` : "") +
       `</div></div>`;
   }
   html += "</div>";
+  // Own-conversation rows are filtered out backend-side (the model already
+  // knows its own activity); say so in one muted line instead of rendering
+  // them with a "this conversation" badge.
+  const hiddenSelf = Number(fa.hiddenSelf || 0);
+  if (hiddenSelf > 0) {
+    html += `<div class="ptool-feed-hidden">${escapeHtml(
+      _t("projectBrain.feedHiddenSelf", "{n} from this conversation hidden")
+        .replace("{n}", hiddenSelf))}</div>`;
+  }
   return html;
 }
 
@@ -793,6 +797,17 @@ function _renderConvMetaBlock(round, svg, q, badgeHtml) {
   //   caption. Replaces the raw English backend display string (round.query)
   //   that the user found meaningless.
   const headLabel = _convMetaHeadLabel(round, _t);
+  // A get_conversation digest's identity — the referenced conversation's
+  // title and the RAW/debug marker — belongs on the always-visible summary
+  // row, not folded into the collapsible body. The conversation id rides the
+  // title's tooltip.
+  const digest = meta.convDigest;
+  const digestTitleHtml = (round.toolName === "get_conversation" && digest && digest.title)
+    ? `<span class="ptool-convmeta-digest-title" title="${escapeHtml(digest.convId || "")}">${escapeHtml(digest.title)}</span>`
+    : "";
+  const digestRawHtml = (round.toolName === "get_conversation")
+    ? _convDigestRawBadge(digest)
+    : "";
   const purpose = _convMetaPurpose(round, _t);
   const purposeHtml = purpose
     ? `<div class="ptool-convmeta-why">${escapeHtml(purpose)}</div>`
@@ -826,7 +841,9 @@ function _renderConvMetaBlock(round, svg, q, badgeHtml) {
        <summary class="ptool-line ptool-convmeta-header">
          <span class="ptool-icon">${svg}</span>
          <span class="ptool-text">${escapeHtml(headLabel)}</span>
+         ${digestTitleHtml}
          ${countChip}
+         ${digestRawHtml}
          ${sourceChip}
          ${badgeHtml}
        </summary>
@@ -1005,6 +1022,9 @@ function _renderTimerWatcherBlock(round, svg) {
   // panel's [data-sw-start] approach.
   let nextPollHtml = "";
   if (isActive && round._timerNextPollTs) {
+    if (typeof _demandToolElapsedTicker === 'function') {
+      _demandToolElapsedTicker();
+    }
     nextPollHtml = `<div class="timer-next-poll" data-timer-next="${round._timerNextPollTs}">${Icon('hourglass', 12)} <span class="timer-next-poll-txt">${_timerNextPollText(round._timerNextPollTs)}</span></div>`;
   }
 
@@ -1067,7 +1087,7 @@ function _renderTimerWatcherBlock(round, svg) {
       if (trace.length > 0) {
         const rows = trace.map(tc => {
           const td = (typeof _TOOL_DISPLAY !== "undefined") ? _TOOL_DISPLAY[tc.name] : null;
-          const ticon = (td && td.icon) ? td.icon : _TD_SVG('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>');
+          const ticon = (td && td.icon) ? td.icon : Icon('wrench');
           const dot = tc.isError
             ? `<span class="sw-tl-dot sw-tl-failed">${Icon('x', 12)}</span>`
             : `<span class="sw-tl-dot sw-tl-done">${Icon('check', 12)}</span>`;
@@ -1153,7 +1173,7 @@ function _renderTimerWatcherBlock(round, svg) {
  * timer, O(N active timers) per tick — mirrors _tickSwarmTimers. */
 function _tickTimerCountdowns() {
   const els = document.querySelectorAll('.timer-next-poll[data-timer-next]');
-  if (!els.length) return;
+  if (!els.length) return false;
   for (const el of els) {
     const nextTs = +el.getAttribute('data-timer-next');
     if (!nextTs) continue;
@@ -1162,42 +1182,8 @@ function _tickTimerCountdowns() {
     const txt = _timerNextPollText(nextTs);
     if (span.textContent !== txt) span.textContent = txt;
   }
+  return true;
 }
-if (typeof window !== 'undefined' && !runtimeScope._timerCountdownTicker) {
-  runtimeScope._timerCountdownTicker = setInterval(() => {
-    try {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      _tickTimerCountdowns();
-    } catch (e) { /* swallowed — countdown ticker is best-effort */ }
-  }, 1000);
-}
-
-/* Upgrade pass: a conv rendered while this module was in flight got the
- * generic-line degradation for conv-meta / checklist / timer-watcher rounds. Re-render
- * the ACTIVE conversation once so they upgrade to their rich cards.
- * Skipped while a stream is live on the conv (the stream re-renders itself
- * with the rich renderer now present), and a no-op when no such rounds
- * exist (the common case — the lazy ESM domain idle-prefetches every boot). */
-(function _upgradeDegradedToolRounds() {
-  try {
-    if (typeof getActiveConv !== 'function') return;
-    const conv = getActiveConv();
-    if (!conv) return;
-    if (typeof convIsBusy === 'function' && convIsBusy(conv)) return;
-    const hasRich = (runtimeScope.ConversationTurnRead?.ordered?.(conv) || []).some(
-      (turn) => Array.isArray(turn.projection?.toolRounds)
-        && turn.projection.toolRounds.some((r) =>
-      r && (r.toolName === "todo_write" ||
-        _timerRecoveryPresentation(r).polls.length || r._timerSkipCount ||
-        (typeof _isRoundConvMeta === 'function' && _isRoundConvMeta(r)) ||
-        (typeof _isRoundMotion === 'function' && _isRoundMotion(r)))));
-    /* The Surface controller is the only conversation DOM commit path.
-     * This silent lazy-renderer upgrade preserves the current scroll anchor. */
-    if (hasRich) runtimeScope.requestAuthoritativeConversationRender(
-      conv.id, { forceScroll: false },
-    );
-  } catch (e) { /* best-effort upgrade — the next natural render fixes it */ }
-})();
 
 /* ══════════════════════════════════════════════════════════════════════════
  * Motion-video / produce tool cards

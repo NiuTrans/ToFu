@@ -206,7 +206,9 @@ def test_unknown_arxiv_id_is_stripped_NEUTER():
     # '' so FAKE is classified hallucination and stripped.
     import lib.paper.survey as _sv
     _orig_ground = _sv._fetch_arxiv_title
+    _orig_ground_many = _sv._fetch_arxiv_titles
     _sv._fetch_arxiv_title = lambda aid: ''
+    _sv._fetch_arxiv_titles = lambda arxiv_ids: {}
     try:
         res = sv.build_survey('dir', real, lang='en', user_id=1, folder_id=folder)
         gm = res['open_gaps']
@@ -225,6 +227,7 @@ def test_unknown_arxiv_id_is_stripped_NEUTER():
         assert gap_ids == ['g_real'], f'expected only g_real, got {gap_ids}'
     finally:
         _sv._fetch_arxiv_title = _orig_ground
+        _sv._fetch_arxiv_titles = _orig_ground_many
         ra(); restore()
     _ok('NEUTER: hallucinated arXiv id stripped, fabricated gap dropped, real gap survives')
 
@@ -407,6 +410,94 @@ def test_grounding_tier_NEUTER():
     _ok('NEUTER: removing the grounded tier drops the real-but-unharvested gap (tier bites)')
 
 
+def test_verification_bounds_model_output_and_grounding_fanout():
+    """A hostile gap map cannot turn one paid response into unbounded probes."""
+    import lib.paper.survey as sv
+
+    def paper_id(index):
+        return f'2608.{index:05d}'
+
+    raw = {
+        'clusters': [
+            {'id': f'c{row}',
+             'papers': [paper_id(row * 100 + col) for col in range(50)]}
+            for row in range(100)
+        ],
+        'method_matrix': [
+            {'paper': paper_id(20_000 + row)} for row in range(100)
+        ],
+        'open_gaps': [
+            {'id': f'g{row}', 'gap': 'x',
+             'evidence': [paper_id(40_000 + row * 100 + col)
+                          for col in range(50)]}
+            for row in range(100)
+        ],
+    }
+    probes = []
+    out = sv._verify_against_library(
+        raw, user_id=1, lib_ids=set(),
+        ground_fn=lambda arxiv_id: probes.append(arxiv_id) or 'Real title')
+
+    budget = out['verification_budget']
+    assert len(probes) == budget['ground_probes'] == 20
+    assert budget['ground_probes_suppressed'] == 1_300
+    assert budget['clusters_truncated'] == 88
+    assert budget['method_matrix_rows_truncated'] == 60
+    assert budget['open_gaps_truncated'] == 80
+    assert budget['references_truncated'] == 320
+    assert len(out['clusters']) == 12
+    assert len(out['missing_ids']) == 20
+    assert len(raw['clusters']) == len(raw['method_matrix']) == 100
+    assert len(raw['open_gaps']) == 100
+
+
+def test_build_survey_aborts_before_post_synthesis_grounding(monkeypatch):
+    import lib.paper.survey as sv
+
+    monkeypatch.setattr(sv, '_load_paper_inputs', lambda *args, **kwargs: [{
+        'arxiv_id': '2608.00001', 'paper_hash': 'h', 'title': 'Paper',
+        'source': 'parsed_text', 'content': 'body',
+    }])
+    monkeypatch.setattr(sv, '_synthesize_survey', lambda *args, **kwargs: (
+        '# survey', {
+            'open_gaps': [{'id': 'g', 'gap': 'x',
+                           'evidence': ['2608.99999']}],
+        }))
+    monkeypatch.setattr(
+        sv, '_fetch_arxiv_titles',
+        lambda arxiv_ids: (_ for _ in ()).throw(
+            AssertionError('aborted verification must not probe the network')))
+
+    got = sv.build_survey(
+        'direction', ['2608.00001'], user_id=1, abort=lambda: True)
+    assert got['ok'] is False and got['error'] == 'aborted'
+
+
+def test_default_grounding_batches_all_candidate_ids_once(monkeypatch):
+    import lib.paper.survey as sv
+
+    calls = []
+
+    def batch(arxiv_ids):
+        calls.append(list(arxiv_ids))
+        return {arxiv_id: f'Title {arxiv_id}' for arxiv_id in arxiv_ids[:2]}
+
+    monkeypatch.setattr(sv, '_fetch_arxiv_titles', batch)
+    monkeypatch.setattr(
+        sv, '_fetch_arxiv_title',
+        lambda arxiv_id: (_ for _ in ()).throw(
+            AssertionError('default verification must not probe ids serially')))
+    ids = [f'2608.{index:05d}' for index in range(5)]
+    out = sv._verify_against_library({
+        'open_gaps': [{'id': 'g', 'gap': 'x', 'evidence': ids}],
+    }, user_id=1, lib_ids=set())
+
+    assert calls == [ids]
+    assert out['open_gaps'][0]['evidence'] == ids[:2]
+    assert out['verification_budget']['ground_batches'] == 1
+    assert out['verification_budget']['ground_probes'] == 5
+
+
 def test_no_library_inputs_is_clean_failure():
     _load_app()
     import lib.paper.survey as sv
@@ -431,6 +522,7 @@ def main():
         test_grounded_tier_keeps_gap_and_flags_low_confidence,
         test_library_tier_gap_is_high_confidence,
         test_grounding_tier_NEUTER,
+        test_verification_bounds_model_output_and_grounding_fanout,
         test_no_library_inputs_is_clean_failure,
         test_dict_shaped_ids_are_extracted_not_crash,
     ]

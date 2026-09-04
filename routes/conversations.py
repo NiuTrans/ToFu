@@ -29,10 +29,11 @@ from lib.api_response import (
     api_not_found,
     api_ok,
 )
-from lib.conversations.catalog import list_conversation_metadata
+from lib.conv_config import resolve_conv_settings
+from lib.conversations.catalog import list_conversation_metadata_page
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.request_parser import async_parse_body
+from lib.request_parser import async_parse_body, optional_dict
 from lib.storage import get_storage_client
 from routes.api_v1 import api_v1_conversations_bp as conversations_bp
 from routes.api_v1.auth import request_user_id as _request_user_id, require_scope
@@ -49,6 +50,7 @@ _SIDEBAR_SETTING_KEYS = frozenset({
     "pinnedAt",
     "folderId",
     "source",
+    "clonedFrom",
     "lastMsgRole",
     "lastMsgTimestamp",
     "lastFinishReason",
@@ -125,34 +127,29 @@ def _metadata(document: Mapping | None, *, sidebar: bool = False) -> dict:
     }
 
 
-def _message_from_turn(turn: Mapping) -> dict:
-    projection = dict(turn.get("projection") or {})
-    projection.pop("role", None)
-    actor = str(turn.get("actor") or "")
-    role = "user" if actor in {"human", "critic", "virtual_user"} else "assistant"
-    created_at = int(turn.get("createdAt") or 0)
-    return {
-        **projection,
-        "role": role,
-        "_turnId": turn.get("turnId"),
-        "_attemptId": turn.get("currentAttemptId"),
-        "_turnActor": actor,
-        "_turnKind": turn.get("kind"),
-        "_turnLaneId": turn.get("laneId") or "main",
-        "_turnStatus": turn.get("status"),
-        "_turnSettlement": turn.get("settlement") or {},
-        "_projectionRevision": int(turn.get("projectionRevision") or 0),
-        "timestamp": projection.get("timestamp") or created_at,
-    }
-
-
 def _full(document: Mapping | None) -> dict:
     metadata = _metadata(document)
     messages = list((document or {}).get("messages") or [])
-    return {**metadata, "messages": messages}
+    full = {**metadata, "messages": messages}
+    message_page = (document or {}).get("message_page")
+    if isinstance(message_page, Mapping):
+        total = int(message_page.get("total_count") or 0)
+        start = max(0, int(message_page.get("start") or 0))
+        end = max(start, int(message_page.get("end") or start))
+        full.update({
+            "windowed": True,
+            "trimmed": False,
+            "totalCount": total,
+            "firstLoadedSeq": start if messages else None,
+            "lastLoadedSeq": end - 1 if messages else None,
+            "hasMore": start > 0,
+        })
+    return full
 
 
 def _windowed(full: dict, window: int, before: int | None) -> dict:
+    if full.get("windowed"):
+        return full
     if window <= 0:
         return full
     messages = list(full.get("messages") or [])
@@ -185,12 +182,50 @@ def _window_args() -> tuple[int, int | None]:
     return window, before
 
 
-async def _get_document(conv_id: str, user_id: int) -> Mapping | None:
+async def _get_document(
+    conv_id: str,
+    user_id: int,
+    *,
+    window: int = 0,
+    before: int | None = None,
+) -> Mapping | None:
+    payload: dict = {
+        "conv_id": conv_id,
+        "user_id": user_id,
+        "derive_messages": True,
+    }
+    if window > 0:
+        payload["message_window"] = window
+        if before is not None:
+            payload["before_sequence"] = before
     result = await _query(
         "conversation.get",
-        {"conv_id": conv_id, "user_id": user_id, "derive_messages": True},
+        payload,
     )
     return result if isinstance(result, Mapping) else None
+
+
+def _live_busy_conversation_ids(user_id: int) -> frozenset:
+    """Ephemeral per-conversation liveness projection for the sidebar.
+
+    The sidebar's streaming dot / "answering" tag derives exclusively from
+    client-side Turn state, which a freshly loaded page only holds for
+    conversations it has hydrated. The task registry already knows which
+    conversations still have live work (``list_running_tasks`` — the same
+    judge as the restart guard); stamping those rows lets the client
+    re-hydrate exactly the busy set instead of waiting for a manual open.
+    Best-effort: a registry failure must never block the metadata list.
+    """
+    try:
+        from lib.tasks_pkg.manager import list_running_tasks
+        return frozenset(
+            entry["convId"]
+            for entry in list_running_tasks(user_id=user_id)
+            if entry.get("convId")
+        )
+    except Exception as exc:
+        logger.debug("[Conversations] busy projection skipped: %s", exc)
+        return frozenset()
 
 
 def _etag(items: list[dict]) -> str:
@@ -227,44 +262,44 @@ async def list_convs():
     )
     limit = max(1, min(requested_limit or default_limit, _MAX_LIST_LIMIT))
 
-    # Folder/cursor/page shaping happens below against this complete base read;
-    # those request arguments therefore do not alter the shared query key.
-    metadata_rows = await asyncio.to_thread(
-        list_conversation_metadata,
-        user_id=user_id,
-        limit=10_000,
-        order_by="updated_at_desc",
-        settings_keys=sorted(_SIDEBAR_SETTING_KEYS),
-    )
-    items = [
-        _metadata({"metadata": metadata}, sidebar=True)
-        for metadata in metadata_rows
-    ]
-
     folder_id = (request.args.get("folderId") or "").strip()
-    if folder_id:
-        items = [
-            item for item in items
-            if (item.get("settings") or {}).get("folderId") == folder_id
-        ]
-    total = len(items)
-
     before_raw = (request.args.get("before") or "").strip()
     before_id = (request.args.get("before_id") or "").strip()
+    if len(folder_id) > 512:
+        return api_bad_request("folderId is too long", field="folderId")
+    if len(before_id) > 256:
+        return api_bad_request("before_id is too long", field="before_id")
+    before = None
     if before_raw:
         try:
             before = int(before_raw)
         except ValueError:
             return api_bad_request("before must be an integer", field="before")
-        items = [
-            item for item in items
-            if (int(item.get("updatedAt") or 0), item["id"])
-            < (before, before_id)
-        ]
+        if before < 0:
+            return api_bad_request(
+                "before must be non-negative", field="before"
+            )
 
-    page_items = items[:limit]
-    has_more = len(items) > limit
-    page = {"hasMore": has_more, "totalCount": total}
+    catalog_page = await asyncio.to_thread(
+        list_conversation_metadata_page,
+        user_id=user_id,
+        limit=limit,
+        folder_id=folder_id or None,
+        before_updated_at=before,
+        before_id=before_id if before is not None else "",
+        settings_keys=sorted(_SIDEBAR_SETTING_KEYS),
+    )
+    page_items = [
+        _metadata({"metadata": metadata}, sidebar=True)
+        for metadata in catalog_page.items
+    ]
+    live_conv_ids = _live_busy_conversation_ids(user_id)
+    if live_conv_ids:
+        for item in page_items:
+            if item["id"] in live_conv_ids:
+                item["busy"] = True
+    total = catalog_page.total_count
+    page = {"hasMore": catalog_page.has_more, "totalCount": total}
     if page_items:
         page.update({
             "nextBefore": page_items[-1]["updatedAt"],
@@ -274,9 +309,11 @@ async def list_convs():
     payload: dict = {"items": page_items, "page": page}
     prefetch_id = (request.args.get("prefetch") or "").strip()
     if prefetch_id:
-        prefetched = await _get_document(prefetch_id, user_id)
+        window, before = _window_args()
+        prefetched = await _get_document(
+            prefetch_id, user_id, window=window, before=before
+        )
         if prefetched is not None:
-            window, before = _window_args()
             payload["prefetched"] = _windowed(_full(prefetched), window, before)
         else:
             payload["prefetched"] = None
@@ -295,10 +332,12 @@ async def list_convs():
 @require_scope("conversations")
 @_db_safe
 async def get_conv(conv_id: str):
-    document = await _get_document(conv_id, _owner_id())
+    window, before = _window_args()
+    document = await _get_document(
+        conv_id, _owner_id(), window=window, before=before
+    )
     if document is None:
         return api_not_found("Conversation not found")
-    window, before = _window_args()
     return api_ok(_windowed(_full(document), window, before))
 
 
@@ -425,6 +464,11 @@ async def patch_conv_settings(conv_id: str):
         return api_bad_request(
             "Browsing cannot mutate conversation recency", field="touchUpdatedAt"
         )
+    return await _apply_conv_settings_update(conv_id, updates)
+
+
+async def _apply_conv_settings_update(conv_id: str, updates: Mapping):
+    """Commit one canonical settings patch without touching Turn recency."""
     result = await _command(
         "conversation.settings.update",
         conv_id,
@@ -436,6 +480,27 @@ async def patch_conv_settings(conv_id: str):
         return api_conflict("conversation_changed")
     _notify_conv_changed(conv_id, rev=None, user_id=_owner_id())
     return api_ok()
+
+
+@conversations_bp.route(
+    "/api/v1/conversations/<conv_id>/settings/resolve", methods=["PATCH"]
+)
+@require_scope("conversations")
+@api_meta(
+    summary="Resolve and persist conversation settings in one request",
+    tags=["conversations"],
+    scope="conversations",
+)
+@_db_safe
+async def patch_resolved_conv_settings(conv_id: str):
+    body = await async_parse_body()
+    updates = resolve_conv_settings(
+        conv_settings=optional_dict(
+            body, "conv_settings", default={}
+        ) or {},
+        overrides=optional_dict(body, "overrides", default={}) or {},
+    )
+    return await _apply_conv_settings_update(conv_id, updates)
 
 
 async def _persist_title(conv_id: str, title: str) -> bool:

@@ -37,6 +37,11 @@ def generate_image(
     timeout: int = 120,
     max_retries: int = 3,
     on_429: 'callable | None' = None,
+    max_429_attempts: int | None = None,
+    abort_check: 'callable | None' = None,
+    owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+    preferred_provider_id: str = '',
 ) -> dict:
     """Generate or edit an image using the best available image_gen slot.
 
@@ -45,8 +50,10 @@ def generate_image(
     applies a 0.5s cooldown on 429'd slots, so the next pick naturally
     lands on a different (key, model) pair.
 
-    429 retries are aggressive (0.3s sleep) and unlimited (up to 120
-    cycles safety cap).  Only non-429 errors count toward ``max_retries``.
+    Interactive 429 retries remain aggressive (0.3s sleep, up to the existing
+    120-cycle safety cap). Background callers can supply a smaller finite
+    ``max_429_attempts`` and a dynamic ``abort_check``. Only non-429 errors
+    count toward ``max_retries``.
 
     Args:
         prompt: Text description of the image to generate, or edit instruction.
@@ -67,6 +74,11 @@ def generate_image(
         on_429: Optional callback ``fn(retry_count)`` called on each 429
             rate-limit retry.  Use this to push live progress to the UI
             so the user knows the request is rate-limited, not stuck.
+        max_429_attempts: Optional positive 429-response ceiling. ``None``
+            preserves the interactive 120-cycle safety cap.
+        abort_check: Optional callback checked before/after each provider
+            attempt and before retry waits. A late successful reply is
+            discarded once cancellation is visible.
 
     Returns:
         dict with keys:
@@ -78,20 +90,90 @@ def generate_image(
             model: str — model that was used
             aspect_ratio: str — aspect ratio used
     """
+    if owner_user_id is not None:
+        from lib.llm_dispatch.provider_pin import provider_pin
+        from lib.model_routing import (
+            ModelRoutingError,
+            ModelRoutingRepository,
+            OwnerBoundary,
+            dispose_routed_slot_group,
+            mint_capability_slot_group,
+        )
+
+        route_group = None
+        try:
+            routed_model, route_group = mint_capability_slot_group(
+                ModelRoutingRepository(),
+                OwnerBoundary.create(owner_user_id, tenant_id),
+                'image_gen',
+                prefer_model=model,
+                preferred_provider_id=preferred_provider_id,
+                owner_tag=f'image-gen:{owner_user_id}',
+            )
+            with provider_pin(route_group.pin_id):
+                return generate_image(
+                    prompt,
+                    model=routed_model,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                    history=history,
+                    source_images=source_images,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    on_429=on_429,
+                    max_429_attempts=max_429_attempts,
+                    abort_check=abort_check,
+                )
+        except ModelRoutingError as exc:
+            return {
+                'ok': False,
+                'error': str(exc),
+                'error_kind': exc.kind,
+                'model': model,
+            }
+        finally:
+            dispose_routed_slot_group(route_group)
+
+    if max_429_attempts is None:
+        _429_max = 120
+    elif (isinstance(max_429_attempts, bool)
+          or not isinstance(max_429_attempts, int)
+          or max_429_attempts <= 0):
+        raise ValueError('max_429_attempts must be a positive integer')
+    else:
+        _429_max = min(120, max_429_attempts)
+
+    def _abort_requested() -> bool:
+        if abort_check is None:
+            return False
+        try:
+            return bool(abort_check())
+        except Exception as exc:
+            logger.warning('[ImageGen] abort callback failed; continuing: %s',
+                           exc)
+            return False
+
+    def _aborted_result(model_name: str = '') -> dict:
+        return {'ok': False, 'error': 'Image generation aborted',
+                'model': model_name, 'aborted': True}
+
     last_error = 'No image_gen slot available'
     first_real_error = ''   # first non-429 error (the real cause)
     first_real_text = ''    # model text from the first real failure (e.g. safety refusal)
     hard_attempts = 0       # non-429 error count
     _429_count = 0          # 429 cycle count
-    _429_max = 120          # safety cap
 
     while hard_attempts <= max_retries:
+        if _abort_requested():
+            return _aborted_result(model)
         api_key, slot_model, slot = _pick_image_slot(prefer_model=model)
-        if not api_key:
+        if slot is None:
             logger.warning('[ImageGen] No image_gen slot available, hard=%d/%d 429s=%d',
                            hard_attempts, max_retries, _429_count)
             hard_attempts += 1
             if hard_attempts <= max_retries:
+                if _abort_requested():
+                    return _aborted_result(model)
                 time.sleep(0.5)
                 continue
             return {'ok': False, 'error': 'No image generation model available — check dispatch config'}
@@ -139,6 +221,10 @@ def generate_image(
                     api_base=api_base, extra_headers=_slot_hdrs)
 
             elapsed = time.time() - t0
+            if _abort_requested():
+                logger.info('[ImageGen] discarding late reply after abort '
+                            'model=%s', use_model)
+                return _aborted_result(use_model)
 
             if result.get('ok'):
                 if slot:
@@ -164,6 +250,8 @@ def generate_image(
                                    first_real_error, first_real_text)
                 hard_attempts += 1
                 if hard_attempts <= max_retries:
+                    if _abort_requested():
+                        return _aborted_result(use_model)
                     time.sleep(0.5)
                     continue
                 result['model'] = use_model
@@ -180,6 +268,8 @@ def generate_image(
                     on_429(_429_count)
                 except Exception as cb_e:
                     logger.debug('[ImageGen] on_429 callback error: %s', cb_e)
+            if _abort_requested():
+                return _aborted_result(use_model)
             if _429_count >= _429_max:
                 if first_real_error:
                     error_msg = '%s (then rate limited after %d retries)' % (first_real_error, _429_count)
@@ -197,6 +287,8 @@ def generate_image(
             continue  # does NOT increment hard_attempts
 
         except _HttpError as he:
+            if _abort_requested():
+                return _aborted_result(use_model)
             # ── Deterministic client errors (400 safety violation / invalid
             #    prompt / bad param) are NOT worth retrying — the prompt is
             #    the problem, not the slot.  Retrying just burns latency and
@@ -255,11 +347,15 @@ def generate_image(
                 }
             hard_attempts += 1
             if hard_attempts <= max_retries:
+                if _abort_requested():
+                    return _aborted_result(use_model)
                 time.sleep(1)
                 continue
             return {'ok': False, 'error': last_error, 'model': use_model}
 
         except requests.exceptions.Timeout:
+            if _abort_requested():
+                return _aborted_result(use_model)
             if slot:
                 slot.record_error()
             logger.warning('[ImageGen] Timeout model=%s hard=%d 429s=%d', use_model, hard_attempts, _429_count)
@@ -272,6 +368,8 @@ def generate_image(
             return {'ok': False, 'error': last_error, 'model': use_model}
 
         except Exception as e:
+            if _abort_requested():
+                return _aborted_result(use_model)
             if slot:
                 slot.record_error()
             logger.error('[ImageGen] Error hard=%d: %s', hard_attempts, e, exc_info=True)

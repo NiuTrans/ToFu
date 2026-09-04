@@ -107,8 +107,22 @@ MCP_DEGRADED_TIMEOUT_STREAK = int(os.environ.get('TOFU_MCP_DEGRADED_TIMEOUT_STRE
 # read-only ``health_probe`` tool is probed once on connect and then every
 # MCP_CRED_PROBE_INTERVAL seconds by the keepalive loop; the probe result text
 # is classified against the entry's ``fail_patterns`` into ok / expired. Set to
-# 0 to disable the periodic probe (the connect-time probe still runs).
+# 0 to disable the periodic probe (the connect-time probe still runs). Unlike a
+# user-owned tool wait, this reconstructible diagnostic has no cancellation
+# owner, so it always carries a finite read deadline and hard ceiling.
 MCP_CRED_PROBE_INTERVAL = int(os.environ.get('TOFU_MCP_CRED_PROBE_INTERVAL', '900'))
+try:
+    _mcp_cred_probe_timeout_raw = int(
+        os.environ.get('TOFU_MCP_CRED_PROBE_TIMEOUT_SECONDS', '30'))
+except (TypeError, ValueError, OverflowError):
+    _mcp_cred_probe_timeout_raw = 30
+MCP_CRED_PROBE_TIMEOUT = max(1, min(300, _mcp_cred_probe_timeout_raw))
+try:
+    _mcp_cred_probe_workers_raw = int(
+        os.environ.get('TOFU_MCP_CRED_PROBE_WORKERS', '1'))
+except (TypeError, ValueError, OverflowError):
+    _mcp_cred_probe_workers_raw = 1
+MCP_CRED_PROBE_WORKERS = max(1, min(16, _mcp_cred_probe_workers_raw))
 
 
 class MCPServerConfig(TypedDict, total=False):
@@ -144,6 +158,8 @@ class MCPToolInfo(TypedDict):
     input_schema: dict[str, Any]
     openai_def: dict[str, Any]  # ready-to-use OpenAI function-calling dict
     read_only_hint: bool        # MCP annotations.readOnlyHint (default False)
+    annotations: dict[str, bool]  # MCP Tool.annotations hints (camelCase keys)
+    output_schema: dict[str, Any]  # MCP Tool.outputSchema (empty when absent)
     meta: dict[str, Any]        # private retrieval/workflow metadata (_meta)
     schema_hash: str            # server-provided or normalized SHA-256 fallback
     catalog_version: str        # optional server catalogVersion

@@ -50,6 +50,14 @@ def test_flow_wire_policy_is_physically_separate_from_stateful_adapter():
         'status_code': 429,
         'detailKey': 'stream.phase.retryRateLimited',
         'detailArgs': {'seconds': 3},
+        'model': 'deepseek-v4-pro',
+        'modelRoute': {
+            'selectedModel': 'kimi-k3',
+            'resolvedModel': 'deepseek-v4-pro',
+            'role': 'worker',
+            'tier': 'heavy',
+            'kind': 'role_tier',
+        },
     }) == {
         'type': 'phase',
         'phase': 'retrying',
@@ -58,6 +66,14 @@ def test_flow_wire_policy_is_physically_separate_from_stateful_adapter():
         'statusCode': 429,
         'detailKey': 'stream.phase.retryRateLimited',
         'detailArgs': {'seconds': 3},
+        'model': 'deepseek-v4-pro',
+        'modelRoute': {
+            'selectedModel': 'kimi-k3',
+            'resolvedModel': 'deepseek-v4-pro',
+            'role': 'worker',
+            'tier': 'heavy',
+            'kind': 'role_tier',
+        },
     }
 
     adapter_source = Path(
@@ -162,6 +178,107 @@ class AdapterTest(unittest.TestCase):
         self.assertTrue(any(m.get('_isFlowPlanner') for m in emitted))
 
 
+class AdapterToolRoundsTest(unittest.TestCase):
+    """A node's bounded tool_log becomes standard chat toolRounds."""
+
+    @staticmethod
+    def _tool_log():
+        return [
+            # finished ok
+            {'round': 1, 'tool': 'run_command',
+             'args_brief': 'pytest -x', 'timestamp': 1700000000.0,
+             'preview': '12 passed', 'preview_full_chars': 9,
+             'preview_truncated': False, 'error': '',
+             'error_full_chars': 0, 'error_truncated': False},
+            # finished with an error
+            {'round': 2, 'tool': 'write_file',
+             'args_brief': 'Write lib/foo.py — add retry',
+             'timestamp': 1700000001.0,
+             'preview': '', 'preview_full_chars': 0,
+             'preview_truncated': False,
+             'error': 'PermissionError: denied',
+             'error_full_chars': 22, 'error_truncated': False},
+            # dispatched but never finished (run aborted mid-call)
+            {'round': 3, 'tool': 'read_files',
+             'args_brief': 'Read lib/foo.py',
+             'timestamp': 1700000002.0, 'preview': ''},
+            # old row whose preview was compacted away, size marker kept
+            {'round': 4, 'tool': 'web_search',
+             'args_brief': 'tofu release notes',
+             'timestamp': 1700000003.0,
+             'preview': '', 'preview_full_chars': 4123,
+             'preview_truncated': True, 'error': '',
+             'error_full_chars': 0, 'error_truncated': False},
+        ]
+
+    def _run_with_log(self, tool_log):
+        defn = build_verifier_loop_definition(max_iterations=5)
+        def runner(node, ctx, it):
+            role = node.get('role')
+            if role == 'worker':
+                result = {'output': 'done', 'status': 'completed',
+                          'error': ''}
+                if tool_log is not None:
+                    result['tool_log'] = tool_log
+                return result
+            if role == 'critic':
+                return {'output': '[VERDICT: STOP]', 'status': 'completed',
+                        'error': ''}
+            return {'output': 'PLAN', 'status': 'completed', 'error': ''}
+        return _run(defn, runner)
+
+    def test_worker_message_projects_tool_log_into_tool_rounds(self):
+        msgs = self._run_with_log(self._tool_log())
+        workers = [m for m in msgs if m.get('_flowIteration')
+                   and not m.get('_isFlowReview')]
+        self.assertEqual(len(workers), 1)
+        rounds = workers[0]['toolRounds']
+
+        self.assertEqual([r['status'] for r in rounds],
+                         ['done', 'error', 'aborted', 'done'])
+        self.assertEqual([r['roundNum'] for r in rounds], [1, 2, 3, 4])
+        self.assertEqual(len({r['toolCallId'] for r in rounds}), 4)
+
+        self.assertEqual(rounds[0]['toolCallId'], 'flow-tool-1')
+
+        done = rounds[0]
+        self.assertEqual(done['toolName'], 'run_command')
+        self.assertEqual(done['query'], 'pytest -x')
+        self.assertEqual(done['toolContent'], '12 passed')
+        self.assertEqual(done['llmRound'], 1)
+        self.assertEqual(done['tStart'], 1700000000000)
+        self.assertEqual(len(done['results']), 1)
+        self.assertEqual(done['results'][0]['fetchedChars'], 9)
+        self.assertTrue(done['results'][0]['fetched'])
+
+        failed = rounds[1]
+        self.assertEqual(failed['toolContent'], 'PermissionError: denied')
+        self.assertNotIn('results', failed)
+
+        aborted = rounds[2]
+        self.assertNotIn('toolContent', aborted)
+        self.assertNotIn('results', aborted)
+
+        compacted = rounds[3]
+        self.assertNotIn('toolContent', compacted)
+        self.assertEqual(compacted['results'][0]['fetchedChars'], 4123)
+        self.assertFalse(compacted['results'][0]['fetched'])
+
+    def test_rounds_are_display_only_and_results_stay_a_list(self):
+        msgs = self._run_with_log(self._tool_log())
+        workers = [m for m in msgs if m.get('_flowIteration')
+                   and not m.get('_isFlowReview')]
+        for entry in workers[0]['toolRounds']:
+            self.assertNotIn('preview', entry)
+            self.assertNotIn('args_brief', entry)
+            if 'results' in entry:
+                self.assertIsInstance(entry['results'], list)
+
+    def test_messages_without_tool_log_carry_no_tool_rounds_key(self):
+        msgs = self._run_with_log(None)
+        for msg in msgs:
+            self.assertNotIn('toolRounds', msg)
+
 class AutopilotProjectionContractTest(unittest.TestCase):
     """A VU graph uses flow transport without inheriting critic meaning."""
 
@@ -197,6 +314,82 @@ class AutopilotProjectionContractTest(unittest.TestCase):
             }],
         }
         self.assertEqual(chat_projection_for_flow(nested), 'autopilot')
+
+    def test_tool_lifecycle_is_live_on_current_turn_and_terminal_id_matches(self):
+        streamed = []
+        adapter = FlowEventAdapter(
+            on_stream=streamed.append,
+            projection='autopilot',
+            vu_flow=True,
+            vu_run_id='run-tools',
+        )
+        adapter.on_event({
+            'type': 'step_start', 'node_id': 'worker',
+            'role': 'worker', 'emits': 'assistant',
+        })
+        for event_type, fields in (
+            ('tool_start', {'query': 'Read a.py'}),
+            ('tool_result', {'results': [], 'status': 'done'}),
+            ('tool_complete', {'toolContent': 'ok'}),
+        ):
+            adapter.on_event({
+                'type': 'step_tool_event', 'node_id': 'worker',
+                'role': 'worker', 'emits': 'assistant',
+                'event': {
+                    'type': event_type, 'roundNum': 1,
+                    'toolCallId': 'flow-tool-occurrence',
+                    'toolName': 'read_files', **fields,
+                },
+            })
+        adapter.on_event({
+            'type': 'step_complete', 'node_id': 'worker',
+            'role': 'worker', 'emits': 'assistant', 'output': 'done',
+            'tool_log': [{
+                'round': 1, 'tool': 'read_files',
+                'tool_call_id': 'flow-tool-occurrence',
+                'args_brief': 'Read a.py', 'preview': 'ok',
+                'preview_full_chars': 2, 'error': '',
+                'error_full_chars': 0, 'status': 'done',
+            }],
+        })
+
+        lifecycle = [event for event in streamed
+                     if event.get('type', '').startswith('tool_')]
+        self.assertEqual([event['type'] for event in lifecycle], [
+            'tool_start', 'tool_result', 'tool_complete'])
+        self.assertTrue(all(
+            event['flowProjection'] == 'autopilot'
+            and event['turnRole'] == 'worker'
+            and event['emits'] == 'assistant'
+            for event in lifecycle))
+        self.assertEqual(
+            adapter.messages[0]['toolRounds'][0]['toolCallId'],
+            'flow-tool-occurrence')
+
+    def test_virtual_user_tool_lifecycle_carries_vu_identity(self):
+        streamed = []
+        adapter = FlowEventAdapter(
+            on_stream=streamed.append,
+            projection='autopilot', vu_flow=True, vu_run_id='run-vu-tools')
+        adapter.on_event({
+            'type': 'step_start', 'node_id': 'vu',
+            'role': 'virtual_user', 'emits': 'user',
+        })
+        vu_msg_id = streamed[-1]['vuMsgId']
+        adapter.on_event({
+            'type': 'step_tool_event', 'node_id': 'vu',
+            'role': 'virtual_user', 'emits': 'user',
+            'event': {'type': 'tool_start', 'roundNum': 1,
+                      'toolCallId': 'flow-vu-tool',
+                      'toolName': 'project_board_read',
+                      'query': 'Project board'},
+        })
+        event = streamed[-1]
+        self.assertEqual(event['type'], 'tool_start')
+        self.assertEqual(event['vuMsgId'], vu_msg_id)
+        self.assertEqual(event['autopilotRunId'], 'run-vu-tools')
+        self.assertEqual(event['turnRole'], 'virtual_user')
+        self.assertEqual(event['emits'], 'user')
 
     def test_virtual_user_live_identity_matches_persisted_turn(self):
         streamed = []
@@ -282,6 +475,31 @@ class AutopilotProjectionContractTest(unittest.TestCase):
         # Never emitted as a delta (would pollute assistantMsg.content).
         self.assertFalse([e for e in streamed if e.get('type') == 'delta'])
 
+    def test_step_complete_persists_actual_role_routed_model(self):
+        adapter = FlowEventAdapter()
+        route = {
+            'selectedModel': 'kimi-k3',
+            'resolvedModel': 'deepseek-v4-pro',
+            'role': 'worker',
+            'tier': 'heavy',
+            'kind': 'role_tier',
+        }
+        adapter.on_event({
+            'type': 'step_start', 'node_id': 'worker',
+            'role': 'worker', 'emits': 'assistant',
+        })
+        adapter.on_event({
+            'type': 'step_complete', 'node_id': 'worker',
+            'role': 'worker', 'emits': 'assistant',
+            'output': 'done', 'model': 'deepseek-v4-pro',
+            'modelRoute': route,
+        })
+
+        self.assertEqual(len(adapter.messages), 1)
+        message = adapter.messages[0]
+        self.assertEqual(message['model'], 'deepseek-v4-pro')
+        self.assertEqual(message['orchestration']['modelRoute'], route)
+
     def test_step_phase_for_verifier_is_skipped(self):
         """A verifier (user-side) producer's phase would land on the wrong
         bubble — the adapter must drop it."""
@@ -355,7 +573,8 @@ class AutopilotProjectionContractTest(unittest.TestCase):
                              stream_sink=_sink)
             r = agent.run()
             # Autopilot VU stops the loop on TASK_DONE.
-            out = ('[VU: TASK_DONE]' if role == 'virtual_user'
+            out = ('[VU: TASK_DONE]\n[PROGRESS: resolved=1 remaining=0]'
+                   if role == 'virtual_user'
                    else (r.final_answer or ''))
             return {'output': out,
                     'status': SubAgentStatus.COMPLETED.value, 'error': ''}
@@ -495,6 +714,51 @@ class ThinkingPropagationTest(unittest.TestCase):
         self.assertTrue(trace_think,
                         'step_trace should carry accumulated thinking')
         self.assertIn(big_think, trace_think[0]['thinking'])
+
+
+class AdapterErrorFieldTest(unittest.TestCase):
+    """A failed leaf (e.g. the worker's LLM call died) must surface its real
+    error on the durable message: finish_info renders msg.error as the
+    terminal error tag instead of a bare ✓ over the placeholder text."""
+
+    def _worker_step(self, adapter, **complete):
+        adapter.on_event({'type': 'step_start', 'role': 'worker',
+                          'emits': 'assistant'})
+        adapter.on_event({'type': 'step_complete', 'role': 'worker',
+                          'emits': 'assistant', 'thinking': '', **complete})
+
+    def test_failed_worker_step_carries_error(self):
+        adapter = FlowEventAdapter()
+        self._worker_step(
+            adapter, status='failed',
+            error='LLM call failed at round 3: Bad request (HTTP 400)',
+            output='[LLM error at round 3] No substantive answer was produced.',
+            state_changing=0)
+        workers = [m for m in adapter.messages
+                   if m.get('role') == 'assistant']
+        self.assertEqual(len(workers), 1)
+        self.assertEqual(
+            workers[0]['error'],
+            'LLM call failed at round 3: Bad request (HTTP 400)')
+
+    def test_healthy_worker_step_has_no_error_key(self):
+        adapter = FlowEventAdapter()
+        self._worker_step(adapter, status='completed', error='',
+                          output='done', state_changing=1)
+        self.assertEqual(len(adapter.messages), 1)
+        self.assertNotIn('error', adapter.messages[0])
+
+    def test_failed_planner_step_carries_error(self):
+        adapter = FlowEventAdapter()
+        adapter.on_event({'type': 'step_start', 'role': 'planner',
+                          'emits': 'assistant'})
+        adapter.on_event({'type': 'step_complete', 'role': 'planner',
+                          'emits': 'assistant', 'thinking': '',
+                          'status': 'failed', 'error': 'dispatch exhausted',
+                          'output': ''})
+        planners = [m for m in adapter.messages if m.get('_isFlowPlanner')]
+        self.assertEqual(len(planners), 1)
+        self.assertEqual(planners[0]['error'], 'dispatch exhausted')
 
 
 if __name__ == '__main__':

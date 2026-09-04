@@ -1,6 +1,7 @@
 /* ===== migrated source: push.js ===== */
 /* Responsibility: multiplex non-conversation events over one /api/push socket.
-   Entries: pushSubscribe, pushUnsubscribe, pushSend, pushOnReconnect.
+   Entries: pushSubscribe, pushUnsubscribe, pushOnReconnect, pushOnBuildId,
+   pushRpcRequest.
    Dependencies: WebSocket, page visibility, apiUrl, and bounded timers.
    Conversation turns retain resumable SSE; handlers receive wire events. */
 
@@ -32,6 +33,8 @@ const _push = (() => {
   const PING_TIMEOUT_MS = 8000;    // no pong within this ⇒ treat as timed out (FLOOR)
   const PING_HIDDEN_TIMEOUT_MS = 30000; // background timer clamping is expected
   const PING_TIMEOUT_MAX_MS = 30000; // adaptive ceiling under a slow proxy/tunnel
+  const BUILD_PROBE_INTERVAL_MS = 5 * 60 * 1000;
+  const BUILD_ID_LISTENER_MAX = 8;
   // Scale the half-open verdict with observed RTT so a slow proxy cannot feed
   // a reconnect/full-refetch loop; background timer clamping gets a 30s floor.
   function _foregroundPingTimeoutMs() {
@@ -58,12 +61,22 @@ const _push = (() => {
   let _latencyMs = null;           // last measured RTT; null = unknown
   let _latencyState = 'unknown';   // unknown | good | ok | poor | timeout | offline
   let _latencyListeners = new Set();
+  let _lastBuildProbeAt = 0;
+  let _lastBuildId = null;
+  let _buildIdListeners = new Set();
+
+  function _observeBuildId(value) {
+    if (typeof value !== 'string' || value.length > 180 ||
+        !/^main-[A-Za-z0-9_-]+\.js$/.test(value) || value === _lastBuildId) return;
+    _lastBuildId = value;
+    for (const fn of _buildIdListeners) {
+      try { fn(value); }
+      catch (e) { console.error('[Push] build-id listener error:', e); }
+    }
+  }
 
   function _emitLatency() {
-    // Stamp each reading so a consumer (net-latency.js watchdog) can tell a
-    // FRESH reading from a frozen one — if the socket wedges in CONNECTING or
-    // a reconnect is scheduled but never opens, no further emit occurs and the
-    // last reading would otherwise display forever as if still live.
+    // Stamp each reading for diagnostics and late-subscriber presentation.
     const reading = { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
     for (const fn of _latencyListeners) {
       try { fn(reading); }
@@ -214,7 +227,14 @@ const _push = (() => {
     // clear _lastPingSentAt before starting a fresh probe.
     if (_lastPingSentAt) return;
     _lastPingSentAt = Date.now();
-    try { _ws.send(JSON.stringify({ action: 'ping', t: _lastPingSentAt })); }
+    const ping = { action: 'ping', t: _lastPingSentAt };
+    const shouldProbeBuild = !_lastBuildProbeAt ||
+      _lastPingSentAt - _lastBuildProbeAt >= BUILD_PROBE_INTERVAL_MS;
+    if (shouldProbeBuild) ping.buildProbe = true;
+    try {
+      _ws.send(JSON.stringify(ping));
+      if (shouldProbeBuild) _lastBuildProbeAt = _lastPingSentAt;
+    }
     catch (e) { console.debug('[Push] ping send failed:', e); }
     // Arm a dedicated watchdog so the timeout is surfaced right at the window
     // edge instead of waiting for a later interval tick to notice the age.
@@ -259,13 +279,19 @@ const _push = (() => {
       _pingTimeoutTimer = setTimeout(
         _firePingTimeout, Math.max(1, _pingTimeoutMs() - elapsed));
     }
-    if (!_pageHidden()) _sendPing();
+    if (!_pageHidden()) {
+      // The existing visibility-resume ping doubles as the build handshake;
+      // no second listener, timer, or HTTP request is needed.
+      _lastBuildProbeAt = 0;
+      _sendPing();
+    }
   }
 
   function _stopPinging() {
     if (_pingTimer) { clearInterval(_pingTimer); _pingTimer = null; }
     if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
     _lastPingSentAt = 0;
+    _lastBuildProbeAt = 0;
   }
 
   function _onPong(t) {
@@ -402,7 +428,11 @@ const _push = (() => {
       const channel = frame.channel;
       const taskId = frame.taskId;
 
-      if (frame.type === 'pong') { _onPong(frame.t); return; }
+      if (frame.type === 'pong') {
+        _observeBuildId(frame.buildId);
+        _onPong(frame.t);
+        return;
+      }
       if (frame.type === 'ping') return;
 
       /* A DATA frame restarts the probe cycle: a server busy streaming large
@@ -590,22 +620,42 @@ const _push = (() => {
     return () => _reconnectListeners.delete(fn);
   }
 
-  return { connect, subscribe, unsubscribe, send, request, isConnected, getLatency, onLatency, onReconnect, socketRequestId };
+  /* Build identity is a low-rate field on the existing pong control frame.
+   * Replay the last valid value to late subscribers so boot ordering cannot
+   * miss the first socket handshake. The cap makes the transport owner remain
+   * bounded even if a caller forgets to unsubscribe. */
+  function onBuildId(fn) {
+    if (typeof fn !== 'function' || _buildIdListeners.size >= BUILD_ID_LISTENER_MAX) {
+      return () => {};
+    }
+    _buildIdListeners.add(fn);
+    if (_lastBuildId) {
+      try { fn(_lastBuildId); }
+      catch (e) { console.error('[Push] build-id listener error:', e); }
+    }
+    return () => _buildIdListeners.delete(fn);
+  }
+
+  return { connect, subscribe, unsubscribe, send, request, isConnected, getLatency, onLatency, onReconnect, onBuildId, socketRequestId };
 })();
 
 // Public API
 function pushSubscribe(channel, taskId, handler) { _push.subscribe(channel, taskId, handler); }
 function pushUnsubscribe(channel, taskId, handler) { _push.unsubscribe(channel, taskId, handler); }
-function pushSend(msg) { _push.send(msg); }
 function pushConnect() { _push.connect(); }
 function pushIsConnected() { return _push.isConnected(); }
 function pushGetLatency() { return _push.getLatency(); }
 function pushOnLatency(fn) { return _push.onLatency(fn); }
 function pushOnReconnect(fn) { return _push.onReconnect(fn); }
-function pushSocketRequestId() { return _push.socketRequestId(); }
+function pushOnBuildId(fn) { return _push.onBuildId(fn); }
 function pushRpcRequest(method, params, options) { return _push.request(method, params, options); }
 
-// Native TypeScript modules have their own ESM scope. Publish only the typed
-// transport port they need; retained runtime sections continue using the
-// lexical helpers above.
+// Lazy/typed modules have their own ESM scope. Publish stable transport
+// functions through the private registry; retained sections keep using the
+// lexical helpers above. These are functions over the live `_push` owner, not
+// captured connection-state snapshots.
+runtimeScope.pushSubscribe = pushSubscribe;
+runtimeScope.pushUnsubscribe = pushUnsubscribe;
+runtimeScope.pushIsConnected = pushIsConnected;
+runtimeScope.pushOnReconnect = pushOnReconnect;
 runtimeScope.pushRpcRequest = pushRpcRequest;

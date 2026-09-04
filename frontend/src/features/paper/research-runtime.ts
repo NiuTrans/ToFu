@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import { _i18nLang } from '../../i18n';
 import {
   paperAttachPush,
   paperDetachPush,
@@ -9,7 +10,7 @@ import {
 } from './push-transport';
 
 type JsonObject = Record<string, unknown>;
-type ResearchStatus = 'pending' | 'running' | 'done' | 'error' | 'aborted';
+type ResearchStatus = 'pending' | 'running' | 'done' | 'error' | 'aborted' | 'degraded';
 
 interface ToolRound extends JsonObject {
   roundNum?: unknown;
@@ -167,6 +168,10 @@ export function researchApplyEvent(
       || event.type === 'stage_done') && typeof event.stage === 'string') {
     stream.phase = event.stage;
   }
+  // Publish is an explicit fifth stage in the durable recipe. The final
+  // publication boundary may be too fast to produce its own tool round, but a
+  // stage event still makes it visible in the workbench trajectory.
+  if (event.type === 'final' || event.type === 'done') stream.phase = 'publish';
   if (event.type === 'tool_start') {
     stream.toolRounds.push({
       roundNum: event.roundNum,
@@ -174,6 +179,8 @@ export function researchApplyEvent(
       query: event.query || event.toolName,
       toolCallId: event.toolCallId || '',
       toolArgs: event.toolArgs || '',
+      attentionKind: event.attentionKind,
+      parentToolCallId: event.parentToolCallId,
       status: 'searching',
       results: null,
     });
@@ -212,12 +219,20 @@ export function researchApplySnapshot(
 ): void {
   researchAdoptServerClocks(stream, snapshot);
   if (typeof snapshot.status === 'string') {
-    stream.status = snapshot.status as ResearchStatus;
+    // The task runtime exposes degraded as a terminal lifecycle status. Keep
+    // the view's terminal predicate simple (done) while retaining the separate
+    // product-quality axis that explains why the artifact needs scrutiny.
+    if (snapshot.status === 'degraded') {
+      stream.status = 'done';
+      stream.degraded = true;
+    } else {
+      stream.status = snapshot.status as ResearchStatus;
+    }
   }
   const quality = snapshot.artifact_quality;
   if (quality && typeof quality === 'object') {
     const row = quality as JsonObject;
-    stream.degraded = Boolean(row.degraded);
+    stream.degraded = Boolean(row.degraded) || stream.degraded;
     stream.degradedReason = typeof row.reason === 'string' ? row.reason : '';
   }
   const result = snapshot.result;
@@ -277,10 +292,14 @@ export async function startResearchJob(direction: string): Promise<void> {
   if (state._researchStream) paperDetachPush(state._researchStream);
   stopResearchPoll();
   const stream = newResearchStream(direction);
+  stream.lang = _i18nLang;
   state._researchStream = stream;
   ensureResearchMode();
   try {
-    const data = await tasks().start('research', { direction });
+    const data = await tasks().start('research', {
+      direction,
+      lang: _i18nLang,
+    });
     const taskId = typeof data.taskId === 'string' ? data.taskId : '';
     if (data.ok !== true || !taskId) {
       throw new Error(typeof data.error === 'string' ? data.error : 'research start failed');

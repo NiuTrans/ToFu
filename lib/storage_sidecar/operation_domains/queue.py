@@ -8,6 +8,8 @@ OPERATIONS = {
     'queue.list': ops.OperationSpec('query', False, ops._queue_list),
     'queue.remove': ops.OperationSpec('command', True, ops._queue_remove),
     'queue.clear': ops.OperationSpec('command', True, ops._queue_clear),
+    'queue.kind.clear': ops.OperationSpec(
+        'command', True, ops._queue_kind_clear),
     'queue.dequeue': ops.OperationSpec('command', False, ops._queue_dequeue),
     'queue.lease.release': ops.OperationSpec(
         'command', True, ops._queue_lease_release),

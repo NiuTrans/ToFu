@@ -16,6 +16,7 @@ Shared DRY primitives live in ``_adapter.py`` (``simple_call``,
 from lib.tasks_pkg.handlers import (  # noqa: F401
     browser,
     code_exec,
+    local_serve,
     mcp,
     memory,
     motion_video,

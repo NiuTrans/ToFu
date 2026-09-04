@@ -22,19 +22,21 @@ from lib.orchestration_engine import FlowExecutor
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
+OWNER = 82
 
 
 def _runtime(*, approval=True, guidance='answer', aborted=False):
     events = []
     calls = []
 
-    def request_approval(request_id, timeout):
-        calls.append(('approval', request_id, timeout))
+    def request_approval(request_id, timeout, owner_user_id):
+        calls.append(('approval', request_id, timeout, owner_user_id))
         return approval
 
-    def request_guidance(request_id, task):
+    def request_guidance(request_id, task, owner_user_id):
         calls.append((
             'guidance', request_id, task.get('id'), task.get('aborted'),
+            owner_user_id,
         ))
         return guidance
 
@@ -46,6 +48,7 @@ def _runtime(*, approval=True, guidance='answer', aborted=False):
             request_guidance=request_guidance,
         ),
         request_scope='test-run',
+        owner_user_id=OWNER,
     )
     return runtime, events, calls
 
@@ -74,7 +77,7 @@ def test_approval_uses_canonical_timeout_and_projects_resolution(approved, abort
     }, 'before')
 
     assert result.aborted is aborted
-    assert calls == [('approval', 'orch_test-run_h_1', 45)]
+    assert calls == [('approval', 'orch_test-run_h_1', 45, OWNER)]
     assert [event['type'] for event in events] == [
         'human_request', 'human_resolved',
     ]
@@ -88,7 +91,7 @@ def test_invalid_approval_timeout_uses_backend_default():
     runtime.execute({
         'id': 'h', 'params': {'mode': 'approve', 'timeout_sec': 'invalid'},
     }, '')
-    assert calls == [('approval', 'orch_test-run_h_1', 300)]
+    assert calls == [('approval', 'orch_test-run_h_1', 300, OWNER)]
 
 
 def test_missing_mode_uses_the_shared_control_default():
@@ -96,7 +99,7 @@ def test_missing_mode_uses_the_shared_control_default():
     result = runtime.execute({'id': 'h', 'params': {}}, 'before')
 
     assert result.aborted is False
-    assert calls == [('approval', 'orch_test-run_h_1', 300)]
+    assert calls == [('approval', 'orch_test-run_h_1', 300, OWNER)]
     assert events[0]['mode'] == 'approve'
 
 
@@ -109,7 +112,7 @@ def test_input_port_receives_abort_aware_task_and_appends_answer():
     assert result.aborted is False
     assert result.context == 'before\n\n[Human input — Owner]\nUSE PLAN B'
     assert calls == [(
-        'guidance', 'orch_test-run_h_1', 'orch_test-run_h_1', True)]
+        'guidance', 'orch_test-run_h_1', 'orch_test-run_h_1', True, OWNER)]
     assert events[-1]['preview'] == 'USE PLAN B'
     assert events[-1]['resolution'] == 'answered'
 
@@ -176,12 +179,14 @@ def test_concurrent_identical_gates_resolve_only_their_own_registry_entry():
     from lib.tasks_pkg import approval
 
     events = {'one': [], 'two': []}
+    owners = {'one': 91, 'two': 92}
     results = {}
     runtimes = {
         name: OrchestrationHumanGateRuntime(
             emit=events[name].append,
             abort_check=lambda: False,
             request_scope='run-' + name,
+            owner_user_id=owners[name],
         )
         for name in events
     }
@@ -204,9 +209,11 @@ def test_concurrent_identical_gates_resolve_only_their_own_registry_entry():
                         if event['type'] == 'human_request'), '')
             for name, rows in events.items()
         }
-        with approval._write_approvals_lock:
-            registered = all(request_id in approval._write_approvals
-                             for request_id in request_ids.values())
+        registered = all(
+            request_id and approval.is_write_approval_pending(
+                request_id, owner_user_id=owners[name])
+            for name, request_id in request_ids.items()
+        )
         if all(request_ids.values()) and registered:
             break
         time.sleep(0.01)
@@ -216,26 +223,31 @@ def test_concurrent_identical_gates_resolve_only_their_own_registry_entry():
             'one': 'orch_run-one_review_1',
             'two': 'orch_run-two_review_1',
         }
-        assert approval.resolve_write_approval(request_ids['one'], True)
-        assert approval.resolve_write_approval(request_ids['two'], False)
+        assert not approval.resolve_write_approval(
+            request_ids['one'], True, owner_user_id=owners['two'])
+        assert approval.resolve_write_approval(
+            request_ids['one'], True, owner_user_id=owners['one'])
+        assert approval.resolve_write_approval(
+            request_ids['two'], False, owner_user_id=owners['two'])
         for thread in threads:
             thread.join(timeout=1)
         assert not any(thread.is_alive() for thread in threads)
         assert results['one'].aborted is False
         assert results['two'].aborted is True
     finally:
-        with approval._write_approvals_lock:
-            for request_id in request_ids.values():
-                approval._write_approvals.pop(request_id, None)
+        for name, request_id in request_ids.items():
+            if request_id:
+                approval.resolve_write_approval(
+                    request_id, False, owner_user_id=owners[name])
 
 
 def test_injected_gate_ports_cross_an_isolated_subflow_boundary():
     calls = []
     ports = HumanGateRequestPorts(
-        request_approval=lambda request_id, timeout: (
-            calls.append((request_id, timeout)) or True
+        request_approval=lambda request_id, timeout, owner_user_id: (
+            calls.append((request_id, timeout, owner_user_id)) or True
         ),
-        request_guidance=lambda _request_id, _task: None,
+        request_guidance=lambda _request_id, _task, _owner_user_id: None,
     )
     child = {
         'schema': 'tofu.orchestration/v1',
@@ -271,7 +283,8 @@ def test_injected_gate_ports_cross_an_isolated_subflow_boundary():
         agent_runner=lambda _node, _context, _iteration: {},
         human_gate_ports=ports,
         parent_task={'id': 'parent-run'},
+        human_gate_owner_user_id=OWNER,
     ).run(initial_context='seed')
 
     assert result['ok'] is True
-    assert calls == [('orch_parent-run_h_1', 17)]
+    assert calls == [('orch_parent-run_h_1', 17, OWNER)]

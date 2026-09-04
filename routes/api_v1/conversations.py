@@ -16,6 +16,7 @@ from lib.openapi import api_meta
 from lib.request_parser import (
     BadRequest,
     async_parse_body,
+    optional_bool,
     optional_dict,
     require_str,
 )
@@ -37,12 +38,25 @@ api_v1_conversations_bp = Blueprint("api_v1_conversations", __name__)
 )
 async def resolve_config_route():
     body = await async_parse_body()
-    return api_ok(resolve_conv_config(
-        conv_settings=optional_dict(body, "conv_settings", default={}) or {},
-        overrides=optional_dict(body, "overrides", default={}) or {},
+    conv_settings = optional_dict(body, "conv_settings", default={}) or {}
+    overrides = optional_dict(body, "overrides", default={}) or {}
+    resolved = resolve_conv_config(
+        conv_settings=conv_settings,
+        overrides=overrides,
         server_defaults=optional_dict(body, "server_defaults", default={}) or {},
         is_active=bool(body.get("is_active", True)),
-    ))
+    )
+    if optional_bool(body, "include_settings", default=False):
+        settings_conv = optional_dict(
+            body,
+            "settings_conv_settings",
+            default=conv_settings,
+        )
+        resolved["settings"] = resolve_conv_settings(
+            conv_settings=settings_conv,
+            overrides=overrides,
+        )
+    return api_ok(resolved)
 
 
 @api_v1_conversations_bp.route(

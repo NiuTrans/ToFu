@@ -170,11 +170,6 @@ function removeConvRef(index) {
   _renderConvRefChips();
 }
 
-function clearConvRefs() {
-  _pendingConvRefs.length = 0;
-  _renderConvRefChips();
-}
-
 /** Remove only references carried by an acknowledged composer submission. */
 function consumePendingConvRefs(consumedRefs) {
   for (const consumed of consumedRefs || []) {

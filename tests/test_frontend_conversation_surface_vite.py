@@ -245,6 +245,11 @@ const tool1 = surface.root.querySelector('[data-block-id="tool:one"]');
 const action1 = surface.root.querySelector('[data-conversation-part="turn-actions"] button');
 action1.focus();
 tool1.querySelector('details').open = true;
+/* Simulate a stale live-render/asset transition that left duplicate keyed
+ * nodes. The next authoritative commit must heal both levels and preserve the
+ * original managed nodes rather than orphaning the first copy forever. */
+tool1.parentElement.appendChild(tool1.cloneNode(true));
+turn1.parentElement.appendChild(turn1.cloneNode(true));
 surface.render(makeVm('ab'));
 const turn2 = surface.root.querySelector('[data-turn-id="turn-1"]');
 const text2 = surface.root.querySelector('[data-block-id="text:terminal"]');
@@ -265,6 +270,7 @@ console.log(JSON.stringify({
   toolRemoved:!surface.root.querySelector('[data-block-id="tool:one"]'),
   intent:intents[0],
   duplicateTurns:surface.root.querySelectorAll('[data-turn-id="turn-1"]').length,
+  duplicateBlocks:surface.root.querySelectorAll('[data-block-id="tool:one"]').length,
 }));
 """)
     assert result["sameTurn"] is True
@@ -278,12 +284,106 @@ console.log(JSON.stringify({
     assert result["text"] == "abc"
     assert result["toolRemoved"] is True
     assert result["duplicateTurns"] == 1
+    assert result["duplicateBlocks"] == 0
     assert result["intent"] == {
         "type": "copy-block",
         "conversationId": "conv-a",
         "turnId": "turn-1",
         "blockId": "text:terminal",
         "laneId": "main",
+    }
+
+
+def test_surface_hands_optimistic_turn_to_durable_identity_in_place(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const vm = (turnId, status, revision) => ({
+  conversationId:'conv-a', conversationRevision:revision, transport:'live',
+  orphanLanes:[], queue:[], mainLane:{laneId:'main', parentTurnId:null,
+    title:'Conversation', kind:'main', turns:[{
+      turnId, presentationId:'cmd-stable:output', laneId:'main',
+      parentTurnId:null, ordinal:2, actor:'assistant', role:'assistant',
+      kind:'reply', status, attemptId:status === 'running' ? 'attempt-1' : null,
+      projectionRevision:revision, subtreeRevisionKey:String(revision),
+      commandPending:null, finish:null, branches:[], actions:[],
+      metadata:{translation:{completed:false}}, source:{}, blocks:[],
+    }]},
+});
+const surface = feature.createConversationSurface(document.getElementById('chat'));
+surface.render(vm('transient:outgoing:cmd-stable:assistant', 'pending', 1));
+const provisional = surface.root.querySelector(
+  '[data-presentation-id="cmd-stable:output"]',
+);
+surface.render(vm('turn-durable', 'running', 2));
+const durable = surface.root.querySelector('[data-turn-id="turn-durable"]');
+console.log(JSON.stringify({
+  sameNode:provisional === durable,
+  presentationId:durable.dataset.presentationId,
+  turnId:durable.dataset.turnId,
+  count:surface.root.querySelectorAll(
+    '[data-presentation-id="cmd-stable:output"]',
+  ).length,
+}));
+surface.dispose();
+dom.window.close();
+""")
+    assert result == {
+        "sameNode": True,
+        "presentationId": "cmd-stable:output",
+        "turnId": "turn-durable",
+        "count": 1,
+    }
+
+
+def test_linked_queue_pair_projects_only_user_turn_with_inline_status(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const turn = (turnId, actor, ordinal, currentAttemptId = null) => ({
+  turnId, presentationId:'cmd-queue:' + (actor === 'human' ? 'input' : 'output'),
+  conversationId:'conv-a', laneId:'main', ordinal, actor,
+  kind:actor === 'human' ? 'input' : 'reply', runId:'',
+  status:actor === 'human' ? 'completed' : 'pending', currentAttemptId,
+  projection:{segments:actor === 'human'
+    ? [{type:'text', blockId:'text:terminal', text:'queued text',
+        deliverable:true, terminal:true}]
+    : []},
+  projectionRevision:1, settlement:{}, createdAt:1, updatedAt:1,
+});
+const input = turn('turn-input', 'human', 1);
+const output = turn('turn-output', 'assistant', 2, 'attempt-queue');
+const state = {
+  conversationId:'conv-a', conversationRevision:3, transport:'live',
+  turnsById:{'turn-input':input, 'turn-output':output},
+  laneOrder:{main:['turn-input','turn-output']},
+  attemptsById:{'attempt-queue':{
+    attemptId:'attempt-queue', turnId:'turn-output', attemptNo:1,
+    status:'pending', queueBinding:{queueId:'queue-1', state:'pending'},
+    createdAt:1, updatedAt:1,
+  }},
+  queueItems:[{queueId:'queue-1', position:2, kind:'real', priority:1,
+    timestamp:1, text:'queued text', inputTurnId:'turn-input',
+    outputTurnId:'turn-output', attemptId:'attempt-queue'}],
+  pendingEventsByTurn:{}, commandPending:{}, liveRoundUsageByTurn:{},
+};
+const viewModel = feature.selectConversationViewModel(state);
+console.log(JSON.stringify({
+  visibleTurnIds:viewModel.mainLane.turns.map(turn => turn.turnId),
+  blockKinds:viewModel.mainLane.turns[0].blocks.map(block => block.kind),
+  queueId:viewModel.mainLane.turns[0].blocks.at(-1).value.queueId,
+  compatibilityQueue:viewModel.queue,
+  live:viewModel.mainLane.live,
+}));
+""")
+    assert result == {
+        "visibleTurnIds": ["turn-input"],
+        "blockKinds": ["text", "queue-status"],
+        "queueId": "queue-1",
+        "compatibilityQueue": [],
+        "live": False,
     }
 
 
@@ -509,13 +609,19 @@ const node = document.querySelector('[data-turn-id="assistant-1"]');
 node.querySelector('[data-conversation-action="resume"]').click();
 node.querySelector('[data-conversation-action="translate"]').click();
 node.querySelector('[data-conversation-action="inspect"]').click();
+const footerNode = node.querySelector('[data-conversation-part="turn-footer"]');
+const timingNode = footerNode.querySelector('.finish-tag.timing');
 console.log(JSON.stringify({
   compatible:Boolean(
     feature.selectConversationViewModel(state).mainLane.turns[0]),
 
   text:node.querySelector('[data-block-id="text:terminal"] .md-content').textContent,
   thinking:node.querySelector('[data-block-id="thinking:llm-1"]').textContent,
-  footer:node.querySelector('[data-conversation-part="turn-footer"]').textContent,
+  footer:footerNode.textContent.replace(
+    timingNode ? timingNode.textContent : '', ''),
+  timing:Boolean(timingNode)
+    && timingNode.textContent.includes(':')
+    && timingNode.textContent.endsWith('· 00:00'),
   failedClass:node.classList.contains('turn-failed'),
   inspectorClass:node.querySelector('[data-conversation-action="inspect"]')
     .classList.contains('ri-anchor'),
@@ -528,6 +634,7 @@ console.log(JSON.stringify({
         "text": "answer",
         "thinking": "Thinking Processreason",
         "footer": "Interrupted: user_stopmodel-a",
+        "timing": True,
         "failedClass": True,
         "inspectorClass": True,
         "intents": [
@@ -609,6 +716,80 @@ console.log(JSON.stringify({
         # Still the activity tail: genuinely mid-reasoning, stays active.
         "liveThinkingTail": [
             ["thinking:llm-1", True], ["thinking:llm-2", False]],
+    }
+
+
+def test_hidden_gateway_rounds_render_as_one_continuous_thinking_disclosure(
+        conversation_bundle: Path):
+    """Internal execute_tools shells are not visible content boundaries.
+
+    Preserve every round identity in the view model, but do not make a reader
+    open five indistinguishable reasoning disclosures when no prose, tool, or
+    program block is visible between them.
+    """
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const segments = [];
+for (let round = 1; round <= 5; round += 1) {
+  segments.push({type:'thinking', blockId:`thinking:llm-${round}`,
+    text:`reason ${round}`, llmRound:round});
+  if (round < 5) segments.push({type:'tool_use',
+    blockId:`tool:gateway-${round}`, id:`gateway-${round}`,
+    name:'execute_tools', input:{calls:[]}, llmRound:round,
+    result:{status:'done', content:'{"status":"ok"}'}});
+}
+segments.push({type:'text', blockId:'text:terminal', text:'answer',
+  deliverable:true, terminal:true});
+const turn = {
+  turnId:'turn-1', conversationId:'conv-a', laneId:'main', ordinal:1,
+  actor:'assistant', kind:'reply', runId:'', status:'completed',
+  currentAttemptId:null, projection:{segments, content:'answer'},
+  projectionRevision:5, settlement:{outcome:'completed'},
+  createdAt:1, updatedAt:2,
+};
+const state = {
+  conversationId:'conv-a', conversationRevision:5, transport:'replay',
+  turnsById:{'turn-1':turn}, laneOrder:{main:['turn-1']},
+  attemptsById:{}, queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+  liveRoundUsageByTurn:{},
+};
+const vm = feature.selectConversationViewModel(state);
+const thinking = vm.mainLane.turns[0].blocks.filter(
+  block => block.kind === 'thinking');
+const surface = feature.createConversationSurface(
+  document.getElementById('chat'),
+  feature.createClassicConversationRenderers({
+    renderSafeMarkdownHtml:value => `<p>${value}</p>`,
+  }),
+);
+surface.render(vm);
+console.log(JSON.stringify({
+  count:thinking.length,
+  blockId:thinking[0]?.blockId,
+  memberBlockIds:thinking[0]?.memberBlockIds,
+  markdown:thinking[0]?.markdown,
+  disclosureCount:surface.root.querySelectorAll('.thinking-block').length,
+  gatewayCount:surface.root.querySelectorAll('[data-block-kind="tool"]').length,
+}));
+surface.dispose();
+dom.window.close();
+""")
+    assert result == {
+        "count": 1,
+        "blockId": "thinking:llm-1",
+        "memberBlockIds": [
+            "thinking:llm-1",
+            "thinking:llm-2",
+            "thinking:llm-3",
+            "thinking:llm-4",
+            "thinking:llm-5",
+        ],
+        "markdown": "reason 1\n\nreason 2\n\nreason 3\n\nreason 4\n\nreason 5",
+        "disclosureCount": 1,
+        "gatewayCount": 0,
     }
 
 
@@ -936,6 +1117,226 @@ console.log(JSON.stringify(payload));
     }
 
 
+
+def test_reused_tool_call_id_joins_each_image_segment_to_its_own_round(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const segment = (blockId, crop) => ({
+  type:'tool_use', blockId, id:'reused-image-id', name:'inspect_image',
+  input:{crop}, llmRound:0, result:{status:'done', content:'image'},
+});
+const richRound = (roundNum, crop, uri) => ({
+  roundNum, llmRound:0, toolCallId:'reused-image-id', toolName:'inspect_image',
+  toolArgs:{crop}, status:'done',
+  results:[{imageDataUris:[{uri, filename:`crop-${roundNum}.jpg`}]}],
+});
+const turn = {
+  turnId:'turn-reused-image', conversationId:'conv-a', laneId:'main', ordinal:1,
+  actor:'assistant', kind:'reply', runId:'', status:'completed',
+  currentAttemptId:null, projectionRevision:1,
+  projection:{
+    segments:[
+      segment('tool:reused-image-id', [0, 0, 0.5, 0.5]),
+      segment('tool:reused-image-id~2', [0.5, 0.5, 1, 1]),
+    ],
+    toolRounds:[
+      richRound(1, [0, 0, 0.5, 0.5], 'data:image/jpeg;base64,FIRST'),
+      richRound(2, [0.5, 0.5, 1, 1], 'data:image/jpeg;base64,SECOND'),
+    ],
+  },
+  settlement:{outcome:'completed'}, createdAt:1, updatedAt:1,
+};
+const blocks = feature.selectTurnBlocks(turn).filter(block => block.kind === 'tool');
+console.log(JSON.stringify({
+  ids:blocks.map(block => block.blockId),
+  crops:blocks.map(block => block.round.toolArgs.crop),
+  uris:blocks.map(block => block.round.results[0].imageDataUris[0].uri),
+}));
+""")
+    assert result == {
+        "ids": ["tool:reused-image-id", "tool:reused-image-id~2"],
+        "crops": [[0, 0, 0.5, 0.5], [0.5, 0.5, 1, 1]],
+        "uris": [
+            "data:image/jpeg;base64,FIRST",
+            "data:image/jpeg;base64,SECOND",
+        ],
+    }
+
+def test_swarm_rich_panel_preserves_live_nodes_and_reader_disclosure(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const renderers = feature.createClassicConversationRenderers({
+  renderSafeMarkdownHtml:value => value,
+  renderToolBlockHtml(block) {
+    const agents = block.round.agents.map(agent =>
+      `<article class="sw-agent" data-agent-id="${agent.id}">`
+      + `<button class="sw-a-header">${agent.role}</button>`
+      + `<span class="sw-a-preview">${agent.preview}</span></article>`
+    ).join('');
+    return `<div data-prn="1" data-prn-kind="swarm">`
+      + `<section class="sw-panel sw-active">${agents}</section></div>`;
+  },
+});
+const makeViewModel = (revision, preview, includeSecond) => ({
+  conversationId:'conv-a', conversationRevision:revision, transport:'live',
+  orphanLanes:[], queue:[], mainLane:{laneId:'main', parentTurnId:null,
+    title:'Conversation', kind:'main', turns:[{
+      turnId:'turn-swarm', laneId:'main', parentTurnId:null, ordinal:1,
+      actor:'assistant', role:'assistant', kind:'reply', status:'running',
+      attemptId:'attempt-1', projectionRevision:revision,
+      subtreeRevisionKey:String(revision), commandPending:null, finish:null,
+      branches:[], actions:[], metadata:{translation:{completed:false},
+        origin:{initiator:'human'}, orchestration:{runId:'run-1'}},
+      source:{createdAt:1, projection:{}}, blocks:[{
+        kind:'tool', blockId:'tool:swarm', identitySource:'contract',
+        source:{type:'tool_use', blockId:'tool:swarm', id:'swarm', name:'swarm'},
+        toolCallId:'swarm', name:'swarm', input:{},
+        result:{status:'running'}, round:{status:'searching', agents:[
+          {id:'agent-a', role:'researcher', preview},
+          ...(includeSecond
+            ? [{id:'agent-b', role:'analyst', preview:'new agent'}] : []),
+        ]},
+      }],
+    }]},
+});
+const surface = feature.createConversationSurface(
+  document.getElementById('chat'), renderers,
+);
+surface.render(makeViewModel(1, 'Looking', false));
+const toolBlock = surface.root.querySelector('[data-block-id="tool:swarm"]');
+const panel = toolBlock.querySelector('.sw-panel');
+const agent = panel.querySelector('[data-agent-id="agent-a"]');
+const header = agent.querySelector('.sw-a-header');
+panel.classList.add('sw-collapsed');
+agent.classList.add('sw-a-open');
+panel._identityMark = 'panel';
+agent._identityMark = 'agent';
+header.focus();
+
+surface.render(makeViewModel(2, 'Looking deeper', true));
+const nextPanel = toolBlock.querySelector('.sw-panel');
+const nextAgent = nextPanel.querySelector('[data-agent-id="agent-a"]');
+console.log(JSON.stringify({
+  samePanel:panel === nextPanel && nextPanel._identityMark === 'panel',
+  sameAgent:agent === nextAgent && nextAgent._identityMark === 'agent',
+  panelCollapsed:nextPanel.classList.contains('sw-collapsed'),
+  agentOpen:nextAgent.classList.contains('sw-a-open'),
+  focusPreserved:document.activeElement === header,
+  preview:nextAgent.querySelector('.sw-a-preview').textContent,
+  newAgent:Boolean(nextPanel.querySelector('[data-agent-id="agent-b"]')),
+}));
+surface.dispose();
+dom.window.close();
+""")
+    assert result == {
+        "samePanel": True,
+        "sameAgent": True,
+        "panelCollapsed": True,
+        "agentOpen": True,
+        "focusPreserved": True,
+        "preview": "Looking deeper",
+        "newAgent": True,
+    }
+
+
+def test_childless_toolscript_failure_renders_program_parent_before_diagnostic(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const programRound = {
+  roundNum:8800000, llmRound:8, _programSynthetic:true,
+  _programCallId:'gateway-1', programBackend:'local_toolscript',
+  programSource:'execute_program', programStatus:'error', status:'error',
+  programCode:"return {status:'ok' result};",
+  programResult:{code:'syntax_error', message:"expected '}', got 'r'", offset:21},
+  childCallIds:[], childToolNames:[],
+};
+const gatewaySegment = {
+  type:'tool_use', blockId:'tool:gateway-1', id:'gateway-1',
+  name:'execute_tools', input:{program:programRound.programCode}, llmRound:8,
+  result:{status:'error', content:'program rejected'},
+};
+const textSegment = {
+  type:'text', blockId:'text:round-8', text:'Checking compacted artifacts',
+  llmRound:8, terminal:true,
+};
+const makeTurn = revision => ({
+  turnId:'turn-program', conversationId:'conv-a', laneId:'main', ordinal:1,
+  actor:'assistant', kind:'reply', runId:'', status:'completed',
+  currentAttemptId:null, projectionRevision:revision,
+  settlement:{outcome:'completed'}, createdAt:1, updatedAt:revision,
+  projection:{segments:[textSegment, gatewaySegment], toolRounds:[programRound],
+    activityTimeline:{blockId:'activity-timeline', version:1, droppedCount:0,
+      entries:[{id:'program-failed', spanId:'program:gateway-1', seq:1,
+        occurredAt:10, kind:'tool', status:'failed', severity:'error', count:1,
+        summary:'ToolScript failed', toolName:'ToolScript', llmRound:8,
+        reasonCode:'syntax_error'}]}},
+});
+const makeState = turn => ({conversationId:'conv-a', conversationRevision:turn.projectionRevision,
+  transport:'live', turnsById:{'turn-program':turn}, laneOrder:{main:['turn-program']},
+  attemptsById:{}, queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+  liveRoundUsageByTurn:{}});
+const scheduled = [];
+let programRenders = 0;
+const controller = feature.createConversationSurfaceController({
+  isActive:() => true,
+  getContainer:() => document.getElementById('chat'),
+  schedule(render) { scheduled.push(render); return () => {}; },
+  nativeRenderers:feature.createClassicConversationRenderers({
+    renderSafeMarkdownHtml:value => value,
+    renderToolBlockHtml(block) {
+      if (block.kind !== 'program') throw new Error('unexpected tool block');
+      programRenders += 1;
+      return `<section class="program-card"><code>${block.round.programCode}</code>`
+        + `<strong>${block.round.programStatus}</strong></section>`;
+    },
+  }),
+});
+const conversation = {id:'conv-a'};
+controller.render(conversation, makeState(makeTurn(1)));
+scheduled.shift()();
+const first = document.querySelector('[data-block-id="program:gateway-1"]');
+controller.render(conversation, makeState(makeTurn(2)));
+scheduled.shift()();
+const second = document.querySelector('[data-block-id="program:gateway-1"]');
+const blocks = feature.selectTurnBlocks(makeTurn(3));
+console.log(JSON.stringify({
+  kinds:blocks.map(block => block.kind),
+  ids:blocks.map(block => block.blockId),
+  code:blocks.find(block => block.kind === 'program').round.programCode,
+  status:blocks.find(block => block.kind === 'program').round.programStatus,
+  programRenders,
+  sameNode:first === second,
+  programText:second.textContent,
+  wrapperHidden:!document.querySelector('[data-block-id="tool:gateway-1"]'),
+  diagnosticAfter:second.nextElementSibling.dataset.blockId,
+}));
+controller.dispose();
+dom.window.close();
+""")
+    assert result == {
+        "kinds": ["text", "program", "activity-event"],
+        "ids": [
+            "text:round-8", "program:gateway-1",
+            "activity:program-failed",
+        ],
+        "code": "return {status:'ok' result};",
+        "status": "error",
+        "programRenders": 1,
+        "sameNode": True,
+        "programText": "return {status:'ok' result};error",
+        "wrapperHidden": True,
+        "diagnosticAfter": "activity:program-failed",
+    }
+
+
 def test_cloned_snapshots_keep_disclosures_focus_and_inner_nodes_stable(
         conversation_bundle: Path):
     result = _run(conversation_bundle, r"""
@@ -954,8 +1355,11 @@ const classic = feature.createClassicConversationRenderers({
   },
   renderToolBlockHtml(block) {
     toolRenders += 1;
-    return `<details class="native-tool"><summary>${block.name}</summary>`
-      + `<div>${block.result.content}</div></details>`;
+    return `<div class="ptool-panel collapsed" data-collapsible="true">`
+      + `<button class="ptool-panel-header" aria-expanded="false">Tools</button>`
+      + `<div class="ptool-panel-body"><details class="native-tool">`
+      + `<summary>${block.name}</summary><div>${block.result.content}</div>`
+      + `</details></div></div>`;
   },
   formatTimestamp:() => '2026年8月26日 15:31',
 });
@@ -1006,8 +1410,12 @@ const thinkingSummary = thinkingBlock.querySelector('.thinking-header');
 const thinkingBody = thinkingBlock.querySelector('.thinking-text');
 const toolBlock = surface.root.querySelector('[data-block-id="tool:one"]');
 const firstToolDetails = toolBlock.querySelector('details');
+const firstToolPanel = toolBlock.querySelector('.ptool-panel');
 thinkingDetails.open = true;
 firstToolDetails.open = true;
+firstToolPanel.classList.remove('collapsed');
+firstToolPanel.querySelector('.ptool-panel-header')
+  .setAttribute('aria-expanded', 'true');
 thinkingSummary.focus();
 
 // A full JSON snapshot recreates every object while preserving semantics.
@@ -1028,6 +1436,7 @@ clonedToolDetails.scrollTop = 19;
 clonedToolDetails.querySelector('summary').focus();
 surface.render(makeViewModel(4, 'reason grows', 'result two'));
 const updatedToolDetails = toolBlock.querySelector('details');
+const updatedToolPanel = toolBlock.querySelector('.ptool-panel');
 const time = surface.root.querySelector('.message-time');
 console.log(JSON.stringify({
   thinkingDetailsStable:thinkingDetails === clonedThinkingDetails
@@ -1043,6 +1452,9 @@ console.log(JSON.stringify({
   changedToolFocusPreserved:document.activeElement
     === updatedToolDetails.querySelector('summary'),
   changedToolScrollPreserved:updatedToolDetails.scrollTop,
+  changedToolPanelExpanded:!updatedToolPanel.classList.contains('collapsed')
+    && updatedToolPanel.querySelector('.ptool-panel-header')
+      .getAttribute('aria-expanded') === 'true',
   markdownRenders,
   toolRenders,
   headerRenders,
@@ -1065,6 +1477,7 @@ dom.window.close();
         "changedToolStillOpen": True,
         "changedToolFocusPreserved": True,
         "changedToolScrollPreserved": 19,
+        "changedToolPanelExpanded": True,
         "markdownRenders": 3,
         "toolRenders": 2,
         "headerRenders": 1,
@@ -1072,6 +1485,89 @@ dom.window.close();
         "timeIsShort": True,
         "timeTitle": "2026年8月26日 15:31",
         "timeHasMachineValue": True,
+    }
+
+
+def test_authoritative_tool_cards_stay_single_layer(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const classic = feature.createClassicConversationRenderers({
+  renderSafeMarkdownHtml:value => value,
+  renderToolBlockHtml:block => '<details class="ptool-result-block" '
+    + 'data-tool-result-authority="toolContent"><summary>History</summary>'
+    + '<pre>' + block.round.toolContent + '</pre></details>',
+});
+const makeTurn = (revision, firstResult) => ({
+  turnId:'turn-tools', conversationId:'conv-a', laneId:'main', parentTurnId:null,
+  ordinal:1, actor:'assistant', kind:'reply', runId:'', status:'completed',
+  currentAttemptId:null, projectionRevision:revision,
+  settlement:{outcome:'completed'}, createdAt:1, updatedAt:revision,
+  projection:{
+    segments:[
+      {type:'tool_use', blockId:'tool:reused', id:'reused', name:'history',
+        input:{before:4}, result:{status:'done', content:'STALE_SEGMENT_ONE'}},
+      {type:'tool_use', blockId:'tool:reused~2', id:'reused', name:'history',
+        input:{before:8}, result:{status:'done', content:'STALE_SEGMENT_TWO'}},
+    ],
+    toolRounds:[
+      {roundNum:1, toolCallId:'reused', toolName:'history', status:'done',
+        toolContent:firstResult, results:[{summary:'UNRELATED_RICH_METADATA'}]},
+      {roundNum:2, toolCallId:'reused', toolName:'history', status:'done',
+        toolContent:'BACKEND_TRUTH_TWO', results:[{summary:'UNRELATED_RICH_METADATA'}]},
+    ],
+  },
+});
+const state = turn => ({
+  conversationId:'conv-a', conversationRevision:turn.projectionRevision,
+  transport:'live', turnsById:{'turn-tools':turn}, laneOrder:{main:['turn-tools']},
+  attemptsById:{}, queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+  liveRoundUsageByTurn:{},
+});
+const surface = feature.createConversationSurface(
+  document.getElementById('chat'), classic,
+);
+surface.render(feature.selectConversationViewModel(
+  state(makeTurn(1, 'BACKEND_TRUTH_ONE')),
+));
+const firstBlock = surface.root.querySelector('[data-block-id="tool:reused"]');
+const secondBlock = surface.root.querySelector('[data-block-id="tool:reused~2"]');
+const firstDetails = firstBlock.querySelector('details');
+const secondDetails = secondBlock.querySelector('details');
+const initialFirstText = firstDetails.querySelector('pre').textContent;
+const initialSecondText = secondDetails.querySelector('pre').textContent;
+
+surface.render(feature.selectConversationViewModel(
+  state(makeTurn(2, 'BACKEND_TRUTH_ONE_UPDATED')),
+));
+const updatedDetails = firstBlock.querySelector('details');
+console.log(JSON.stringify({
+  sources:[firstDetails.dataset.toolResultAuthority,
+    secondDetails.dataset.toolResultAuthority],
+  firstText:initialFirstText,
+  secondText:initialSecondText,
+  detailsPerCard:[firstBlock.querySelectorAll('details').length,
+    secondBlock.querySelectorAll('details').length],
+  summaries:[firstDetails.querySelector('summary').textContent,
+    secondDetails.querySelector('summary').textContent],
+  updatedText:updatedDetails.querySelector('pre').textContent,
+  nestedBackendDisclosure:!!surface.root.querySelector(
+    '.conversation-tool__authoritative-result'),
+}));
+surface.dispose();
+dom.window.close();
+""")
+    assert result == {
+        "sources": ["toolContent", "toolContent"],
+        "firstText": "BACKEND_TRUTH_ONE",
+        "secondText": "BACKEND_TRUTH_TWO",
+        "detailsPerCard": [1, 1],
+        "summaries": ["History", "History"],
+        "updatedText": "BACKEND_TRUTH_ONE_UPDATED",
+        "nestedBackendDisclosure": False,
     }
 
 
@@ -1125,7 +1621,7 @@ const turn = {
     segments:[toolSegment, textSegment],
     toolRounds:[richRound], content:'answer', model:'glm-5.3',
     fallbackFrom:'kimi-k3', fallbackModel:'glm-5.3', fallbackReason:'provider failure',
-    activityTimeline:{blockId:'activity-timeline', version:1, entries},
+    activityTimeline:{blockId:'activity-timeline', version:1, droppedCount:5, entries},
   },
   projectionRevision:1, settlement:{outcome:'completed'}, createdAt:1, updatedAt:2,
 };
@@ -1197,6 +1693,7 @@ const payload = {
     .querySelector('.activity-event__facts').textContent,
   richToolRenders,
   richToolText:block('tool:call-1').textContent,
+  droppedRowAbsent:!block('activity:dropped'),
 };
 controller.dispose();
 dom.window.close();
@@ -1238,6 +1735,7 @@ console.log(JSON.stringify(payload));
         "switchVisible": True,
         "retryVisible": True,
         "retryFacts": "kimi-k3",
+        "droppedRowAbsent": True,
         # Appending an unrelated activity row must reuse the stable rich-tool
         # block instead of paying its renderer a second time.
         "richToolRenders": 1,
@@ -1378,7 +1876,7 @@ console.log(JSON.stringify({
         "toolName": "read_tool_artifact",
         "status": "skipped",
         "severity": "warning",
-        "summaryKey": "activity.tool.skipped",
+        "summaryKey": "activity.tool.validationRejected",
         "reasonCode": "missing_required_arguments",
         "detail": (
             "Missing required arguments: artifact_ref "
@@ -1660,6 +2158,54 @@ console.log(JSON.stringify(payload));
         ],
     }
 
+
+def test_document_badge_glyph_follows_file_extension(conversation_bundle: Path):
+    """Document attachment badges render the file extension (PDF/DOCX/…) as
+    the glyph instead of a blanket DOC; extensionless names keep the DOC
+    fallback. Mirrors the knowledge panel glyph cap."""
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const pdfTexts = [
+  {name:'report.pdf', text:'a', textLength:1, pages:1},
+  {name:'notes.docx', text:'b', textLength:1, pages:2},
+  {name:'LICENSE', text:'c', textLength:1},
+];
+const turn = {
+  turnId:'doc-glyph', conversationId:'conv-a', laneId:'main', ordinal:1,
+  actor:'human', kind:'input', runId:'', status:'completed', currentAttemptId:null,
+  projection:{segments:[{type:'text', blockId:'text:terminal', text:'x',
+    deliverable:true, terminal:true}], content:'x', pdfTexts},
+  projectionRevision:1, settlement:{outcome:'completed'}, createdAt:1, updatedAt:1,
+};
+const state = {conversationId:'conv-a', conversationRevision:1, transport:'live',
+  turnsById:{'doc-glyph':turn}, laneOrder:{main:['doc-glyph']},
+  attemptsById:{}, queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+  liveRoundUsageByTurn:{}};
+const scheduled = [];
+const controller = feature.createConversationSurfaceController({
+  isActive:() => true,
+  getContainer:() => document.getElementById('chat'),
+  schedule(render) { scheduled.push(render); return () => {}; },
+  nativeRenderers:feature.createClassicConversationRenderers({
+    renderSafeMarkdownHtml:value => value,
+    localizedText:(_key, fallback) => fallback,
+  }),
+  onIntent() {},
+});
+controller.render({id:'conv-a'}, state);
+scheduled.shift()();
+const payload = {
+  glyphs:Array.from(document.querySelectorAll('.pdf-attach-icon'))
+    .map(node => node.textContent),
+};
+controller.dispose();
+dom.window.close();
+console.log(JSON.stringify(payload));
+""")
+    assert result == {"glyphs": ["PDF", "DOCX", "DOC"]}
 
 def test_translation_display_mode_is_local_and_does_not_mutate_turn_facts(
         conversation_bundle: Path):
@@ -2076,7 +2622,10 @@ const controller = feature.createConversationSurfaceController({
   nativeRenderers:feature.createClassicConversationRenderers({
     renderSafeMarkdownHtml:value => value,
     localizedText:(key, fallback, values) => key === 'stream.phase.retryRateLimited'
-      ? `rate limited ${values.model} ${values.attempt}` : fallback,
+      ? `rate limited ${values.model} ${values.attempt}`
+      : key === 'stream.phase.executorQueuedWithMetrics'
+        ? `queue ${values.position}; ${values.active}/${values.capacity}; ${values.waitSeconds}s`
+        : fallback,
   }),
 });
 const conversation = {id:'conv-a'};
@@ -2094,12 +2643,21 @@ controller.render(conversation, secondState);
 scheduled.shift()();
 const second = document.querySelector('[data-block-id="live-status"]');
 const secondText = second.querySelector('.stream-phase-text').textContent;
+const queueState = makeState({phase:'executor_queued',
+  detailKey:'stream.phase.executorQueuedWithMetrics',
+  detailArgs:{position:2, queued:3, active:4, capacity:4, waitSeconds:31},
+  queuePosition:2, queued:3, active:4, capacity:4, waitSeconds:31});
+controller.render(conversation, queueState);
+scheduled.shift()();
+const queued = document.querySelector('[data-block-id="live-status"]');
+const queuedText = queued.querySelector('.stream-phase-text').textContent;
 controller.render(conversation, makeState(null, 'completed'));
 scheduled.shift()();
 const payload = {
-  stableNode:first === second,
+  stableNode:first === second && second === queued,
   firstText,
   secondText,
+  queuedText,
   removedAtSettlement:!document.querySelector('[data-block-id="live-status"]'),
   stateUnchanged:before === JSON.stringify(firstState),
 };
@@ -2111,8 +2669,127 @@ console.log(JSON.stringify(payload));
         "stableNode": True,
         "firstText": "rate limited m1 2",
         "secondText": "Running search",
+        "queuedText": "queue 2; 4/4; 31s",
         "removedAtSettlement": True,
         "stateUnchanged": True,
+    }
+
+
+def test_send_preparation_does_not_steal_status_from_active_assistant(
+        conversation_bundle: Path):
+    """Submitting while an assistant attempt is still active composes two
+    transient rows after that attempt: the optimistic human echo and a send
+    preparation status. The preparation row owns its explicit status, but it
+    must not displace the conversation-level live phase from the durable
+    assistant and leave that assistant as a header-only ghost."""
+    result = _run(conversation_bundle, r"""
+const active = {
+  turnId:'turn-active', conversationId:'conv-a', laneId:'main', parentTurnId:null,
+  ordinal:1, actor:'assistant', kind:'reply', runId:'task-a', status:'running',
+  currentAttemptId:'attempt-a', projection:{content:'', segments:[]},
+  projectionRevision:1, settlement:{}, createdAt:1, updatedAt:1,
+};
+const durable = {conversationId:'conv-a', conversationRevision:1,
+  transport:'live', turnsById:{'turn-active':active},
+  laneOrder:{main:['turn-active']}, attemptsById:{'attempt-a':{
+    attemptId:'attempt-a', turnId:'turn-active', status:'running',
+    taskId:'task-a', createdAt:1, updatedAt:1}},
+  queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+  liveRoundUsageByTurn:{},
+  livePhase:{phase:'tool_exec', detail:'Running search', tools:['search']},
+};
+const overlay = feature.createTransientTurnOverlay();
+overlay.upsert(feature.createOptimisticUserTurn({
+  conversationId:'conv-a', commandId:'cmd-next', text:'next question', timestamp:2,
+}));
+overlay.upsert(feature.createTransientStatusTurn({
+  conversationId:'conv-a', turnId:'transient:send-preparation',
+  phase:'translating', label:'Translating…', timestamp:3,
+}));
+const vm = feature.selectConversationViewModel(overlay.compose(durable));
+const visible = vm.mainLane.turns.map(turn => ({
+  turnId:turn.turnId,
+  role:turn.role,
+  blocks:turn.blocks.map(block => [
+    block.kind,
+    block.kind === 'live-status' ? block.value.detail || block.value.label : '',
+  ]),
+}));
+console.log(JSON.stringify({
+  visible,
+  headerOnly:visible.filter(turn => turn.role === 'assistant'
+    && turn.blocks.length === 0).map(turn => turn.turnId),
+}));
+""")
+    assert result == {
+        "visible": [
+            {
+                "turnId": "turn-active",
+                "role": "assistant",
+                "blocks": [["live-status", "Running search"]],
+            },
+            {
+                "turnId": "transient:outgoing:cmd-next",
+                "role": "user",
+                "blocks": [["text", ""]],
+            },
+            {
+                "turnId": "transient:send-preparation",
+                "role": "assistant",
+                "blocks": [["live-status", "Translating…"]],
+            },
+        ],
+        "headerOnly": [],
+    }
+
+
+def test_cold_snapshot_explains_agent_slot_queue_before_worker_entry(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const baseTurn = {turnId:'turn-live', conversationId:'conv-a', laneId:'main',
+  ordinal:1, actor:'assistant', kind:'reply', runId:'',
+  currentAttemptId:'attempt-a', projection:{segments:[], content:''},
+  projectionRevision:1, settlement:{}, createdAt:1, updatedAt:1};
+const makeState = (status, taskId) => ({conversationId:'conv-a',
+  conversationRevision:1, transport:'snapshot',
+  turnsById:{'turn-live':{...baseTurn, status}},
+  laneOrder:{main:['turn-live']},
+  attemptsById:{'attempt-a':{attemptId:'attempt-a', turnId:'turn-live',
+    status, taskId, createdAt:1, updatedAt:1}},
+  queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+  liveRoundUsageByTurn:{}, livePhase:null});
+const scheduled = [];
+const controller = feature.createConversationSurfaceController({
+  isActive:() => true,
+  getContainer:() => document.getElementById('chat'),
+  schedule(render) { scheduled.push(render); return () => {}; },
+  nativeRenderers:feature.createClassicConversationRenderers({
+    renderSafeMarkdownHtml:value => value,
+    localizedText:key => key,
+  }),
+});
+const conversation = {id:'conv-a'};
+const renderText = state => {
+  controller.render(conversation, state);
+  scheduled.shift()();
+  return document.querySelector(
+    '[data-block-id="live-status"] .stream-phase-text').textContent;
+};
+const preparing = renderText(makeState('pending', ''));
+const queued = renderText(makeState('pending', 'task-a'));
+const running = renderText(makeState('running', 'task-a'));
+controller.dispose();
+dom.window.close();
+console.log(JSON.stringify({preparing, queued, running}));
+""")
+    assert result == {
+        "preparing": "stream.phase.executorPreparing",
+        "queued": "stream.phase.executorQueued",
+        "running": "stream.phase.workerStarting",
     }
 
 
@@ -2186,7 +2863,7 @@ console.log(JSON.stringify({
     assert result == {
         "wedgedText": "WEDGE-LABEL",
         "wedgedClass": "stream-phase stream-phase-wedged",
-        "clearedText": "Waiting for the agent…",
+        "clearedText": "Server execution slot acquired; starting the task…",
         "clearedClass": "stream-phase",
         "stalePhase": "WEDGE-LABEL",
         "foldedTrue": True,
@@ -2601,6 +3278,88 @@ dom.window.close();
     }
 
 
+def test_rolled_back_tail_stays_visible_above_the_resumed_lane(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const rolledBack = [{blockId:'rolled-back', attemptId:'attempt-1', at:7,
+  thinking:'old **reasoning**', content:'old draft answer'}];
+const makeTurn = (revision, text, rolled = rolledBack) => ({
+  turnId:'turn-rb', conversationId:'conv-a', laneId:'main', ordinal:1,
+  actor:'assistant', kind:'reply', runId:'task-rb', status:'completed',
+  currentAttemptId:'attempt-2', projectionRevision:revision,
+  projection:{
+    segments:[
+      {type:'tool_use', blockId:'tool:1', id:'call-1', name:'run_command',
+        input:{}, result:{}},
+      {type:'thinking', blockId:'thinking:terminal', text:'new reasoning',
+        terminal:true},
+      {type:'text', blockId:'text:terminal', text, deliverable:true,
+        terminal:true},
+    ],
+    content:text, thinking:'new reasoning', rolledBack:rolled,
+  },
+  settlement:{outcome:'completed'}, createdAt:1, updatedAt:revision});
+const state = turn => ({conversationId:'conv-a',
+  conversationRevision:turn.projectionRevision, transport:'live',
+  turnsById:{'turn-rb':turn}, laneOrder:{main:['turn-rb']}, attemptsById:{},
+  queueItems:[], pendingEventsByTurn:{}, commandPending:{}, liveRoundUsageByTurn:{}});
+const scheduled = [];
+const controller = feature.createConversationSurfaceController({
+  isActive:() => true,
+  getContainer:() => document.getElementById('chat'),
+  schedule(render) { scheduled.push(render); return () => {}; },
+  nativeRenderers:feature.createClassicConversationRenderers({
+    renderSafeMarkdownHtml:value => value,
+  }),
+});
+const conversation = {id:'conv-a'};
+controller.render(conversation, state(makeTurn(1, 'first')));
+scheduled.shift()();
+const vm = feature.selectConversationViewModel(state(makeTurn(1, 'first')));
+const firstBlock = document.querySelector('[data-block-kind="rolled-back"]');
+const firstThinking = firstBlock.querySelector('.thinking-block.thinking-prior');
+const firstContent = firstBlock.querySelector('.thinking-block.content-prior');
+controller.render(conversation, state(makeTurn(2, 'second')));
+scheduled.shift()();
+const secondBlock = document.querySelector('[data-block-kind="rolled-back"]');
+const emptyVm = feature.selectConversationViewModel(state(makeTurn(3, 'third',
+  [{blockId:'rolled-back', thinking:'  ', content:''}])));
+console.log(JSON.stringify({
+  blockOrder:vm.mainLane.turns[0].blocks.map(block => [block.kind, block.blockId]),
+  thinkingText:firstThinking.querySelector('.thinking-text').textContent,
+  contentText:firstContent.querySelector('.thinking-text').textContent,
+  collapsed:!firstThinking.open && !firstContent.open,
+  labels:[...firstBlock.querySelectorAll('.thinking-label')]
+    .map(el => el.textContent),
+  sameNode:firstBlock === secondBlock,
+  emptyFiltered:!emptyVm.mainLane.turns[0].blocks
+    .some(block => block.kind === 'rolled-back'),
+}));
+controller.dispose();
+dom.window.close();
+""")
+    assert result == {
+        "blockOrder": [
+            ["tool", "tool:1"],
+            ["rolled-back", "rolled-back"],
+            ["thinking", "thinking:terminal"],
+            ["text", "text:terminal"],
+        ],
+        "thinkingText": "old **reasoning**",
+        "contentText": "old draft answer",
+        "collapsed": True,
+        "labels": [
+            "Earlier Thinking (rolled back)",
+            "Interrupted Draft (rolled back)",
+        ],
+        "sameNode": True,
+        "emptyFiltered": True,
+    }
+
 def test_file_changes_use_stable_turn_intents_and_keep_their_keyed_dom(
         conversation_bundle: Path):
     result = _run(conversation_bundle, r"""
@@ -2647,7 +3406,10 @@ scheduled.shift()();
 const vm = feature.selectConversationViewModel(firstState);
 const first = document.querySelector('[data-block-id="file-changes"]');
 first.querySelector('details').open = false;
-first.querySelector('[data-conversation-action="undo-turn-files"]').click();
+const undoAction = first.querySelector('[data-conversation-action="undo-turn-files"]');
+const actionInSummary = undoAction.closest('summary') === first.querySelector('summary');
+undoAction.click();
+const closedAfterAction = !first.querySelector('details').open;
 controller.render(conversation, makeState(makeTurn(2, 'undone')));
 scheduled.shift()();
 const second = document.querySelector('[data-block-id="file-changes"]');
@@ -2655,7 +3417,8 @@ second.querySelector('[data-conversation-action="redo-turn-files"]').click();
 console.log(JSON.stringify({
   native:Boolean(vm.mainLane.turns[0]),
   blockKinds:vm.mainLane.turns[0].blocks.map(block => block.kind),
-
+  actionInSummary,
+  closedAfterAction,
   sameNode:first === second,
   stayedClosed:!second.querySelector('details').open,
   actions:intents.map(intent => ({type:intent.type, turnId:intent.turnId,
@@ -2668,7 +3431,8 @@ dom.window.close();
     assert result == {
         "native": True,
         "blockKinds": ["text", "file-changes"],
-
+        "actionInSummary": True,
+        "closedAfterAction": True,
         "sameNode": True,
         "stayedClosed": True,
         "actions": [
@@ -3589,6 +4353,80 @@ console.log(JSON.stringify(output));
     }
 
 
+def test_surface_requests_remote_history_and_reveals_prepended_batch(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const turn = ordinal => ({
+  turnId:`turn-${ordinal}`, conversationId:'conv-remote-window', laneId:'main',
+  ordinal, actor:'assistant', kind:'reply', status:'completed',
+  currentAttemptId:null, projectionRevision:1,
+  projection:{content:`turn ${ordinal}`}, settlement:{outcome:'completed'},
+  createdAt:ordinal, updatedAt:ordinal,
+});
+const state = turns => ({
+  conversationId:'conv-remote-window', conversationRevision:300, transport:'live',
+  turnsById:Object.fromEntries(turns.map(item => [item.turnId, item])),
+  laneOrder:{main:turns.map(item => item.turnId)}, attemptsById:{},
+  historyByLane:{main:{nextBeforeOrdinal:turns[0].ordinal,
+    hasMore:true, totalTurns:300}},
+  queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+  liveRoundUsageByTurn:{},
+});
+const loaded = Array.from({length:96}, (_, index) => turn(index + 100));
+const intents = [];
+const surface = feature.createConversationSurface(
+  document.getElementById('chat'), {onIntent(intent) { intents.push(intent); }},
+);
+surface.render(feature.selectConversationViewModel(state(loaded)));
+const earlier = surface.root.querySelector(
+  '[data-conversation-window-action="earlier"]',
+);
+earlier.click();
+const localFirst = surface.root.querySelector('[data-turn-id]').dataset.turnId;
+earlier.click();
+const requested = intents[0];
+const prepended = Array.from({length:64}, (_, index) => turn(index + 36));
+surface.render(feature.selectConversationViewModel(state([...prepended, ...loaded])));
+const visible = Array.from(surface.root.querySelectorAll('[data-turn-id]'))
+  .map(node => node.dataset.turnId);
+const output = {
+  localFirst,
+  requested,
+  revealedFirst:visible[0],
+  revealedLast:visible.at(-1),
+  domTurns:visible.length,
+  windowState:surface.windowState,
+};
+surface.dispose(); dom.window.close();
+console.log(JSON.stringify(output));
+""")
+
+    assert result == {
+        "localFirst": "turn-100",
+        "requested": {
+            "type": "load-earlier-turns",
+            "conversationId": "conv-remote-window",
+            "laneId": "main",
+            "beforeOrdinal": 100,
+            "limit": 64,
+        },
+        "revealedFirst": "turn-80",
+        "revealedLast": "turn-159",
+        "domTurns": 80,
+        "windowState": {
+            "start": 44,
+            "end": 124,
+            "total": 160,
+            "maxTurns": 80,
+            "batchSize": 20,
+        },
+    }
+
+
 def test_surface_window_budget_clamps_hostile_options(
         conversation_bundle: Path):
     result = _run(conversation_bundle, r"""
@@ -3921,6 +4759,269 @@ console.log(JSON.stringify({
     }
 
 
+def test_inline_turn_editor_keeps_focus_and_caret_through_surface_commits(
+        conversation_bundle: Path):
+    """Regression for the mid-typing caret loss: an authoritative surface
+    commit (SSE sync, streaming deltas of other turns) re-normalizes the
+    turn's content part order. That normalization must skip the unmanaged
+    editor host instead of pushing it after the footer — moving a focused
+    host blurs the textarea. A genuine turn-node rebuild must still remount
+    the host and restore the caret where the user was typing, not collapse
+    it to the draft end."""
+    result = _run(conversation_bundle, r"""
+(async () => {
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"><div id="chatInner"></div></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const root = document.getElementById('chatInner');
+const turn = (id, text, actor) => ({
+  turnId:id, laneId:'main', parentTurnId:null, ordinal:Number(id.split('-')[1]),
+  actor, role:actor === 'human' ? 'user' : 'assistant',
+  kind:actor === 'human' ? 'input' : 'reply', status:'completed',
+  attemptId:`attempt-${id}`, projectionRevision:text.length, commandPending:null,
+  finish:null, actions:[], branches:[],
+  blocks:[{kind:'text', blockId:`text:${id}`, identitySource:'contract',
+    source:{text}, markdown:text, deliverable:true, terminal:true, resumable:false}],
+  metadata:{translation:{pending:false, completed:false}}, source:{projection:{}},
+});
+const vm = streaming => ({
+  conversationId:'conv-edit', conversationRevision:streaming.length, transport:'live',
+  mainLane:{laneId:'main', parentTurnId:null, title:'Conversation', kind:'main',
+    expanded:true, live:true, humanTurnCount:1,
+    turns:[turn('turn-1','edit me please','human'),
+      turn('turn-2', streaming, 'assistant')]},
+  orphanLanes:[], queue:[], planDecision:null,
+});
+const surface = feature.createConversationSurface(root, {});
+surface.render(vm('streaming chunk one'));
+const findTurnNode = id => root.querySelector(`[data-turn-id="${id}"]`);
+const session = feature.openTurnInlineEditor({
+  conversationId:'conv-edit', turnId:'turn-1', text:'edit me please',
+  canResend:false, allowEmpty:false, findTurnNode,
+  onSubmit:() => true,
+});
+const host = root.querySelector('.turn-inline-editor');
+const textarea = host.querySelector('textarea');
+textarea.focus();
+textarea.value = 'edit me please - plus more';
+textarea.setSelectionRange(8, 8);
+textarea.dispatchEvent(new dom.window.Event('input', {bubbles:true}));
+textarea.dispatchEvent(new dom.window.Event('select', {bubbles:true}));
+/* A background commit: another turn streams more text. */
+surface.render(vm('streaming chunk one, now longer'));
+const drifted = host.previousElementSibling?.dataset?.conversationPart || '';
+feature.reconcileTurnInlineEditors();
+const afterCommit = {
+  drifted,
+  pinnedAfterBlocks: host.previousElementSibling?.dataset?.conversationPart || '',
+  draft: textarea.value,
+  selection:[textarea.selectionStart, textarea.selectionEnd],
+  focused: document.activeElement === textarea,
+};
+/* A genuine rebuild: the turn node is replaced outright. */
+findTurnNode('turn-1').remove();
+surface.render(vm('streaming chunk one, longer still'));
+feature.reconcileTurnInlineEditors();
+const afterRemount = {
+  remounted: host.isConnected,
+  placedAfterBlocks: host.previousElementSibling?.dataset?.conversationPart || '',
+  draft: textarea.value,
+  selection:[textarea.selectionStart, textarea.selectionEnd],
+  focused: document.activeElement === textarea,
+};
+session.close();
+surface.dispose();
+dom.window.close();
+console.log(JSON.stringify({afterCommit, afterRemount}));
+})();
+""")
+
+    assert result == {
+        "afterCommit": {
+            "drifted": "turn-blocks",
+            "pinnedAfterBlocks": "turn-blocks",
+            "draft": "edit me please - plus more",
+            "selection": [8, 8],
+            "focused": True,
+        },
+        "afterRemount": {
+            "remounted": True,
+            "placedAfterBlocks": "turn-blocks",
+            "draft": "edit me please - plus more",
+            "selection": [8, 8],
+            "focused": True,
+        },
+    }
+
+
+def test_inline_turn_editor_paste_attaches_images_with_chip_lifecycle(
+        conversation_bundle: Path):
+    """Pasting an image into the edit session attaches it to the TURN (not
+    the composer draft). Regression pins: text-only paste keeps the default
+    caret insertion, image paste is claimed (preventDefault like the
+    composer), an optimistic chip shows while the caller compresses/uploads,
+    save stays disabled while any chip is processing (its projection payload
+    does not exist yet), an attached image satisfies the non-empty rule for
+    an otherwise empty draft, submit carries the caller-provided payloads,
+    a null resolution drops the chip, and removing a chip mid-flight
+    discards the late result."""
+    result = _run(conversation_bundle, r"""
+(async () => {
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"><div id="chatInner"></div></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const root = document.getElementById('chatInner');
+const article = document.createElement('article');
+article.dataset.turnId = 'turn-1';
+const content = document.createElement('div');
+content.dataset.conversationPart = 'turn-content';
+const blocks = document.createElement('div');
+blocks.dataset.conversationPart = 'turn-blocks';
+content.appendChild(blocks);
+article.appendChild(content);
+root.appendChild(article);
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+const pasteEvent = (items) => {
+  const event = new dom.window.Event('paste', {bubbles:true, cancelable:true});
+  Object.defineProperty(event, 'clipboardData', {value:{items}});
+  return event;
+};
+const imageItem = () => ({
+  type:'image/png',
+  getAsFile:() => new dom.window.File(['png-bytes'], 'pasted.png', {type:'image/png'}),
+});
+const submissions = [];
+let cancels = 0;
+let attachCalls = 0;
+const base = {
+  conversationId:'conv-a', turnId:'turn-1', text:'',
+  findTurnNode:(id) => root.querySelector(`[data-turn-id="${id}"]`),
+  translate:(key) => key,
+  onSubmit:async ({text, resend, images}) => {
+    submissions.push({text, resend, images}); return true; },
+  onCancel:() => { cancels += 1; },
+};
+const saveButton = () => root.querySelector('.turn-inline-editor-btn--save');
+const chips = () => root.querySelectorAll('.turn-inline-editor-chip');
+/* Scenario A/B: text paste flows through; image paste is claimed and the
+ * resolved payload reaches onSubmit. Empty text + attached image = saveable. */
+feature.openTurnInlineEditor({...base,
+  onImageAttach:async (file) => {
+    attachCalls += 1;
+    return {payload:{base64:'AAA', mediaType:file.type, url:'/api/images/a.png'},
+      preview:'data:image/png;base64,AAA'};
+  },
+});
+const textarea = () => root.querySelector('.turn-inline-editor-input');
+const textPaste = pasteEvent([{type:'text/plain', getAsFile:() => null}]);
+textarea().dispatchEvent(textPaste);
+const textPasteDefaultAllowed = !textPaste.defaultPrevented;
+const imagePaste = pasteEvent([imageItem()]);
+textarea().dispatchEvent(imagePaste);
+const imagePasteClaimed = imagePaste.defaultPrevented;
+const chipShownImmediately = chips().length === 1;
+const chipProcessingInitially = chips()[0]?.dataset.processing === 'true';
+await tick();
+const saveEnabledWithImageAfterAttach = !saveButton().disabled;
+saveButton().click();
+await tick();
+const editorClosedAfterSave = !root.querySelector('.turn-inline-editor');
+/* Scenario C: an unresolved upload keeps save disabled. */
+let resolveAttach;
+const gate = new Promise(resolve => { resolveAttach = resolve; });
+feature.openTurnInlineEditor({...base, onImageAttach:() => { attachCalls += 1; return gate; }});
+textarea().dispatchEvent(pasteEvent([imageItem()]));
+await tick();
+const saveDisabledWhileProcessing = saveButton().disabled;
+const chipMarkedProcessing = chips()[0]?.dataset.processing === 'true';
+resolveAttach({payload:{base64:'BBB'}, preview:''});
+await tick();
+const saveEnabledAfterResolve = !saveButton().disabled;
+root.querySelector('.turn-inline-editor-btn--cancel').click();
+/* Scenario D: a null resolution drops the chip and re-blocks an empty save. */
+feature.openTurnInlineEditor({...base, onImageAttach:async () => { attachCalls += 1; return null; }});
+textarea().dispatchEvent(pasteEvent([imageItem()]));
+await tick();
+const chipsAfterFailedAttach = chips().length;
+const saveDisabledAfterChipDropped = saveButton().disabled;
+root.querySelector('.turn-inline-editor-btn--cancel').click();
+/* Scenario E: removing a chip mid-flight discards the late result. */
+let resolveLate;
+const lateGate = new Promise(resolve => { resolveLate = resolve; });
+feature.openTurnInlineEditor({...base, onImageAttach:() => { attachCalls += 1; return lateGate; }});
+textarea().dispatchEvent(pasteEvent([imageItem()]));
+await tick();
+root.querySelector('.turn-inline-editor-chip-remove').click();
+resolveLate({payload:{base64:'CCC'}, preview:''});
+await tick();
+const lateResolveKeptZeroChips = chips().length === 0;
+console.log(JSON.stringify({
+  textPasteDefaultAllowed, imagePasteClaimed, chipShownImmediately,
+  chipProcessingInitially, saveEnabledWithImageAfterAttach,
+  submissions, editorClosedAfterSave,
+  saveDisabledWhileProcessing, chipMarkedProcessing, saveEnabledAfterResolve,
+  chipsAfterFailedAttach, saveDisabledAfterChipDropped,
+  lateResolveKeptZeroChips, attachCalls, cancels,
+}));
+})();
+""")
+
+    assert result == {
+        "textPasteDefaultAllowed": True,
+        "imagePasteClaimed": True,
+        "chipShownImmediately": True,
+        "chipProcessingInitially": True,
+        "saveEnabledWithImageAfterAttach": True,
+        "submissions": [{
+            "text": "",
+            "resend": False,
+            "images": [{"base64": "AAA", "mediaType": "image/png",
+                        "url": "/api/images/a.png"}],
+        }],
+        "editorClosedAfterSave": True,
+        "saveDisabledWhileProcessing": True,
+        "chipMarkedProcessing": True,
+        "saveEnabledAfterResolve": True,
+        "chipsAfterFailedAttach": 0,
+        "saveDisabledAfterChipDropped": True,
+        "lateResolveKeptZeroChips": True,
+        "attachCalls": 4,
+        "cancels": 2,
+    }
+
+
+def test_inline_editor_input_neutralizes_global_composer_textarea_leak() -> None:
+    """Root-cause pin for the truncated/no-scroll editor draft: the bare
+    composer rule `textarea{flex:1;max-height:200px;…}` in
+    02-messages-composer.css leaks onto the inline editor input. The editor
+    rule must keep its explicit counters — without them flex-basis:0%
+    ignores the JS-fitted pixel height and the 200px clamp sits below the
+    editor's 45vh fit cap, so long drafts render clipped with no scrollbar."""
+    source = (ROOT / "frontend/src/styles/application"
+              / "23-turn-reading-system.css").read_text(encoding="utf-8")
+    block = source.split(
+        ".conversation-surface .turn-inline-editor-input {", 1)[1].split("\n}", 1)[0]
+    assert "flex: none;" in block
+    assert "max-height: none;" in block
+
+
+def test_file_changes_details_scroll_inside_the_open_clamp() -> None:
+    """Root-cause pin for the unscrollable 146-file list: the collapsed base
+    rule `.fc-details{max-height:0;overflow:hidden;…}` keeps overflow:hidden
+    for the collapse animation, and the [open] lift only raised max-height to
+    400px — so long lists rendered clipped at ~18 rows with no scrollbar. The
+    open rule must re-enable vertical scrolling inside the clamp."""
+    source = (ROOT / "frontend/src/styles/application"
+              / "23-turn-reading-system.css").read_text(encoding="utf-8")
+    block = source.split(
+        ".conversation-surface .conversation-file-changes[open] .fc-details {",
+        1)[1].split("\n}", 1)[0]
+    assert "max-height: 400px;" in block
+    assert "overflow-y: auto;" in block
+
+
 def test_controller_keeps_legacy_scroll_when_viewport_is_unavailable_at_mount(
         conversation_bundle: Path):
     result = _run(conversation_bundle, r"""
@@ -3995,3 +5096,133 @@ dom.window.close();
         "legacyFollowCalls": 1,
         "text": "revision 2",
     }
+
+
+def test_human_text_block_requests_raw_html_escape(conversation_bundle: Path):
+    """Human-authored input is plain text: the classic renderer must ask the
+    markdown port to neutralize raw '<tag>' HTML for actor === 'human' turns
+    only, so a typed '<MyComponent>' renders literally instead of being
+    swallowed as an unknown element. Assistant turns keep the raw-HTML
+    contract (no options argument) — model output may legitimately rely on
+    inline HTML. Regression pin for the renderTextBlock threading."""
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const turn = (id, ordinal, actor, kind, text) => ({
+  turnId:id, conversationId:'conv-a', laneId:'main', ordinal,
+  actor, kind, runId:'', status:'completed', currentAttemptId:null,
+  projection:{ segments:[{type:'text', blockId:'text:terminal', text,
+    deliverable:true, terminal:true}], content:text },
+  projectionRevision:1, settlement:{outcome:'completed'},
+  createdAt:1, updatedAt:2,
+});
+const state = {
+  conversationId:'conv-a', conversationRevision:1, transport:'replay',
+  turnsById:{
+    'human-turn':turn('human-turn', 1, 'human', 'input',
+      'look at <MyComponent> now'),
+    'assistant-turn':turn('assistant-turn', 2, 'assistant', 'reply',
+      'use <b>bold</b> here'),
+  },
+  laneOrder:{main:['human-turn', 'assistant-turn']},
+  attemptsById:{}, queueItems:[], pendingEventsByTurn:{},
+  commandPending:{}, liveRoundUsageByTurn:{},
+};
+const vm = feature.selectConversationViewModel(state);
+const calls = [];
+const surface = feature.createConversationSurface(
+  document.getElementById('chat'),
+  feature.createClassicConversationRenderers({
+    renderSafeMarkdownHtml:(value, options) => {
+      calls.push({ value, escapeRawHtml:Boolean(options?.escapeRawHtml),
+        optionsPresent:options !== undefined });
+      return '<p>' + value + '</p>';
+    },
+  }),
+);
+surface.render(vm);
+console.log(JSON.stringify(calls));
+surface.dispose();
+dom.window.close();
+""")
+    assert result == [
+        {"value": "look at <MyComponent> now", "escapeRawHtml": True,
+         "optionsPresent": True},
+        {"value": "use <b>bold</b> here", "escapeRawHtml": False,
+         "optionsPresent": False},
+    ]
+
+
+def test_footer_rerenders_when_cost_signature_lands(conversation_bundle: Path):
+    """Historical settled turns (projection written before the server-side
+    cost fold) have no authoritative ``projection.cost``; the footer falls
+    back to the client ``calcCostCny`` micro-batch. That fill mutates no Turn
+    fact, so unless the signature rides presentation state into the footer
+    compare, the re-render requested by the batch is diffed away and the cost
+    tag never appears (2026-08-29, mtd9ci53zq3xfm)."""
+    result = _run(conversation_bundle, r"""
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const projection = {
+  usage:{prompt_tokens:1000, completion_tokens:500},
+  model:'gpt-4o',
+  segments:[{type:'text', blockId:'text:terminal', text:'answer',
+    deliverable:true, terminal:true}],
+};
+const state = {
+  conversationId:'conv-a', conversationRevision:5, transport:'live',
+  turnsById:{'turn-1':{
+    turnId:'turn-1', conversationId:'conv-a', laneId:'main', ordinal:1,
+    actor:'assistant', kind:'reply', runId:'', status:'completed',
+    currentAttemptId:null, projection, projectionRevision:3,
+    settlement:{outcome:'completed'}, createdAt:1, updatedAt:2}},
+  laneOrder:{main:['turn-1']},
+  attemptsById:{}, queueItems:[], pendingEventsByTurn:{},
+  commandPending:{}, liveRoundUsageByTurn:{},
+};
+let footerRenders = 0;
+const surface = feature.createConversationSurface(
+  document.getElementById('chat'), {
+    onIntent() {},
+    renderBlock(node, block) { node.textContent = block.markdown || ''; },
+    renderTurnFooter(node) { footerRenders += 1; node.textContent = 'footer'; },
+  });
+const presentation = (signature) => ({
+  costSignatureByTurnId: signature
+    ? new Map([['turn-1', signature]]) : new Map(),
+});
+const vmEmpty = feature.selectConversationViewModel(state, {}, presentation(''));
+surface.render(vmEmpty);
+const vmLanded = feature.selectConversationViewModel(
+  state, {}, presentation('0.0234'));
+const landedSignature = vmLanded.mainLane.turns[0].metadata.costSignature;
+surface.render(vmLanded);
+const afterFill = footerRenders;
+surface.render(feature.selectConversationViewModel(
+  state, {}, presentation('0.0234')));
+const afterSame = footerRenders;
+/* An authoritative projection cost needs no presentation signature: the
+ * projectionRevision footer compare already covers it. */
+const stampedState = JSON.parse(JSON.stringify(state));
+stampedState.turnsById['turn-1'].projection = {...projection, cost:{costCny:0.02}};
+const vmStamped = feature.selectConversationViewModel(
+  stampedState, {}, presentation('0.0234'));
+console.log(JSON.stringify({
+  emptySignature: vmEmpty.mainLane.turns[0].metadata.costSignature ?? null,
+  landedSignature,
+  afterFill,
+  afterSame,
+  stampedSignature: vmStamped.mainLane.turns[0].metadata.costSignature ?? null,
+}));
+surface.dispose();
+dom.window.close();
+""")
+    assert result["emptySignature"] is None
+    assert result["landedSignature"] == "0.0234"
+    assert result["afterFill"] == 2
+    assert result["afterSame"] == 2
+    assert result["stampedSignature"] is None

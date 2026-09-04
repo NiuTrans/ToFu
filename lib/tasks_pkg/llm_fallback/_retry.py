@@ -9,6 +9,32 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+_DEFAULT_FALLBACK_MAX_429_ATTEMPTS = 3
+_HARD_MAX_FALLBACK_429_ATTEMPTS = 16
+
+
+def _fallback_max_429_attempts(task: dict | None = None) -> int:
+    """Return the bounded upstream-429 budget for fallback/rescue attempts.
+
+    Primary user-selected dispatch remains indefinitely waitable by default.
+    Once that path has already failed and the system switches models, however,
+    an unbounded fallback would leave the client permanently in ``retrying``
+    with no terminal event. The per-task override is clamped to a small hard
+    ceiling so malformed or stale config cannot defeat the resource bound.
+    """
+    raw_value = None
+    if isinstance(task, dict):
+        config = task.get('config')
+        if isinstance(config, dict):
+            raw_value = config.get('fallbackMax429Attempts')
+    if raw_value is None or isinstance(raw_value, bool):
+        return _DEFAULT_FALLBACK_MAX_429_ATTEMPTS
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return _DEFAULT_FALLBACK_MAX_429_ATTEMPTS
+    return max(1, min(parsed, _HARD_MAX_FALLBACK_429_ATTEMPTS))
+
 
 def _get_fallback_model(task: dict | None = None) -> str:
     """Return the configured fallback model, or empty string if disabled.
@@ -33,6 +59,20 @@ def _get_fallback_model(task: dict | None = None) -> str:
             logger.debug('disableModelFallback check failed: %s', e)
     import lib as _lib
     return getattr(_lib, 'FALLBACK_MODEL', '') or ''
+
+
+def _get_pool_rescue_model(failed_models=None) -> str:
+    """Return the configured default as the pool rescue's soft preference.
+
+    Pool rescue remains non-strict: if the default is unavailable, dispatch
+    can still widen to any healthy slot. The preference prevents score-only
+    selection from jumping first to a cheap/fast catalogue entry when the
+    user's configured default is healthy.
+    """
+    import lib as _lib
+    candidate = str(getattr(_lib, 'LLM_MODEL', '') or '').strip()
+    return '' if not candidate or candidate in set(failed_models or ()) \
+        else candidate
 
 
 
@@ -79,4 +119,3 @@ def _flag_empty_stop_for_retry(assistant_msg: dict, finish_reason, task: dict,
     usage['_empty_stop'] = True
     usage['_stream_anomaly'] = True
     return True
-

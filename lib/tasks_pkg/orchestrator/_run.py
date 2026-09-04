@@ -40,7 +40,10 @@ from lib.tasks_pkg.orchestrator._vu_startup import (
     setup_project_context,
     start_external_edit_probe,  # noqa: F401  (also invoked indirectly via setup_project_context)
 )
-from lib.tasks_pkg.orchestrator._prefetch import start_prefetches
+from lib.tasks_pkg.orchestrator._prefetch import (
+    start_prefetches,
+    stop_prefetches,
+)
 from lib.tasks_pkg.orchestrator._context_inject import inject_context_and_emit_chips  # noqa: E501
 from lib.tasks_pkg.orchestrator._round_state import RoundState
 from lib.tasks_pkg.orchestrator._root_agent_loop import (
@@ -49,11 +52,15 @@ from lib.tasks_pkg.orchestrator._root_agent_loop import (
 )
 from lib.tasks_pkg.orchestrator._tool_history import (
     inject_continue_tool_history,
+    prepare_continue_tool_history,
 )
 from lib.tasks_pkg.orchestrator._memory_prefetch import (
     maybe_run_memory_prefetch,
 )
-from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+from lib.tasks_pkg.orchestrator._resume_state import (
+    apply_resume_state,
+    prepare_resume_state,
+)
 from lib.tasks_pkg.orchestrator._post_loop import (
     finalize_after_loop,
     handle_task_base_exception,
@@ -149,6 +156,7 @@ def run_task(task: dict[str, Any]) -> None:
         trace_id=task.get('_requestId') or '',
         user_id=task.get('_userId') or '',
     )
+    _prefetch_executor = None
     try:
         # Keep the prelude inside the same no-escape teardown boundary as the
         # main loop. Snapshot/log/presence helpers are fault-injectable; if one
@@ -182,23 +190,8 @@ def run_task(task: dict[str, Any]) -> None:
         fetch_enabled   = mcfg['fetch_enabled']
         project_path    = mcfg['project_path']
         project_enabled = mcfg['project_enabled']
-        # ── One-shot project-scope startup (slice 4 → setup_project_context).
-        setup_project_context(task, cfg, project_path, project_enabled)
         code_exec_enabled = mcfg['code_exec_enabled']
         memory_enabled  = mcfg['memory_enabled']
-        # ── Memory/project prefetch pool (slice 3 → _prefetch;
-        #    shut down in the context-inject helper).
-        _prefetch_executor = start_prefetches(
-            task, cfg=cfg, project_path=project_path,
-            project_enabled=project_enabled, memory_enabled=memory_enabled)
-
-        _pp = project_path if project_enabled else None
-
-        # ── Section 2: Tool Assembly (slice 29 → _tool_assembly_prep;
-        #    force-enable guard + _tool_schema stash).
-        _emit_startup_phase(task, 'tools')
-        tool_list, has_real_tools = assemble_round_tools(cfg, task, mcfg)
-
         messages = list(task['messages'])
         original_messages = list(messages)
         # ── Round-loop cross-iteration state (slice 1): the 14 locals
@@ -207,44 +200,82 @@ def run_task(task: dict[str, Any]) -> None:
         rs = RoundState(model=model, preset=preset,
                         thinking_enabled=thinking_enabled)
         all_search_results_text = []
+        tool_list = []
+        has_real_tools = False
 
         # Abort-during-prep gates (2026-08-06 conv msftgnt3 incident →
-        #   _abort_prep): one sticky-flag check per expensive stage boundary —
-        #   the FIRST tripped stage owns exit_reason and skips the loop below.
+        #   _abort_prep): check BEFORE each expensive stage as well as after
+        #   non-interruptible work. The first tripped stage owns exit_reason.
         _prep_aborted = handle_abort_during_prep(task, rs, stage='startup',
                                                  tid=tid)
 
-        # Tool history is already reconstructed from the owner-scoped,
-        # turn-native transcript before task creation. There is deliberately
-        # no second in-process message authority here.
+        # Validate every Continue/checkpoint authority before project setup,
+        # prefetch, context mutation, or provider dispatch. Keep the detached
+        # result so the hydration seam does not parse/copy a large snapshot a
+        # second time.
+        prepared_resume_state = None
+        prepared_tool_history = None
         if not _prep_aborted:
+            prepared_resume_state = prepare_resume_state(cfg)
+            prepared_tool_history = prepare_continue_tool_history(
+                task=task, cfg=cfg, model=model)
+
+        if not _prep_aborted:
+            # ── One-shot project-scope startup (slice 4 →
+            #    setup_project_context). This may touch FUSE-backed state, so
+            #    never enter it for a task already cancelled in the queue.
+            setup_project_context(task, cfg, project_path, project_enabled)
+            _prep_aborted = handle_abort_during_prep(
+                task, rs, stage='project_setup', tid=tid)
+
+        if not _prep_aborted:
+            # ── Memory/project prefetch pool (slice 3 → _prefetch).
+            #    Context injection consumes it; the outer finally is the
+            #    no-escape cleanup for aborts and exceptions.
+            _prefetch_executor = start_prefetches(
+                task, cfg=cfg, project_path=project_path,
+                project_enabled=project_enabled,
+                memory_enabled=memory_enabled)
+
+            # ── Section 2: Tool Assembly (slice 29 →
+            #    _tool_assembly_prep; force-enable guard + schema stash).
+            _emit_startup_phase(task, 'tools')
+            tool_list, has_real_tools = assemble_round_tools(cfg, task, mcfg)
             _prep_aborted = handle_abort_during_prep(task, rs,
                                                      stage='tool_setup',
                                                      tid=tid)
 
-        # ── Section 3.5: local high-confidence memory selection. It completes
-        #   synchronously before Composer runs and never mutates messages.
-        _emit_startup_phase(task, 'context')
-        maybe_run_memory_prefetch(
-            task=task, cfg=cfg, messages=messages, tool_list=tool_list,
-            project_path=project_path, project_enabled=project_enabled,
-            memory_enabled=memory_enabled, has_real_tools=has_real_tools,
-            injected_tool_calls=len(cfg.get('toolHistory') or []),
-        )
+        if _prep_aborted and _prefetch_executor is not None:
+            stop_prefetches(
+                task, _prefetch_executor, cancel_pending=True)
+            _prefetch_executor = None
 
-        # ── Section 3: Context Injection → _t_prep_done
-        #    (slice 7 → _context_inject).
-        _t_prep_done = inject_context_and_emit_chips(
-            task=task, messages=messages, cfg=cfg,
-            project_path=project_path, project_enabled=project_enabled,
-            memory_enabled=memory_enabled, search_enabled=search_enabled,
-            has_real_tools=has_real_tools,
-            model=model, tool_list=tool_list,
-            prefetch_executor=_prefetch_executor,
-            tid=tid, t_run_start=_t_run_start,
-            vu_phase=_vu_phase,
-        )
         if not _prep_aborted:
+            # ── Section 3.5: local high-confidence memory selection. It
+            #    completes synchronously before Composer and never mutates
+            #    messages.
+            _emit_startup_phase(task, 'context')
+            maybe_run_memory_prefetch(
+                task=task, cfg=cfg, messages=messages, tool_list=tool_list,
+                project_path=project_path, project_enabled=project_enabled,
+                memory_enabled=memory_enabled,
+                has_real_tools=has_real_tools,
+                injected_tool_calls=prepared_tool_history.injected_calls,
+            )
+
+            # ── Section 3: Context Injection → _t_prep_done
+            #    (slice 7 → _context_inject).
+            inject_context_and_emit_chips(
+                task=task, messages=messages, cfg=cfg,
+                project_path=project_path, project_enabled=project_enabled,
+                memory_enabled=memory_enabled,
+                search_enabled=search_enabled,
+                has_real_tools=has_real_tools,
+                model=model, tool_list=tool_list,
+                prefetch_executor=_prefetch_executor,
+                tid=tid, t_run_start=_t_run_start,
+                vu_phase=_vu_phase,
+            )
             _prep_aborted = handle_abort_during_prep(task, rs,
                                                      stage='context_inject',
                                                      tid=tid)
@@ -265,16 +296,22 @@ def run_task(task: dict[str, Any]) -> None:
         #  last_finish_reason / last_usage / assistant_msg / accumulated_usage
         #  / api_rounds — now live on `rs`, constructed above; slice 1)
 
-        # Continue-toolHistory injection + drift guard
-        #   (slice 36 → _tool_history.inject_continue_tool_history).
-        _injected_tool_calls = inject_continue_tool_history(
-            task=task, rs=rs, messages=messages, cfg=cfg, model=model, tid=tid)
-
-        # ── Resume-state hydration (slice 10 → _resume_state).
-        apply_resume_state(task=task, cfg=cfg, messages=messages,
-                           model=model, tid=tid)
-
         if not _prep_aborted:
+            # Tool history is already reconstructed from the owner-scoped,
+            # turn-native transcript before task creation. There is
+            # deliberately no second in-process message authority here.
+            _injected_tool_calls = inject_continue_tool_history(
+                task=task, rs=rs, messages=messages, cfg=cfg, model=model,
+                tid=tid, prepared_history=prepared_tool_history)
+            if _injected_tool_calls != prepared_tool_history.injected_calls:
+                raise RuntimeError(
+                    'Prepared Continue tool-history count changed at injection')
+
+            # ── Resume-state hydration (slice 10 → _resume_state).
+            apply_resume_state(task=task, cfg=cfg, messages=messages,
+                               model=model, tid=tid,
+                               prepared_state=prepared_resume_state)
+
             _prep_aborted = handle_abort_during_prep(task, rs, stage='prefinal',
                                                      tid=tid)
 
@@ -329,4 +366,5 @@ def run_task(task: dict[str, Any]) -> None:
     finally:
         # No-escape teardown lane (slice 5 → _teardown.finalize_task_lane;
         # each step fail-soft).
+        stop_prefetches(task, _prefetch_executor, cancel_pending=True)
         finalize_task_lane(task, tid=tid)

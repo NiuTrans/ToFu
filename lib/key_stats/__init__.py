@@ -27,9 +27,11 @@ slot names a model — on an aggregating gateway one key proxies several
 upstream vendors, so a billing-stop on one model must not cross-poison the
 others (2026-07-28: qwen→Aliyun quota-death on a sankuai key must not stop
 kimi→Moonshot on the same key). Callers that cannot name a model still flip
-the key-wide ``exhausted`` flag. Manual overrides keep winning over BOTH
-(user supremacy); the Settings card surfaces the override-vs-stop conflict
-instead of letting a stale manual ON silently defeat a fresh billing-stop.
+the key-wide ``exhausted`` flag. Manual overrides keep winning over BOTH for
+ordinary interactive admission (user supremacy); the Settings card surfaces
+the override-vs-stop conflict. Optional background work may enter
+``strict_billing_stop_admission()`` so a fresh recorded stop defeats a stale
+manual ON for that request only and cannot be promoted as last resort.
 
 Namespace fold (account/face separation, charter #23):
   History may have been recorded under an absorbed duplicate face CARD
@@ -85,6 +87,7 @@ Sub-modules:
   _state   — shared singletons + low-level cache helpers
   _record  — hot-path outcome recording (record_outcome / record_rate_limit /
              mark_key_exhausted)
+  _admission — request-local strict billing-stop policy for optional work
   _enable  — raw-enabled + last-resort guard + is_key_enabled
   _query   — read/snapshot API + manual overrides
 """
@@ -118,6 +121,12 @@ from lib.key_stats._record import (
     record_rate_limit,
 )
 
+# ── Request-local optional-work admission policy ──
+from lib.key_stats._admission import (
+    is_strict_billing_stop_admission,
+    strict_billing_stop_admission,
+)
+
 # ── Enable / last-resort decision logic ──
 from lib.key_stats._enable import (
     _has_explicit_false_override_unlocked,
@@ -147,6 +156,8 @@ __all__ = [
     'get_today_stats',
     'get_all_stats',
     'is_key_enabled',
+    'strict_billing_stop_admission',
+    'is_strict_billing_stop_admission',
     'set_key_override',
     'clear_key_override',
     'MIN_ATTEMPTS',

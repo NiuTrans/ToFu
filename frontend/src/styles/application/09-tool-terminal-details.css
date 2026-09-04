@@ -423,28 +423,14 @@
   display: block;
 }
 /* Folded output (owner call 2026-08-27): a done command keeps only its
- * title row — the header itself is the disclosure and a small chevron in
- * the chips cluster marks the folded pane. The standalone "Show output"
- * button row is retired for run_command/code_exec (browser_execute_js
- * keeps its own toggle above). Expansion state is keyed by toolCallId in
- * _cmdOutputExpanded so re-renders keep the reader's choice. */
+ * title row — the header itself is the disclosure. The standalone
+ * "Show output" button row is retired for run_command/code_exec
+ * (browser_execute_js keeps its own toggle above). Expansion state is
+ * keyed by toolCallId in _cmdOutputExpanded so re-renders keep the
+ * reader's choice. */
 .ptool-cmd-block.ptool-cmd-hasoutput > .ptool-cmd-header {
   cursor: pointer;
   user-select: none;
-}
-.ptool-cmd-outchev {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-tertiary);
-  transition: transform .16s ease;
-}
-.ptool-cmd-outchev svg {
-  display: block;
-  width: 11px;
-  height: 11px;
-}
-.ptool-cmd-block.output-open .ptool-cmd-outchev {
-  transform: rotate(90deg);
 }
 .ptool-cmd-block.output-open .ptool-cmd-output {
   display: block;
@@ -732,6 +718,19 @@
 .ptool-batch-done-edit[open] {
   border-color: rgba(255,255,255,0.1);
 }
+
+/* Failed edit body — the exact per-edit line the tool returned to the model
+   (or the metadata detail fallback when the raw text was compacted away). */
+.ptool-batch-fail-detail {
+  padding: 6px 11px 8px 34px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--accent-red, #f87171);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
 .ptool-batch-done-single {
   border-radius: 6px;
   overflow: hidden;
@@ -905,6 +904,83 @@
    connector line threads the state glyphs. Green success accent; per the
    tool-row NO-opacity-for-state rule, item STATE is conveyed by solid glyph
    color + strike-through, never by fading the row. */
+/* ── Waiting on blocker card (.wait-block) ── */
+.wait-block {
+  margin: 12px 0;
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, var(--border, rgba(255,255,255,0.15)));
+  border-radius: 8px;
+  background: color-mix(in srgb, #f59e0b 6%, var(--bg-secondary, rgba(20,20,20,0.8)));
+  overflow: hidden;
+}
+.wait-block > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12.5px;
+}
+.wait-block > summary::-webkit-details-marker { display: none; }
+.wait-block > summary::marker { display: none; content: ""; }
+.wait-block-icon {
+  color: #f59e0b;
+  display: flex;
+  align-items: center;
+}
+.wait-block-title {
+  font-weight: 700;
+  color: #f59e0b;
+}
+.wait-block-note {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wait-block-snapshot {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.wait-block-agent-chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.15);
+  color: #f59e0b;
+}
+.wait-block-body {
+  padding: 10px 14px;
+  border-top: 1px solid color-mix(in srgb, #f59e0b 20%, var(--border, rgba(255,255,255,0.1)));
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wait-block-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px;
+}
+.wait-block-agent-row code {
+  color: var(--text-tertiary);
+}
+.wait-block-resolved {
+  color: var(--s-done, #10b981);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.wait-block-live {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
 .ptool-todo-block {
   border-radius: 8px;
   overflow: hidden;
@@ -1117,12 +1193,24 @@
   font-size: 10px;
   font-weight: 650;
   letter-spacing: 0.02em;
-  text-transform: uppercase;
   line-height: 1;
   border-radius: 999px;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text-tertiary);
+  background: transparent;
+  border: 1px solid var(--border);
   white-space: nowrap;
+}
+/* Referenced-conversation title pinned to a get_conversation card's summary
+   row — the card's identity, so it renders as strong inline text (not another
+   pill) and yields space to the meta chips when narrow. */
+.ptool-convmeta-digest-title {
+  min-width: 0;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+  color: var(--text-primary);
 }
 /* At-a-glance count chip on a COLLAPSED routine-read summary ("3 active" /
    "5 open") — a neutral pill so the user gets the signal without expanding. */
@@ -1276,7 +1364,7 @@
 .ptool-feed-body { flex: 1; min-width: 0; }
 .ptool-feed-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
 .ptool-feed-who { font-size: 11.5px; font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
-.ptool-feed-mine { font-size: 10px; font-weight: 600; color: var(--accent); }
+.ptool-feed-hidden { margin-top: 5px; font-size: 10.5px; color: var(--text-tertiary); font-style: italic; }
 .ptool-feed-when { font-size: 10.5px; color: var(--text-tertiary); margin-left: auto; white-space: nowrap; }
 .ptool-feed-summary { margin-top: 2px; font-size: 11.5px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
 .ptool-feed-empty { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
@@ -1320,7 +1408,6 @@
    the raw ═══ / ── User Message # ASCII dump. */
 .ptool-convdigest { display: flex; flex-direction: column; gap: 9px; }
 .ptool-convdigest-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
-.ptool-convdigest-title { min-width: 0; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; color: var(--text-primary); }
 .ptool-convdigest-preset { display: inline-flex; align-items: center; height: 17px; padding: 0 8px; font-size: 10px; font-weight: 650; letter-spacing: 0.02em; line-height: 1; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); white-space: nowrap; }
 .ptool-convdigest-msgcount { font-size: 11px; color: var(--text-tertiary); }
 .ptool-convdigest-time { font-size: 11px; color: var(--text-tertiary); margin-left: auto; white-space: nowrap; }
@@ -1409,8 +1496,9 @@
 }
 /* Per-edit operation pill — a glanceable rewrite/insert indicator on each
    batch-edit row. Amber = replace (rewrote existing text), green = insert
-   (pure addition, anchor untouched). The label is the raw API enum value so
-   it matches the header summary "(N edits: replace, …)". */
+   (pure addition, anchor untouched). The label is the raw API enum value;
+   per-op detail lives on these rows, the header summary carries the edit
+   description instead. */
 .ptool-op {
   flex-shrink: 0;
   display: inline-flex;
@@ -1755,11 +1843,22 @@
 .hg-options-grid {
   display: grid;
   /* auto-fit (not auto-fill): empty tracks collapse so the actual
-     option cards stretch to fill the full row width — no dead space
+     option groups stretch to fill the full row width — no dead space
      on the right when there are fewer options than columns. */
   grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  align-items: start;
   gap: 10px;
   padding: 4px 14px 14px;
+}
+.hg-option-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 6px;
+}
+.hg-option-group > .hg-option-card {
+  width: 100%;
+  min-height: 100%;
 }
 .hg-option-card {
   display: flex;
@@ -1789,6 +1888,13 @@
   background: rgba(99, 102, 241, 0.14);
   box-shadow: 0 2px 12px -3px rgba(99, 102, 241, 0.2);
   transform: translateY(-1px);
+}
+/* ── Choice notes input (one optional draft per option) ── */
+.hg-option-note-input {
+  min-height: 44px;
+  max-height: 120px;
+  font-size: 12px;
+  resize: vertical;
 }
 .hg-option-card:active {
   transform: translateY(0);
@@ -1902,14 +2008,30 @@
   background: rgba(220, 38, 38, 0.05);
   border-color: rgba(220, 38, 38, 0.18);
 }
+/* The reason can be a long unbroken string (URL, JSON payload). As a nowrap
+ * flex sibling it out-shrinks .ptool-text (whose flex-basis is 0), squeezing
+ * the command text to a ~1-char column that wraps one letter per line. Give
+ * the reason its own full-width line under the row and wrap it there. */
+.ptool-line.ptool-error,
+.ptool-line.ptool-rejected {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
 .ptool-error-reason {
+  flex: 1 1 100%;
+  /* Align with .ptool-text: 16px icon + 8px gap. */
+  margin-left: 24px;
   color: var(--error-text, #f87171);
   font-size: 11px;
+  line-height: 1.5;
   opacity: 0.85;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
 }
 
 /* ── Inline Turn activity events ─────────────────────────────────────────

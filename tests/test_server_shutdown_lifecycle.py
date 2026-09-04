@@ -84,6 +84,9 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     monkeypatch.setattr(
         swarm_integration, 'stop_swarm_cleanup_timer',
         sync_call('swarm-cleanup'))
+    monkeypatch.setattr(
+        swarm_integration, 'stop_swarm_output_cleanup',
+        sync_call('swarm-output-cleanup'))
     monkeypatch.setattr(netpath, 'stop_prober', sync_call('netpath'))
     monkeypatch.setattr(
         background_services, 'stop_lan_discovery_responder',
@@ -126,7 +129,8 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     loop_thread = serving_loop_threads[0]
 
     assert [name for name, _, _ in calls] == [
-        'swarm-cleanup', 'netpath', 'lan-discovery', 'cgroup', 'local-health',
+        'swarm-cleanup', 'swarm-output-cleanup', 'netpath', 'lan-discovery',
+        'cgroup', 'local-health',
         'fs-keepalive', 'presence', 'integration', 'route-services', 'pricing-refresh',
         'mcp-startup', 'mcp', 'admission', 'push', 'http', 'runtime',
         'event-maintenance', 'event-batcher', 'storage',
@@ -139,9 +143,10 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     assert calls[-1][2] == {'timeout': 5.0}
     assert calls[-2][2] == {'timeout': 3.0}
     assert calls[0][2] == {'timeout': 2.0}
-    assert calls[1][2] == {}
-    assert all(kwargs == {'timeout': 2.0} for _, _, kwargs in calls[2:7])
-    assert all(kwargs == {'timeout': 2.0} for _, _, kwargs in calls[7:11])
+    assert calls[1][2] == {'timeout': 2.0}
+    assert calls[2][2] == {}
+    assert all(kwargs == {'timeout': 2.0} for _, _, kwargs in calls[3:8])
+    assert all(kwargs == {'timeout': 2.0} for _, _, kwargs in calls[8:12])
 
 
 def test_storage_shutdown_certifies_reexec_only_after_release(monkeypatch):
@@ -233,8 +238,6 @@ def test_legacy_daily_report_scheduler_facade_is_thread_free(monkeypatch):
     ('lib.fs_keepalive', '_thread', ('_stop_event',), 'stop_fs_keepalive'),
     ('lib.llm_dispatch.health_local', '_thread', ('_stop_event', '_wake_event'),
      'stop_local_health_checker'),
-    ('lib.llm_dispatch.model_catalog_sync', '_thread',
-     ('_stop_event', '_wake_event'), 'stop_model_catalog_sync'),
     ('lib.oauth.codex_catalog', '_worker_thread',
      ('_worker_stop', '_refresh_wake'), 'stop_codex_catalog_refresher'),
     ('lib.presence.registry', '_sweeper_thread', ('_sweeper_stop',),
@@ -283,36 +286,38 @@ def test_worker_stop_contract_releases_only_a_stopped_owner(
 
 
 def test_visual_enrichment_stop_contract_releases_each_owner(monkeypatch):
-    """The knowledge worker registry is partitioned by explicit owner."""
+    """The shared lane releases every explicitly owned worker on shutdown."""
     from lib.knowledge import enrichment
+    from lib.knowledge.enrichment_lane import OwnerFairEnrichmentLane
 
-    class Thread:
-        alive = True
+    started = {7: threading.Event(), 9: threading.Event()}
+    released: set[int] = set()
+    released_lock = threading.Lock()
 
-        def __init__(self):
-            self.joined = []
+    def process(owner_id, stop_event):
+        started[owner_id].set()
+        assert stop_event.wait(1.0)
+        with released_lock:
+            released.add(owner_id)
+        return False
 
-        def is_alive(self):
-            return self.alive
+    lane = OwnerFairEnrichmentLane(
+        max_workers=2,
+        owner_capacity=2,
+        idle_seconds=1.0,
+        processor=process,
+    )
+    monkeypatch.setattr(enrichment, '_enrichment_lane', lane)
 
-        def join(self, timeout):
-            self.joined.append(timeout)
-            self.alive = False
-
-    first = Thread()
-    second = Thread()
-    first_stop = threading.Event()
-    second_stop = threading.Event()
-    monkeypatch.setattr(enrichment, '_workers', {7: first, 9: second})
-    monkeypatch.setattr(
-        enrichment, '_worker_stops', {7: first_stop, 9: second_stop})
-
-    assert enrichment.stop_visual_enrichment(timeout=0.125) is True
-    assert first.joined == [0.0625]
-    assert second.joined == [0.0625]
-    assert first_stop.is_set() and second_stop.is_set()
-    assert enrichment._workers == {}
-    assert enrichment._worker_stops == {}
+    assert lane.schedule(7) is True
+    assert lane.schedule(9) is True
+    assert started[7].wait(1.0)
+    assert started[9].wait(1.0)
+    assert enrichment.stop_visual_enrichment(timeout=0.5) is True
+    assert released == {7, 9}
+    snapshot = enrichment.knowledge_enrichment_snapshot()
+    assert snapshot['residentThreads'] == 0
+    assert snapshot['retainedOwners'] == 0
 
 
 def test_scheduler_manager_stop_interrupts_wait_and_releases_owner():

@@ -74,6 +74,19 @@ class TestInternalErrorClassification:
         assert 'Keys / Providers' not in env['hint']
         assert '429' not in env['hint']
 
+    def test_context_compaction_error_is_internal_not_prompt_too_long(self):
+        from lib.error_envelope import from_exception
+        from lib.error_envelope._classify import _classify_exception
+        from lib.llm_errors import ContextCompactionError
+
+        exc = ContextCompactionError(
+            'Automatic context compaction failed locally.')
+        assert _classify_exception(exc) == 'internal'
+        env = from_exception(exc, model='kimi-k3', source='orchestrator')
+        assert env['kind'] == 'internal'
+        assert 'logs/error.log' in env['hint']
+        assert '上下文已超过模型上限' not in env['message']
+
     def test_neuter_dispatch_string_errors_still_classify(self):
         """NEUTER: the new branch must NOT swallow dispatch-layer errors that
         the substring heuristics own. A RuntimeError carrying a rate-limit /
@@ -130,6 +143,19 @@ class TestVendorOutageClassification:
         assert _classify_exception(RateLimitError('HTTP 429 too many requests')) == 'ratelimit'
         assert _classify_exception(RateLimitError('insufficient_quota', is_quota=True)) == 'quota'
         assert _classify_exception(PermissionError_('HTTP 403 invalid api key')) == 'permission'
+
+    def test_permission_envelope_keeps_exact_http_status_without_key_blame(self):
+        from lib.error_envelope import from_exception
+        from lib.llm import PermissionError_
+
+        env = from_exception(
+            PermissionError_('model entitlement denied', status_code=403),
+            model='kimi-k3', context='request-rejected', source='llm-stream')
+
+        assert env['kind'] == 'permission'
+        assert env['statusCode'] == 403
+        assert '请求被拒绝' in env['message']
+        assert '模型权限' in env['hint']
 
     def test_retryable_api_error_is_upstream_error(self):
         from lib.error_envelope._classify import _classify_exception

@@ -92,6 +92,28 @@ class RateLimitTest(unittest.TestCase):
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, 'tpd')
 
+    def test_api_key_state_is_lru_bounded(self):
+        old_capacity = rate_limit_api._state_capacity
+        old_evictions = rate_limit_api._state_capacity_evictions
+        try:
+            rate_limit_api._state_capacity = 2
+            rate_limit_api._state_capacity_evictions = 0
+            check_request(self._ctx(key_id='k1', rpm=10))
+            check_request(self._ctx(key_id='k2', rpm=10))
+            check_request(self._ctx(key_id='k1', rpm=10))  # k1 is hottest
+            check_request(self._ctx(key_id='k3', rpm=10))
+
+            self.assertEqual(list(_buckets()), ['k1', 'k3'])
+            self.assertEqual(rate_limit_api.api_rate_limit_stats(), {
+                'entries': 2,
+                'capacity': 2,
+                'capacity_evictions': 1,
+            })
+        finally:
+            _buckets().clear()
+            rate_limit_api._state_capacity = old_capacity
+            rate_limit_api._state_capacity_evictions = old_evictions
+
     def test_apply_headers(self):
         class Resp:
             headers: dict = {}

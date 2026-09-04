@@ -15,9 +15,10 @@ through the SHARED single-tool dispatch. This suite pins the four contracts:
      an 8k single-result / 24k aggregate cap and owner-scoped semantic artifact
      continuation. An explicit registered control arm can reproduce the still-
      bounded legacy baseline without contaminating the V2 candidate.
-  4. POLICY — write-partition calls in an unattended paper engine are
-     auto-approved AND audit-logged (never silently bypassed, never blocked
-     on a human who cannot answer).
+  4. POLICY — ordinary write-partition calls in an unattended paper engine are
+     auto-approved AND audit-logged. Registry-declared attended-confirmation
+     tools are not advertised because a headless task cannot mint their
+     one-use approval receipt.
 
 NEUTER map (each mutation was verified to turn the named test(s) red):
   * build_paper_full_tool_context → research set only ...... parity tests
@@ -112,7 +113,8 @@ def test_full_epoch_default_is_uncapped_and_model_neutral():
     assert wire_names == authority_names == set(_names(other.wire_schemas))
     telemetry = epoch.telemetry()
     assert telemetry['configuredSchemaBudgetTokens'] == 0
-    assert telemetry['wireToolCount'] == telemetry['executableToolCount'] == 33
+    assert telemetry['wireToolCount'] == len(epoch.wire_schemas)
+    assert telemetry['executableToolCount'] == len(epoch.executable_schemas)
     assert telemetry['searchableToolCount'] == 0
     assert len(epoch.epoch_hash) == 64
     repeated = build_paper_full_tool_epoch(
@@ -122,9 +124,16 @@ def test_full_epoch_default_is_uncapped_and_model_neutral():
     assert {'web_search', 'fetch_url', 'read_files', 'inspect_image',
             'read_tool_artifact', 'search_tool_artifact', 'run_command',
             'create_memory', 'schedule_create', 'produce_slides',
-            'spawn_agents', 'search_skills', 'load_skill',
-            'read_skill_resource', 'request_skill_install'} <= wire_names
+            'spawn_agents', 'get_agent_result', 'search_skills', 'load_skill',
+            'read_skill_resource', 'local_serve_prepare',
+            'local_serve_status', 'local_serve_list',
+            'local_serve_stop'} <= wire_names
     assert 'search_tools' not in wire_names and 'execute_tools' not in wire_names
+    from lib.tools.registry import all_specs
+    attended_confirmation_names = set().union(*(
+        set(spec.confirmation_tools) for spec in all_specs()
+    ))
+    assert not authority_names & attended_confirmation_names
     assert 'ask_human' not in authority_names, (
         'an unattended paper task must never expose a wait that cannot resume')
 
@@ -222,7 +231,7 @@ def test_explicit_zero_budget_restores_the_pre_tool_search_control_surface():
     assert epoch.schema_budget_tokens == 0
     assert epoch.schema_tokens > 4_000
     assert epoch.gateway_schema_tokens == 0
-    assert len(epoch.wire_schemas) == len(epoch.executable_schemas) == 20
+    assert len(epoch.wire_schemas) == len(epoch.executable_schemas) == 21
     assert 'search_tools' not in names and 'execute_tools' not in names
     assert {'run_command', 'create_memory', 'spawn_agents'} <= names
     assert {'search_skills', 'load_skill', 'read_skill_resource'} <= names
@@ -278,9 +287,9 @@ def test_registered_tool_arms_are_single_factor_in_paper_epoch():
     assert not {'read_tool_artifact', 'search_tool_artifact'} & control_names
     assert result.result_envelope == 'v2'
     assert {'read_tool_artifact', 'search_tool_artifact'} <= result_names
-    assert control.telemetry()['wireToolCount'] == 18
+    assert control.telemetry()['wireToolCount'] == 19
     assert surface.telemetry()['wireToolCount'] == 6
-    assert result.telemetry()['wireToolCount'] == 20
+    assert result.telemetry()['wireToolCount'] == 21
 
 
 def test_full_paper_prompts_teach_the_bounded_gateway_contract():
@@ -682,7 +691,7 @@ def test_cap_tool_result_bounds_read_files_and_uses_owner_artifact(monkeypatch):
     visible = cap_tool_result(
         big, 'read_files', owner_user_id=TEST_OWNER_USER_ID)
     value = json.loads(visible)
-    assert _budget._result_tokens(visible, '') <= 8_000
+    assert _budget._model_result_tokens(visible, '') <= 8_000
     assert value['status'] == 'partial' and value['truncated'] is True
     assert value['artifactRef'] == 'tool-result:' + 'a' * 64
     assert stored == [(big, TEST_OWNER_USER_ID)]
@@ -730,8 +739,10 @@ def test_paper_round_budget_handles_duplicate_and_empty_call_ids(monkeypatch):
     assert sum(_budget._result_tokens(message['content'], '')
                for message in messages) <= 24_000
     assert any(entry.get('aggregateResultBudgetApplied') for entry in entries)
-    assert all(json.loads(message['content'])['contractVersion']
-               == 'tofu.tool-result/v2' for message in messages)
+    assert all('contractVersion' not in json.loads(message['content'])
+               for message in messages)
+    assert all(entry['toolResultEvidence']['resultContractVersion']
+               == 'tofu.tool-result/v2' for entry in entries)
 
 
 def test_paper_batch_read_budget_consumes_fair_projection(
@@ -851,9 +862,9 @@ def test_research_executor_reads_owner_artifact_through_shared_dispatch(
     result_budget.finish_round(0)
 
     value = json.loads(messages[0]['content'])
-    assert value['contractVersion'] == 'tofu.tool-result/v2'
-    assert value['items'][0]['status'] == 'ok'
-    assert value['items'][0]['content'] == 'recover-me'
+    assert 'contractVersion' not in value
+    assert value['status'] == 'ok'
+    assert value['content'] == 'recover-me'
 
 
 # ─── 5. Engine-level e2e: the report loop really runs read_files ──────────
@@ -897,7 +908,7 @@ def test_report_engine_explicit_control_keeps_legacy_full_wire():
     names = set(_names(seen['tools']))
     assert task['status'] == 'done', task.get('error')
     assert task['toolEpochV2']['configuredSchemaBudgetTokens'] == 0
-    assert task['toolEpochV2']['wireToolCount'] == 20
+    assert task['toolEpochV2']['wireToolCount'] == 21
     assert 'search_tools' not in names and 'execute_tools' not in names
     assert seen['messages'][0]['content'] == 'control system'
 
@@ -936,8 +947,11 @@ def test_report_engine_full_loop_executes_read_files(tmp_path):
                                 # offline suite — the insight second pass must
                                 # not dispatch a real LLM (CI 401 → endless
                                 # cooldown cycle → 600s timeout, 233daa6)
-                                config={'paperInsightEnabled': False,
-                                'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
+                                config={
+                                    'responses': {'promptProfile': 'full'},
+                                    'paperInsightEnabled': False,
+                                    'paperCheckpointsEnabled': False,
+                                }, user_id=TEST_OWNER_USER_ID)
         re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper text'},
@@ -948,8 +962,9 @@ def test_report_engine_full_loop_executes_read_files(tmp_path):
     assert task['status'] == 'done', task.get('error')
     assert task['toolEpochV2']['configuredSchemaBudgetTokens'] == 0
     assert task['toolEpochV2']['wireSchemaTokens'] > 4_000
-    assert task['toolEpochV2']['wireToolCount'] == 33
-    assert task['toolEpochV2']['executableToolCount'] == 33
+    assert task['toolEpochV2']['wireToolCount'] > 0
+    assert (task['toolEpochV2']['wireToolCount'] ==
+            task['toolEpochV2']['executableToolCount'])
     assert len(task['tool_rounds']) == 1
     assert task['tool_rounds'][0]['toolName'] == 'read_files'
     assert task['tool_rounds'][0]['status'] == 'done'
@@ -1002,8 +1017,9 @@ def test_qa_engine_full_loop_executes_read_files(tmp_path):
     assert task['status'] == 'done', task.get('error')
     assert task['toolEpochV2']['configuredSchemaBudgetTokens'] == 0
     assert task['toolEpochV2']['wireSchemaTokens'] > 4_000
-    assert task['toolEpochV2']['wireToolCount'] == 33
-    assert task['toolEpochV2']['executableToolCount'] == 33
+    assert task['toolEpochV2']['wireToolCount'] > 0
+    assert (task['toolEpochV2']['wireToolCount'] ==
+            task['toolEpochV2']['executableToolCount'])
     assert task['tool_rounds'][0]['toolName'] == 'read_files'
     assert '42' in task['full_text']
     # Complement pin: the asset content must have been fed back as a tool

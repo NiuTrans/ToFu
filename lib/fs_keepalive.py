@@ -227,24 +227,6 @@ _probe_runtime: _ProbeRuntime | None = None
 #  Core keepalive logic
 # ═══════════════════════════════════════════════════════════════════════
 
-def _stat_with_timeout(path, timeout):
-    """Perform os.stat(path) with a timeout.
-
-    Returns:
-        (ok: bool, elapsed: float)
-        ok=True if stat completed within timeout, False if it hung.
-    """
-    runtime = _ProbeRuntime()
-    runtime.start()
-    generation = runtime.request((path,))
-    results, _active_path = runtime.wait(generation, timeout)
-    runtime.request_stop()
-    runtime.join(0.1)
-    if results:
-        _path, ok, elapsed = results[0]
-        return ok, elapsed
-    return False, timeout
-
 
 def _probe_paths_with_timeout(
     runtime: _ProbeRuntime,

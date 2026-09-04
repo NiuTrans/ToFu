@@ -1,7 +1,5 @@
 """Contracts for the agent-runner → flow tool-usage boundary."""
 
-from pathlib import Path
-
 import pytest
 
 from lib.orchestration_tool_usage import (
@@ -11,7 +9,6 @@ from lib.orchestration_tool_usage import (
 
 
 pytestmark = pytest.mark.unit
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_tool_names_project_to_detached_state_and_exploration_counts():
@@ -68,12 +65,3 @@ def test_tool_names_stays_authoritative_when_both_shapes_are_present():
 
     assert usage.engine_tuple() == (0, 0, [], True)
     assert fallback.engine_tuple() == (1, 0, ['write_file'], True)
-
-
-def test_flow_executor_delegates_runner_shape_compatibility():
-    engine = (ROOT / 'lib' / 'orchestration_engine.py').read_text()
-
-    assert 'normalize_orchestration_agent_result(' in engine
-    assert ').tool_usage.engine_tuple()' in engine
-    assert "res.get('tool_log')" not in engine
-    assert "res.get('tool_names')" not in engine

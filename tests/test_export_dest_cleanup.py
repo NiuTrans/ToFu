@@ -114,7 +114,8 @@ class DestCleanupTargetsTest(unittest.TestCase):
         """Shipped-source needle: export_project must route its cleanup
         through _dest_cleanup_targets (a hand-rolled reimplementation or a
         dropped call regresses the mirror semantics invisibly)."""
-        src = Path(export.__file__).read_text(encoding='utf-8')
+        import inspect
+        src = inspect.getsource(export.export_project)
         self.assertIn('targets = _dest_cleanup_targets(dest, mode, source_names)',
                       src)
 
@@ -136,6 +137,55 @@ class StaticImagesExclusionTest(unittest.TestCase):
                                             'personal')
             self.assertIsNone(reason, f'{name} must survive personal exports')
 
+
+class ToolchainSelfExclusionTest(unittest.TestCase):
+    """The export toolchain itself + the internal journal must never reach
+    the public tree: export_pkg/_lists.py carries private markers (real API
+    keys, internal usernames/domains) as sanitization patterns, and
+    JOURNAL.md is the internal evolution log (ops incidents, internal
+    hosts/ids). The 2026-08 export of a stale ref proved the failure mode:
+    export_pkg shipped and the sanitizer then rewrote _sanitize.py's own
+    pattern literals in the dest tree."""
+
+    def test_export_infra_excluded_from_opensource(self):
+        self.assertIn('export.py', export.ALWAYS_EXCLUDE_FILES)
+        self.assertIn('export_pkg', export.OPENSOURCE_EXTRA_EXCLUDE_DIRS)
+        self.assertIn('JOURNAL.md', export.OPENSOURCE_EXTRA_EXCLUDE_FILES)
+        for rel, name in (('export.py', 'export.py'),
+                          ('export_pkg/_lists.py', '_lists.py'),
+                          ('JOURNAL.md', 'JOURNAL.md')):
+            reason = export._should_exclude(rel, name, 'opensource')
+            self.assertIsNotNone(reason, f'{rel} must be excluded (opensource)')
+
+    def test_export_infra_still_ships_in_personal(self):
+        """Personal backups keep the toolchain + journal — the exclusion is
+        opensource/internal-only."""
+        for rel, name in (('export_pkg/_lists.py', '_lists.py'),
+                          ('JOURNAL.md', 'JOURNAL.md')):
+            reason = export._should_exclude(rel, name, 'personal')
+            self.assertIsNone(reason, f'{rel} must survive personal exports')
+
+
+class ExportedPySyntaxGateTest(unittest.TestCase):
+    """The whole-tree ``ast.parse`` gate must fail the export when the
+    sanitizer corrupts any ``.py`` (twin of the JS ``node --check`` gate)."""
+
+    def test_corrupt_py_fails_the_gate(self):
+        from export_pkg._verify import (
+            ExportSyntaxError, _verify_exported_py_syntax)
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d)
+            (dest / 'ok.py').write_text('x = 1\n', encoding='utf-8')
+            (dest / 'broken.py').write_text('def broken(:\n', encoding='utf-8')
+            with self.assertRaises(ExportSyntaxError):
+                _verify_exported_py_syntax(dest)
+
+    def test_clean_tree_passes_the_gate(self):
+        from export_pkg._verify import _verify_exported_py_syntax
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d)
+            (dest / 'ok.py').write_text('x = 1\n', encoding='utf-8')
+            _verify_exported_py_syntax(dest)
 
 if __name__ == '__main__':
     unittest.main()

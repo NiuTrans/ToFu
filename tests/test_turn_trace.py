@@ -32,6 +32,8 @@ DB, cleaned up after):
      rule, and every rule key is a registered phase (the unified-interface
      ratchet, mirroring test_phase_registry.py).
  11. Route registration pins /api/v1/tasks/<id>/trace on the v1 blueprint.
+ 12. User-visible phase history and browser paint/transport receipts remain
+     idempotent, bounded, content-free, and byte-capped.
 
 NEUTER: make ``_disjoint_summary`` attribute every segment to 'llmMs' →
 the sum-to-total assertion flips red (proving the partition is
@@ -449,6 +451,115 @@ def test_missing_round_end_flags_truncated():
         _cleanup(tid)
 
 
+def test_recycled_tool_id_does_not_overwrite_unsettled_prior_round_span():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        ('tool_start', 1200, {'roundNum': 1, 'toolName': 'read_files',
+                              'toolCallId': 'call_0',
+                              'tStart': _T0 + 1200}),
+        # The result event is lost, but the next round proves the tool stopped.
+        ('round_start', 3000, {'roundNum': 2}),
+        ('round_end', 4000, {'roundNum': 2, 'reason': 'tools'}),
+        ('tool_start', 4200, {'roundNum': 2, 'toolName': 'write_file',
+                              'toolCallId': 'call_0',
+                              'tStart': _T0 + 4200}),
+        ('tool_result', 5000, {'roundNum': 2, 'toolCallId': 'call_0',
+                               'status': 'done', 'tEnd': _T0 + 5000}),
+        ('done', 5100, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        tools = _spans(doc, 'tool')
+        assert len(tools) == 2
+        assert tools[0]['name'] == 'read_files'
+        assert tools[0]['status'] == 'unknown'
+        assert tools[0]['tEnd'] == _T0 + 3000
+        assert tools[0].get('truncated') is True
+        assert tools[1]['name'] == 'write_file'
+        assert tools[1]['status'] == 'done'
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_duplicate_tool_id_in_one_round_is_paired_by_occurrence():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        ('tool_start', 1200, {'roundNum': 1, 'toolName': 'read_files',
+                              'toolCallId': 'same', 'tStart': _T0 + 1200}),
+        ('tool_start', 1300, {'roundNum': 1, 'toolName': 'grep_search',
+                              'toolCallId': 'same', 'tStart': _T0 + 1300}),
+        ('tool_result', 2000, {'roundNum': 1, 'toolCallId': 'same',
+                               'status': 'done', 'tEnd': _T0 + 2000}),
+        ('tool_result', 2300, {'roundNum': 1, 'toolCallId': 'same',
+                               'status': 'done', 'tEnd': _T0 + 2300}),
+        ('done', 2400, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        tools = _spans(doc, 'tool')
+        assert [tool['name'] for tool in tools] == [
+            'read_files', 'grep_search']
+        assert [tool['status'] for tool in tools] == ['done', 'done']
+        assert len({tool['spanId'] for tool in tools}) == 2
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_stale_approval_does_not_attach_to_recycled_id_in_later_round():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('write_approval_request', 500, {'roundNum': 1,
+                                          'toolCallId': 'call_0'}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'error'}),
+        ('round_start', 2000, {'roundNum': 2}),
+        ('round_end', 3000, {'roundNum': 2, 'reason': 'tools'}),
+        ('tool_start', 3200, {'roundNum': 2, 'toolName': 'write_file',
+                              'toolCallId': 'call_0',
+                              'tStart': _T0 + 3200}),
+        ('tool_result', 3800, {'roundNum': 2, 'toolCallId': 'call_0',
+                               'status': 'done', 'tEnd': _T0 + 3800}),
+        ('done', 3900, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        assert _spans(doc, 'approval_wait') == []
+        assert _spans(doc, 'tool')[0]['status'] == 'done'
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_unknown_result_id_never_settles_an_unrelated_open_tool():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        ('tool_start', 1200, {'roundNum': 1, 'toolName': 'read_files',
+                              'toolCallId': 'real', 'tStart': _T0 + 1200}),
+        ('tool_result', 1500, {'roundNum': 1, 'toolCallId': 'orphan',
+                               'status': 'error', 'tEnd': _T0 + 1500}),
+        ('tool_result', 2100, {'roundNum': 1, 'toolCallId': 'real',
+                               'status': 'done', 'tEnd': _T0 + 2100}),
+        ('done', 2200, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        tools = _spans(doc, 'tool')
+        assert len(tools) == 1
+        assert tools[0]['status'] == 'done'
+        assert tools[0]['tEnd'] == _T0 + 2100
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
 # ── 9. Honesty: empty / Flow / legacy coverage ──
 
 def test_unknown_task_is_honestly_empty():
@@ -522,7 +633,266 @@ def test_budget_tables_are_well_formed():
                 f'positive ms int, got {budget!r}')
 
 
-# ── 11. Route registration ──
+# ── 11. Durable prompt/perception evidence and resource bounds ──
+
+def test_user_visible_status_history_coalesces_heartbeats_and_marks_stall():
+    from lib.tasks_pkg.turn_trace import (
+        observe_task_trace_event,
+        task_status_history,
+    )
+
+    task = {'id': 'status-task'}
+    observe_task_trace_event(task, {
+        'type': 'phase', 'phase': 'waiting_model',
+        'detailKey': 'status.waitingModel', 'detailArgs': {'model': 'm-a'},
+    }, observed_at_ms=1_000)
+    observe_task_trace_event(task, {
+        'type': 'phase', 'phase': 'waiting_model',
+        'detailKey': 'status.waitingModel', 'detailArgs': {'model': 'm-a'},
+    }, observed_at_ms=2_000)
+    observe_task_trace_event(task, {
+        'type': 'phase', 'phase': 'stream_stalled',
+        'detailKey': 'status.streamStalled',
+    }, observed_at_ms=3_000)
+    observe_task_trace_event(
+        task, {'type': 'done'}, observed_at_ms=7_000)
+
+    history, dropped = task_status_history(task)
+    assert dropped == 0
+    assert [row['phase'] for row in history] == [
+        'waiting_model', 'stream_stalled']
+    assert history[0]['count'] == 2
+    assert history[0]['tStart'] == 1_000
+    assert history[0]['lastObservedAt'] == 2_000
+    assert history[0]['tEnd'] == 3_000
+    assert history[1]['attention'] == 'stall'
+    assert history[1]['tEnd'] == 7_000
+    assert history[1]['terminalBoundary'] is True
+
+
+def test_status_history_is_bounded_and_reports_eviction():
+    from lib.tasks_pkg.turn_trace import (
+        TRACE_MAX_STATUS_ENTRIES,
+        observe_task_trace_event,
+        task_status_history,
+    )
+
+    task = {'id': 'bounded-status-task'}
+    for index in range(TRACE_MAX_STATUS_ENTRIES + 9):
+        observe_task_trace_event(task, {
+            'type': 'phase', 'phase': 'working',
+            'detailKey': f'status.synthetic.{index}',
+        }, observed_at_ms=index + 1)
+    history, dropped = task_status_history(task)
+    assert len(history) == TRACE_MAX_STATUS_ENTRIES
+    assert dropped == 9
+    assert history[0]['detailKey'] == 'status.synthetic.9'
+
+
+def test_terminal_pending_event_freezes_status_history():
+    from lib.tasks_pkg import turn_trace
+
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('phase', 100, {'phase': 'waiting_model',
+                        'detailKey': 'status.waitingModel'}),
+        ('round_end', 2_000, {'roundNum': 1, 'reason': 'final'}),
+    ])
+    original = turn_trace._read_trace_rows
+    turn_trace._read_trace_rows = lambda selected: list(
+        _SEEDED_ROWS.get(selected, ()))
+    try:
+        doc = turn_trace.fold_task_trace(
+            tid,
+            now_ms=_T0 + 2_100,
+            pending_event={'type': 'done', 'finishReason': 'stop'},
+            pending_sequence=3,
+        )
+        assert doc['status'] == 'done'
+        assert doc['running'] is False
+        assert doc['tEnd'] == _T0 + 2_100
+        assert doc['eventLogAvailable'] is False
+        assert doc['statusHistory'][0]['detailKey'] == 'status.waitingModel'
+        assert doc['statusHistory'][0]['terminalBoundary'] is True
+    finally:
+        turn_trace._read_trace_rows = original
+        _cleanup(tid)
+
+
+def test_client_perception_receipts_are_idempotent_derived_and_bounded():
+    from lib.tasks_pkg.turn_trace import (
+        TRACE_MAX_CLIENT_OBSERVATIONS,
+        append_client_trace_observation,
+    )
+
+    trace = {'version': 1, 'taskId': 'task-a', 'source': 'turn-snapshot'}
+    observation = {
+        'observationId': 'paint:1',
+        'kind': 'phase_painted',
+        'attemptId': 'attempt-a',
+        'clientId': 'page-a',
+        'phase': 'waiting_model',
+        'detailKey': 'status.waitingModel',
+        'serverEmittedAt': 1_000,
+        'receivedAt': 1_125,
+        'paintedAt': 1_160,
+    }
+    trace, applied = append_client_trace_observation(
+        trace, observation, task_id='task-a', attempt_id='attempt-a',
+        recorded_at_ms=1_200,
+    )
+    assert applied is True
+    row = trace['clientObservations'][0]
+    assert row['renderMs'] == 35
+    assert row['transportMs'] == 125
+    assert 'content' not in row and 'detail' not in row
+
+    replay, applied = append_client_trace_observation(
+        trace, observation, task_id='task-a', attempt_id='attempt-a',
+        recorded_at_ms=1_300,
+    )
+    assert applied is False
+    assert replay['clientObservations'] == trace['clientObservations']
+
+    with pytest.raises(ValueError, match='unsupported perception fields'):
+        append_client_trace_observation(
+            trace, {**observation, 'observationId': 'paint:content',
+                    'content': 'forbidden'},
+            task_id='task-a', attempt_id='attempt-a', recorded_at_ms=1_400,
+        )
+    with pytest.raises(ValueError, match='authoritative attempt'):
+        append_client_trace_observation(
+            trace, {**observation, 'observationId': 'paint:mismatch',
+                    'attemptId': 'attempt-b'},
+            task_id='task-a', attempt_id='attempt-a', recorded_at_ms=1_400,
+        )
+
+    for index in range(1, TRACE_MAX_CLIENT_OBSERVATIONS + 5):
+        trace, applied = append_client_trace_observation(
+            trace, {
+                **observation,
+                'observationId': f'paint:{index + 1}',
+                'receivedAt': 2_000 + index,
+                'paintedAt': 2_010 + index,
+            },
+            task_id='task-a', attempt_id='attempt-a',
+            recorded_at_ms=3_000 + index,
+        )
+        assert applied is True
+    assert len(trace['clientObservations']) == TRACE_MAX_CLIENT_OBSERVATIONS
+    assert trace['clientObservationDroppedCount'] == 5
+
+
+def test_attempt_receipt_lane_overlays_server_trace_without_cross_task_leakage():
+    from lib.tasks_pkg.turn_trace import merge_client_trace_evidence
+
+    server = {
+        'version': 1, 'taskId': 'task-a', 'source': 'turn-snapshot',
+        'eventsAvailable': True, 'summary': {'totalMs': 10},
+        'clientObservations': [{'observationId': 'old'}],
+    }
+    receipts = {
+        'version': 1, 'taskId': 'task-a',
+        'clientObservations': [{'observationId': 'new'}],
+        'clientObservationDroppedCount': 3,
+    }
+    merged = merge_client_trace_evidence(server, receipts, task_id='task-a')
+    assert merged['summary'] == {'totalMs': 10}
+    assert merged['clientObservations'] == [{'observationId': 'new'}]
+    assert merged['clientObservationDroppedCount'] == 3
+
+    mismatched = merge_client_trace_evidence(
+        server, {**receipts, 'taskId': 'task-b'}, task_id='task-a')
+    assert mismatched['clientObservations'] == [{'observationId': 'old'}]
+
+
+def test_new_attempt_drops_previous_attempt_live_trace_before_first_phase():
+    from lib.tasks_pkg.turn_trace import project_running_trace_status
+
+    projected = project_running_trace_status({
+        'content': '',
+        'timingTrace': {
+            'version': 1, 'taskId': 'old-task', 'running': False,
+        },
+    }, {'id': 'new-task'})
+    assert 'timingTrace' not in projected
+
+
+def test_persisted_trace_has_a_hard_byte_budget():
+    import json
+
+    from lib.tasks_pkg.turn_trace import (
+        TRACE_MAX_PERSISTED_BYTES,
+        compact_trace_document,
+    )
+
+    noisy = {
+        'version': 1,
+        'taskId': 'task-budget',
+        'summary': {'totalMs': 1, 'llmMs': 0, 'toolMs': 0, 'waitMs': 0,
+                    'compactionMs': 0, 'approvalWaitMs': 0,
+                    'unattributedMs': 1, 'ttftMs': 0, 'overBudget': [{
+                        'spanId': f'over-{index}', 'kind': 'tool',
+                        'name': 'o' * 400, 'elapsedMs': 2, 'budgetMs': 1,
+                    } for index in range(256)]},
+        'spans': [{
+            'spanId': f'span-{index}', 'parent': 'turn', 'depth': 2,
+            'kind': 'tool', 'name': 'x' * 400, 'tStart': index,
+            'tEnd': index + 1, 'status': 'done',
+            'attrs': {f'field-{child}': 'y' * 400 for child in range(32)},
+        } for index in range(600)],
+        'statusHistory': [{
+            'id': f'status-{index}', 'phase': 'working',
+            'attention': 'progress', 'tStart': index,
+            'lastObservedAt': index, 'count': 1,
+            'detail': 'z' * 400, 'detailKey': 'status.synthetic',
+            'detailArgs': {f'arg-{child}': 'v' * 200 for child in range(16)},
+        } for index in range(300)],
+        'clientObservations': [{
+            'observationId': f'paint-{index}',
+            'kind': 'phase_painted', 'taskId': 'task-budget',
+            'attemptId': 'attempt-budget', 'clientId': 'c' * 64,
+            'recordedAt': index, 'phase': 'p' * 80,
+            'detailKey': 'd' * 160, 'reason': 'r' * 160,
+            'receivedAt': index, 'paintedAt': index + 1,
+        } for index in range(100)],
+    }
+    compacted = compact_trace_document(noisy, source='turn-snapshot')
+    size = len(json.dumps(
+        compacted, ensure_ascii=False, separators=(',', ':')).encode())
+    assert size <= TRACE_MAX_PERSISTED_BYTES
+    assert compacted['compacted'] is True
+    assert compacted['droppedSpans'] > 0
+    assert compacted['statusDroppedCount'] > 0
+    assert compacted['overBudgetDroppedCount'] > 0
+    from lib.conversation_sync.validation import decode
+    decode('TurnTimingTrace', compacted)
+
+
+def test_projection_normalizer_retains_timing_trace():
+    from lib.turn_projection_patch import normalize_projection_document
+
+    timing_trace = {
+        'version': 1, 'taskId': 'task-a', 'source': 'turn-snapshot',
+        'status': 'done', 'running': False,
+    }
+    normalized = normalize_projection_document({
+        'content': 'settled', 'timingTrace': timing_trace,
+    })
+    assert normalized['timingTrace'] == timing_trace
+
+
+def test_perception_storage_lane_avoids_receipt_and_sync_write_amplification():
+    from lib.storage_sidecar.operation_domains.turns import OPERATIONS
+
+    operation = OPERATIONS['turn.perception.record']
+    assert operation.kind == 'command'
+    assert operation.receipt_required is False
+    assert operation.after is None
+
+
+# ── 12. Route registration ──
 
 def test_trace_route_registered_on_v1_blueprint():
     from quart import Quart

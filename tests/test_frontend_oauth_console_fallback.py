@@ -106,6 +106,8 @@ global.fetch = (url, opts) => {
 };
 global.alert = (m) => { calls.push({ verb: 'alert', msg: String(m) }); };
 global.escapeHtml = (s) => String(s);
+global.errorEnvelopeMessage = (v) =>
+  String(v == null ? '' : (v.message != null ? v.message : v));
 global.showAlert = (m) => { calls.push({ verb: 'showAlert', msg: String(m) }); };
 global.showConfirm = async () => true;
 global.debugLog = () => {};

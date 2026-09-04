@@ -64,6 +64,26 @@ class KnowledgeRepository:
         )
         return dict(row) if isinstance(row, Mapping) else None
 
+    def document_metadata(self, document_id: str) -> dict | None:
+        row = self._client().query(
+            "knowledge.document.metadata",
+            self._payload(document_id=str(document_id or "")),
+        )
+        return dict(row) if isinstance(row, Mapping) else None
+
+    def document_assets(
+        self, document_id: str, *, offset: int = 0, limit: int = 80,
+    ) -> list[dict] | None:
+        rows = self._client().query(
+            "knowledge.document.assets",
+            self._payload(
+                document_id=str(document_id or ""),
+                offset=int(offset), limit=int(limit)),
+        )
+        if rows is None:
+            return None
+        return [dict(row) for row in rows] if isinstance(rows, list) else []
+
     def document_content(
         self, document_id: str, *, offset: int = 0, limit: int = 80,
     ) -> dict | None:
@@ -102,6 +122,17 @@ class KnowledgeRepository:
         result = self._command(
             "knowledge.document.replace",
             self._payload(document_id=document_id, document=dict(document)),
+            command_id,
+        )
+        return dict(result) if isinstance(result, Mapping) else None
+
+    def patch_document(
+        self, document_id: str, *, updates: Mapping, command_id: str,
+    ) -> dict | None:
+        result = self._command(
+            "knowledge.document.patch",
+            self._payload(
+                document_id=str(document_id or ""), updates=dict(updates)),
             command_id,
         )
         return dict(result) if isinstance(result, Mapping) else None
@@ -147,10 +178,13 @@ class KnowledgeRepository:
 
     def search_candidates(
         self, tokens: list[str], *, limit: int = 80,
+        document_id: str = "",
     ) -> list[dict]:
         result = self._client().query(
             "knowledge.search.candidates",
-            self._payload(tokens=list(tokens), limit=int(limit)),
+            self._payload(
+                tokens=list(tokens), limit=int(limit),
+                document_id=str(document_id or "")),
         )
         return [dict(row) for row in result] if isinstance(result, list) else []
 
@@ -217,19 +251,24 @@ __all__ = ["KnowledgeRepository"]
 
 def visual_enrichment_owner_ids(
     *, principal: PrincipalContext,
+    limit: int = 512,
     client_factory: Callable[..., Any] | None = None,
 ) -> list[int]:
-    """Owners whose durable settings authorize background vision work."""
+    """Bounded owners with authorized, unfinished visual evidence."""
     if not isinstance(principal, PrincipalContext) or principal.kind != "system":
         raise PermissionError(
             "knowledge owner inventory requires a system principal")
     principal.require_scope("knowledge:maintain")
+    if (not isinstance(limit, int) or isinstance(limit, bool)
+            or limit <= 0 or limit > 512):
+        raise ValueError("knowledge enrichment owner limit must be 1..512")
     if client_factory is None:
         from lib.storage import get_storage_client
 
         client_factory = get_storage_client
 
-    rows = client_factory(write=False).query("knowledge.enrichment.owners", {})
+    rows = client_factory(write=False).query(
+        "knowledge.enrichment.owners", {"limit": limit})
     return [int(owner_id) for owner_id in rows] if isinstance(rows, list) else []
 
 

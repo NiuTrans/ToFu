@@ -34,7 +34,7 @@ attempted in turn and the tier actually used is reported.
 The fallback is NOT hypothetical — it is load-bearing on this very host, and
 for a reason worth writing down. The library and the job dirs sit on the SAME
 device (both under the data root), so a hardlink "should" work; measured, it
-does not: dolphinfs answers ``os.link`` with ``EPERM`` (*Operation not
+does not: the FUSE mount answers ``os.link`` with ``EPERM`` (*Operation not
 permitted*) rather than ``EXDEV``. A same-device check would therefore have
 concluded "hardlink is fine" and every materialisation would have failed. On
 top of that ``/tmp`` really is a different device here, so a workdir relocated
@@ -165,7 +165,7 @@ def materialise(library_path: str, scene_dir: str, *,
     copied, survives library pruning), ``'symlink'`` (no bytes copied, breaks
     if the library entry is removed) or ``'copy'`` (independent bytes). The
     tiers are tried in that order because a hardlink is strictly best when
-    available, and NEVER predicted: measured on this host, dolphinfs refuses
+    available, and NEVER predicted: measured on this host, the FUSE mount refuses
     ``os.link`` with ``EPERM`` even for two paths on the SAME device, so a
     same-device test would wrongly conclude hardlinks work. A workdir under
     ``/tmp`` additionally fails with ``EXDEV``. Both cases must degrade

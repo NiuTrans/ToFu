@@ -58,6 +58,7 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
     """
     out = {'insight': None, 'markdown': '', 'grounded': 0, 'dropped': 0,
            'selfref': 0, 'llmError': False, 'usage': None,
+           'agentUsageV1': None,
            'anchors': {'nominated': 0, 'resolved': 0}}
     if not (report_md or '').strip() and not (paper_text or '').strip():
         logger.warning('[Paper:Insight] Nothing to synthesize (empty report + paper)')
@@ -96,6 +97,7 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
     # the persisted items or the rendered markdown.
     synthesis_usage = insight.pop('_usage', None)
     out['usage'] = synthesis_usage
+    out['agentUsageV1'] = insight.pop('_agentUsageV1', None)
 
     self_aid, self_ttl = _self_identity(
         phash, report_md, self_arxiv_id, self_title, user_id=user_id)
@@ -197,6 +199,7 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
     out = {'fired': False, 'baseline': None, 'insight': None, 'markdown': '',
            'grounded': 0, 'dropped': 0, 'selfref': 0, 'persisted': False,
            'llmError': False, 'usage': None,
+           'agentUsageV1': None,
            'anchors': {'nominated': 0, 'resolved': 0}}
 
     baseline = None
@@ -225,7 +228,8 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
         allow_personal_context=allow_personal_context, user_id=user_id)
 
     out.update({k: gen[k] for k in ('insight', 'markdown', 'grounded', 'dropped',
-                                    'selfref', 'llmError', 'usage', 'anchors')})
+                                    'selfref', 'llmError', 'usage',
+                                    'agentUsageV1', 'anchors')})
 
     # Fold the rubric scoring cost into the pass's total usage (design §3.3 —
     # the reader should see EVERYTHING this pass billed, not just the

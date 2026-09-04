@@ -50,11 +50,13 @@ from .memory import api_v1_memory_bp
 from .skills import api_v1_skills_bp
 from .tools import api_v1_tools_bp
 from .knowledge import api_v1_knowledge_bp
+from .media import api_v1_media_bp
 from .mcp import api_v1_mcp_bp
 from .daily_report import api_v1_daily_report_bp
 from .oauth import api_v1_oauth_bp
 from .adapter import api_v1_adapter_bp
 from .project import api_v1_project_bp
+from .project_brain import api_v1_project_brain_bp
 from .integration import api_v1_integration_bp
 from .translate import api_v1_translate_bp
 from .artifacts import api_v1_artifacts_bp
@@ -69,7 +71,7 @@ from .audio import api_v1_audio_bp
 from .common import api_v1_common_bp
 from .config import api_v1_config_bp
 from .providers import api_v1_providers_bp
-from .model_catalog import api_v1_model_catalog_bp
+from .model_intelligence import api_v1_model_intelligence_bp
 from .webhooks import api_v1_webhooks_bp
 from .usage import api_v1_usage_bp
 from .logs import api_v1_logs_bp
@@ -103,11 +105,13 @@ ALL_V1_BLUEPRINTS = [
     api_v1_skills_bp,
     api_v1_tools_bp,
     api_v1_knowledge_bp,
+    api_v1_media_bp,
     api_v1_mcp_bp,
     api_v1_daily_report_bp,
     api_v1_oauth_bp,
     api_v1_adapter_bp,
     api_v1_project_bp,
+    api_v1_project_brain_bp,
     api_v1_integration_bp,
     api_v1_translate_bp,
     api_v1_artifacts_bp,
@@ -121,8 +125,8 @@ ALL_V1_BLUEPRINTS = [
     api_v1_common_bp,
     api_v1_config_bp,
     api_v1_providers_bp,
+    api_v1_model_intelligence_bp,
     api_v1_webhooks_bp,
-    api_v1_model_catalog_bp,
     api_v1_usage_bp,
     api_v1_logs_bp,
     api_v1_update_bp,

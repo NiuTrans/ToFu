@@ -22,8 +22,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
-import tempfile
 import unittest
 from unittest import mock
 
@@ -281,6 +279,18 @@ class TestResolveHeaders(unittest.TestCase):
         self.assertNotEqual(hdrs['x-client-request-id'],
                             hdrs2['x-client-request-id'])
 
+    def test_token_rotation_session_cache_is_bounded(self):
+        outbound._session_ids.clear()
+        try:
+            newest = ''
+            for index in range(260):
+                newest = outbound._session_id_for_token(f'token-{index}')
+            self.assertEqual(len(outbound._session_ids), 256)
+            self.assertEqual(
+                outbound._session_id_for_token('token-259'), newest)
+        finally:
+            outbound._session_ids.clear()
+
     def test_resolve_no_longer_mutates_messages(self):
         # The system structure is owned by apply_claude_cloak at the Anthropic
         # boundary — resolve_oauth_request must NOT prepend anything itself.
@@ -314,21 +324,30 @@ class TestCodexPlanGating(unittest.TestCase):
         self.assertEqual(plan, '')
 
     def _provision(self, plan_type):
-        tmp = tempfile.TemporaryDirectory()
-        cfg_path = os.path.join(tmp.name, 'server_config.json')
-        with open(cfg_path, 'w') as f:
-            json.dump({'providers': []}, f)
-        with mock.patch('lib._SERVER_CONFIG_PATH', cfg_path), \
-             mock.patch('lib.reload_config', lambda: None), \
-             mock.patch('lib.llm_dispatch.reset_dispatcher', lambda: None), \
-             mock.patch('lib.oauth.token_store.load_token',
-                        return_value={'plan_type': plan_type} if plan_type else None):
-            outbound.provision_oauth_provider('codex')
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-        tmp.cleanup()
-        managed = next(p for p in cfg['providers'] if p['id'] == 'oauth_codex')
-        return [m['model_id'] for m in managed['models']]
+        from lib.model_routing import (
+            InMemoryModelRoutingRepository,
+            OwnerBoundary,
+        )
+
+        repository = InMemoryModelRoutingRepository()
+        with mock.patch.object(outbound, '_activate_oauth_config_change'):
+            outbound.provision_oauth_provider(
+                'codex',
+                plan_type=plan_type,
+                owner_user_id=1,
+                repository=repository,
+            )
+        document = repository.get(OwnerBoundary.create(1)).document
+        access = next(
+            row for row in document['provider_accesses']
+            if row['provider_id'] == 'oauth_codex'
+        )
+        return [
+            row['model']['model_id']
+            for row in document['offerings']
+            if row['provider_access_id'] == access['provider_access_id']
+            and row['identity_state'] == 'confirmed'
+        ]
 
     def test_free_plan_gated_to_free_tier(self):
         ids = self._provision('free')

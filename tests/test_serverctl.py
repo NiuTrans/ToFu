@@ -150,15 +150,22 @@ def test_install_does_not_call_retired_guard_stop_after_cron_commit(
 def test_forwarded_server_env_is_narrow_and_uses_project_dotenv(
         tmp_path, monkeypatch):
     (tmp_path / '.env').write_text(
-        'PORT="15000"\nBIND_HOST=0.0.0.0\nDATABASE_URL=file-secret\n',
+        'PORT="15000"\nBIND_HOST=0.0.0.0\n'
+        'TOFU_AGENT_WORKERS=12\nTOFU_AGENT_QUEUE_CAPACITY=96\n'
+        'DATABASE_URL=file-secret\n',
         encoding='utf-8')
     monkeypatch.setattr(serverctl, 'PROJECT', str(tmp_path))
+    for key in serverctl.SERVER_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv('PORT', '16000')
     monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '6144')
+    monkeypatch.setenv('TOFU_AGENT_QUEUE_CAPACITY', '128')
     monkeypatch.setenv('DATABASE_URL', 'secret')
     assert serverctl._forwarded_server_env() == {
         'PORT': '16000', 'BIND_HOST': '0.0.0.0',
-        'TOFU_PROCESS_RSS_RECYCLE_MB': '6144'}
+        'TOFU_PROCESS_RSS_RECYCLE_MB': '6144',
+        'TOFU_AGENT_WORKERS': '12',
+        'TOFU_AGENT_QUEUE_CAPACITY': '128'}
 
 
 @pytest.mark.parametrize(
@@ -420,6 +427,8 @@ def test_managed_start_reports_queued_storage_maintenance_without_waiting(
 def test_manager_launcher_timeout_outlives_shell_watchdog_budget(monkeypatch):
     health = iter([None, {'ok': True}])
     monkeypatch.setattr(serverctl, '_manager_health', lambda: next(health))
+    monkeypatch.setattr(
+        serverctl, 'supervisor_generation_matches', lambda *_args: True)
     observed = {}
 
     def fake_run(_cmd, **kwargs):
@@ -430,6 +439,61 @@ def test_manager_launcher_timeout_outlives_shell_watchdog_budget(monkeypatch):
 
     assert serverctl.ensure_manager(timeout=8.0) == {'ok': True}
     assert observed['timeout'] >= 25.0
+
+
+def test_live_stale_manager_is_refreshed_before_lifecycle_use(monkeypatch):
+    stale = {'ok': True, 'managerPid': 11}
+    current = {'ok': True, 'managerPid': 12}
+    health = iter([stale, current])
+    refreshed = []
+    monkeypatch.setattr(serverctl, '_manager_health', lambda: next(health))
+    monkeypatch.setattr(
+        serverctl,
+        'supervisor_generation_matches',
+        lambda value, _project: value is current,
+    )
+    monkeypatch.setattr(
+        serverctl,
+        'refresh_supervisor',
+        lambda project, **kwargs: refreshed.append((project, kwargs)) or {
+            'ok': True,
+        },
+    )
+
+    assert serverctl.ensure_manager(timeout=8.0) is current
+    assert refreshed and refreshed[0][0] == serverctl.PROJECT
+
+
+def test_doctor_reports_manager_and_live_worker_budget_drift():
+    findings = serverctl._doctor_findings(
+        {
+            'observed': 'running',
+            'desired': 'running',
+            'health': True,
+            'ready': True,
+            'workerRssGuardEnabled': True,
+        },
+        guard_loops=[],
+        legacy_cron=[],
+        manager_cron=['installed'],
+        memory={'usagePct': 10.0},
+        snapshot={'required': False},
+        manager_generation={
+            'current': False,
+            'loadedFingerprint': 'old-generation',
+        },
+        worker_budget_drift={
+            'stale': True,
+            'mismatches': {
+                'TOFU_AGENT_WORKERS': {'observed': '4', 'expected': '48'},
+            },
+        },
+    )
+    by_code = {finding['code']: finding for finding in findings}
+    assert by_code['supervisor_source_stale']['severity'] == 'warning'
+    assert by_code['worker_resource_budget_stale']['severity'] == 'warning'
+    assert 'TOFU_AGENT_WORKERS=4 (next 48)' in \
+        by_code['worker_resource_budget_stale']['message']
 
 
 def test_stale_source_frontend_is_rebuilt_once_before_lifecycle_action(
@@ -460,6 +524,27 @@ def test_stale_source_frontend_is_rebuilt_once_before_lifecycle_action(
     assert builds[0][1]['timeout'] == 600.0
 
 
+def test_other_checkout_frontend_validation_includes_authoring_freshness(
+        tmp_path, monkeypatch):
+    verifier = tmp_path / 'scripts' / 'verify_frontend_dist.py'
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text('# verifier\n', encoding='utf-8')
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed['command'] = command
+        observed['kwargs'] = kwargs
+        return SimpleNamespace(returncode=0, stdout='validated')
+
+    monkeypatch.setattr(serverctl, 'PROJECT', str(tmp_path))
+    monkeypatch.setattr(serverctl.subprocess, 'run', fake_run)
+
+    serverctl._validate_frontend_artifact()
+
+    assert observed['command'][-1] == '--authoring-freshness'
+    assert observed['kwargs']['cwd'] == tmp_path.resolve()
+
+
 def test_frontend_repair_revalidates_after_cross_process_lock(
         tmp_path, monkeypatch):
     validations = iter([RuntimeError('stale i18n'), None])
@@ -483,7 +568,7 @@ def test_frontend_repair_revalidates_after_cross_process_lock(
     assert serverctl._repair_source_frontend_artifact('test startup') == ''
 
 
-def test_release_without_node_dependencies_preserves_server_validation(
+def test_invalid_release_without_node_is_refused_before_lifecycle_change(
         monkeypatch):
     monkeypatch.setattr(serverctl, '_lifecycle_owns_frontend', lambda: True)
     monkeypatch.setattr(
@@ -496,7 +581,24 @@ def test_release_without_node_dependencies_preserves_server_validation(
         lambda *_args, **_kwargs: pytest.fail(
             'release lifecycle must not acquire a Node build dependency'))
 
-    assert serverctl._repair_source_frontend_artifact('release startup') == ''
+    error = serverctl._repair_source_frontend_artifact('release startup')
+
+    assert 'no local Vite builder is available' in error
+    assert 'manifest missing' in error
+
+
+def test_prepare_frontend_command_reports_preflight_failure(
+        monkeypatch, capsys):
+    monkeypatch.setattr(
+        serverctl, 'prepare_source_frontend_artifact',
+        lambda _operation: 'authoring digest mismatch',
+    )
+
+    exit_code = serverctl.main([
+        'prepare-frontend', '--operation', 'manager recovery'])
+
+    assert exit_code == 1
+    assert 'authoring digest mismatch' in capsys.readouterr().err
 
 
 def test_non_frontend_role_skips_source_artifact_repair(monkeypatch):
@@ -671,6 +773,8 @@ def test_status_exit_code_is_monitoring_safe(monkeypatch, capsys):
     monkeypatch.setattr(
         serverctl, '_remote_status',
         lambda probe=False: {'observed': 'running', 'restartCount': 2,
+                             'workerFailureCount': 1,
+                             'plannedExitCount': 3,
                              'recentFailureCount': 1,
                              'failureWindowSeconds': 120,
                              'maxFailures': 5,
@@ -681,6 +785,7 @@ def test_status_exit_code_is_monitoring_safe(monkeypatch, capsys):
     assert serverctl.cmd_status(args) == 0
     output = capsys.readouterr().out
     assert 'recent=1/5 in 120s' in output
+    assert 'failures=1; planned=3' in output
     assert 'Last RTO: 2.500s' in output
     assert 'RSS guard: 2.00 GiB / 8.00 GiB hard ceiling' in output
 
@@ -741,9 +846,10 @@ def test_sqlite_snapshot_status_uses_sidecar_authority_and_inventories_legacy(
         }),
         encoding='utf-8',
     )
-    (legacy / 'tofu-20260812_020000-old.sqlite3').write_bytes(b'old-copy')
-    (legacy / '.tofu-20260813_020000.sqlite3.tmp-dead').write_bytes(
-        b'partial')
+    published = legacy / 'tofu-20260812_020000-old.sqlite3'
+    temporary = legacy / '.tofu-20260813_020000.sqlite3.tmp-dead'
+    published.write_bytes(b'old-copy')
+    temporary.write_bytes(b'partial')
     os.utime(canonical, (1000.0, 1000.0))
 
     status = serverctl.sqlite_snapshot_status(
@@ -756,9 +862,14 @@ def test_sqlite_snapshot_status_uses_sidecar_authority_and_inventories_legacy(
     assert status['legacy'] == {
         'publishedCount': 1,
         'publishedBytes': len(b'old-copy'),
+        'publishedAllocatedBytes': published.stat().st_blocks * 512,
         'temporaryCount': 1,
         'temporaryBytes': len(b'partial'),
+        'temporaryAllocatedBytes': temporary.stat().st_blocks * 512,
         'totalBytes': len(b'old-copy') + len(b'partial'),
+        'totalAllocatedBytes': (
+            published.stat().st_blocks + temporary.stat().st_blocks) * 512,
+        'allocatedBytesAvailable': True,
         'scanTruncated': False,
     }
 
@@ -775,6 +886,54 @@ def test_sqlite_snapshot_status_marks_missing_required_backup(tmp_path):
     assert status['destinationConfigured'] is False
     assert status['fresh'] is False
     assert status['latestPath'] is None
+
+
+def test_sqlite_snapshot_freshness_uses_manifest_recovery_point(tmp_path):
+    project = tmp_path / 'project'
+    backups = project / 'data' / 'backups'
+    backups.mkdir(parents=True)
+    (project / 'data' / 'tofu.db').write_bytes(b'db')
+    snapshot = backups / 'storage-sqlite-recovered-late.sqlite3'
+    snapshot.write_bytes(b'snapshot')
+    snapshot.with_name(snapshot.name + '.manifest.json').write_text(
+        json.dumps({
+            'format': 'tofu.storage-backup.v1',
+            'backend': 'sqlite',
+            'artifact': snapshot.name,
+            'bytes': len(b'snapshot'),
+            'sha256': 'c' * 64,
+            'integrity': 'ok',
+            'recovery_point_at': '1970-01-01T00:16:40+00:00',
+        }),
+        encoding='utf-8',
+    )
+    os.utime(snapshot, (1000.0 + 10 * 3600, 1000.0 + 10 * 3600))
+
+    status = serverctl.sqlite_snapshot_status(
+        str(project), now=1000.0 + 30 * 3600)
+
+    assert status['fresh'] is False
+    assert status['latestAgeHours'] == 30.0
+    assert status['latestMtime'] == 1000.0 + 10 * 3600
+    assert status['latestRecoveryPoint'] == 1000.0
+    assert status['latestRecoveryPointSource'] == 'manifest'
+
+
+def test_legacy_snapshot_inventory_distinguishes_sparse_allocation(tmp_path):
+    data = tmp_path / 'data'
+    legacy = data / 'db_snapshots'
+    legacy.mkdir(parents=True)
+    temporary = legacy / '.tofu-20260820_020000.sqlite3.tmp-dead'
+    with temporary.open('wb') as stream:
+        stream.truncate(64 * 1024 * 1024)
+
+    inventory = serverctl._legacy_snapshot_inventory(data)
+
+    assert inventory['temporaryBytes'] == 64 * 1024 * 1024
+    assert inventory['temporaryAllocatedBytes'] == (
+        temporary.stat().st_blocks * 512)
+    assert inventory['totalAllocatedBytes'] <= inventory['totalBytes']
+    assert inventory['allocatedBytesAvailable'] is True
 
 
 def test_sqlite_snapshot_status_is_not_required_in_distributed_mode(
@@ -818,6 +977,34 @@ def test_offline_port_diagnostics_use_project_env_and_preserve_invalid_value(
         port_config=invalid)
     assert findings[0]['code'] == 'port_config_invalid'
     assert findings[0]['severity'] == 'error'
+
+
+def test_doctor_reports_allocated_and_logical_legacy_footprints():
+    findings = serverctl._doctor_findings(
+        None,
+        guard_loops=[],
+        legacy_cron=[],
+        manager_cron=[],
+        memory={'usagePct': 10.0},
+        snapshot={
+            'required': False,
+            'fresh': False,
+            'destinationConfigured': False,
+            'legacy': {
+                'publishedCount': 2,
+                'temporaryCount': 1,
+                'totalBytes': 12 << 30,
+                'totalAllocatedBytes': 8 << 30,
+                'allocatedBytesAvailable': True,
+            },
+        },
+    )
+
+    legacy = next(
+        item for item in findings
+        if item['code'] == 'legacy_sqlite_snapshot_artifacts')
+    assert '8.0 GiB allocated / 12.0 GiB logical' in legacy['message']
+    assert '(2 published, 1 interrupted)' in legacy['message']
 
 
 def test_doctor_preserves_unreadable_dotenv_as_actionable_finding(

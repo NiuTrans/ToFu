@@ -60,15 +60,15 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 JS_DIR = os.path.normpath(os.path.join(HERE, '..', 'frontend', 'src'))
 API_JS = runtime_section_path('api.js')
-ORCHESTRATION_API_JS = runtime_section_path('api/orchestrations.js')
-ORCHESTRATION_ENDPOINTS_JS = runtime_section_path(
-    'api/orchestration-endpoints.js')
-API_SURFACE_FILES = (
-    API_JS, ORCHESTRATION_ENDPOINTS_JS, ORCHESTRATION_API_JS,
-)
+ORCHESTRATION_API_TS = os.path.join(
+    JS_DIR, 'features', 'orchestration', 'api-client.ts')
+ORCHESTRATION_CONTRACT_TS = os.path.join(
+    JS_DIR, 'features', 'orchestration', 'request-contracts.generated.ts')
+API_SURFACE_FILES = (API_JS,)
 API_SURFACE_RELPATHS = {
     os.path.relpath(path, JS_DIR).replace(os.sep, '/')
-    for path in API_SURFACE_FILES
+    for path in (*API_SURFACE_FILES, ORCHESTRATION_API_TS,
+                 ORCHESTRATION_CONTRACT_TS)
 }
 
 
@@ -244,16 +244,22 @@ def _api_js_path_verbs():
             else:                     # request(<literal>, {...})
                 verb = _resolve_request_method(s, m.end())
         else:
-            # Indirection: literal assigned to a var (const url = <lit> / ? : ),
-            # then request(url, {method:'X'}) later. Find the nearest following
-            # request(<ident>, {...}) within a bounded window and read its
-            # literal method.
+            # Indirection: a literal is bound to a variable (const path = <lit>)
+            # then consumed by a verb wrapper (get(path)/post(path)/…) or by
+            # request(path, {method:'X'}). Find the nearest following call
+            # within a bounded window and resolve its method from the name.
             follow = s[m.end():m.end() + 400]
-            rm = re.search(r'request\(\s*[A-Za-z_]\w*\s*,', follow)
-            if rm:
-                verb = _resolve_request_method(s, m.end() + rm.end())
-            else:
+            ind = re.search(
+                r'(request|get|post|put|patch|del|stream)'
+                r'\(\s*[A-Za-z_]\w*\s*[,)]',
+                follow,
+            )
+            if not ind:
                 verb = _UNRESOLVED
+            elif ind.group(1) == 'request':
+                verb = _resolve_request_method(s, m.end() + ind.end())
+            else:
+                verb = _VERB_METHOD[ind.group(1)]
 
         if verb == _UNRESOLVED:
             unresolved.append((norm, 'method not a string literal / no opener'))
@@ -317,6 +323,18 @@ def _api_js_domain_methods() -> dict[str, set[str]]:
             i += 1
         if methods:
             domains[name] = methods
+    # The Orchestration facade is generated from the canonical typed request
+    # registry, so its dynamic method set cannot be recovered by parsing an
+    # object literal. Seed the exact generated policy instead of restoring a
+    # hand-maintained classic method table for this source-only guard.
+    from lib.orchestration.browser_endpoint_contract import (
+        orchestration_browser_request_contract_dicts,
+    )
+    orchestration_methods = {'listResult', 'list', 'save'}
+    for contract in orchestration_browser_request_contract_dicts().values():
+        orchestration_methods.add(str(contract['resultMethod']))
+        orchestration_methods.add(str(contract['directMethod']))
+    domains['orchestrations'] = orchestration_methods
     return domains
 
 

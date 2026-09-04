@@ -34,7 +34,7 @@ function _purgeEmptyConvs() {
   }
 }
 // ── Per-conversation tool state helpers ──
-/* ── Brand detection for model_id — reuse _detectBrand from settings.js ── */
+/* ── Brand detection for model_id — typed owner alias from _prelude.js ── */
 const _DEPTH_ICONS  = { off: '', medium: '', high: '', xhigh: '', max: '', ultra: '' };
 const _DEPTH_ICON_FALLBACK = '';
 const _DEPTH_LABELS = { off: 'Off', medium: 'Med', high: 'High', xhigh: 'xHigh', max: 'Max', ultra: 'Ultra' };
@@ -49,14 +49,22 @@ function _isThinkingCapable(modelId) {
   // Fallback regex before server config loads
   return /claude|opus|sonnet|gemini|qwen|doubao|minimax|deepseek/i.test(modelId);
 }
-/* Registered model list — populated from /api/server-config at startup */
+/* Registered model list — replaced by the authenticated v2 projection at boot. */
 let _registeredModels = [];   // [{ model_id, brand, thinking_default, capabilities }]
+let _registeredModelsLoaded = false;
 /* Hidden models — loaded from server config, not shown in dropdown */
 let _hiddenModels = new Set();
+function _paperModelPickerState() {
+  return {
+    models: _registeredModels,
+    hiddenModels: _hiddenModels,
+    selectedModel: (config && config.model) || serverModel || '',
+  };
+}
 /* Hidden image gen models — loaded from server config, not shown in image gen picker */
 var _hiddenIgModels = new Set();  // shared with image-gen.js
 
-/* _modelShortName is defined in settings.js (loaded earlier) */
+/* _modelShortName is composed from core/model-display-names in _prelude.js. */
 
 /* Track what _applyModelUI last applied so we can skip redundant work */
 let _lastAppliedModelId = null;
@@ -163,7 +171,11 @@ function _applyModelUI(modelId) {
 
   // Highlight active model item in dropdown
   document.querySelectorAll(".preset-dropdown-item").forEach((item) => {
-    item.classList.toggle("active", item.getAttribute("data-value") === modelId);
+    const sameModel = item.getAttribute("data-value") === modelId;
+    const routeKey = item.getAttribute('data-route-key') || '';
+    const rowProvider = routeKey ? routeKey.split('::', 1)[0] : '';
+    const preferred = config.preferredProviderId || 'auto';
+    item.classList.toggle('active', sameModel && (!routeKey || rowProvider === preferred));
   });
   _updateDepthButtons(depth);
 
@@ -405,7 +417,7 @@ function selectThinkingDepth(depth) {
    * conv.thinkingDepth
    * → backend receives the stale depth → no thinking generated. */
   captureActiveConversationSettings();
-  try { localStorage.setItem("claude_client_config", JSON.stringify(config)); }
+  try { localStorage.setItem("claude_client_config", JSON.stringify(_configForPersist())); }
   catch (e) { debugLog(`[selectThinkingDepth] localStorage save failed: ${e.message}`, 'error'); }
 }
 
@@ -568,18 +580,6 @@ function _applyImageGenUI(enabled) {
     _scheduleReflow();
   }
 }
-function toggleImageGen() {
-  const entering = !imageGenMode;
-  if (entering && typeof setAgentMode === 'function'
-      && (planMode || autopilotEnabled || activeFlow)) {
-    if (setAgentMode('standard') !== true) return false;
-  }
-  _applyImageGenUI(entering);
-  captureActiveConversationSettings();
-  if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
-  debugLog(`Image Gen: ${imageGenMode ? 'ON' : 'OFF'}`, imageGenMode ? 'success' : 'info');
-  return true;
-}
 function _applyDesktopUI(enabled) {
   desktopEnabled = !!enabled;
   document
@@ -593,22 +593,6 @@ function _applyDesktopUI(enabled) {
    * is repainted here rather than toggled per-flag. */
   if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
 }
-/* Desktop control used to be a blind flag flip: it turned the toggle on
- * without ever checking whether an agent was running, and
- * lib/tools/registry/_build.py silently ships ZERO desktop tools when none
- * is — so the user saw an enabled toggle and tools that never appeared.
- * It now opens the merged Local Control modal, which shows live status and
- * the ONE install step that applies to this deployment. */
-function toggleDesktop() {
-  if (typeof openLocalControlModal === "function") {
-    openLocalControlModal();
-    return;
-  }
-  // Bundle shipped without local-control.js — degrade to a plain flip rather
-  // than making the entry a dead button.
-  _applyDesktopUI(!desktopEnabled);
-  captureActiveConversationSettings();
-}
 function captureActiveConversationSettings() {
   const conv = getActiveConv();
   if (!conv) return;
@@ -621,6 +605,10 @@ function captureActiveConversationSettings() {
    *   composer still renders the default, it just stops being written down. */
   if (!config._modelIsProvisional && config.model) {
     conv.model = config.model;
+    if (config.modelRef && typeof config.modelRef === 'object') {
+      conv.modelRef = Object.assign({}, config.modelRef);
+      conv.preferredProviderId = config.preferredProviderId || '';
+    }
   }
   conv.thinkingDepth = config.thinkingDepth;
   /* FIX: Track the selected image gen model separately so pure image-gen
@@ -628,6 +616,7 @@ function captureActiveConversationSettings() {
    * polluting the chat model field (which _applyModelUI reads on restore). */
   if (imageGenMode) {
     conv.imageGenModel = _igSelectedModel || 'gemini-3.1-flash-image-preview';
+    conv.imageGenProviderId = _igSelectedProviderId || '';
     conv.imageGenCount = _igSelectedCount || 1;
     conv.imageGenAspect = _igSelectedAspect || '1:1';
     conv.imageGenResolution = _igSelectedResolution || '1K';
@@ -683,7 +672,7 @@ function captureActiveConversationSettings() {
    * change, NOT new conversation activity.  Passing conv.id bumps
    * updatedAt = Date.now(), making the conversation jump to the top of the
    * sidebar just because the user toggled a tool button. */
-  saveConversations(null);
+  reconcileConversationCatalogMetadata(null);
   /* Settings persist independently of Turn content. Local-only shells refresh
    * their metadata cache; server-owned conversations use the unified settings
    * PATCH. Rapid composer changes coalesce into one write. */
@@ -726,6 +715,11 @@ function restoreConversationSettingsToComposer(conv) {
   const _restoredWorkflowMode = _restoredInteraction.agentMode !== 'standard'
     || !!_restoredInteraction.activeFlow;
   config.thinkingDepth = conv.thinkingDepth || null;   // ← restore depth BEFORE model UI (let _applyModelUI normalize)
+  config.modelRef = (conv.modelRef && typeof conv.modelRef === 'object')
+    ? Object.assign({}, conv.modelRef) : null;
+  config.preferredProviderId = conv.preferredProviderId || '';
+  config.routing = config.preferredProviderId
+    ? { preferred_provider_id: config.preferredProviderId } : {};
   /* Pass the conversation's OWN value only — no `|| serverModel` here. A conv
    * that stored nothing must reach _applyModelUI as falsy so the default it
    * paints is marked provisional and never written back. */
@@ -768,6 +762,7 @@ function restoreConversationSettingsToComposer(conv) {
   }
   /* Restore the image gen model + batch count + aspect + resolution from conv settings */
   if (conv.imageGenModel) _igSelectedModel = conv.imageGenModel;
+  _igSelectedProviderId = conv.imageGenProviderId || '';
   if (conv.imageGenCount) {
     _igSelectedCount = conv.imageGenCount;
     document.querySelectorAll('#igCountBar .ig-pill').forEach(b =>
@@ -802,7 +797,7 @@ function restoreConversationSettingsToComposer(conv) {
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
   if (typeof runtimeScope.updateContextBar === 'function') runtimeScope.updateContextBar();
   /* Re-filter the cross-conversation presence strip to this conversation's
-   *   project root immediately on switch (else it lags up to one 5s tick). */
+   *   project root immediately; the signal-driven owner has no fallback poll. */
   if (typeof runtimeScope.presenceRefresh === 'function') runtimeScope.presenceRefresh();
   /* If the Project Brain panel is open, re-resolve its feed to the new
    *   conversation's project (two projects must never bleed into one view). */
@@ -852,6 +847,7 @@ function _resetToolsToDefaults() {
   _igSelectedAspect = '1:1';
   _igSelectedResolution = '1K';
   _igSelectedCount = 1;
+  _igSelectedProviderId = '';
   document.querySelectorAll('#igAspectBar .ig-pill').forEach(b =>
     b.classList.toggle('active', b.dataset.ar === '1:1'));
   document.querySelectorAll('#igResolutionBar .ig-pill').forEach(b =>
@@ -922,25 +918,14 @@ function _installViewportHeightGuard() {
  * tab that stays on already-loaded code (the "bug fixed hours ago but the
  * user still sees it" class — e.g. the sidebar 今天→昨天→今天 date-group
  * interleave, whose fix only reached tabs that happened to reload).
- * /api/health now carries the served entry-bundle basename; poll it
- * (5 min + on visible) and hard-reload when the disk build differs from
- * ours. Reloads are IDLE-GATED (no active streams, empty composer) so an
+ * The existing push ping/pong carries the served entry-bundle basename on a
+ * 5-minute / visibility-resume probe; hard-reload when it differs from ours.
+ * This adds no HTTP poll, timer, or visibility listener. Reloads are
+ * IDLE-GATED (no active streams, empty composer) so an
  * in-flight generation or a half-typed draft is never yanked, and
  * LOOP-GUARDED (one attempt per build id per tab session) so a stale-cached
- * index.html upstream can never spin the tab into a reload loop. */
-let _buildWatchTimer = null;
-let _buildWatchToastFor = null;
-/* Busy-defer bookkeeping: {build, since} of the NEWER build we are
- * currently deferring for. A long-running attempt must not wedge self-heal
- * forever: after _BUILD_WATCH_MAX_DEFER_MS the
- * reload lands anyway. Boot re-attaches any genuinely-live task
- * (initActiveTasks), so the cost of a "wrongful" reload is a view flash,
- * never lost work — while the cost of a wedged self-heal is the tab running
- * pre-fix code indefinitely (measured 2026-08-20: the conv-switch open-paint
- * fix shipped in the morning bundle; tabs with stale busy pins never
- * received it and kept reporting the bug). */
-let _buildWatchPending = null;
-const _BUILD_WATCH_MAX_DEFER_MS = 30 * 60 * 1000;
+ * index.html upstream can never spin the tab into a reload loop. The typed
+ * build-watch controller owns bounded busy-defer and session-guard state. */
 
 function _loadedBuildId() {
   /* The boot graph's own entry script tag carries the content hash:
@@ -959,55 +944,12 @@ function _buildWatchBusy() {
   return !!(ta && ta.value && ta.value.trim());
 }
 
-async function _buildWatchTick() {
-  const mine = _loadedBuildId();
-  if (!mine || typeof Api === 'undefined' || !Api.health || !Api.health.info) return;
-  const d = await Api.health.info().catch(() => null);
-  const theirs = d && d.buildId;
-  if (!theirs || theirs === mine) { _buildWatchPending = null; return; }
-  /* Loop guard: if we already reloaded FOR this build and still woke up on
-   * the old bundle (an upstream cache served a stale index.html), stop —
-   * never spin the tab. */
-  const GUARD_KEY = 'tofu:build-watch-reload';
-  try { if (sessionStorage.getItem(GUARD_KEY) === theirs) return; }
-  catch (_e) { /* storage disabled — proceed; idle gating still bounds any loop */ }
-  if (_buildWatchBusy()) {
-    const _now = Date.now();
-    if (!_buildWatchPending || _buildWatchPending.build !== theirs) {
-      _buildWatchPending = { build: theirs, since: _now };
-    }
-    if (_now - _buildWatchPending.since < _BUILD_WATCH_MAX_DEFER_MS) {
-      /* One quiet notice per build id; the reload itself lands on a later
-       * idle tick (or after the bounded defer elapses). */
-      if (_buildWatchToastFor !== theirs && typeof showToast === 'function') {
-        _buildWatchToastFor = theirs;
-        try { showToast('', t('buildWatch.title'), t('buildWatch.body'), 8000); }
-        catch (_e) { /* toast best-effort */ }
-      }
-      return;
-    }
-    /* Defer budget exhausted — the tab has been "busy" continuously since
-     * this build appeared, which in practice means a stale busy pin, not a
-     * user mid-action. Fall through and reload. */
-  }
-  try { sessionStorage.setItem(GUARD_KEY, theirs); } catch (_e) { /* best-effort */ }
-  _reloadPage();
-}
-
 /* Test seam: the page-reload primitive, indirect so jsdom harnesses can spy
  * on navigation (jsdom's location.reload is unimplemented). */
 function _reloadPage() { window.location.reload(); }
 
 function _startBuildWatch() {
-  if (_buildWatchTimer || typeof setInterval !== 'function') return;
-  _buildWatchTimer = setInterval(() => {
-    _buildWatchTick().catch(() => { /* the watch must never throw into the timer queue */ });
-  }, 5 * 60 * 1000);
-  /* Returning to a tab is the natural "about to interact" moment — check
-   * then too. */
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') _buildWatchTick().catch(() => {});
-  });
+  if (typeof buildWatchController !== 'undefined') buildWatchController.start();
 }
 
 // ── Event bindings ──
@@ -1275,8 +1217,8 @@ function _startBuildWatch() {
       if (typeof paperMode !== 'undefined' && paperMode) {
         for (const f of files) {
           if (f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")) {
-            if (typeof _handlePaperFileDrop === 'function') {
-              await _handlePaperFileDrop(f);
+            if (typeof runtimeScope._handlePaperFileDrop === 'function') {
+              await runtimeScope._handlePaperFileDrop(f);
               break; // Only one PDF at a time in paper reader
             }
           }
@@ -1297,7 +1239,7 @@ function _startBuildWatch() {
     });
   }
   document.getElementById("settingsModal").addEventListener("click", (e) => {
-    if (e.target === document.getElementById("settingsModal")) closeSettings();
+    if (e.target === document.getElementById("settingsModal")) runtimeScope.closeSettings();
   });
   /* Throttled scroll — updateActiveTurn is expensive (getBoundingClientRect on every turn dot) */
   let _scrollTicking = false;
@@ -1365,25 +1307,25 @@ function _startBuildWatch() {
       }
       const sm = document.getElementById("settingsModal");
       if (sm && sm.classList.contains("open")) {
-        closeSettings();
+        runtimeScope.closeSettings();
         e.preventDefault();
         return;
       }
       const prm = document.getElementById("projectModal");
       if (prm && prm.classList.contains("open")) {
-        closeProjectModal();
+        runtimeScope.closeProjectModal();
         e.preventDefault();
         return;
       }
       const brm = document.getElementById("localControlModal");
       if (brm && brm.classList.contains("open")) {
-        closeLocalControlModal();
+        runtimeScope.closeLocalControlModal();
         e.preventDefault();
         return;
       }
       const cm = document.getElementById("dailyReportModal");
       if (cm && cm.classList.contains("open")) {
-        closeDailyReport();
+        runtimeScope.closeDailyReport();
         e.preventDefault();
         return;
       }
@@ -1415,16 +1357,11 @@ function _startBuildWatch() {
     const convList = document.getElementById('conversationList');
     if (convList) convList.innerHTML = '<div style="text-align:center;padding:18px 0;color:#999;font-size:13px">Loading…</div>';
   }
-  // ── Startup storage health check ──
-  /* typeof-guarded: _checkStorageHealth lives in core/backend_offline_monitor.js.
-   *   An UNGUARDED call here once hit the Epic-E sub-3B deferral window (the
-   *   module was briefly deferred) and the ReferenceError killed the whole
-   *   boot IIFE — initActiveTasks never ran, so neither conversations nor
-   *   folders loaded (the "sidebar folder rail gone" incident, 2026-08-01).
-   *   The guard also keeps boot alive if the file is ever corruption-skipped
-   *   by the bundler (it is not a _CRITICAL_FILES member): losing the storage
-   *   banner degrades, crashing boot destroys. */
-  if (typeof _checkStorageHealth === 'function') _checkStorageHealth();
+  /* Backend liveness and Sidecar readiness are separate typed verdict owners.
+   * Their overlapping startup health reads share one body-safe request flight;
+   * neither owner can block catalog/folder initialization. */
+  backendAvailabilityMonitor.start();
+  void storageAvailabilityMonitor.check();
 
   // ── Restore PDF/VLM state from sessionStorage (survives page refresh) ──
   if (typeof _vlmRestoreState === 'function') {
@@ -1519,10 +1456,10 @@ function _startBuildWatch() {
     if (typeof _wireConvSyncPush === 'function') _wireConvSyncPush();
 
     /* Long-lived-tab handshake (see _startBuildWatch above): reload the
-     * tab when /api/health reports a NEWER frontend build than the bundle
+     * tab when a push pong reports a NEWER frontend build than the bundle
      * this page is running — the root fix for "already-fixed sidebar bugs
      * (今天→昨天→今天) still visible in a days-old tab". Idle-gated and
-     * loop-guarded; inert when the health route predates buildId. */
+     * loop-guarded; inert when the server predates pong buildId. */
     if (typeof _startBuildWatch === 'function') _startBuildWatch();
   });
 
@@ -1697,13 +1634,10 @@ function _startBuildWatch() {
            *   flag, not the absence of a throw. */
           if (typeof serverLoadOk !== 'function' || serverLoadOk()) {
             _clearBootReconnectBanner();
-            /* Self-heal folders: loadFolders() runs ONCE at boot inside
-             *   initActiveTasks' Promise.all and has no retry of its own — a
-             *   failed first fetch leaves _foldersLoaded=false and the folder
-             *   rail hidden for the whole session ("sidebar folder gone after
-             *   refresh"). The reconnect loop only re-ran loadConversationCatalog,
-             *   so folders never recovered. Re-fetch them here once the server
-             *   is reachable again. */
+            /* Converge folders immediately when the catalog reconnects instead
+             *   of waiting for the folder owner's bounded retry timer. The
+             *   single-flight loader shares this request with any retry/push
+             *   refresh already in progress. */
             if (typeof loadFolders === 'function' &&
                 typeof areFoldersLoaded === 'function' && !areFoldersLoaded()) {
               await Promise.resolve(loadFolders()).catch(e =>

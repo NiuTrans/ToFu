@@ -2,20 +2,26 @@
 """Image handling for request bodies — MIME sniffing, validation, downscaling.
 
 Cohesive group:
-  - sniff_image_mime(head) -> str|None       (magic-byte MIME detection)
+  - sniff_image_mime(head) -> str|None       (lightweight shared re-export)
   - _validate_image_blocks(messages) -> messages
   - _downscale_oversized_images(messages, model) -> None
-  - _CLAUDE_IMAGE_MAX_PX / _IMAGE_MAGICS      (module constants)
+  - _project_images_for_text_model(messages, model, ...) -> int
+  - _CLAUDE_IMAGE_MAX_PX / _IMAGE_MAGICS      (compatibility exports)
 """
 
 import base64 as _b64
 import io
 import os
 
+from lib.image_mime import (
+    IMAGE_MIME_MAGICS,
+    sniff_image_mime,
+)
 from lib.log import get_logger
 from lib.model_info import is_claude
 
 logger = get_logger(__name__)
+_IMAGE_MAGICS = IMAGE_MIME_MAGICS
 
 # ── Claude image dimension cap ──
 # Claude's vision tower internally downscales EVERY image to a ~1568px long
@@ -34,39 +40,72 @@ logger = get_logger(__name__)
 #     forever, regardless of how many images accumulate.
 _CLAUDE_IMAGE_MAX_PX = 1568
 
-# Plain-prefix magics for the formats whose signature is a fixed head.
-# WebP is deliberately NOT here: its magic is a RIFF container whose 4-byte
-# head 'RIFF' is shared with WAV / AVI / ANI, so a bare startswith(b'RIFF')
-# would mislabel any RIFF payload as image/webp. WebP is sniffed separately in
-# sniff_image_mime() by the full RIFF....WEBP signature. Anthropic accepts
-# exactly PNG / JPEG / GIF / WebP, which is the full set covered here.
-_IMAGE_MAGICS = {
-    b'\x89PNG':    'image/png',
-    b'\xff\xd8':   'image/jpeg',
-    b'GIF8':       'image/gif',
-}
 
+def _project_images_for_text_model(
+        messages: list,
+        _target_model: str,
+        *,
+        fallback_from: str = '',
+) -> int:
+    """Replace image blocks with bounded provenance markers for a text model.
 
-def sniff_image_mime(head: bytes):
-    """Return the true image MIME from magic bytes, or None if unrecognized.
+    ``messages`` must be the request-local deep copy produced by
+    ``_strip_non_api_fields``. The durable transcript is never mutated. One
+    marker is inserted at the first image position in each image-bearing
+    message, regardless of how many images that message carries; this keeps
+    prompt growth bounded while retaining temporal/message locality. Adjacent
+    captions, ``[image ref: ...]`` text, tool results, and earlier assistant
+    descriptions remain byte-for-byte available as textual visual memory.
 
-    The single source of truth for "what image format are these bytes really?"
-    — used both by the OpenAI-side validator (``_validate_image_blocks``) and
-    by the Anthropic boundary transform (``anthropic_outbound._media_type_and_data``)
-    so the two paths cannot drift.
-
-    WebP requires the full RIFF-container check (bytes 0-3 == 'RIFF' AND bytes
-    8-11 == 'WEBP'); a bare 'RIFF' prefix also matches WAV/AVI and must NOT be
-    treated as an image.
+    Returns the number of image blocks removed.
     """
-    if not isinstance(head, (bytes, bytearray)):
-        return None
-    for magic, mtype in _IMAGE_MAGICS.items():
-        if head.startswith(magic):
-            return mtype
-    if len(head) >= 12 and head[:4] == b'RIFF' and head[8:12] == b'WEBP':
-        return 'image/webp'
-    return None
+    total_images = 0
+
+    for message in messages:
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+        image_count = sum(
+            1 for block in content
+            if isinstance(block, dict) and block.get('type') == 'image_url'
+        )
+        if image_count == 0:
+            continue
+
+        total_images += image_count
+        if fallback_from:
+            prefix = (
+                f'[Vision fallback projection: {image_count} image(s) in this '
+                'message cannot be sent to the text-only fallback model. ')
+        else:
+            prefix = (
+                f'[Text-only image projection: {image_count} image(s) in this '
+                'message cannot be sent to the selected text-only model. ')
+        notice = (
+            prefix
+            + 'The original conversation still retains the image data. '
+              'Treat the pixels as unseen; rely only on adjacent captions or '
+              'image references, tool results, and prior assistant descriptions.]'
+        )
+        marker = {'type': 'text', 'text': notice}
+
+        projected = []
+        marker_inserted = False
+        for block in content:
+            if isinstance(block, dict) and block.get('type') == 'image_url':
+                if not marker_inserted:
+                    projected.append(marker)
+                    marker_inserted = True
+                continue
+            projected.append(block)
+
+        if (len(projected) == 1 and isinstance(projected[0], dict)
+                and projected[0].get('type') == 'text'):
+            message['content'] = projected[0].get('text', '')
+        else:
+            message['content'] = projected
+
+    return total_images
 
 
 def _validate_image_blocks(messages: list) -> list:

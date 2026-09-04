@@ -1,0 +1,89 @@
+/* ═══════════════════════════════════════════════════════════
+   trading/reconcile.css — the daily reconcile view
+
+   Colours come from the trading tokens, which theme-bridge.css has re-mapped
+   onto the host design system. Nothing here hardcodes a palette, so this
+   page follows light/dark automatically.
+   ═══════════════════════════════════════════════════════════ */
+
+.rec-loading { padding: 24px; color: var(--t2); font-size: 14px; text-align: center; }
+
+.rec-empty { padding: 28px 20px; text-align: center; }
+.rec-empty-title { font-size: 15px; font-weight: 600; color: var(--t1); margin-bottom: 6px; }
+.rec-empty-note { font-size: 13px; color: var(--t2); line-height: 1.6; max-width: 46ch; margin: 0 auto; }
+
+.rec-section-title { font-size: 13px; font-weight: 600; color: var(--t2);
+  text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 10px; }
+
+/* Estimate banner: this data is a prior close, not a live quote. */
+.rec-estimate-banner { display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; margin-bottom: 14px; border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+  color: var(--t2); font-size: 12.5px; }
+.rec-estimate-icon { font-weight: 700; color: var(--warning); font-size: 15px; }
+
+/* ── Action cards ── */
+.rec-action-list { display: flex; flex-direction: column; gap: 10px; }
+.rec-action { display: flex; justify-content: space-between; align-items: center;
+  gap: 16px; padding: 14px 16px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--bg2); }
+.rec-action-main { flex: 1; min-width: 0; }
+.rec-action-head { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+.rec-symbol { font-weight: 600; font-size: 15px; color: var(--t1); font-family: var(--font-mono, monospace); }
+.rec-side { padding: 2px 9px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.rec-side.buy  { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.rec-side.sell { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.rec-action-detail { font-size: 13.5px; color: var(--t1); }
+.rec-price { color: var(--t2); font-size: 12px; margin-left: 6px; }
+.rec-action-reason { font-size: 12.5px; color: var(--t2); margin-top: 3px; line-height: 1.5; }
+
+.rec-action-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.rec-action-actions button { padding: 7px 14px; border-radius: 7px; border: 1px solid transparent;
+  font-size: 13px; font-weight: 500; cursor: pointer; transition: opacity .15s; }
+.rec-action-actions button:hover { opacity: .85; }
+.btn-done { background: var(--primary); color: var(--bg1); border: none; }
+.btn-skip { background: transparent; color: var(--t2); border-color: var(--border-h); }
+
+/* ── Skipped explainer ── */
+.rec-skipped { margin-top: 16px; border: 1px dashed var(--border-h);
+  border-radius: 10px; padding: 10px 14px; }
+.rec-skipped-summary { font-size: 13px; color: var(--t2); cursor: pointer;
+  list-style: none; user-select: none; }
+.rec-skipped-summary::before { content: "▸ "; }
+.rec-skipped[open] .rec-skipped-summary::before { content: "▾ "; }
+.rec-skipped-list { list-style: none; margin: 10px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px; }
+.rec-skipped-item { display: flex; align-items: baseline; gap: 10px;
+  font-size: 12.5px; flex-wrap: wrap; }
+.rec-skipped-symbol { font-family: var(--font-mono, monospace);
+  color: var(--t1); font-weight: 600; }
+.rec-skipped-gate { padding: 1px 7px; border-radius: 4px;
+  background: color-mix(in srgb, var(--t2) 12%, transparent);
+  color: var(--t2); font-size: 11px; font-weight: 500; flex-shrink: 0; }
+.rec-skipped-note { color: var(--t2); line-height: 1.5; flex: 1; min-width: 180px; }
+
+/* ── Targets ── */
+.rec-hint { font-size: 12px; color: var(--t2); }
+.rec-target-list { display: flex; flex-direction: column; gap: 10px; }
+.rec-target { padding: 12px 14px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--bg2); }
+.rec-target.pending { border-style: dashed; border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 5%, transparent); }
+.rec-target-main { display: flex; align-items: center; gap: 12px; }
+.rec-target-weight { font-weight: 600; font-size: 14px; color: var(--t1); }
+.rec-badge-pending { margin-left: auto; padding: 2px 8px; border-radius: 20px;
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning); font-size: 11px; font-weight: 600; }
+.rec-target-reason { font-size: 12.5px; color: var(--t2); margin-top: 5px; line-height: 1.5; }
+.btn-approve { margin-top: 10px; padding: 7px 14px; border-radius: 7px;
+  background: var(--primary); color: var(--bg1); border: none;
+  font-size: 13px; font-weight: 500; cursor: pointer; }
+.btn-approve:hover { opacity: .85; }
+.rec-target-summary { margin-top: 12px; font-size: 12.5px; color: var(--t2);
+  padding-top: 10px; border-top: 1px solid var(--border); }
+
+/* ── Adoption stats ── */
+.rec-adoption { display: flex; align-items: baseline; gap: 8px; }
+.rec-adoption-rate { font-size: 20px; font-weight: 700; color: var(--t1); }
+.rec-adoption-label { font-size: 12px; color: var(--t2); }

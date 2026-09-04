@@ -292,6 +292,7 @@ def _request_payload(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_envelope(content: str) -> dict[str, Any] | None:
+    """Compatibility parser for pre-split native event recordings."""
     try:
         value = json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -306,6 +307,29 @@ def _parse_envelope(content: str) -> dict[str, Any] | None:
             "rawBytes", "visibleBytes", "freshness", "evidenceId", "error",
         )
         if key in value
+    }
+
+
+def _parse_result_evidence(value: Any) -> dict[str, Any] | None:
+    """Project the non-model V1 sidecar into the release envelope record."""
+    if not isinstance(value, dict) or value.get(
+            "contractVersion") != "tofu.tool-result-evidence/v1":
+        return None
+    return {
+        key: projected
+        for key, projected in {
+            "contractVersion": value.get("resultContractVersion"),
+            "status": value.get("status"),
+            "artifactRef": value.get("artifactRef"),
+            "cursor": value.get("cursor"),
+            "truncated": value.get("truncated"),
+            "rawBytes": value.get("rawBytes"),
+            "visibleBytes": value.get("visibleBytes"),
+            "freshness": value.get("freshness"),
+            "evidenceId": value.get("evidenceId"),
+            "error": value.get("error"),
+        }.items()
+        if projected is not None
     }
 
 
@@ -708,7 +732,15 @@ def project_tofu_trial(
             "resultDigest": _text_sha256(model_content),
             "paidCostUsd": 0,
         }
-        envelope = _parse_envelope(model_content)
+        result_evidence = completion_event.get("toolResultEvidence")
+        envelope = _parse_result_evidence(result_evidence)
+        if envelope is not None and _non_negative_integer(
+                envelope.get("visibleBytes"),
+                "tool result evidence visibleBytes") != model_visible_bytes:
+            raise TofuProjectionError(
+                "tool result evidence visible byte count drifted")
+        if envelope is None:
+            envelope = _parse_envelope(model_content)
         if envelope is not None:
             row["envelope"] = envelope
         tool_results.append(row)

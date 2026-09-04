@@ -1,124 +1,118 @@
-"""tests/test_frontend_approval_card_render.py — Approval-card RENDER contract.
+"""Public retained-dispatch contract for typed write-approval cards.
 
-Complements tests/test_frontend_sse_dispatch.py (which proves the SSE
-*dispatcher* stores ``approvalMeta`` on the round) by proving the *renderer*
-in ``static/js/ui/tool_rounds.js`` turns that meta into the correct card.
-
-The untested path this pins (2026-06): a DESTRUCTIVE ``run_command`` gated in
-Manual mode emits a ``write_approval_request`` whose ``meta`` carries
-``command`` / ``description`` (not the file-write ``search`` / ``replace`` /
-``contentPreview`` keys). ``_renderUnifiedToolLine`` must therefore select the
-``ameta.command != null`` branch and render a shell-command card with working
-approve/reject buttons — never mis-route into the apply_diff diff branch.
-
-Loads the REAL shipped tool_rounds.js under jsdom; skips when node+jsdom are
-absent.
+The typed owner carries projection, escaping, localization, and resource
+policy. This jsdom fixture proves the retained ordered dispatcher supplies its
+trusted header slots and preserves command/write branch selection.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section_path
+from tests._jsdom import JS_DIR, run_harness
+
 
 pytestmark = pytest.mark.unit
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-TOOL_ROUNDS = runtime_section_path('ui/tool_rounds.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+TOOL_ROUNDS = os.path.join(JS_DIR, 'ui', 'tool_rounds.js')
 
 
 _HARNESS = r"""
-const fs = require('fs');
-const path = require('path');
-const ROOT = process.argv[3];
-const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
-global.window = dom.window; global.document = dom.window.document;
-global.escapeHtml = (s) => String(s == null ? '' : s)
-  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-global.t = (k, d) => (d || k);
-global.renderMarkdown = (s) => s;
-global._shortUrl = (u) => u;
-global.formatNumber = (n) => String(n);
+const messages = {
+  'toolApproval.awaiting': 'awaiting approval',
+  'toolApproval.approve': 'Approve',
+  'toolApproval.reject': 'Reject',
+  'toolApproval.oneEditAcross': '{count} edit across {path}',
+  'toolApproval.manyEditsAcross': '{count} edits across {path}',
+  'toolApproval.moreLines': '… {count} more lines',
+  'toolApproval.editFallback': 'Edit {index}',
+  'toolApproval.editStats': '{searchLines}→{replaceLines} lines',
+  'toolApproval.moreLinesWithTotals': '… {count} more lines ({totalLines} lines · {totalChars} chars total)',
+  'toolApproval.moreEdits': '… and {count} more edits',
+  'toolApproval.moreLinesUnknown': '… more lines',
+  'toolApproval.writeMeta': '{lines} lines · {chars} chars',
+  'toolApproval.previewLimit': 'Preview truncated to the first {n} characters.',
+  'toolApproval.riskFieldsLimit': 'Showing first {shown} of {total} risk fields.',
+  'toolApproval.approvalIdLimit': 'Approval unavailable: identifier exceeds {n} characters.',
+};
+function translate(key, paramsOrFallback) {
+  if (typeof paramsOrFallback === 'string') {
+    return messages[key] || paramsOrFallback;
+  }
+  let value = messages[key] || key;
+  if (!paramsOrFallback) return value;
+  return value.replace(/\{([A-Za-z0-9_]+)\}/g, (token, name) => (
+    Object.prototype.hasOwnProperty.call(paramsOrFallback, name)
+      ? String(paramsOrFallback[name]) : token
+  ));
+}
+const { setup } = require(process.env.JSDOM_HARNESS);
+const { check, report } = setup({
+  root: process.argv[3],
+  targets: [process.argv[2]],
+  globals: {
+    t: translate,
+    _featureFlags: { debug_mode: false },
+    projectState: { extraRoots: [] },
+  },
+});
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // ui/tool_rounds.js
-
-const out = [];
-function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
-
-// Destructive run_command, gated → meta has command/description only.
-const cmdRound = {
+const commandHtml = _renderUnifiedToolLine({
   status: 'pending_approval', approvalId: 'ap2', toolName: 'run_command',
-  query: 'run_command', toolRounds: [],
-  approvalMeta: { toolName: 'run_command', command: 'rm foo.py', description: 'delete foo' },
-};
-const html = _renderUnifiedToolLine(cmdRound, false);
-check('cmd_card_class', html.includes('ptool-cmd-code'));
-check('cmd_shows_command', html.includes('$ rm foo.py'));
-check('cmd_shows_description', html.includes('delete foo'));
-check('cmd_approve_btn', html.includes("resolveWriteApproval('ap2',true)"));
-check('cmd_reject_btn', html.includes("resolveWriteApproval('ap2',false)"));
-check('cmd_awaiting_badge', html.includes('awaiting approval'));
-// Must NOT have mis-routed into the apply_diff search/replace branch.
-check('cmd_no_diff_lines', !html.includes('ptool-diff-del'));
+  query: 'run_command', results: [],
+  approvalMeta: {
+    toolName: 'run_command', command: 'rm foo.py', description: 'delete foo',
+  },
+}, false);
+check('command_card_reaches_typed_owner',
+  commandHtml.includes('ptool-cmd-code')
+  && commandHtml.includes('$ rm foo.py')
+  && commandHtml.includes('delete foo'));
+check('command_card_keeps_static_approve_action',
+  commandHtml.includes('data-approval-id="ap2"')
+  && commandHtml.includes('resolveWriteApproval(this.dataset.approvalId,true)'));
+check('command_card_keeps_static_reject_action',
+  commandHtml.includes('resolveWriteApproval(this.dataset.approvalId,false)'));
+check('command_card_localizes_status_and_buttons',
+  commandHtml.includes('awaiting approval')
+  && commandHtml.includes('> Approve</button>')
+  && commandHtml.includes('> Reject</button>'));
+check('command_branch_does_not_fall_into_diff_preview',
+  !commandHtml.includes('ptool-diff-del'));
 
-// Sanity: a write_file approval still renders its content-preview card and
-// does NOT render a command card (branch isolation in the other direction).
-const wfRound = {
+const writeHtml = _renderUnifiedToolLine({
   status: 'pending_approval', approvalId: 'ap3', toolName: 'write_file',
-  query: 'write_file', toolRounds: [],
-  approvalMeta: { toolName: 'write_file', path: 'x.py',
-    contentPreview: 'print(1)\nprint(2)', contentLines: 2, contentChars: 17 },
-};
-const wfHtml = _renderUnifiedToolLine(wfRound, false);
-check('wf_no_cmd_card', !wfHtml.includes('ptool-cmd-code'));
-check('wf_approve_btn', wfHtml.includes("resolveWriteApproval('ap3',true)"));
+  query: 'write_file', results: [],
+  approvalMeta: {
+    toolName: 'write_file', path: 'x.py',
+    contentPreview: 'print(1)\nprint(2)', contentLines: 2, contentChars: 17,
+  },
+}, false);
+check('write_card_uses_content_preview_branch',
+  writeHtml.includes('print(1)')
+  && writeHtml.includes('2 lines · 17 chars'));
+check('write_card_does_not_render_command_shell',
+  !writeHtml.includes('ptool-cmd-code'));
+check('write_card_keeps_action_authority',
+  writeHtml.includes('data-approval-id="ap3"')
+  && writeHtml.includes('resolveWriteApproval(this.dataset.approvalId,true)'));
 
-console.log(out.join('\n'));
-// Exit explicitly: tool_rounds.js / jsdom may leave a timer or listener handle
-// open, which would keep node's event loop alive past the 60s harness timeout
-// even though every assertion already ran.
-process.exit(0);
+const unrelatedHtml = _renderUnifiedToolLine({
+  status: 'done', approvalId: 'stale', toolName: 'write_file',
+  query: 'write_file', results: [],
+}, false);
+check('non_pending_round_falls_through_without_approval_buttons',
+  !unrelatedHtml.includes('ptool-approval-btns'));
+
+report();
 """
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_run_command_approval_card_renders():
-    harness = os.path.join(HERE, '_approval_card_render_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness,
-             TOOL_ROUNDS,                                   # argv[2]
-             ROOT],                                          # argv[3]
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'approval-card render failures:\n' + output
-    assert output.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{output}'
-
-
-if __name__ == '__main__':
-    import sys
-    sys.exit(pytest.main([__file__, '-v']))
+def test_retained_dispatcher_routes_pending_approvals_to_typed_owner():
+    run_harness(
+        target_js=TOOL_ROUNDS,
+        body_js=_HARNESS,
+        expect_pass=9,
+        label='retained approval dispatcher',
+    )

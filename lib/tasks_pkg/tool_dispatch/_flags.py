@@ -1,11 +1,11 @@
 # HOT_PATH
-"""Tool partitions + dedup cache — write/idempotent classification and caching.
+"""Tool partitions + result reuse and provider-response call identity.
 
-Houses the stateless tool-partition tables (write vs idempotent),
-per-task partition union, the deterministic cache-key builder, project-cache
-invalidation, cache-entry unpacking, and the rich cache-hit display metadata.
-Also the Layer-0/Layer-1 idempotency feature flags
-(``TOFU_CANONICAL_CALL_IDS``) and the shared call signature builder.
+Houses the stateless tool-partition tables (write vs result reuse), per-task
+partition union, the distinct retry-idempotency contract, deterministic cache
+keys, project-cache invalidation, cache entry helpers, and the canonical
+signature/scope builders shared by direct and gateway occurrences from one
+provider response.
 """
 
 from __future__ import annotations
@@ -17,25 +17,18 @@ from typing import Any
 
 from lib.log import get_logger
 from lib.token_counter import count_text
-from lib.tasks_pkg.executor import _build_simple_meta
-
+from lib.tools.resource_policy import (
+    TOOL_RESULT_CACHE_HARD_CAPACITY,
+    tool_result_cache_capacity,
+)
 logger = get_logger(__name__)
 
 
-def _canonical_call_ids_enabled() -> bool:
-    """Layer-0 switch: harness-minted canonical call ids (default ON).
-
-    ``TOFU_CANONICAL_CALL_IDS=0`` falls back to the pre-2026-08-17 behaviour
-    (the model's own tool_call id is trusted as the execution identity; the
-    receipt-layer conflict-execute fix stays active as the compat path).
-    Read live so tests and operators can toggle without a restart.
-    """
-    raw = os.environ.get('TOFU_CANONICAL_CALL_IDS', '1').strip().lower()
-    return raw not in ('0', 'false', 'off', 'no')
+_TOOL_RESULT_CACHE_MIN_CAPACITY = 16
 
 
 def _call_id_signature(fn_name: str, fn_args: Any) -> str:
-    """Stable identity for replay protection; never trusts display metadata."""
+    """Stable name+argument identity; never trusts display metadata."""
     try:
         payload = json.dumps(
             {'name': str(fn_name or ''),
@@ -46,6 +39,42 @@ def _call_id_signature(fn_name: str, fn_args: Any) -> str:
         logger.debug('[ToolDispatch] call signature JSON fallback: %s', exc)
         payload = f'{fn_name!s}\0{fn_args!r}'
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _execute_gateway_delegation_scope(
+    task: dict[str, Any], round_num: int,
+) -> str:
+    """Identity of one provider response for direct↔gateway delegation."""
+    attempt_id = str(
+        task.get('_attemptId') or task.get('attemptId') or task.get('id') or '')
+    world_version = str(
+        task.get('_worldVersion') or task.get('worldVersion') or '')
+    return f'{attempt_id}\0{round_num}\0{world_version}'
+
+
+
+def _publish_execute_gateway_direct_siblings(
+    task: dict[str, Any],
+    round_num: int,
+    direct_calls: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    """Publish the runnable direct-call multiset for one provider response.
+
+    Each signature retains provider order and occurrence cardinality. Gateway
+    handlers consume IDs FIFO so one direct occurrence delegates at most one
+    identical ``execute_tools.calls[]`` child; same-channel duplicates remain
+    independent model actions.
+    """
+    by_signature: dict[str, list[str]] = {}
+    for name, call_id, arguments in direct_calls:
+        if not name or not call_id:
+            continue
+        signature = _call_id_signature(name, arguments)
+        by_signature.setdefault(signature, []).append(str(call_id))
+    task['_execute_gateway_direct_siblings'] = {
+        'scope': _execute_gateway_delegation_scope(task, round_num),
+        'by_signature': by_signature,
+    }
 
 
 def _safe_count_tokens(text: str, model: str = '') -> int:
@@ -63,31 +92,204 @@ def _safe_count_tokens(text: str, model: str = '') -> int:
         logger.debug('[ToolDispatch] count_text failed: %s', e)
         return 0
 
-# ── Idempotent tool dedup — cache read-only tool results within a task ──
+# ── Result dedup — cache explicitly reusable results within a task ──
 # These tools produce the same result for the same arguments within one task
 # execution.  When the model repeats a call, we return the cached result
 # instantly instead of re-executing (e.g. re-fetching a URL).
 #
+# Every production writer must use ``_store_tool_result_cache_entry``.  The
+# per-task FIFO bound is launch-probed and the terminal lifecycle owner drops
+# the whole cache after settlement.  Cache pressure may therefore cause a
+# safe live re-execution, never retention that grows with an arbitrarily long
+# task or with the one-hour terminal TaskRuntime TTL.
+#
 # The literal base below covers built-in tools (incl. browser-internal names
 # that the ToolSpec registry doesn't enumerate).  We then union the
-# ``idempotent_tools`` flags declared by every registered ToolSpec — so a
-# third-party plugin that marks its tool idempotent is honoured automatically
-# with no edit here.  See lib/tools/registry/.
-_IDEMPOTENT_TOOLS_BASE = frozenset({
+# ``cacheable_tools`` policy declared by every registered ToolSpec. Legacy
+# plugins that omit it retain the historical idempotent=>cacheable default.
+_CACHEABLE_TOOLS_BASE = frozenset({
     'web_search', 'fetch_url',
     'read_files', 'list_dir', 'grep_search', 'find_files',
-    'browser_list_tabs', 'browser_read_page',
-    'browser_get_history', 'browser_get_cookies',
-    'list_conversations', 'get_conversation',
-    'project_charter_read', 'project_board_read',
-    'project_peer_status',
 })
+
+
+def _resolve_tool_result_cache_capacity(
+    environment: dict[str, str] | None = None,
+) -> int:
+    """Resolve the per-task receipt count from the shared resource policy."""
+    try:
+        return tool_result_cache_capacity(environment)
+    except Exception as exc:
+        # Import/probe failure must not break tool execution.  This is the
+        # same lean floor accepted for an explicit operator override; normal
+        # probe failure resolves to the resource policy's 64-entry default.
+        logger.warning(
+            '[DedupCache] capacity resolution failed; using %d: %s',
+            _TOOL_RESULT_CACHE_MIN_CAPACITY, exc)
+        return _TOOL_RESULT_CACHE_MIN_CAPACITY
+
+
+def _record_tool_result_cache_evictions(
+    task: dict[str, Any], evicted: int, capacity: int,
+) -> None:
+    """Record content-free pressure evidence without logging every eviction."""
+    if evicted <= 0:
+        return
+    try:
+        previous = max(0, int(task.get('_tool_result_cache_evictions') or 0))
+    except (TypeError, ValueError, OverflowError):
+        previous = 0
+    total = min(1_000_000_000, previous + evicted)
+    task['_tool_result_cache_evictions'] = total
+    if total == 1 or total & (total - 1) == 0:
+        logger.info(
+            '[DedupCache] task=%s evicted=%d total_evictions=%d capacity=%d',
+            str(task.get('id') or '')[:12] or '?', evicted, total, capacity)
+
+
+def _trim_tool_result_cache(
+    task: dict[str, Any], cache: dict, capacity: int,
+) -> int:
+    """Drop oldest receipts until ``cache`` satisfies its finite capacity."""
+    evicted = 0
+    while len(cache) > capacity:
+        oldest_key = next(iter(cache))
+        cache.pop(oldest_key, None)
+        evicted += 1
+    _record_tool_result_cache_evictions(task, evicted, capacity)
+    return evicted
+
+
+def _ensure_tool_result_cache(task: dict[str, Any]) -> dict:
+    """Return the task cache, repairing legacy shape and enforcing its cap."""
+    cache = task.get('_tool_result_cache')
+    if not isinstance(cache, dict):
+        if cache is not None:
+            logger.warning(
+                '[DedupCache] task=%s replaced invalid cache type=%s',
+                str(task.get('id') or '')[:12] or '?',
+                type(cache).__name__)
+        cache = {}
+        task['_tool_result_cache'] = cache
+
+    capacity = task.get('_tool_result_cache_capacity')
+    try:
+        capacity = int(capacity)
+    except (TypeError, ValueError, OverflowError):
+        capacity = 0
+    if not (_TOOL_RESULT_CACHE_MIN_CAPACITY
+            <= capacity <= TOOL_RESULT_CACHE_HARD_CAPACITY):
+        capacity = _resolve_tool_result_cache_capacity()
+        task['_tool_result_cache_capacity'] = capacity
+    _trim_tool_result_cache(task, cache, capacity)
+    return cache
+
+
+def _store_tool_result_cache_entry(
+    task: dict[str, Any], cache_key: str, cache_entry: Any,
+) -> dict:
+    """Insert one receipt as newest and enforce the task-local FIFO bound."""
+    cache = _ensure_tool_result_cache(task)
+    # Replacing an existing receipt refreshes its FIFO age.  This matters for
+    # the prefetch-to-budgeted rewrite: the final compact form is the live
+    # receipt, not an old entry that should be first under pressure.
+    if cache_key in cache:
+        cache.pop(cache_key, None)
+    cache[cache_key] = cache_entry
+    capacity = int(task['_tool_result_cache_capacity'])
+    _trim_tool_result_cache(task, cache, capacity)
+    return cache
+
+
+def _record_tool_call_id_receipt_evictions(
+    task: dict[str, Any], evicted: int, capacity: int,
+) -> None:
+    """Record content-free call-id ledger pressure at logarithmic cadence."""
+    if evicted <= 0:
+        return
+    try:
+        previous = max(
+            0, int(task.get('_tool_call_id_receipt_evictions') or 0))
+    except (TypeError, ValueError, OverflowError):
+        previous = 0
+    total = min(1_000_000_000, previous + evicted)
+    task['_tool_call_id_receipt_evictions'] = total
+    if total == 1 or total & (total - 1) == 0:
+        logger.info(
+            '[CallIdReceipts] task=%s evicted=%d total_evictions=%d '
+            'capacity=%d',
+            str(task.get('id') or '')[:12] or '?', evicted, total, capacity)
+
+
+def _ensure_tool_call_id_receipts(task: dict[str, Any]) -> dict[str, dict]:
+    """Return a bounded, content-free completed-call identity ledger.
+
+    The ledger is diagnostic/recycle metadata, never replay authority. Call-id
+    collision correctness comes from the active history index in the pipeline,
+    so pressure may safely discard the oldest signature receipt.
+    """
+    receipts = task.get('_tool_call_id_receipts')
+    if not isinstance(receipts, dict):
+        if receipts is not None:
+            logger.warning(
+                '[CallIdReceipts] task=%s replaced invalid ledger type=%s',
+                str(task.get('id') or '')[:12] or '?',
+                type(receipts).__name__)
+        receipts = {}
+        task['_tool_call_id_receipts'] = receipts
+
+    # Repair live/rehydrated legacy rows that pinned a complete tool body.
+    invalid_keys = []
+    for call_id, receipt in receipts.items():
+        if not isinstance(receipt, dict):
+            invalid_keys.append(call_id)
+            continue
+        receipts[call_id] = {
+            'signature': str(receipt.get('signature') or ''),
+            'name': str(receipt.get('name') or ''),
+            'status': str(receipt.get('status') or 'done'),
+        }
+    for call_id in invalid_keys:
+        receipts.pop(call_id, None)
+
+    _ensure_tool_result_cache(task)
+    capacity = int(task['_tool_result_cache_capacity'])
+    evicted = len(invalid_keys)
+    while len(receipts) > capacity:
+        receipts.pop(next(iter(receipts)), None)
+        evicted += 1
+    _record_tool_call_id_receipt_evictions(task, evicted, capacity)
+    return receipts
+
+
+def _store_tool_call_id_receipt(
+    task: dict[str, Any], call_id: str, receipt: dict[str, Any],
+) -> dict[str, dict]:
+    """Store one newest call identity without retaining model/tool content."""
+    receipts = _ensure_tool_call_id_receipts(task)
+    normalized = {
+        'signature': str(receipt.get('signature') or ''),
+        'name': str(receipt.get('name') or ''),
+        'status': str(receipt.get('status') or 'done'),
+    }
+    call_id = str(call_id or '')
+    if not call_id:
+        return receipts
+    receipts.pop(call_id, None)
+    receipts[call_id] = normalized
+    capacity = int(task['_tool_result_cache_capacity'])
+    evicted = 0
+    while len(receipts) > capacity:
+        receipts.pop(next(iter(receipts)), None)
+        evicted += 1
+    _record_tool_call_id_receipt_evictions(task, evicted, capacity)
+    return receipts
 
 # ── Concurrency safety partitioning ──
 # Inspired by Claude Code's isConcurrencySafe flag per tool.
 # Write tools run SERIALLY (even when auto_apply=True) to prevent
 # filesystem race conditions.  Read-only tools run in parallel.
-# This is separate from _IDEMPOTENT_TOOLS (dedup) — a tool can be
+# This is separate from _CACHEABLE_TOOLS (dedup) — a tool can be
 # concurrent-safe (run in parallel) but not idempotent (don't cache).
 _WRITE_TOOLS_BASE = frozenset({
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
@@ -105,15 +307,17 @@ def _registry_tool_flags() -> tuple[frozenset, frozenset]:
     list.  Falls back to the base sets if the registry import fails.
     """
     write = set(_WRITE_TOOLS_BASE)
-    idem = set(_IDEMPOTENT_TOOLS_BASE)
+    cacheable = set(_CACHEABLE_TOOLS_BASE)
     try:
         from lib.tools.registry import all_specs
         for spec in all_specs():
             write |= set(spec.write_tools)
-            idem |= set(spec.idempotent_tools)
+            declared = spec.cacheable_tools
+            cacheable |= set(
+                spec.idempotent_tools if declared is None else declared)
     except Exception as e:
         logger.debug('[tool_dispatch] registry flag union skipped: %s', e)
-    return frozenset(write), frozenset(idem)
+    return frozenset(write), frozenset(cacheable)
 
 
 def _registry_confirmation_tools() -> frozenset[str]:
@@ -125,6 +329,23 @@ def _registry_confirmation_tools() -> frozenset[str]:
             names |= set(spec.confirmation_tools)
     except Exception as exc:
         logger.debug('[tool_dispatch] confirmation flag union skipped: %s', exc)
+    return frozenset(names)
+
+
+def _registry_idempotent_tools() -> frozenset[str]:
+    """Return retry-safe names without conflating them with result reuse."""
+    # Literal legacy/internal reads (not all have a visible ToolSpec) retain
+    # their established retry contract. Registered families then add the
+    # authoritative idempotent declaration even when cacheable_tools is empty.
+    names = set(_CACHEABLE_TOOLS_BASE)
+    try:
+        from lib.tools.registry import all_specs
+
+        for spec in all_specs():
+            names.update(spec.idempotent_tools)
+    except Exception as exc:
+        logger.debug('[tool_dispatch] registry idempotency union skipped: %s',
+                     exc)
     return frozenset(names)
 
 
@@ -141,13 +362,16 @@ def _task_confirmation_tools(task: dict[str, Any]) -> frozenset[str]:
     return frozenset(names)
 
 
-_WRITE_TOOLS, _IDEMPOTENT_TOOLS = _registry_tool_flags()
+_WRITE_TOOLS, _CACHEABLE_TOOLS = _registry_tool_flags()
+# Compatibility export for callers/tests written before cache policy was
+# separated from the idempotency contract. Its value is the cache partition.
+_IDEMPOTENT_TOOLS = _CACHEABLE_TOOLS
 _INITIAL_WRITE_TOOLS = _WRITE_TOOLS
 _INITIAL_IDEMPOTENT_TOOLS = _IDEMPOTENT_TOOLS
 
 
 def _task_partitions(task: dict[str, Any]) -> tuple[frozenset, frozenset]:
-    """Per-task write/idempotent partitions: base UNION the task's custom env.
+    """Per-task write/result-reuse partitions plus the task's custom env.
 
     Registry flags are resolved live so a late plugin registration or hot
     replacement cannot leave a stale concurrency/cache partition. Per-request
@@ -188,6 +412,24 @@ def _task_partitions(task: dict[str, Any]) -> tuple[frozenset, frozenset]:
         except Exception as e:
             logger.debug('[tool_dispatch] task partition union skipped: %s', e)
     return frozenset(write), frozenset(idem)
+
+
+def _task_idempotent_tools(task: dict[str, Any]) -> frozenset[str]:
+    """Return the task's retry-safe read contract for semantic consumers.
+
+    Unlike :func:`_task_partitions`, this deliberately includes mutable
+    observers that must execute fresh. Loop/progress guards need to recognize
+    those calls as reads without accidentally making their results reusable.
+    """
+    names = set(_registry_idempotent_tools())
+    env = task.get('_tool_env')
+    if env is not None:
+        try:
+            names.update(env.idempotent_names)
+        except Exception as exc:
+            logger.debug(
+                '[tool_dispatch] task idempotency union skipped: %s', exc)
+    return frozenset(names)
 
 
 def _make_cache_key(fn_name: str, fn_args: dict[str, Any]) -> str:
@@ -238,7 +480,7 @@ def _unpack_cache_entry(cached) -> tuple:
     """Unpack a dedup cache entry into (content, is_search, source, display,
     engine_breakdown, vertical, search_diag).
 
-    Handles all legacy tuple lengths (2–8) and bare values gracefully.
+    Handles all legacy tuple lengths (2–9) and bare values gracefully.
     ``search_diag`` (slot 7) carries the orchestrator's zero-result
     diagnostic (``reason`` / ``engine_errors`` / …) so a cache/prefetch hit
     of a FAILED search renders the honest network-error/no-matches row
@@ -255,12 +497,11 @@ def _unpack_cache_entry(cached) -> tuple:
             logger.warning('[Dedup] cache value is unexpected type %s (not tuple/str/dict) '
                            '— wrapping; model will see str() of it', type(cached).__name__)
         return (cached, False, 'dedup', None, None, None, None)
-    # Pad to length 7 with defaults. Slot 8 is deliberately handled by
-    # ``_cache_entry_projection_items`` so this long-standing return contract
-    # remains backward compatible for callers that unpack exactly 7 values.
+    # Pad to length 7 with defaults. Additive sidecars in slots 8–9 are handled
+    # separately so callers that unpack exactly seven values remain compatible.
     defaults = (None, False, 'dedup', None, None, None, None)
     padded = tuple(cached) + defaults[len(cached):]
-    if len(cached) < 2 or len(cached) > 8:
+    if len(cached) < 2 or len(cached) > 9:
         logger.warning('[Dedup] cache entry has unexpected length %d', len(cached))
     return padded[:7]
 
@@ -274,6 +515,14 @@ def _cache_entry_projection_items(cached):
     if isinstance(cached, (tuple, list)) and len(cached) >= 8:
         items = cached[7]
         return items if isinstance(items, list) else None
+    return None
+
+
+def _cache_entry_producer_metadata(cached):
+    """Return optional producer omission evidence from cache slot 9."""
+    if isinstance(cached, (tuple, list)) and len(cached) >= 9:
+        metadata = cached[8]
+        return metadata if isinstance(metadata, dict) else None
     return None
 
 
@@ -360,6 +609,11 @@ def _build_cache_hit_meta(
                 'badge': f'svg{badge_suffix}',
                 'imageDataUris': svg_uris,
             }
+
+    # Imported lazily: executor/__init__ imports the handler registry, which
+    # imports this module — a top-level import here closes the cycle whenever
+    # _flags is the first of the two to be imported.
+    from lib.tasks_pkg.executor import _build_simple_meta
 
     content_str = cached_content if isinstance(cached_content, str) else str(cached_content)
     chars = len(content_str)

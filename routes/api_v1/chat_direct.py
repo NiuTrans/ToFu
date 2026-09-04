@@ -10,14 +10,12 @@ the production home that finally makes the native-async streaming path live
 
 How the on-loop bridge works
 ----------------------------
-``async_dispatch_stream`` invokes its sync ``on_content`` / ``on_thinking``
-callbacks synchronously inside the async SSE-parse loop (``aiter_lines`` →
-``SSEAccumulator``), i.e. **on the event-loop thread**. So the callbacks can
-push frames straight into an ``asyncio.Queue`` via ``put_nowait`` (no
-``call_soon_threadsafe`` needed). We run the dispatch as a background
-``asyncio.Task`` and an async generator drains the queue into SSE frames; when
-the dispatch task completes we flush the queue, emit the terminal frame, and
-close with ``[DONE]``.
+Native httpx callbacks arrive on the event loop; subscription/desktop adapters
+may invoke the same callbacks from a bridge worker. One loop-owned scheduling
+seam normalizes both sources before they touch the bounded ``asyncio.Queue``.
+The dispatch is a background ``asyncio.Task`` and an async generator drains the
+queue into SSE frames; completion flushes the queue, emits the terminal frame,
+and closes with ``[DONE]``.
 
 Deliberate scope (NOT a replacement for /chat/completions)
 ----------------------------------------------------------
@@ -25,222 +23,64 @@ This is a single-turn, loop-resident streaming relay: NO tool loop, NO MCP, NO
 multi-round orchestration, NO task-replay/abort handle. Those require the full
 orchestrator, which is correctly thread-based. Callers needing tools/replay use
 ``/chat/completions``. This endpoint is for low-latency, pure-text (± thinking)
-streaming that benefits from staying on the loop. It shares the admission
-controller (backpressure) with the rest of the headless surface and touches
-NONE of the create_task / spawn_task / thread-worker machinery.
+streaming that benefits from staying on the loop. It shares authenticated v2
+model routing, provider isolation, billing settlement, usage accounting, and
+admission control with task-backed chat. A disconnected HTTP observer does not
+cancel an already-started dispatch; relay chunks are dropped while the provider
+response is consumed up to its finite request deadline.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import time
 
 from quart import Blueprint
 
 from lib.agent_core.admission import controller
+from lib.agent_core.execution_session import (
+    ExecutionPhase,
+    ExecutionSession,
+    bind_admission_lease,
+    bind_billing_reservation,
+    bind_model_route,
+)
+from lib.agent_core.direct_stream import (
+    _DETACHED_DIRECT_DISPATCHES,
+    _DIRECT_DEFAULT_TIMEOUT_S,
+    _DIRECT_MAX_TIMEOUT_S,
+    run_direct_stream,
+)
 from lib.agent_core.sse_limit import limiter as sse_limiter
 from lib.api_response import api_bad_request, api_error, sse_response
+from lib.billing.request_flow import (
+    estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
+)
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
-from lib.llm.stream_result import (
-    ProviderStreamResult,
-    ensure_provider_stream_result,
-)
+from lib.llm.stream_result import ProviderStreamResult
 from lib.log import audit_log, get_logger
+from lib.model_routing import ModelRoutingError
 from lib.openapi import api_meta
+from lib.rate_limit_api import record_tokens
 from lib.request_parser import (
-    async_parse_body, optional_dict, optional_str, require_list,
+    async_parse_body, optional_dict, optional_int, optional_str, require_list,
 )
-from lib.turn_verdict import (
-    TerminalTaskFailure,
-    derive_provider_stream_verdict,
-)
+from lib.usage_tracker import record as record_usage
 
-from .auth import current_auth, require_scope
-from .chat import (  # shared message and stream-cap boundaries
-    _openai_finish_reason,
-    _try_acquire_sse_slot,
-    _validate_messages,
+from .auth import (
+    current_auth, guard_model_relay_or_dispose, request_principal,
+    require_scope,
+)
+from .chat import _try_acquire_sse_slot, _validate_messages
+from routes.model_routing_adapter import (
+    dispose_routed_slot_group,
+    mint_native_request_route,
+    routing_error_fields,
 )
 
 logger = get_logger(__name__)
 
 api_v1_chat_direct_bp = Blueprint('api_v1_chat_direct', __name__)
-
-
-# Sentinel pushed onto the bridge queue when the dispatch task finishes.
-_STREAM_END = object()
-
-
-def _chunk_frame(completion_id: str, model: str, *, role=False, content=None,
-                 thinking=None) -> str:
-    """One OpenAI ``chat.completion.chunk`` SSE frame."""
-    delta: dict = {}
-    if role:
-        delta['role'] = 'assistant'
-    if content is not None:
-        delta['content'] = content
-    if thinking is not None:
-        delta['reasoning_content'] = thinking
-    chunk = {
-        'id': completion_id,
-        'object': 'chat.completion.chunk',
-        'created': int(time.time()),
-        'model': model,
-        'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}],
-    }
-    return f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
-
-
-async def run_direct_stream(messages, *, model, cfg, completion_id,
-                            dispatch_fn=None, queue_maxsize=1000):
-    """Async generator: drive an on-loop streaming dispatch → SSE frames.
-
-    This is the TESTABLE CORE — ``dispatch_fn`` is injectable so tests can
-    stub the LLM. In production it defaults to
-    ``lib.llm_dispatch.async_dispatch_stream``.
-
-    Contract of ``dispatch_fn`` (mirrors ``async_dispatch_stream``):
-        ``await dispatch_fn(messages, on_content=..., on_thinking=...,
-        max_tokens=..., temperature=..., prefer_model=..., capability=...,
-        log_prefix=...)`` → ``ProviderStreamResult``; the sync
-        ``on_content(str)`` / ``on_thinking(str)`` callbacks fire ON the loop.
-
-    A historical three-tuple is accepted only at the named adapter seam. Its
-    explicit finish reason is converted to the same typed result before any
-    terminal decision is made.
-
-    Yields OpenAI ``chat.completion.chunk`` SSE frames, then a terminal frame
-    (with ``finish_reason`` + ``usage``), then ``data: [DONE]``.
-
-    The queue is bounded; ``put_nowait`` is safe because both producer
-    (callbacks) and consumer (this generator) run on the same loop and the
-    consumer drains between dispatch suspensions. On overflow we drop to a
-    blocking put scheduled on the loop (still ordered) — see _push.
-    """
-    if dispatch_fn is None:
-        from lib.llm_dispatch import async_dispatch_stream as dispatch_fn
-
-    q: asyncio.Queue = asyncio.Queue(maxsize=queue_maxsize)
-
-    def _push(kind: str, text: str) -> None:
-        # Runs on the loop thread (callback fires inside the async parse loop).
-        try:
-            q.put_nowait((kind, text))
-        except asyncio.QueueFull:
-            # Extremely unlikely (consumer drains every suspension); drop the
-            # oldest to keep the stream live rather than stall the producer.
-            try:
-                q.get_nowait()
-                q.put_nowait((kind, text))
-            except Exception as e:
-                logger.warning('[chat_direct] queue overflow drop failed: %s', e)
-
-    def _on_content(c):
-        if c:
-            _push('content', c)
-
-    def _on_thinking(t):
-        if t:
-            _push('thinking', t)
-
-    async def _drive():
-        try:
-            result = await dispatch_fn(
-                messages,
-                on_content=_on_content,
-                on_thinking=_on_thinking,
-                max_tokens=int(cfg.get('maxTokens') or 4096),
-                temperature=float(cfg.get('temperature') or 0),
-                thinking_enabled=bool(cfg.get('thinkingEnabled')),
-                preset=cfg.get('preset') or 'low',
-                capability=cfg.get('capability') or 'text',
-                prefer_model=model or None,
-                strict_model=bool(model),
-                log_prefix='[chat_direct]',
-            )
-            return result
-        finally:
-            # Always unblock the consumer, even on dispatch error.
-            q.put_nowait((_STREAM_END, None))
-
-    drive_task = asyncio.ensure_future(_drive())
-
-    emitted_role = False
-    try:
-        while True:
-            kind, text = await q.get()
-            if kind is _STREAM_END:
-                break
-            if not emitted_role:
-                yield _chunk_frame(completion_id, model, role=True)
-                emitted_role = True
-            if kind == 'content':
-                yield _chunk_frame(completion_id, model, content=text)
-            elif kind == 'thinking':
-                yield _chunk_frame(completion_id, model, thinking=text)
-
-        # Dispatch finished — surface its result (finish_reason + usage) or error.
-        stream_result: ProviderStreamResult | None = None
-        err = None
-        failure_cause = 'generation_error'
-        try:
-            stream_result = ensure_provider_stream_result(drive_task.result())
-            if not stream_result.is_verified_complete:
-                verdict = derive_provider_stream_verdict(stream_result)
-                raise TerminalTaskFailure(verdict)
-        except Exception as e:  # dispatch raised (exhausted slots, etc.)
-            err = e
-            if isinstance(e, TerminalTaskFailure):
-                failure_cause = e.verdict.cause
-            logger.warning('[chat_direct] dispatch failed: %s', e)
-
-        if err is not None:
-            from lib.error_envelope import make_envelope
-            envelope = make_envelope(
-                'internal', detail=str(err)[:300], model=model,
-                context='chat_direct', source='routes.api_v1.chat_direct')
-            yield f'data: {json.dumps({
-                "error": {
-                    "message": str(err),
-                    "type": "server_error",
-                    "code": failure_cause,
-                },
-                "tofu_error": envelope,
-            }, ensure_ascii=False)}\n\n'
-            yield 'data: [DONE]\n\n'
-            return
-
-        assert stream_result is not None
-        if not emitted_role:
-            # A verified zero-delta completion still needs a role frame.
-            yield _chunk_frame(completion_id, model, role=True)
-
-        provider_finish = stream_result.provider_finish_reason
-        assert provider_finish is not None
-
-        final = {
-            'id': completion_id, 'object': 'chat.completion.chunk',
-            'created': int(time.time()), 'model': model,
-            'choices': [{'index': 0, 'delta': {},
-                         'finish_reason': _openai_finish_reason(
-                             provider_finish)}],
-        }
-        if stream_result.usage:
-            final['usage'] = stream_result.usage
-        yield f'data: {json.dumps(final, ensure_ascii=False)}\n\n'
-        yield 'data: [DONE]\n\n'
-    except (GeneratorExit, asyncio.CancelledError):
-        # Client disconnected — cancel the in-flight dispatch so we don't keep
-        # streaming from the upstream into the void.
-        logger.info('[chat_direct] client disconnected — cancelling dispatch')
-        drive_task.cancel()
-        raise
-    finally:
-        if not drive_task.done():
-            drive_task.cancel()
-
 
 @api_v1_chat_direct_bp.route('/api/v1/chat/stream-direct', methods=['POST'])
 @require_scope('chat')
@@ -253,11 +93,15 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
         'occupies a worker thread. SSE only (always streams). NO tool loop / '
         'MCP / multi-round orchestration — use `/api/v1/chat/completions` for '
         'those. Frames are OpenAI `chat.completion.chunk` shape, terminated by '
-        '`data: [DONE]`.'),
+        '`data: [DONE]`. If the client disconnects after provider dispatch '
+        'starts, the server still consumes and validates the upstream response; '
+        'this relay-only endpoint has no replay handle, so detached output is '
+        'not recoverable by the caller. Dispatch lifetime defaults to 600 '
+        'seconds and is capped at 900 seconds.'),
     tags=['chat'],
     scope='chat',
     request_body={'required': True, 'content': {'application/json': {
-        'schema': {'$ref': '#/components/schemas/ChatCompletionRequest'},
+        'schema': {'$ref': '#/components/schemas/NativeChatCompletionRequest'},
     }}},
     responses={'200': {'description': 'SSE stream of chat.completion.chunk frames',
                        'content': {'text/event-stream': {
@@ -272,39 +116,221 @@ async def chat_stream_direct():
     if not messages:
         return api_bad_request('messages is empty', field='messages')
 
-    model = optional_str(body, 'model', default='', max_len=200)
     cfg_in = optional_dict(body, 'config') or {}
-    from lib.tasks_pkg.entry import build_chat_config
-    cfg = build_chat_config(
-        model, cfg_in,
-        max_tokens=body.get('max_tokens') if 'max_tokens' in body else None,
-        temperature=body.get('temperature') if 'temperature' in body else None,
-        thinking_depth=(body.get('thinking_depth')
-                        or body.get('thinkingDepth') or ''),
+    timeout_s = optional_int(
+        body, 'timeout_s', default=_DIRECT_DEFAULT_TIMEOUT_S,
+        min=1, max=_DIRECT_MAX_TIMEOUT_S,
     )
     requested_id = optional_str(body, 'id', default='', max_len=200)
     completion_id = requested_id or short_id('chatcmpl-')
 
     auth = current_auth()
+    owner_user_id = request_principal().require_owner(
+        context='direct chat stream')
+    if auth is None or auth.owner_user_id is None:
+        return api_bad_request(
+            'caller has no repository owner identity', field='model')
+
+    route_group = None
+    try:
+        model, model_selection, route_group = await asyncio.to_thread(
+            mint_native_request_route,
+            body,
+            owner_user_id=auth.owner_user_id,
+            tenant_id=auth.tenant_id,
+            owner_tag=f'direct-chat:{owner_user_id}',
+        )
+    except ModelRoutingError as exc:
+        return api_bad_request(str(exc), **routing_error_fields(exc))
+    relay_denial = guard_model_relay_or_dispose(route_group)
+    if relay_denial is not None:
+        return relay_denial
+
+    from lib.tasks_pkg.entry import build_chat_config
+    try:
+        cfg = build_chat_config(
+            model, cfg_in,
+            max_tokens=(body.get('max_tokens')
+                        if 'max_tokens' in body else None),
+            temperature=(body.get('temperature')
+                         if 'temperature' in body else None),
+            thinking_depth=(body.get('thinking_depth')
+                            or body.get('thinkingDepth') or ''),
+        )
+    except Exception:
+        dispose_routed_slot_group(route_group)
+        raise
     audit_log('api_chat_stream_direct',
               key_id=(auth.key_id if auth else ''),
               model=cfg.get('model', '?'), n_messages=len(messages))
 
-    inner = run_direct_stream(messages, model=cfg.get('model', model or '?'),
-                              cfg=cfg, completion_id=completion_id)
+    # A direct relay still owns one server-minted request identity so billing
+    # idempotency never depends on a caller-supplied completion id.
+    request_record = {
+        'id': short_id('direct-', 20),
+        'usage': {},
+        '_requested_model_ref': (
+            model_selection.model.public_dict()
+            if model_selection.model is not None
+            else model_selection.provider_offering.public_dict()
+        ),
+    }
+    execution_session = ExecutionSession(
+        execution_id=request_record['id'],
+        kind='chat_direct',
+        owner_user_id=owner_user_id,
+        deadline_seconds=timeout_s,
+    )
+    bind_model_route(
+        execution_session,
+        lambda: dispose_routed_slot_group(route_group),
+    )
+    billing_user_id = auth.account_user_id or ''
+    reservation_micro = 0
+    if billing_user_id:
+        from lib.billing import InsufficientFunds
+        try:
+            reservation_micro = await asyncio.to_thread(
+                reserve_for_task,
+                request_record,
+                user_id=billing_user_id,
+                model=cfg.get('model', '') or '',
+                prompt_tokens=estimate_prompt_tokens(messages),
+                max_completion_tokens=int(cfg.get('maxTokens') or 1024),
+            )
+        except InsufficientFunds as exc:
+            execution_session.settle(
+                ExecutionPhase.FAILED, cause='billing_reservation_refused')
+            return api_error(
+                'Insufficient credits.', status=402,
+                error_kind='insufficient_funds',
+                balance_micro=exc.balance_micro,
+                needed_micro=exc.needed_micro,
+            )
+        except Exception:
+            execution_session.settle(
+                ExecutionPhase.FAILED, cause='billing_reservation_failed')
+            raise
+
+    terminal_metadata: dict = {}
+
+    if billing_user_id:
+        def _settle_direct_billing():
+            billing = settle_task(
+                request_record,
+                user_id=billing_user_id,
+                model=cfg.get('model', '') or '',
+                raise_on_error=True,
+            )
+            if billing:
+                terminal_metadata['billing'] = billing
+            return billing
+
+        bind_billing_reservation(
+            execution_session,
+            reservation_micro=reservation_micro,
+            settle=_settle_direct_billing,
+            release=lambda: release_reservation(
+                request_record,
+                user_id=billing_user_id,
+                reservation_micro=reservation_micro,
+                raise_on_error=True,
+            ),
+        )
 
     # Admission control: shared backpressure with the rest of the headless
-    # surface. Unlike the task path there is no spawn_task; the dispatch runs
-    # inline on the loop, so we release the instant the generator finishes.
+    # surface. The lease follows the upstream dispatch, not the frontend SSE
+    # lifetime, so repeated disconnects cannot create uncounted model work.
     sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
     if sse_rejection is not None:
+        await asyncio.to_thread(
+            execution_session.settle,
+            ExecutionPhase.FAILED,
+            cause='sse_admission_refused',
+        )
         return sse_rejection
-    if not controller.try_acquire():
+    admission_lease = controller.acquire()
+    if admission_lease is None:
         sse_limiter.release(sse_slot_token)
+        await asyncio.to_thread(
+            execution_session.settle,
+            ExecutionPhase.FAILED,
+            cause='task_admission_refused',
+        )
         logger.warning('[chat_direct] admission refused (in_flight=%d/%d)',
                        controller.in_flight, controller.capacity)
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
+    bind_admission_lease(
+        execution_session,
+        lambda: controller.release(admission_lease),
+    )
+    dispatch_terminal: dict = {}
+
+    def _dispatch_started():
+        execution_session.mark_dispatch_started()
+
+    def _settle_dispatch_sync():
+        """Run storage/billing adapters off the event-loop thread."""
+        result = dispatch_terminal.get('result')
+        if isinstance(result, ProviderStreamResult):
+            request_record['usage'] = dict(result.usage or {})
+            dispatch = request_record['usage'].get('_dispatch') or {}
+            if isinstance(dispatch, dict):
+                request_record['provider_id'] = str(
+                    dispatch.get('provider_id') or '')
+        try:
+            if auth.key_id:
+                usage = request_record.get('usage') or {}
+                total = int(usage.get('total_tokens') or (
+                    int(usage.get('prompt_tokens') or usage.get('input_tokens') or 0)
+                    + int(usage.get('completion_tokens') or usage.get('output_tokens') or 0)
+                ))
+                record_tokens(auth.key_id, total)
+                record_usage(
+                    auth.key_id, n_tokens=total,
+                    model=cfg.get('model', '') or '', request_count=0)
+        except Exception as exc:
+            logger.debug(
+                '[chat_direct] usage accounting failed request=%s type=%s',
+                request_record['id'], type(exc).__name__)
+        error = dispatch_terminal.get('error')
+        if error is None and isinstance(result, ProviderStreamResult) \
+                and result.is_verified_complete:
+            outcome = ExecutionPhase.COMPLETED
+            cause = ''
+        elif isinstance(error, (TimeoutError, asyncio.TimeoutError)) \
+                or execution_session.cancel_requested:
+            outcome = ExecutionPhase.TIMED_OUT
+            cause = 'execution_deadline_exceeded'
+        elif isinstance(error, asyncio.CancelledError):
+            outcome = ExecutionPhase.CANCELLED
+            cause = 'dispatch_cancelled'
+        else:
+            outcome = ExecutionPhase.FAILED
+            cause = 'provider_dispatch_failed'
+        dispatch_terminal['execution_receipt'] = execution_session.settle(
+            outcome, cause=cause)
+
+    async def _dispatch_settled():
+        if execution_session.is_terminal:
+            return
+        await asyncio.to_thread(_settle_dispatch_sync)
+
+    inner = run_direct_stream(
+        messages,
+        model=cfg.get('model', model or '?'),
+        cfg=cfg,
+        completion_id=completion_id,
+        owner_user_id=owner_user_id,
+        pinned_provider_id=route_group.pin_id,
+        dispatch_timeout_s=timeout_s,
+        execution_session=execution_session,
+        dispatch_terminal=dispatch_terminal,
+        terminal_metadata=terminal_metadata,
+        on_dispatch_started=_dispatch_started,
+        on_dispatch_settled=_dispatch_settled,
+    )
 
     async def _gen():
         try:
@@ -312,10 +338,30 @@ async def chat_stream_direct():
                 sse_limiter.refresh(sse_slot_token)
                 yield frame
         finally:
-            controller.release()
+            try:
+                await inner.aclose()
+            except (GeneratorExit, asyncio.CancelledError):
+                pass
+            except Exception as e:
+                logger.debug('[chat_direct] relay close failed type=%s',
+                             type(e).__name__)
+            # A response rejected/closed before the inner generator starts has
+            # no _drive callback to release its lease. Once started, _drive is
+            # the sole owner and may outlive this HTTP generator.
+            if not execution_session.dispatch_started:
+                await asyncio.to_thread(
+                    execution_session.settle,
+                    ExecutionPhase.FAILED,
+                    cause='response_closed_before_dispatch',
+                )
             sse_limiter.release(sse_slot_token)
 
-    return sse_response(_gen())
+    return sse_response(
+        _gen(), extra_headers={'X-Tofu-Request-Id': request_record['id']})
 
 
-__all__ = ['api_v1_chat_direct_bp', 'run_direct_stream']
+__all__ = [
+    '_DETACHED_DIRECT_DISPATCHES',
+    'api_v1_chat_direct_bp',
+    'run_direct_stream',
+]

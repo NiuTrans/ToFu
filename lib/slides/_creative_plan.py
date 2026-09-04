@@ -17,8 +17,8 @@ from lib.production.contracts import normalise_narrative_core
 logger = get_logger(__name__)
 
 __all__ = [
-    'LAYOUT_ARCHETYPES', 'NARRATIVE_ROLES', 'normalise_deck_plan',
-    'page_packet',
+    'LAYOUT_ARCHETYPES', 'NARRATIVE_ROLES', 'VISUAL_MODALITIES',
+    'normalise_deck_plan', 'page_packet',
 ]
 
 LAYOUT_ARCHETYPES = (
@@ -29,6 +29,22 @@ NARRATIVE_ROLES = (
     'hook', 'argument', 'explanation', 'evidence', 'contrast', 'progression',
     'resolution',
 )
+VISUAL_MODALITIES = (
+    'hero-image', 'annotated-evidence', 'native-chart', 'native-diagram',
+    'timeline', 'comparison', 'table', 'quote', 'code', 'formula', 'map',
+    'minimal-type',
+)
+
+_LAYOUT_MODALITY = {
+    'full-bleed-hero': 'hero-image',
+    'split-editorial': 'annotated-evidence',
+    'metric-focus': 'native-chart',
+    'diagram-flow': 'native-diagram',
+    'comparison-field': 'comparison',
+    'timeline-ribbon': 'timeline',
+    'evidence-quote': 'quote',
+    'closing-resolve': 'minimal-type',
+}
 
 _NUMBER_RE = re.compile(r'(?:\d[\d,.]*\s*%|\d+(?:\.\d+)?)')
 
@@ -74,15 +90,15 @@ def _role(page: dict, index: int, total: int) -> str:
     }.get(layout, 'argument')
 
 
-def _asset_mode(layout: str, page: dict) -> str:
-    if layout in ('metric-focus', 'diagram-flow', 'comparison-field',
-                  'timeline-ribbon'):
+def _asset_mode(layout: str, modality: str, page: dict) -> str:
+    if modality in ('native-chart', 'native-diagram', 'timeline', 'comparison',
+                    'table', 'code', 'formula', 'map'):
         return 'code'
-    if layout == 'closing-resolve':
+    if modality in ('quote', 'minimal-type'):
         return 'none'
     if page.get('asset_mode') == 'provided':
         return 'provided'
-    if layout in ('full-bleed-hero', 'split-editorial', 'evidence-quote'):
+    if modality in ('hero-image', 'annotated-evidence'):
         return 'generate'
     return 'none'
 
@@ -132,7 +148,18 @@ def normalise_deck_plan(outline: dict) -> dict:
         page['density'] = ('breathing' if index % 3 == 0 or
                            layout in ('full-bleed-hero', 'closing-resolve')
                            else 'dense' if index % 3 == 1 else 'balanced')
-        page['asset_mode'] = _asset_mode(layout, page)
+        modality = str(page.get('visual_modality') or '').strip().lower()
+        if modality not in VISUAL_MODALITIES:
+            modality = _LAYOUT_MODALITY[layout]
+        page['visual_modality'] = modality
+        anchor = re.sub(r'\s+', ' ', str(page.get('visual_anchor') or '')).strip()
+        page['visual_anchor'] = (anchor or message or title)[:280]
+        handoff = re.sub(r'\s+', ' ', str(page.get('handoff') or '')).strip()
+        if not handoff and index + 1 < total:
+            handoff = str(pages[index + 1].get('purpose') or
+                          pages[index + 1].get('key_message') or '')
+        page['handoff'] = handoff[:280]
+        page['asset_mode'] = _asset_mode(layout, modality, page)
         if page['asset_mode'] == 'generate':
             page['asset_prompt'] = _asset_prompt(title, page, layout)
             page['asset_semantic_target'] = message[:280]
@@ -160,11 +187,20 @@ def page_packet(brief: dict, page_index: int, total: int, *,
         f'- narrative role: {brief.get("narrative_role") or "argument"}\n'
         f'- why this page exists: {brief.get("narrative_why") or ""}\n'
         f'- layout archetype: {brief.get("layout_archetype") or "split-editorial"}\n'
+        f'- visual modality: {brief.get("visual_modality") or "annotated-evidence"}\n'
+        f'- recurring visual anchor: {brief.get("visual_anchor") or ""}\n'
+        f'- handoff to next page: {brief.get("handoff") or "(resolution)"}\n'
         f'- density: {brief.get("density") or "balanced"}\n'
         f'- previous page message: {continuity.get("previous_message") or "(opening)"}\n'
         f'- next page message: {continuity.get("next_message") or "(ending)"}\n'
         f'- page position: {page_index + 1}/{total}\n'
         '- Use a shared alignment axis and restrained recurring chrome, but do '
         'not turn the page into a card wall. Honour the named archetype.\n'
+        '- Establish one dominant visual mass occupying roughly 35–65% of the '
+        'canvas on non-table pages. Repeated peers must share exact baselines, '
+        'heights and gaps; avoid manually eyeballed coordinates.\n'
+        '- Prefer semantic process/timeline components for sequences. If a '
+        'chevron is necessary, declare adjustments: [25000]; every arrow '
+        'endpoint must terminate on the named target, never float nearby.\n'
         '- This page must advance the neighbouring messages; do not restate '
         'the narration or duplicate the previous layout.\n')

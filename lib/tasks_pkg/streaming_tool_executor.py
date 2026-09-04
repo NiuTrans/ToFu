@@ -36,11 +36,19 @@ Architecture
 
 import json
 import time
+from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 # See _pipeline.py: futures-TimeoutError is a distinct class on 3.10.
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 
 from lib.log import get_logger
+from lib.tool_call_identity import ensure_unique_tool_call_ids
+from lib.tool_caller_identity import (
+    MAX_TOOL_CALLER_ID_CHARS,
+    normalize_tool_caller,
+    tool_caller_authority,
+)
+from lib.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
 from lib.tools.contracts import (
     ToolContractError,
     validate_tool_arguments_from_documents,
@@ -71,17 +79,22 @@ class _ContentWithDisplayResults(str):
     restore the instance ``__dict__`` after ``__new__``, so the real metadata
     is preserved regardless of this default.
     """
-    def __new__(cls, content: str, display_results: list | None = None):
+    def __new__(cls, content: str, display_results: list | None = None,
+                *, cacheable: bool = True):
         instance = super().__new__(cls, content)
         instance.display_results = display_results if display_results is not None else []
         instance.search_diag = None
         instance.engine_breakdown = None
         instance.vertical = None
+        # Outcome policy, independent of the tool's contract-level
+        # idempotency. Transient failures must fall through to the ordinary
+        # handler instead of becoming an authoritative prefetch hit.
+        instance.cacheable = bool(cacheable)
         return instance
 
 
 class _ContentWithResultProjection(str):
-    """String result carrying bounded, request-local model projection items.
+    """String result carrying bounded, request-local result sidecars.
 
     Batched ``read_files`` still returns its legacy plain-text representation,
     but the V2 result budget needs the producer's per-file boundaries to avoid
@@ -90,10 +103,12 @@ class _ContentWithResultProjection(str):
     the sidecar through the streaming future into the dedup cache.
     """
 
-    def __new__(cls, content: str, projection_items: list | None = None):
+    def __new__(cls, content: str, projection_items: list | None = None,
+                *, producer_metadata: dict | None = None):
         instance = super().__new__(cls, content)
         instance.result_projection_items = (
             projection_items if projection_items is not None else [])
+        instance.result_producer_metadata = producer_metadata
         return instance
 
 
@@ -103,9 +118,86 @@ _STREAMABLE_TOOLS = frozenset({
     'read_files', 'grep_search', 'find_files', 'list_dir',
     'web_search', 'fetch_url',
 })
+def _stream_prefetch_worker_limit(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Reuse the launch-probed tool budget, retaining the historical hard 4."""
+    from runtime_guards import resolve_resource_budget
+    return min(4, resolve_resource_budget(
+        'TOOL_MAX_PARALLEL_WORKERS',
+        environment,
+        minimum=1,
+        maximum=32,
+    ))
+
+
+_stream_prefetch_workers_cache: int | None = None
+
+
+def _stream_prefetch_workers() -> int:
+    """Return the prefetch pool size, resolved lazily on first use.
+
+    The launch probe was previously evaluated at import time, so a probe
+    failure could raise while importing an unrelated module and the value was
+    frozen before any operator override could be read. Resolve once at first
+    use instead; a probe failure falls back to the lean single-worker floor (a
+    speculative latency optimization must never take down streaming).
+    """
+    global _stream_prefetch_workers_cache
+    if _stream_prefetch_workers_cache is None:
+        try:
+            _stream_prefetch_workers_cache = _stream_prefetch_worker_limit()
+        except Exception as error:
+            logger.warning(
+                '[StreamingToolExec] prefetch worker probe failed; '
+                'falling back to 1 worker: %s', error)
+            _stream_prefetch_workers_cache = 1
+    return _stream_prefetch_workers_cache
+
+
+# Speculative prefetch ceiling: at most 8 read-only calls per stream are
+# submitted early. Calls beyond this still execute through ordinary post-stream
+# dispatch, so the bound never drops a model occurrence.
+_MAX_STREAM_PREFETCH_CALLS = 8
 
 # ── Internal tool prefixes to skip (proxy artifacts, not real tools) ──
 _INTERNAL_TOOL_PREFIXES = ('antml:', 'anthropic.', '__')
+
+
+def _stream_occurrence_signature(tool_call: dict) -> tuple | None:
+    """Return a strict identity for one callback-visible response position.
+
+    A provider retry is a new response attempt even when it recycles the same
+    correlation id.  Within one attempt, the signature lets us distinguish an
+    exact duplicate callback from a second, conflicting position before the
+    ordinary dispatch layer gets a chance to remint duplicate ids.
+    """
+    if not isinstance(tool_call, dict):
+        return None
+    function = tool_call.get('function')
+    if not isinstance(function, dict):
+        return None
+    name = function.get('name')
+    arguments = function.get('arguments')
+    if not isinstance(name, str) or not name or not isinstance(arguments, str):
+        return None
+    try:
+        decoded_arguments = json.loads(arguments) if arguments.strip() else {}
+        canonical_arguments = json.dumps(
+            decoded_arguments, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':'), default=str)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        canonical_arguments = f'raw:{arguments}'
+
+    caller, caller_error = normalize_tool_caller(
+        tool_call.get('caller') if 'caller' in tool_call else None,
+        require_program_identity=False,
+    )
+    if caller_error:
+        return None
+    authority = (tool_caller_authority(caller)
+                 if caller is not None else ('root', ''))
+    return name, canonical_arguments, authority
 
 
 def _has_executable_target(fn_name: str, fn_args: dict) -> bool:
@@ -127,7 +219,8 @@ def _has_executable_target(fn_name: str, fn_args: dict) -> bool:
             for s in urls
         ):
             return True
-        return bool((fn_args.get('url') or '').strip())
+        url = fn_args.get('url')
+        return isinstance(url, str) and bool(url.strip())
     if fn_name == 'web_search':
         queries = fn_args.get('queries')
         if isinstance(queries, list) and any(
@@ -135,7 +228,8 @@ def _has_executable_target(fn_name: str, fn_args: dict) -> bool:
             for s in queries
         ):
             return True
-        return bool((fn_args.get('query') or '').strip())
+        query = fn_args.get('query')
+        return isinstance(query, str) and bool(query.strip())
     # Project tools (read_files, grep_search, …) — let the handler validate.
     return True
 
@@ -185,14 +279,24 @@ class StreamingToolAccumulator:
         self._tool_round_num = tool_round_num
         self._round_num = round_num
         self._project_enabled = project_enabled
-        self._pool = ThreadPoolExecutor(max_workers=4,
+        self._pool = ThreadPoolExecutor(max_workers=_stream_prefetch_workers(),
                                         thread_name_prefix='stream-tool')
+        self._closed = False
         # tc_id → (future, fn_name, fn_args, submit_time)
         self._futures: dict[str, tuple[Future, str, dict, float]] = {}
         self._submitted_count = 0
+        self._prefetch_limit_logged = False
         self._tid = task['id'][:8]
         # tc_id → (rn, round_entry) for tools already announced via tool_start
         self._announced: dict[str, tuple[int, dict]] = {}
+        self._announced_signatures: dict[str, tuple] = {}
+        # Rows/futures from a provider attempt that was explicitly discarded
+        # must remain visible long enough to receive a terminal verdict, but
+        # they are never candidates for the adopted response or its cache.
+        self._discarded_announced: list[tuple[str, int, dict]] = []
+        self._discarded_futures: list[Future] = []
+        self._claimed_callback_ids: set[str] = set()
+        self._announced_count = 0
         self._first_announced = True  # for assistantContent tagging
 
     @property
@@ -202,8 +306,59 @@ class StreamingToolAccumulator:
 
     @property
     def announced_tc_map(self) -> dict[str, tuple[int, dict]]:
-        """Map of tc_id → (roundNum, round_entry) for already-announced tools."""
+        """Active adopted-attempt rows eligible for parser reconciliation."""
         return dict(self._announced)
+
+    @property
+    def announced_count(self) -> int:
+        """Total rows announced, including rows from discarded attempts."""
+        return self._announced_count
+
+    def close(self, *, cancel_futures: bool = True,
+              wait: bool = False) -> None:
+        """Idempotently release speculative work on every round exit path."""
+        if self._closed:
+            return
+        self._closed = True
+        if cancel_futures:
+            for future, _name, _args, _started in self._futures.values():
+                future.cancel()
+            for future in self._discarded_futures:
+                future.cancel()
+        try:
+            self._pool.shutdown(
+                wait=wait, cancel_futures=cancel_futures)
+        except Exception as error:
+            logger.warning(
+                '[%s] StreamingToolExec: pool shutdown failed: %s',
+                self._tid, error)
+        finally:
+            self._futures.clear()
+            self._discarded_futures.clear()
+
+    def on_provider_attempt_restart(self, *, reason: str = '') -> None:
+        """Retire all early work owned by a discarded provider attempt.
+
+        The retry callback fires before the replacement request starts.  Keep
+        its rows for an explicit ``aborted`` settlement, clear them from the
+        parser's adoption map, and quarantine its read-only futures so their
+        results can never satisfy the replacement response by content alone.
+        """
+        if not self._announced and not self._futures:
+            return
+        for tc_id, (round_num, round_entry) in self._announced.items():
+            self._discarded_announced.append((tc_id, round_num, round_entry))
+        self._announced.clear()
+        self._announced_signatures.clear()
+        for future, _name, _args, _started in self._futures.values():
+            future.cancel()
+            self._discarded_futures.append(future)
+        self._futures.clear()
+        logger.info(
+            '[%s] StreamingToolExec: retired discarded provider attempt '
+            '(rows=%d futures=%d reason=%s)',
+            self._tid, len(self._discarded_announced),
+            len(self._discarded_futures), reason or 'retry')
 
     def reconcile_announced_rounds(self, assistant_msg: dict) -> int:
         """Settle orphan early-announced rounds whose tc_id was superseded.
@@ -252,7 +407,7 @@ class StreamingToolAccumulator:
 
         Returns the number of orphan rounds finalized.
         """
-        if not self._announced:
+        if not self._announced and not self._discarded_announced:
             return 0
         # True cause of any orphan this call settles (see docstring): FloorRetry
         # adoption re-minted tc_ids, vs a transient stream retry. Read the marker
@@ -262,16 +417,41 @@ class StreamingToolAccumulator:
         _cause = ('a FloorRetry resend adoption (identical-body cache-floor '
                   'recovery re-minted tc_ids)' if _fr_adopted
                   else 'a discarded stream-retry attempt')
-        final_ids = {
-            (tc.get('id') or '')
-            for tc in (assistant_msg.get('tool_calls') or [])
-            if isinstance(tc, dict)
-        }
-        orphans = [
-            (tc_id, rn, entry)
-            for tc_id, (rn, entry) in self._announced.items()
-            if tc_id not in final_ids
-        ]
+        # A recovered FloorRetry response is dispatched with the callback
+        # disabled.  If it is adopted, every row/future announced by the
+        # original response is non-authoritative even when the resend happens
+        # to recycle the same call id.
+        if _fr_adopted:
+            self.on_provider_attempt_restart(reason='floor-retry adoption')
+
+        final_occurrences: dict[str, list[tuple]] = {}
+        raw_final_calls = (
+            assistant_msg.get('tool_calls')
+            if isinstance(assistant_msg, dict) else None)
+        for tool_call in raw_final_calls if isinstance(raw_final_calls, list) else []:
+            if not isinstance(tool_call, dict):
+                continue
+            call_id = tool_call.get('id')
+            signature = _stream_occurrence_signature(tool_call)
+            if (isinstance(call_id, str) and call_id and signature is not None):
+                final_occurrences.setdefault(call_id, []).append(signature)
+
+        orphans = list(self._discarded_announced)
+        self._discarded_announced.clear()
+        for tc_id, (rn, entry) in list(self._announced.items()):
+            signature = self._announced_signatures.get(tc_id)
+            candidates = final_occurrences.get(tc_id) or []
+            if signature in candidates:
+                candidates.remove(signature)
+                continue
+            orphans.append((tc_id, rn, entry))
+            self._announced.pop(tc_id, None)
+            self._announced_signatures.pop(tc_id, None)
+            discarded_future = self._futures.pop(tc_id, None)
+            if discarded_future is not None:
+                future = discarded_future[0]
+                future.cancel()
+                self._discarded_futures.append(future)
         if not orphans:
             return 0
 
@@ -303,12 +483,22 @@ class StreamingToolAccumulator:
                 'badge': 'superseded',
                 'interrupted': True,
             }
+            # This row is a discarded transport-attempt announcement, not a
+            # tool execution.  Stamp the semantic marker before settlement so
+            # both the fallback path and every persisted projection retain it.
+            entry[SUPERSEDED_PROVIDER_ATTEMPT_FIELD] = True
             try:
                 # The verdict goes THROUGH the seam so the emitted tool_result
                 # frame and the persisted round agree — a post-hoc downgrade
                 # would ship a 'done' frame for an 'aborted' round.
-                _finalize_tool_round(self._task, rn, entry, [meta],
-                                     query_override=query, status='aborted')
+                _finalize_tool_round(
+                    self._task, rn, entry, [meta],
+                    query_override=query,
+                    status='aborted',
+                    extra_event_fields={
+                        SUPERSEDED_PROVIDER_ATTEMPT_FIELD: True,
+                    },
+                )
                 finalized += 1
                 logger.info(
                     '[%s] StreamingToolExec: settled orphan early-announced '
@@ -348,11 +538,22 @@ class StreamingToolAccumulator:
            (so the frontend shows "Searching…" / "Running…" right away).
         2. Submits read-only, concurrency-safe tools for pre-execution.
         """
-        fn_name = tool_call.get('function', {}).get('name', '')
+        if not isinstance(tool_call, dict):
+            return
+        if self._closed:
+            return
+        function = tool_call.get('function')
+        if not isinstance(function, dict):
+            return
+        fn_name = function.get('name', '')
         tc_id = tool_call.get('id', '')
-        fn_args_raw = tool_call.get('function', {}).get('arguments', '')
+        fn_args_raw = function.get('arguments', '')
 
-        if not fn_name or not tc_id:
+        if (not isinstance(fn_name, str) or not isinstance(tc_id, str)
+                or not isinstance(fn_args_raw, str)
+                or not fn_name or not tc_id
+                or len(fn_name) > 512
+                or len(tc_id) > MAX_TOOL_CALLER_ID_CHARS):
             return
 
         # Skip internal/spurious tool names (proxy artifacts)
@@ -367,20 +568,29 @@ class StreamingToolAccumulator:
         # Defer program-issued calls until post-stream reconciliation so the
         # canonical program parent + hard call budget exist before any child
         # is announced or executed. Direct calls keep the latency prefetch.
-        caller = tool_call.get('caller')
-        if isinstance(caller, dict) and caller.get('type') == 'program':
+        caller, caller_error = normalize_tool_caller(
+            tool_call.get('caller'), require_program_identity=False)
+        caller_type = caller.get('type') if caller is not None else ''
+        if ('caller' in tool_call and tool_call.get('caller') is not None
+                and caller_error is not None):
+            logger.warning(
+                '[%s] StreamingToolExec: deferring invalid attributed call '
+                '%s (tc_id=%s) to the authority validator',
+                self._tid, fn_name, tc_id[:8])
+            return
+        if caller is not None:
+            tool_call['caller'] = caller
+        if caller_type == 'program':
             logger.debug(
                 '[%s] StreamingToolExec: deferring program child %s '
                 '(tc_id=%s caller=%s) until parent reconciliation',
                 self._tid, fn_name, tc_id[:8], caller.get('caller_id', ''))
             return
 
-        # Note: we do NOT filter empty-args tool calls here.  During streaming
-        # we can't tell phantom calls (model started a slot, never sent args)
-        # from legitimate no-arg tools.  The post-stream
-        # filter in lib/llm/stream.py handles phantom detection using same-name
-        # comparison.  A stray tool_start event for a phantom is harmless — it
-        # just won't get a matching tool_done.
+        # Do not filter empty-args calls here. A distinct provider occurrence
+        # may be a legitimate no-arg call; otherwise the request-owned schema
+        # validator returns its typed rejection after streaming. Similarity to
+        # a same-named sibling is not evidence that either occurrence is fake.
 
         # ── Parse arguments ──
         try:
@@ -389,18 +599,27 @@ class StreamingToolAccumulator:
             # Can't parse → still emit tool_start with empty args for UI feedback
             logger.debug('[streaming_tool_executor] on_tool_call_ready caught %s: %s', type(_e_audit).__name__, _e_audit)
             fn_args = {}
+        if not isinstance(fn_args, dict):
+            logger.warning(
+                '[%s] StreamingToolExec: deferring non-object arguments for '
+                '%s (tc_id=%s) to the typed parser',
+                self._tid, fn_name, tc_id[:8])
+            fn_args = {}
+            contract_allows_prefetch = False
+        else:
+            contract_allows_prefetch = True
 
         # A read-only prefetch still executes real code. Validate it against
         # the same request-owned contract before submitting the future; the
         # post-stream parser will render the typed rejection. ``None`` keeps
         # old standalone/test callers read-compatible, while a present map
         # (including an empty one) fails closed on schema drift.
-        contract_allows_prefetch = True
         try:
-            fn_args = validate_tool_arguments_from_documents(
-                (self._task.get('_toolContractDocumentsByName')
-                 if '_toolContractDocumentsByName' in self._task else None),
-                fn_name, fn_args)
+            if contract_allows_prefetch:
+                fn_args = validate_tool_arguments_from_documents(
+                    (self._task.get('_toolContractDocumentsByName')
+                     if '_toolContractDocumentsByName' in self._task else None),
+                    fn_name, fn_args)
         except ToolContractError as exc:
             contract_allows_prefetch = False
             logger.warning(
@@ -408,32 +627,88 @@ class StreamingToolAccumulator:
                 'tool=%s code=%s path=%s',
                 self._tid, fn_name, exc.code, exc.path)
 
+        occurrence_signature = _stream_occurrence_signature(tool_call)
+        if tc_id in self._announced:
+            if self._announced_signatures.get(tc_id) == occurrence_signature:
+                # This may be a retransmitted callback or a distinct exact twin.
+                # One early row/prefetch is enough for latency; the final parser
+                # still retains and independently settles every response position.
+                logger.warning(
+                    '[%s] StreamingToolExec: duplicate callback call_id=%s '
+                    'ignored before announcement/prefetch',
+                    self._tid, tc_id[:8])
+                return
+            # Same id, different action in one response: repair the callback
+            # object itself. SSE finalization retains this object, so the final
+            # assistant protocol and early row share the fresh identity.
+            ensure_unique_tool_call_ids(
+                [tool_call], self._claimed_callback_ids,
+                id_prefix=f'stream_r{self._round_num}')
+            tc_id = tool_call['id']
+            logger.warning(
+                '[%s] StreamingToolExec: conflicting callback call_id reminted '
+                'before announcement (tool=%s id=%s)',
+                self._tid, fn_name, tc_id[:12])
+        elif tc_id in self._claimed_callback_ids:
+            # The same provider id came back after an explicit attempt restart.
+            # It is a new response occurrence even when payload bytes match.
+            ensure_unique_tool_call_ids(
+                [tool_call], self._claimed_callback_ids,
+                id_prefix=f'stream_retry_r{self._round_num}')
+            tc_id = tool_call['id']
+        else:
+            self._claimed_callback_ids.add(tc_id)
+
         # ── Emit tool_start SSE event immediately ──
         try:
             self._emit_tool_start(
                 fn_name, fn_args, tc_id,
                 json.dumps(fn_args, ensure_ascii=False, separators=(',', ':')),
-                caller=tool_call.get('caller'))
+                caller=tool_call.get('caller'),
+                signature_arguments=fn_args_raw)
         except Exception as e:
             logger.debug('[%s] StreamingToolExec: tool_start emission failed '
                          'for %s: %s', self._tid, fn_name, e)
 
         # ── Pre-execute read-only tools ──
         if (contract_allows_prefetch and fn_name in _STREAMABLE_TOOLS and fn_args
-                and _has_executable_target(fn_name, fn_args)):
+                and _has_executable_target(fn_name, fn_args)
+                and self._submitted_count < _MAX_STREAM_PREFETCH_CALLS):
             self._submitted_count += 1
             t0 = time.time()
             logger.info('[%s] StreamingToolExec: pre-executing %s (tc_id=%s) '
                         'while model streams',
                         self._tid, fn_name, tc_id[:8])
 
-            future = self._pool.submit(
-                self._execute_one, fn_name, fn_args
-            )
+            try:
+                future = self._pool.submit(
+                    self._execute_one, fn_name, fn_args
+                )
+            except Exception as error:
+                self._submitted_count -= 1
+                # Speculative prefetch is an observer/latency optimization.
+                # Pool shutdown/saturation must not escape into the provider
+                # SSE callback and terminate an otherwise healthy model stream;
+                # the ordinary post-stream tool path will execute this call.
+                logger.warning(
+                    '[%s] StreamingToolExec: prefetch submit failed for %s '
+                    '(tc_id=%s); deferring to post-stream execution: %s',
+                    self._tid, fn_name, tc_id[:8], error,
+                )
+                return
             self._futures[tc_id] = (future, fn_name, fn_args, t0)
+        elif (contract_allows_prefetch and fn_name in _STREAMABLE_TOOLS
+              and fn_args and _has_executable_target(fn_name, fn_args)
+              and not self._prefetch_limit_logged):
+            self._prefetch_limit_logged = True
+            logger.warning(
+                '[%s] StreamingToolExec: speculative queue reached %d calls; '
+                'remaining occurrences will execute through normal dispatch',
+                self._tid, _MAX_STREAM_PREFETCH_CALLS)
 
     def _emit_tool_start(self, fn_name: str, fn_args: dict, tc_id: str,
-                         tc_args_str: str, caller=None):
+                         tc_args_str: str, caller=None,
+                         signature_arguments: str | None = None):
         """Emit a tool_start SSE event + append round entry to task.
 
         Uses the same ``_build_tool_round_entry`` as ``parse_tool_calls``
@@ -473,6 +748,27 @@ class StreamingToolAccumulator:
 
         # Track as announced
         self._announced[tc_id] = (rn, round_entry)
+        # The announced identity must derive from the SAME wire bytes the
+        # final assembled assistant message carries. ``tc_args_str`` is the
+        # validated serialization, and the contract validator fills schema
+        # defaults (contracts._validate) — keying on it orphans every call
+        # whose model omitted a defaulted arg once reconcile matches against
+        # the raw final ``function.arguments``.
+        signature_call = {
+            'id': tc_id,
+            'function': {
+                'name': fn_name,
+                'arguments': (signature_arguments
+                              if isinstance(signature_arguments, str)
+                              else tc_args_str),
+            },
+        }
+        if caller is not None:
+            signature_call['caller'] = caller
+        signature = _stream_occurrence_signature(signature_call)
+        if signature is not None:
+            self._announced_signatures[tc_id] = signature
+        self._announced_count += 1
 
         logger.info('[%s] StreamingToolExec: early tool_start emitted for '
                     '%s (tc_id=%s, rn=%d) — UI shows activity immediately',
@@ -491,7 +787,8 @@ class StreamingToolAccumulator:
         if self._task.get('aborted'):
             logger.info('[%s] StreamingToolExec: skipping %s — task aborted',
                         self._tid, fn_name)
-            return 'Task aborted by user.'
+            return _ContentWithDisplayResults(
+                'Task aborted by user.', cacheable=False)
 
         try:
             if fn_name in ('read_files', 'grep_search', 'find_files',
@@ -529,9 +826,19 @@ class StreamingToolAccumulator:
                         logger.debug('[%s] StreamingToolExec: freshness '
                                      'read-token record failed (non-fatal): %s',
                                      self._tid, _fe)
-                    if isinstance(_content, str) and _projection_items:
-                        _content = _ContentWithResultProjection(
-                            _content, _projection_items)
+                _producer_metadata = None
+                if fn_name == 'grep_search' and isinstance(_content, str):
+                    from lib.project_mod.read_tools import (
+                        grep_result_was_truncated,
+                    )
+                    if grep_result_was_truncated(_content):
+                        _producer_metadata = {
+                            'status': 'partial', 'truncated': True}
+                if (isinstance(_content, str)
+                        and (_projection_items or _producer_metadata)):
+                    _content = _ContentWithResultProjection(
+                        _content, _projection_items,
+                        producer_metadata=_producer_metadata)
                 return _content
 
             elif fn_name == 'web_search':
@@ -554,6 +861,18 @@ class StreamingToolAccumulator:
                 )
                 from tofu_search.search import format_search_for_tool_response
                 user_question = self._task.get('lastUserQuery', '')
+                from lib.search_bridge import bind_search_browser
+                owner_user_id = self._task.get('_userId', '') or ''
+                configured_client_id = (
+                    (self._task.get('config') or {}).get('browserClientId') or '')
+
+                # Resolve an unselected browser once, then bind that exact
+                # owner/device inside every worker thread. ContextVars do not
+                # propagate through ThreadPoolExecutor on their own.
+                with bind_search_browser(
+                        user_id=owner_user_id,
+                        client_id=configured_client_id) as selected_binding:
+                    selected_client_id = selected_binding[1]
 
                 # Batch mode: run concurrent searches (lightweight, no SSE events)
                 # Parity with serial _handle_web_search_batch (handlers/search.py):
@@ -576,8 +895,11 @@ class StreamingToolAccumulator:
 
                     def _worker(spec):
                         q, f, v = spec
-                        results, search_diag, _bkdn, vertical_result = _web_search_one(
-                            q, user_question, f, vertical=v)
+                        with bind_search_browser(
+                                user_id=owner_user_id,
+                                client_id=selected_client_id):
+                            results, search_diag, _bkdn, vertical_result = _web_search_one(
+                                q, user_question, f, vertical=v)
                         fmt = format_search_for_tool_response(results, search_diag=search_diag, query=q)
                         if vertical_result:
                             fmt = _vertical_header_for_llm(vertical_result) + fmt
@@ -617,8 +939,11 @@ class StreamingToolAccumulator:
                 query = fn_args.get('query', '')
                 vertical_param = fn_args.get('vertical', 'auto')
                 freshness = fn_args.get('freshness', '')
-                results, search_diag, engine_breakdown, vertical_result = _web_search_one(
-                    query, user_question, freshness, vertical=vertical_param)
+                with bind_search_browser(
+                        user_id=owner_user_id,
+                        client_id=selected_client_id):
+                    results, search_diag, engine_breakdown, vertical_result = _web_search_one(
+                        query, user_question, freshness, vertical=vertical_param)
                 formatted_text = format_search_for_tool_response(results, search_diag=search_diag, query=query)
                 if vertical_result:
                     formatted_text = _vertical_header_for_llm(vertical_result) + formatted_text
@@ -649,6 +974,14 @@ class StreamingToolAccumulator:
                 from lib.tasks_pkg.handlers.search._display import _format_fetch_display
                 from lib.tasks_pkg.tool_display import _short_url
                 user_question = self._task.get('lastUserQuery', '')
+                from lib.search_bridge import bind_search_browser
+                owner_user_id = self._task.get('_userId', '') or ''
+                configured_client_id = (
+                    (self._task.get('config') or {}).get('browserClientId') or '')
+                with bind_search_browser(
+                        user_id=owner_user_id,
+                        client_id=configured_client_id) as selected_binding:
+                    selected_client_id = selected_binding[1]
 
                 # Batch mode: run concurrent fetches (lightweight, no SSE events)
                 # Parity with the serial batch worker (handlers/search.py:614) —
@@ -663,8 +996,15 @@ class StreamingToolAccumulator:
                     ]
                     parts = [None] * len(url_list)
                     display_results = [None] * len(url_list)
+                    def _worker(target_url):
+                        with bind_search_browser(
+                                user_id=owner_user_id,
+                                client_id=selected_client_id):
+                            return _fetch_url_one(
+                                target_url, user_question, '')
+
                     with _TP(max_workers=min(len(url_list), 8)) as pool:
-                        futs = {pool.submit(_fetch_url_one, u, user_question, ''): i
+                        futs = {pool.submit(_worker, u): i
                                 for i, u in enumerate(url_list)}
                         for f in _ac(futs):
                             idx = futs[f]
@@ -693,20 +1033,35 @@ class StreamingToolAccumulator:
                     formatted = _ContentWithDisplayResults(
                         '\n\n'.join(p for p in parts if p),
                         [d for d in display_results if d is not None],
+                        cacheable=all(
+                            part is not None
+                            and not part.startswith('Failed to fetch ')
+                            for part in parts),
                     )
                     return formatted
 
                 url = fn_args.get('url', '')
                 fetch_reason = fn_args.get('reason', '')
-                item = _fetch_url_one(url, user_question, fetch_reason=fetch_reason)
+                with bind_search_browser(
+                        user_id=owner_user_id,
+                        client_id=selected_client_id):
+                    item = _fetch_url_one(
+                        url, user_question, fetch_reason=fetch_reason)
                 page_content = item.get('page_content')
                 filtered_chars = item.get('filtered_chars', 0)
                 error_msg = item.get('error_msg')
                 if page_content:
-                    return (f"Content from {url} "
-                            f"({filtered_chars:,} chars):\n\n{page_content}")
-                return (f"Failed to fetch {url}."
-                        + (f' ({error_msg})' if error_msg else ''))
+                    return _ContentWithDisplayResults(
+                        f"Content from {url} "
+                        f"({filtered_chars:,} chars):\n\n{page_content}",
+                        [_format_fetch_display(item, _short_url)],
+                    )
+                return _ContentWithDisplayResults(
+                    f"Failed to fetch {url}."
+                    + (f' ({error_msg})' if error_msg else ''),
+                    [_format_fetch_display(item, _short_url)],
+                    cacheable=False,
+                )
 
             return ''
 
@@ -804,11 +1159,12 @@ class StreamingToolAccumulator:
         Returns:
             Count of successfully injected results.
         """
-        if '_tool_result_cache' not in task:
-            task['_tool_result_cache'] = {}
-        cache = task['_tool_result_cache']
-
-        from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
+        from lib.tasks_pkg.tool_dispatch._flags import (
+            _ensure_tool_result_cache,
+            _make_cache_key,
+            _store_tool_result_cache_entry,
+        )
+        _ensure_tool_result_cache(task)
 
         injected = 0
         # First pass: collect already-done futures immediately
@@ -817,6 +1173,12 @@ class StreamingToolAccumulator:
             if future.done() and not future.cancelled():
                 try:
                     content = future.result(timeout=0)
+                    if not getattr(content, 'cacheable', True):
+                        logger.info(
+                            '[%s] StreamingToolExec: %s pre-exec outcome is '
+                            'not cacheable; deferring to normal pipeline',
+                            self._tid, fn_name)
+                        continue
                     elapsed = time.time() - t0
                     is_search = fn_name in ('web_search',)
                     cache_key = _make_cache_key(fn_name, fn_args)
@@ -830,13 +1192,18 @@ class StreamingToolAccumulator:
                     _sd = getattr(content, 'search_diag', None)
                     _projection = getattr(
                         content, 'result_projection_items', None)
+                    _producer_metadata = getattr(
+                        content, 'result_producer_metadata', None)
                     cache_val, content_len = self._prepare_cache_value(content, fn_name)
                     cache_entry = (
                         cache_val, is_search, 'prefetch', _disp, _eng_bkdn,
                         _vert, _sd)
-                    if _projection is not None:
+                    if _projection is not None or _producer_metadata is not None:
                         cache_entry += (_projection,)
-                    cache[cache_key] = cache_entry
+                    if _producer_metadata is not None:
+                        cache_entry += (_producer_metadata,)
+                    _store_tool_result_cache_entry(
+                        task, cache_key, cache_entry)
                     injected += 1
                     logger.info('[%s] StreamingToolExec: injected %s into '
                                 'dedup cache (%.1fs, %d chars%s)',
@@ -853,6 +1220,7 @@ class StreamingToolAccumulator:
         # in-progress and would be executed serially anyway, so waiting
         # is always faster than cancelling + re-executing.
         # BUT: if user aborted, cancel remaining futures immediately.
+        _stragglers_timed_out = False
         if pending and task.get('aborted'):
             logger.info('[%s] StreamingToolExec: task aborted — cancelling %d '
                         'pending tool(s): %s',
@@ -902,6 +1270,12 @@ class StreamingToolAccumulator:
                                          'timeout probe unavailable: %s',
                                          self._tid, _e)
                     content = future.result(timeout=_wait_timeout)
+                    if not getattr(content, 'cacheable', True):
+                        logger.info(
+                            '[%s] StreamingToolExec: waited %s outcome is not '
+                            'cacheable; deferring to normal pipeline',
+                            self._tid, fn_name)
+                        continue
                     elapsed = time.time() - t0
                     is_search = fn_name in ('web_search',)
                     cache_key = _make_cache_key(fn_name, fn_args)
@@ -911,19 +1285,25 @@ class StreamingToolAccumulator:
                     _sd = getattr(content, 'search_diag', None)
                     _projection = getattr(
                         content, 'result_projection_items', None)
+                    _producer_metadata = getattr(
+                        content, 'result_producer_metadata', None)
                     cache_val, content_len = self._prepare_cache_value(content, fn_name)
                     cache_entry = (
                         cache_val, is_search, 'prefetch', _disp, _eng_bkdn,
                         _vert, _sd)
-                    if _projection is not None:
+                    if _projection is not None or _producer_metadata is not None:
                         cache_entry += (_projection,)
-                    cache[cache_key] = cache_entry
+                    if _producer_metadata is not None:
+                        cache_entry += (_producer_metadata,)
+                    _store_tool_result_cache_entry(
+                        task, cache_key, cache_entry)
                     injected += 1
                     logger.info('[%s] StreamingToolExec: waited and injected '
                                 '%s into dedup cache (%.1fs, %d chars%s)',
                                 self._tid, fn_name, elapsed, content_len,
                                 ', %d display_results' % len(_disp) if _disp else '')
                 except (TimeoutError, _FuturesTimeoutError):
+                    _stragglers_timed_out = True
                     logger.warning('[%s] StreamingToolExec: %s timed out after '
                                    '%ds, deferring to normal pipeline',
                                    self._tid, fn_name, _wait_timeout)
@@ -932,9 +1312,18 @@ class StreamingToolAccumulator:
                                  'deferring to normal pipeline: %s',
                                  self._tid, fn_name, e)
 
-        # Shutdown thread pool — cancel futures on abort, wait otherwise
+        # Shutdown thread pool — cancel futures on abort, wait otherwise.
+        # ``dispatch`` also calls this idempotently from ``finally`` so a
+        # provider break/exception cannot strand queued speculative closures.
+        # If any future timed out above it is still running; waiting again
+        # (wait=True) would re-block the round past its deadline on the same
+        # stragglers. Cancel the pending subset and return without waiting,
+        # while keeping the normal fast path blocking.
         _aborted = task.get('aborted', False)
-        self._pool.shutdown(wait=not _aborted, cancel_futures=_aborted)
+        if _stragglers_timed_out:
+            self.close(cancel_futures=True, wait=False)
+        else:
+            self.close(cancel_futures=_aborted, wait=not _aborted)
 
         _total = self._submitted_count
         if _total > 0:

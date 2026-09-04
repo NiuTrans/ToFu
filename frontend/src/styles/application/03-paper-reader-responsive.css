@@ -1,0 +1,68 @@
+/* Paper loading/error states and the responsive single-pane reader layout. */
+.paper-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--text-secondary);font-size:13px}
+.paper-loading-spinner{width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:paperSpin .8s linear infinite}
+@keyframes paperSpin{to{transform:rotate(360deg)}}
+.paper-fetch-progress{max-width:420px;margin:0 auto;width:100%;text-align:center}
+.paper-fetch-title{color:var(--text-primary);font-weight:500;font-size:13px}
+.paper-fetch-id{color:var(--text-tertiary);font-weight:400;font-size:12px;margin-left:6px;font-family:var(--font-mono,monospace)}
+.paper-fetch-bar-wrap{width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px}
+.paper-fetch-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .15s ease}
+.paper-fetch-detail{color:var(--text-tertiary);font-size:12px;font-variant-numeric:tabular-nums}
+@keyframes paperProgressIndet{0%{margin-left:-40%}100%{margin-left:100%}}
+.paper-error{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:40px;color:var(--text-tertiary);font-size:13px;text-align:center}
+.paper-error-detail{font-size:12px;color:var(--text-secondary);max-width:560px;word-break:break-word;font-family:var(--font-mono,monospace)}
+.paper-retry-btn{margin-top:8px;padding:8px 20px;border:1px solid var(--border);border-radius:8px;background:var(--bg-hover);color:var(--text-primary);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit}
+.paper-retry-btn:hover{background:var(--bg-tertiary);border-color:var(--border-light)}
+
+/* On phones and coarse-pointer portrait tablets, a side-by-side PDF/reader
+ * would make both panes unusable. The JS matchMedia owner mirrors this exact
+ * predicate and writes data-paper-view; these rules only project that state. */
+@media(max-width:768px),(max-width:1024px) and (pointer:coarse){
+  /* Reserve the fixed switcher plus the platform safe area. */
+  .paper-mode-container{--paper-switch-h:calc(54px + env(safe-area-inset-bottom,0px))}
+  .paper-body{position:relative;flex-direction:row;padding-bottom:var(--paper-switch-h)}
+  /* Both panes overlay the same area. !important clears stale widths left by
+   * a desktop divider drag before a viewport/orientation transition. */
+  .paper-left,.paper-right{position:absolute!important;inset:0;width:auto!important;max-width:none!important;min-width:0!important;flex:none!important;border:none!important}
+  .paper-body[data-paper-view="pdf"] .paper-left{display:flex;z-index:2}
+  .paper-body[data-paper-view="pdf"] .paper-right{display:none}
+  .paper-body[data-paper-view="reader"] .paper-right{display:flex;z-index:2}
+  .paper-body[data-paper-view="reader"] .paper-left{display:none}
+  .paper-divider{display:none}
+
+  .paper-mobile-switch{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:25;height:var(--paper-switch-h);padding-bottom:env(safe-area-inset-bottom,0px);background:var(--bg-secondary);border-top:1px solid var(--border);box-shadow:0 -2px 12px rgba(0,0,0,0.12)}
+  .paper-mobile-switch-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;border:none;background:none;color:var(--text-tertiary);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent;border-top:2px solid transparent;transition:color .15s,background .15s}
+  .paper-mobile-switch-btn svg{flex-shrink:0}
+  .paper-mobile-switch-btn.active{color:var(--accent);background:var(--bg-hover);border-top-color:var(--accent)}
+
+  .paper-pdf-toolbar{padding:4px 8px}
+  /* In reading mode the drawer remains the paper library, rather than falling
+   * back to the chat conversation list when the viewport becomes narrow. */
+  .sidebar.paper-active .paper-sidebar-overlay{display:flex!important}
+  .sidebar.paper-active .sidebar-action-row,
+  .sidebar.paper-active .sidebar-search-wrapper,
+  .sidebar.paper-active .folder-quickadd,
+  .sidebar.paper-active .sidebar-body,
+  .sidebar.paper-active .conversations-list{display:none!important}
+  .sidebar.paper-active .sidebar-header h1{display:none!important}
+  .paper-sidebar-current{padding:14px 16px}
+  .paper-sidebar-new-inline-btn{width:32px;height:32px}
+  .paper-lib-item{padding:12px;min-height:48px}
+  .paper-lib-item-del{display:flex;width:32px;height:32px}
+  .paper-tab-btn{padding:10px 6px;font-size:12px;gap:4px}
+  .paper-tab-btn svg{width:13px;height:13px}
+  .paper-qa-input-area{padding:8px}
+  #paperQAInput{font-size:16px}
+  .paper-report-content{padding:14px}
+  .paper-landing{padding:24px 16px}
+  .paper-landing h3{font-size:16px}
+  .paper-arxiv-input{flex-direction:column}
+  .paper-arxiv-input .paper-arxiv-search-icon{display:none}
+  .paper-arxiv-input input{padding-left:14px}
+  .paper-arxiv-btn{width:100%}
+  .research-landing{padding:32px 16px}
+  .research-landing-row{flex-direction:column}
+  .research-landing-btn{width:100%}
+  .paper-search{padding:16px 12px}
+  .paper-result-card{padding:12px}
+}

@@ -12,6 +12,11 @@ from typing import Any
 from lib.app_lifecycle import add_shutdown_handler, add_startup_handler
 
 
+_ATTEMPT_DISPATCH_RECOVERY_INTERVAL_SECONDS = 2.0
+_ATTEMPT_DISPATCH_RECOVERY_GRACE_MS = 1_500
+_ATTEMPT_DISPATCH_RECOVERY_BATCH = 8
+
+
 def _create_debug_guard(loop: asyncio.AbstractEventLoop, *, logger, environ):
     from lib.server_loop_debug import LoopDebugGuard
 
@@ -85,6 +90,16 @@ def _redispatch_orphaned_queue() -> Any:
     return redispatch_orphaned_queue_on_startup()
 
 
+def _recover_dispatchable_attempts(created_before_ms: int) -> dict[str, int]:
+    """Delegate one owner-aware, bounded recovery batch to the app service."""
+    from lib.conversation_sync.runtime import conversation_turn_commands
+
+    return conversation_turn_commands.recover_dispatchable_attempts(
+        created_before_ms=created_before_ms,
+        limit=_ATTEMPT_DISPATCH_RECOVERY_BATCH,
+    )
+
+
 def _turn_recovery_backstop_body(
         stop_event: Any, gate_open_ms: int, log: logging.Logger) -> None:
     """Post-serving safety net for restart settlement (2026-08-19 incident).
@@ -126,8 +141,22 @@ def register_serving_loop_lifecycle(
     fault_log: Any = None,
     logger: logging.Logger | None = None,
     environ: Mapping[str, str] | None = None,
+    process_role: str = 'all',
 ) -> bool:
     """Register loop-bound owners once, before production startup handlers."""
+    from lib.process_roles import (
+        CAPABILITY_TASK_RECOVERY,
+        CAPABILITY_TASK_WORKERS,
+        normalize_process_role,
+        process_role_has,
+    )
+
+    process_role = normalize_process_role(process_role)
+    owns_task_recovery = process_role_has(
+        process_role, CAPABILITY_TASK_RECOVERY)
+    owns_task_workers = process_role_has(
+        process_role, CAPABILITY_TASK_WORKERS)
+    owns_attempt_dispatch_recovery = owns_task_workers
     marker = 'tofu_serving_loop_lifecycle_registered'
     if app.extensions.get(marker):
         return False
@@ -145,6 +174,10 @@ def register_serving_loop_lifecycle(
         'exception_handler': None,
         'previous_exception_handler': None,
         'auto_restart_started': False,
+        'process_role': process_role,
+        'owns_task_recovery': owns_task_recovery,
+        'owns_task_workers': owns_task_workers,
+        'owns_attempt_dispatch_recovery': owns_attempt_dispatch_recovery,
     }
 
     async def _startup() -> None:
@@ -240,14 +273,67 @@ def register_serving_loop_lifecycle(
                 log.warning(
                     '[Server] turn-recovery backstop failed: %s', exc)
 
-        runtime.create_task(
-            _run_orphan_queue_redispatch(),
-            name='tofu-orphan-queue-redispatch',
-        )
-        runtime.create_task(
-            _run_turn_recovery_backstop(),
-            name='tofu-turn-recovery-backstop',
-        )
+        async def _run_attempt_dispatch_recovery() -> None:
+            """Continuously close commit-to-claim gaps without busy polling."""
+            await gate.wait()
+            transient_failures = 0
+            while not stop_event.is_set():
+                delay = _ATTEMPT_DISPATCH_RECOVERY_INTERVAL_SECONDS
+                try:
+                    result = await asyncio.to_thread(
+                        _recover_dispatchable_attempts,
+                        int(_time.time() * 1000)
+                        - _ATTEMPT_DISPATCH_RECOVERY_GRACE_MS,
+                    )
+                    examined = int(result.get('examined') or 0)
+                    recovered = int(result.get('recovered') or 0)
+                    settled_failed = int(result.get('settledFailed') or 0)
+                    if recovered or settled_failed:
+                        log.warning(
+                            '[Server] accepted-attempt recovery examined=%d '
+                            'started=%d settled_failed=%d',
+                            examined,
+                            recovered,
+                            settled_failed,
+                        )
+                    # Drain a real backlog promptly, but still yield to the
+                    # event loop and the storage writer between bounded pages.
+                    if examined >= _ATTEMPT_DISPATCH_RECOVERY_BATCH:
+                        delay = 0.05
+                    transient_failures = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    transient_failures += 1
+                    if transient_failures & (transient_failures - 1) == 0:
+                        log.warning(
+                            '[Server] accepted-attempt recovery transient '
+                            'failure (attempt=%d): %s',
+                            transient_failures,
+                            exc,
+                        )
+                    delay = min(
+                        30.0,
+                        _ATTEMPT_DISPATCH_RECOVERY_INTERVAL_SECONDS
+                        * (2 ** min(transient_failures, 4)),
+                    )
+                await asyncio.sleep(delay)
+
+        if owns_task_workers:
+            runtime.create_task(
+                _run_orphan_queue_redispatch(),
+                name='tofu-orphan-queue-redispatch',
+            )
+        if owns_task_recovery:
+            runtime.create_task(
+                _run_turn_recovery_backstop(),
+                name='tofu-turn-recovery-backstop',
+            )
+        if owns_attempt_dispatch_recovery:
+            runtime.create_task(
+                _run_attempt_dispatch_recovery(),
+                name='tofu-attempt-dispatch-recovery',
+            )
         state['status'] = 'ready'
 
     async def _shutdown() -> None:

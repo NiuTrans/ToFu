@@ -50,8 +50,6 @@ def _request(task, state):
 
 def _install_common(monkeypatch, events, *, tool_timeout=False):
     monkeypatch.setattr(
-        root_loop, 'check_task_resource_budget', lambda *a, **k: False)
-    monkeypatch.setattr(
         root_loop, 'emit_round_open',
         lambda task, state, rnd: events.append(('open', rnd)))
     monkeypatch.setattr(
@@ -65,16 +63,20 @@ def _install_common(monkeypatch, events, *, tool_timeout=False):
         lambda task, state, messages, tools, **k: (tools, {'messages': []}))
     monkeypatch.setattr(
         root_loop, 'build_stream_accumulator',
-        lambda *a, **k: SimpleNamespace(announced_tc_map={}))
+        lambda *a, **k: SimpleNamespace(
+            announced_tc_map={},
+            close=lambda **close_kwargs: events.append((
+                'stream_close',
+                close_kwargs['cancel_futures'],
+                close_kwargs['wait'],
+            )),
+        ))
     monkeypatch.setattr(
         root_loop, 'stamp_round_cache_accounting',
         lambda *a, **k: events.append(('cache', k['round_num'])))
     monkeypatch.setattr(
         root_loop, 'settle_stream_accumulator',
         lambda *a, **k: events.append(('settle', k['round_num'])))
-    monkeypatch.setattr(
-        root_loop, 'check_round_gates',
-        lambda *a, **k: events.append(('gate', k['round_num'])) or False)
     monkeypatch.setattr(
         root_loop, 'append_assistant_tool_call_message',
         lambda *a, **k: events.append(('tool_open', k['round_num'])))
@@ -160,6 +162,121 @@ def _tool_message(round_num=0):
     }
 
 
+def test_provider_break_closes_stream_prefetch_without_settling(monkeypatch):
+    task = {'aborted': False, 'error': None}
+    state = _state()
+    events = []
+    _install_common(monkeypatch, events)
+    monkeypatch.setattr(
+        root_loop, 'run_llm_call_with_fallback',
+        lambda *args, **kwargs: 'break',
+    )
+
+    hooks = root_loop._RootLoopHooks(_request(task, state))
+    hooks.dispatch(0, [])
+
+    assert ('stream_close', True, False) in events
+    assert not [event for event in events if event[0] == 'settle']
+
+
+def test_dispatch_forwards_its_final_admission_count_to_body_prep(monkeypatch):
+    import lib.context_telemetry as context_telemetry
+    from lib.tasks_pkg.compaction import _prompt_admission as admission
+    from lib.token_counter.base import (
+        REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY,
+    )
+
+    task = {'aborted': False, 'error': None}
+    state = _state()
+    events = []
+    captured = []
+    admission_schema_inputs = []
+    _install_common(monkeypatch, events)
+
+    def enforce(*args, **kwargs):
+        admission_schema_inputs.append(
+            kwargs.get('precomputed_tool_schema_tokens'))
+        return {
+            'totalTokens': 111_000,
+            'toolSchemaTokens': 18_000,
+            REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY: {123: 456},
+        }
+
+    monkeypatch.setattr(
+        admission,
+        'enforce_dispatch_prompt_limit',
+        enforce,
+    )
+    def build_request(task, state, messages, tools, **kwargs):
+        captured.append(kwargs)
+        source = list(tools)
+        evidence = context_telemetry.build_tool_schema_evidence(
+            source,
+            kwargs.get('admitted_tool_schema_tokens'),
+            model=state.model,
+            source_fingerprint=kwargs.get(
+                'admitted_tool_schema_fingerprint'),
+        )
+        return tools, {
+            'messages': [],
+            context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY: evidence,
+        }
+
+    def run_request(*args, **kwargs):
+        body = args[2]
+        final_tools = list(args[4])
+        context_telemetry.record_tool_schema_fingerprint(
+            body[context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY],
+            final_tools,
+            'a' * 64,
+        )
+        return 'break'
+
+    monkeypatch.setattr(root_loop, 'build_round_request', build_request)
+    monkeypatch.setattr(
+        root_loop, 'run_llm_call_with_fallback', run_request)
+
+    tools = [{'type': 'function'}]
+    hooks = root_loop._RootLoopHooks(_request(task, state))
+    hooks.dispatch(0, tools)
+    hooks.dispatch(1, tools)
+    state.model = 'claude-opus-4.8'
+    hooks.dispatch(2, tools)
+    hooks.dispatch(3, list(tools))
+
+    assert admission_schema_inputs == [None, 18_000, None, None]
+    assert len(captured) == 4
+    assert [row['admitted_tool_schema_fingerprint'] for row in captured] == [
+        None, 'a' * 64, None, None,
+    ]
+    for request_evidence in captured:
+        assert request_evidence['admitted_input_tokens'] == 111_000
+        assert request_evidence['admitted_tool_schema_tokens'] == 18_000
+        assert request_evidence[
+            'reusable_text_token_counts_by_identity'] == {123: 456}
+
+
+def test_provider_exception_closes_stream_prefetch_and_preserves_error(
+    monkeypatch,
+):
+    task = {'aborted': False, 'error': None}
+    state = _state()
+    events = []
+    _install_common(monkeypatch, events)
+
+    def fail_provider(*args, **kwargs):
+        raise RuntimeError('provider stream failed')
+
+    monkeypatch.setattr(root_loop, 'run_llm_call_with_fallback', fail_provider)
+    hooks = root_loop._RootLoopHooks(_request(task, state))
+
+    with pytest.raises(RuntimeError, match='provider stream failed'):
+        hooks.dispatch(0, [])
+
+    assert ('stream_close', True, False) in events
+    assert not [event for event in events if event[0] == 'settle']
+
+
 def test_tool_round_then_verified_natural_completion(monkeypatch):
     task = {'aborted': False, 'error': None}
     state = _state()
@@ -189,36 +306,6 @@ def test_tool_round_then_verified_natural_completion(monkeypatch):
         ('checkpoint', 0)]
 
 
-def test_hygiene_receives_exact_remaining_api_round_budget(monkeypatch):
-    task = {'aborted': False, 'error': None}
-    state = _state()
-    state.api_rounds.extend([{'round': 1}, {'round': 2}])
-    events = []
-    _install_common(monkeypatch, events)
-    remaining = []
-    monkeypatch.setattr(
-        root_loop,
-        'run_round_message_hygiene',
-        lambda *args, **kwargs: remaining.append(
-            kwargs['remaining_api_rounds']),
-    )
-    _install_script(monkeypatch, state, [
-        ({'role': 'assistant', 'content': 'done'}, 'stop', {}),
-    ], events)
-
-    def decide(task, current_state, *, round_num, **kwargs):
-        current_state.exit_reason = f'no_tool_calls_round_{round_num}'
-        return 'break', kwargs['premature_retry_count']
-
-    monkeypatch.setattr(root_loop, 'apply_stream_decision', decide)
-    request = _request(task, state)
-    request.cfg = {'maxApiRounds': 5}
-
-    root_loop.run_root_agent_loop(request)
-
-    assert remaining == [3]
-
-
 def test_program_continuation_gets_next_round_without_tool_execution(
     monkeypatch,
 ):
@@ -243,7 +330,6 @@ def test_program_continuation_gets_next_round_without_tool_execution(
 
     assert not result.outcome.completed and result.last_round_num == 1
     assert [e for e in events if e[0] == 'llm'] == [('llm', 0), ('llm', 1)]
-    assert [e for e in events if e[0] == 'gate'] == [('gate', 0)]
     assert not [e for e in events if e[0] == 'tools']
 
 
@@ -326,26 +412,3 @@ def test_abort_during_batch_tools_stops_before_another_provider_call(
     assert [e for e in events if e[0] == 'checkpoint'] == [
         ('checkpoint', 0)]
     assert ('abort_at_start', 1) in events
-
-
-def test_resource_gate_stops_before_provider_dispatch(monkeypatch):
-    task = {'aborted': False, 'error': None}
-    state = _state()
-    events = []
-    _install_common(monkeypatch, events)
-
-    def resource_gate(task, current_state, *, round_num, cfg, messages):
-        assert messages == []
-        current_state.exit_reason = f'budget_exceeded_round_{round_num}'
-        return True
-
-    monkeypatch.setattr(root_loop, 'check_task_resource_budget', resource_gate)
-    monkeypatch.setattr(
-        root_loop, 'run_llm_call_with_fallback',
-        lambda *a, **k: pytest.fail('provider call crossed resource gate'))
-    result = root_loop.run_root_agent_loop(_request(task, state))
-
-    assert result.outcome.halted
-    assert result.outcome.exit_reason == 'budget_exceeded_round_0'
-    assert result.last_round_num == 0
-    assert not events

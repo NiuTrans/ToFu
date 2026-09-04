@@ -8,40 +8,28 @@ PROJECT_TOOL_GREP = {
     "function": {
         "name": "grep_search",
         "description": (
-            "Search for a pattern across project files. Returns matching lines with file "
-            "paths and line numbers. Very useful for finding function definitions, imports, "
-            "usages, etc.\n\n"
-            "**Prefer this over ``run_command grep/rg``** — grep_search is backed by a "
-            "persistent project file index (no directory re-walk per query) with ripgrep "
-            "over the exact candidate set — it stays fast even on huge or network-mounted "
-            "(FUSE/cross-DC) trees where a recursive walk alone can exceed a minute. "
-            "Auto-skips ignored dirs, case-insensitive by default. Supports ``max_results`` "
-            "(like head -n) and ``count_only`` (like grep -c).\n\n"
-            "Use simple, short patterns for best results — e.g. 'handleRequest' instead "
-            "of 'def handle_.*request'. If unsure of naming, search for a core keyword "
-            "substring.\n\n"
-            "**Regex flavor**: ripgrep / Rust regex (PCRE-like), NOT GNU grep BRE. "
-            "Alternation is ``A|B`` (no backslash). ``.`` is the any-char metachar — "
-            "escape as ``\\.`` to match a literal dot. Anchors ``^`` / ``$`` work per-line.\n\n"
-            "``path`` accepts a SINGLE relative path (or omit for project root). To "
-            "search multiple roots in one call, use the ``searches`` batch array with "
-            "one entry per path — that's strictly faster than sequential calls.\n\n"
-            "For MULTIPLE searches, provide a 'searches' array — each entry has the same "
-            "fields as the top-level parameters. Batch mode runs them together and cuts "
-            "round trips."
+            "Search project file content and return paths, line numbers, and matches. "
+            "Prefer this over shell grep/rg: a persistent file index plus ripgrep over "
+            "exact candidates avoids recursive walks on huge/network (FUSE) trees, "
+            "skips ignored directories, and is case-insensitive by default. Prefer "
+            "short literal keywords; regex uses Rust/ripgrep syntax (`A|B`, `\\.` for "
+            "a literal dot, per-line `^`/`$`), not GNU BRE. `path` is one relative "
+            "path or project root. For independent roots/patterns use one `searches` "
+            "batch (max 20 entries); it runs together and avoids sequential model "
+            "rounds."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Search pattern — prefer short literal substrings (e.g. 'handleRequest', 'TODO', 'import foo'). Regex also supported."},
-                "path": {"type": "string", "description": "Relative path to search in (optional, defaults to project root)"},
-                "include": {"type": "string", "description": "File glob filter, e.g. '*.py' or '*.js' (optional)"},
-                "context_lines": {"type": "integer", "description": "Number of context lines before and after each match (like grep -C). Default 0, max 10. Use 3-5 to see surrounding code without a separate read_files call."},
-                "max_results": {"type": "integer", "description": "Maximum number of matching lines to return (like head -n). Default 50. Use a small value (5-20) when you only need a few examples or to check existence."},
-                "count_only": {"type": "boolean", "description": "If true, return only the count of matching lines (like grep -c or wc -l), not the actual lines. Much faster for large result sets. NOTE: `max_results` is ignored in count_only mode — the full count is always returned."},
+                "pattern": {"type": "string", "description": "Short literal substring preferred; Rust/ripgrep regex is supported."},
+                "path": {"type": "string", "description": "One relative path; omit for project root."},
+                "include": {"type": "string", "description": "Optional file glob such as `*.py`."},
+                "context_lines": {"type": "integer", "description": "Lines before/after each match. Default 0, max 10; use 3-5 to avoid a follow-up read."},
+                "max_results": {"type": "integer", "description": "Matching-line cap, default 50; use 5-20 for samples/existence checks."},
+                "count_only": {"type": "boolean", "description": "Return the full matching-line count only; `max_results` is ignored in count_only mode."},
                 "searches": {
                     "type": "array",
-                    "description": "Array of search operations (for batch mode, max 20 entries — extras are dropped). Each entry has the same fields as the top-level parameters. Much faster than multiple separate grep_search calls.",
+                    "description": "Batch operations, max 20 entries; extras are dropped. Faster than separate calls.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -103,44 +91,72 @@ PROJECT_TOOL_WRITE_FILE = {
     "function": {
         "name": "write_file",
         "description": (
-            "Write content to a file in the project. Creates the file if it doesn't "
-            "exist. Overwrites the entire file.\n\n"
-            "**When to use which write tool:**\n"
-            "  • write_file — new files, or major rewrites of an entire file\n"
-            "  • edit_file — targeted changes to existing files; select an insert "
-            "operation when existing anchor text remains intact\n\n"
-            "IMPORTANT: Always read_files first to understand existing code before "
-            "writing. Include ALL content — not just the changed parts. Otherwise the "
-            "rest of the file is lost.\n\n"
-            "**Paths:** a relative path resolves under the current project. An "
-            "ABSOLUTE path (e.g. '/home/user/other-repo/src/main.py') also works "
-            "directly — its containing directory is auto-registered as a workspace "
-            "root on first write, so no separate scaffold step is needed. Only "
-            "genuine system paths (/etc, /usr, $HOME itself, …) are refused. The "
-            "same applies to edit_file."
+            "Create or replace one whole file. Use for new files/major rewrites; "
+            "use edit_file for targeted changes. Read an existing file first and "
+            "supply its complete replacement—omitted lines are deleted. Relative "
+            "paths use the current project. An absolute path outside registered "
+            "roots needs allow_outside_workspace=true after the user confirms it "
+            "(the containing directory then registers as a new root); system paths "
+            "(/etc, /usr, $HOME itself) are refused outright. Give exactly one "
+            "source: content (an empty "
+            "string creates an empty file) or content_ref to reuse all/a slice of a "
+            "previous tool result."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "description": {"type": "string", "description": "Brief description of what was changed (generated FIRST, before writing content)"},
-                "path": {"type": "string", "description": "Relative file path from project root"},
-                "content": {"type": "string", "description": "Complete file content to write"},
+                "description": {
+                    "type": "string",
+                    "description": "Short pre-write intent shown before execution."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Project-relative or allowed absolute file path."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Complete replacement; may be empty."
+                },
                 "content_ref": {
                     "type": "object",
-                    "description": (
-                        "Reference to content from a previous tool result. Use INSTEAD of 'content' to avoid "
-                        "re-generating large text that already exists in a previous tool round's output. "
-                        "The referenced content will be resolved and written to the file."
-                    ),
+                    "description": "Reuse prior tool output without regenerating it.",
                     "properties": {
-                        "tool_round": {"type": "integer", "description": "roundNum of the tool result whose output to use as file content"},
-                        "start": {"type": "integer", "description": "Start character index for partial content (optional, default 0)"},
-                        "end": {"type": "integer", "description": "End character index for partial content (optional, default end)"}
+                        "tool_round": {
+                            "type": "integer", "description": "Prior roundNum."
+                        },
+                        "start": {
+                            "type": "integer",
+                            "description": "First character; default 0."
+                        },
+                        "end": {
+                            "type": "integer",
+                            "description": "Exclusive end; default content end."
+                        }
                     },
                     "required": ["tool_round"]
+                },
+                "allow_outside_workspace": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true only after the user explicitly confirmed this "
+                        "exact out-of-workspace destination; its containing "
+                        "directory registers as a new root. Default false: "
+                        "refused with an error naming this flag."
+                    )
                 }
             },
-            "required": ["description", "path"]
+            "required": ["description", "path"],
+            "oneOf": [
+                {
+                    "properties": {"content": {"type": "string"}},
+                    "required": ["content"]
+                },
+                {
+                    "properties": {"content_ref": {"type": "object"}},
+                    "required": ["content_ref"]
+                }
+            ],
+            "additionalProperties": False
         }
     }
 }
@@ -174,6 +190,10 @@ PROJECT_TOOL_APPLY_DIFF = {
                 "replace_all": {
                     "type": "boolean",
                     "description": "If true, replace ALL occurrences of 'search' in the file (not just the first). Default false — errors when multiple matches exist to prevent accidental mass edits."
+                },
+                "allow_outside_workspace": {
+                    "type": "boolean",
+                    "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused."
                 }
             },
             "required": ["description", "path", "search", "replace"]
@@ -216,7 +236,11 @@ PROJECT_TOOL_APPLY_DIFFS = {
                         "required": ["description", "path", "search", "replace"]
                     }
                 },
-                "description": {"type": "string", "description": "Brief description of the overall change"}
+                "description": {"type": "string", "description": "Brief description of the overall change"},
+                "allow_outside_workspace": {
+                    "type": "boolean",
+                    "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused."
+                }
             },
             "required": ["edits"]
         }
@@ -260,6 +284,10 @@ PROJECT_TOOL_INSERT_CONTENT = {
                     "type": "string",
                     "enum": ["before", "after"],
                     "description": "Insert before or after the anchor. Default: 'after'"
+                },
+                "allow_outside_workspace": {
+                    "type": "boolean",
+                    "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused."
                 }
             },
             "required": ["description", "path", "anchor", "content"]
@@ -306,7 +334,11 @@ PROJECT_TOOL_INSERT_CONTENTS = {
                         "required": ["description", "path", "anchor", "content"]
                     }
                 },
-                "description": {"type": "string", "description": "Brief description of the overall insertion"}
+                "description": {"type": "string", "description": "Brief description of the overall insertion"},
+                "allow_outside_workspace": {
+                    "type": "boolean",
+                    "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused."
+                }
             },
             "required": ["edits"]
         }
@@ -324,82 +356,71 @@ PROJECT_TOOL_EDIT_FILE = {
     "function": {
         "name": "edit_file",
         "description": (
-            "Edit one or more existing files with exact anchors. Choose "
-            "insert_after or insert_before whenever the anchor must remain "
-            "unchanged; choose replace only when the anchor itself must be "
-            "changed or removed. For example, to add B between existing A and "
-            "C, use anchor A + content B + operation insert_after (or anchor C "
-            "+ content B + insert_before). Do not repeat A/C in content: the "
-            "anchor and the lines next to the insertion point stay in the "
-            "file automatically — echoing them in content is auto-stripped "
-            "when provably safe and rejected when the whole content is "
-            "such an echo. A "
-            "replace whose content repeats the anchor verbatim at either end "
-            "is REJECTED as a pure insertion — re-issue it as "
-            "insert_after/insert_before carrying only the new text.\n\n"
-            "Read-before-edit is enforced: each target file must have been read "
-            "or written in an earlier tool round. Edits run sequentially, so a "
-            "later edit sees earlier changes. A failed edit does not stop or "
-            "roll back the remaining edits. Anchors must match exactly once "
-            "unless replace_all is used with operation=replace."
+            "Apply 1–30 ordered anchored edits after reading/writing each target "
+            "in an earlier round. Use insert_after/insert_before when the anchor "
+            "stays; content is only new text—do not repeat its anchor or neighbor "
+            "lines. Example: add B between A/C with insert_after, anchor A, content "
+            "B. Safe insertion echoes are stripped; pure echoes and a replace that "
+            "merely wraps its unchanged anchor are rejected as insertions. Use "
+            "replace only to change/remove the anchor. Anchors match exactly once; "
+            "replace_all permits multiple matches only for replace. Later edits see "
+            "earlier changes; one failure neither rolls back nor stops the others."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "description": {
                     "type": "string",
+                    "minLength": 1,
                     "maxLength": 120,
-                    "description": (
-                        "Required pre-edit intent shown to the user before execution. "
-                        "Write one short sentence describing the change."
-                    ),
+                    "description": "Short pre-edit intent shown before execution.",
                 },
                 "edits": {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": 30,
-                    "description": (
-                        "Ordered edit operations (max 30). Keep anchors as short "
-                        "as possible while still matching exactly once."
-                    ),
+                    "description": "Shortest-unique-anchor operations, in order.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Relative file path"},
+                            "path": {
+                                "type": "string", "minLength": 1,
+                                "description": "Project-relative or allowed absolute path."
+                            },
                             "operation": {
                                 "type": "string",
                                 "enum": ["insert_after", "insert_before", "replace"],
-                                "description": (
-                                    "Use insert_after/insert_before for purely additive "
-                                    "changes; use replace only to modify/remove anchor."
-                                ),
+                                "description": "Insert keeps anchor; replace changes/removes it.",
                             },
                             "anchor": {
                                 "type": "string",
-                                "description": "Exact existing text; must normally match once",
+                                "minLength": 1,
+                                "description": "Exact, normally unique existing text.",
                             },
                             "content": {
                                 "type": "string",
-                                "description": (
-                                    "Only the new text to insert, or the replacement text. "
-                                    "Never repeat the anchor for insert operations, "
-                                    "nor the file lines already next to the insertion "
-                                    "point."
-                                ),
+                                "description": "Only inserted/replacement text; do not echo context.",
                             },
                             "replace_all": {
                                 "type": "boolean",
-                                "description": (
-                                    "For replace, replace every anchor match. Ignored for "
-                                    "insert operations, whose anchor must still match exactly once."
-                                ),
+                                "description": "Replace every match; ignored by inserts.",
                             },
                         },
                         "required": ["path", "operation", "anchor", "content"],
                     },
                 },
+                "allow_outside_workspace": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true only after the user explicitly confirmed this "
+                        "exact out-of-workspace destination; its containing "
+                        "directory registers as a new root. Default false: "
+                        "refused."
+                    ),
+                },
             },
             "required": ["description", "edits"],
+            "additionalProperties": False,
         },
     },
 }
@@ -409,88 +430,72 @@ PROJECT_TOOL_RUN_COMMAND = {
     "function": {
         "name": "run_command",
         "description": (
-            "Execute a shell command in the project directory and return its output "
-            "(stdout + stderr). Use this for running tests, linting, building, checking "
-            "git status, installing packages — anything that needs a real shell.\n\n"
+            "Execute a shell command in the project directory and return stdout + "
+            "stderr. Use it for builds, tests, lint, installs, Git, and pipelines over "
+            "another command's output.\n\n"
             "**Never use a shell no-op as a placeholder.** Do not call "
-            "`true`, `:`, or `exit 0` merely to obtain another model round. "
-            "Continue reasoning in the current response, then call the real "
-            "tool needed for the next action or finish and state the blocker. "
-            "The harness treats repeated placeholder commands as a tool loop.\n\n"
-            "The command runs with the project root as working directory. There is "
-            "NO default timeout — a build, test suite or install runs to completion "
-            "however long it takes, and the user ends it with Stop if they don't want "
-            "to wait. Pass an explicit `timeout` ONLY when the command itself should "
-            "be abandoned after a bound (e.g. a probe you expect to answer quickly). "
-            "Avoid interactive commands that require stdin input (they will "
-            "hang).\n\n"
-            "Each call runs in its own fresh subprocess — there is **no persistent "
-            "shell**, so environment/shell state (exported variables, sourced "
-            "profiles, activated virtualenvs) does NOT carry over between calls. "
-            "**Prefer absolute paths and avoid `cd`** — use `cd` only when the user "
-            "explicitly asks; to run in a different directory, pass `working_dir` "
-            "instead of prefixing the command with `cd`.\n\n"
-            "**WHEN TO USE run_command vs the dedicated tools:**\n"
-            "  • Building / testing (`npm test`, `pytest`, `cargo build`) — use run_command\n"
-            "  • Installing packages (`pip install`, `npm install`) — use run_command\n"
-            "  • Git operations (`git status`, `git log`, `git push`) — use run_command\n"
-            "  • Pipelines whose source is NOT a recursive search (`make 2>&1 | tail -50`, `pytest -k foo | grep PASS`) — use run_command\n\n"
-            "**Do NOT use run_command for these — use the dedicated tools instead:**\n"
-            "  • Reading files → use **read_files** (line numbers, batch reads, auto image/PDF/Office support)\n"
-            "  • Searching file content → use **grep_search** (5x+ faster than `grep -r`, auto-respects .gitignore, batch mode)\n"
-            "  • Finding files by name → use **find_files** (max_results, ignored-dir filter)\n"
-            "  • Editing existing files → use **edit_file**; creating or fully "
-            "rewriting files → use **write_file**\n"
-            "  • Downloading a remote URL onto the Tofu server → use "
-            "**download_url_to_server**. It automatically uses the selected "
-            "logged-in browser when server HTTP cannot authenticate/reach the "
-            "site. Never export browser cookies into curl/wget; a narrow "
-            "cookie-bearing file-download command is intercepted before shell "
-            "spawn and redirected to server staging.\n"
-            "Reaching for `cat` / `grep` / `find` / `sed` / `awk` is almost always a smell — there is a dedicated tool that's faster, safer, and easier for the user to review.\n"
-            "**Pipelines do NOT excuse this** — `grep -rn 'foo' lib/ | head -20` is the WORST case: on a FUSE-mounted or large tree, the recursive `grep -rn` walks every untracked dir (caches, .project_sessions, vendor) and can take >120s, while `grep_search(pattern='foo', path='lib', max_results=20)` finishes in <1s. Use grep_search and pass `max_results` instead of piping to `head`.\n\n"
-            "**Enforced:** a `grep`/`egrep`/`fgrep` reading the filesystem "
-            "(file/dir operands or `-r`) is executed TRANSPARENTLY by an "
-            "in-process GNU-compatible engine (FUSE-safe, junk-dir aware) and "
-            "the pipeline continues from its real output — you get GNU-format "
-            "results without wedging on the network filesystem. Only shapes "
-            "that cannot be translated honestly (e.g. `-P`, command "
-            "substitution in arguments, or a target written by an earlier "
-            "part of the same command) are refused, with the reason and the "
-            "grep_search translation. Grepping another command's STREAM was "
-            "never intercepted (`make 2>&1 | grep error`, `ps aux | grep "
-            "python`).\n\n"
-            "**Modern text tools are installed in the Tofu env and always on PATH:**\n"
-            "  • `sd` — find-and-replace, prefer over `sed` for substitutions: "
-            "`sd 'old' 'new' file` (modern regex, no BRE/ERE guessing) or "
-            "`sd -s 'old' 'new' file` (literal strings, zero escaping). It is "
-            "NOT a full sed — addresses (`1,5s/...`), multi-command scripts and "
-            "hold-space programs still require GNU sed.\n"
-            "  • `mlr` (Miller) — CSV/TSV/JSON column work by field NAME "
-            "(cut/sort/join/stats); prefer over hand-rolled `awk` on "
-            "structured data.\n"
-            "  • `goawk` — POSIX awk with a native CSV mode (`goawk -i csv`).\n"
-            "On a host that lacks them (e.g. some remote desktop agents), fall "
-            "back to GNU sed/awk."
+            "`true`, `:`, or `exit 0` to obtain another model round. Continue "
+            "reasoning, call the real next tool, or finish with the blocker; repeated "
+            "placeholders are a tool loop.\n\n"
+            "The project root is the initial working directory. There is NO default "
+            "timeout: builds, tests, and installs run until completion or user Stop. "
+            "Set `timeout` only when the command itself should be abandoned after a "
+            "bound. Avoid commands that wait for stdin.\n\n"
+            "Every call uses a fresh subprocess with no persistent shell; exports, "
+            "sourced profiles, and activated environments do not carry over. Prefer "
+            "absolute paths and avoid `cd`; use `working_dir` to choose another "
+            "directory (use `cd` only when the user explicitly requests it).\n\n"
+            "Use dedicated tools for repository data: `read_files` for reading; "
+            "`grep_search` for file content (bounded, .gitignore-aware, batchable); "
+            "`find_files` for names; `edit_file` for edits; `write_file` for "
+            "creation/full rewrites. Use `browser_download_url_to_server` for remote "
+            "files on the server, including browser-authenticated downloads; never "
+            "export browser cookies to curl/wget. Do not hide recursive filesystem "
+            "grep behind a pipeline—call `grep_search` with `max_results`.\n\n"
+            "**Enforced:** filesystem `grep`/`egrep`/`fgrep` (file/directory operands "
+            "or `-r`) runs through a bounded, FUSE-safe GNU-compatible engine and "
+            "feeds its real output to the remaining pipeline. Shapes that cannot be "
+            "translated honestly (`-P`, command substitution in arguments, or a "
+            "target written earlier in the command) are refused with a `grep_search` "
+            "translation. Filtering another command's stream remains allowed "
+            "(`make 2>&1 | grep error`).\n\n"
+            "Text tools on PATH: `sd` for regex/literal substitution; `mlr` for "
+            "CSV/TSV/JSON fields; `goawk -i csv` for POSIX awk with CSV. Use GNU "
+            "sed/awk when the host lacks them or sed address/script semantics are "
+            "required."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute, e.g. 'python -m pytest tests/', 'git status', 'npm test'"
+                    "description": (
+                        "Shell command to execute (for example `pytest`, "
+                        "`git status`, or `npm test`)."
+                    )
                 },
                 "description": {
                     "type": "string",
-                    "description": "ALWAYS provide a short one-line summary (in the user's language) of what this command does and why. It is rendered as a caption above the command in the UI so the user can grasp the intent at a glance without parsing the shell syntax — especially valuable for long pipelines. E.g. 'Run the auth test suite', 'Check installed package versions'."
+                    "description": (
+                        "Required short one-line caption, in the user's "
+                        "language, explaining what the command does and why."
+                    )
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Optional timeout in seconds. OMIT IT for normal use — the default is NO timeout, so a long build/test/install is waited out rather than killed. Set a value only when the command should be abandoned after a bound; 0 also means unlimited."
+                    "description": (
+                        "Optional seconds before abandonment. Omit for the "
+                        "NO-timeout default; 0 also means unlimited."
+                    )
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Working directory for the command (optional). In multi-root workspaces, use 'rootname:subdir' to run in a specific root. STICKY: once you set it (or `cd` inside a command), later run_command calls in this conversation resume from that directory automatically — so you do NOT need to repeat `cd <project>` or use absolute paths for `python`/`pip` every call. Default: the conversation's last working directory, else project root."
+                    "description": (
+                        "Optional directory. In multi-root workspaces use "
+                        "`rootname:subdir`. STICKY: after setting it (or using "
+                        "`cd`), later project run_command calls resume there. "
+                        "Default: last conversation directory, then project root."
+                    )
                 },
                 "credentials": {
                     "type": "array",
@@ -516,56 +521,34 @@ READ_FILES_TOOL = {
     "function": {
         "name": "read_files",
         "description": (
-            "Read the contents of one or more files. Returns file content with line "
-            "numbers. Can read specific line ranges for large files.\n\n"
-            "**Read WIDE, not narrow.** When examining a function or class, read 200+ "
-            "lines in one shot — don't read 50-line fragments and come back for more. "
-            "Prefer reading the WHOLE file (omit start_line / end_line) for files "
-            "under 500 lines. Files under ~40 KB auto-expand to whole-file regardless "
-            "of range, so don't worry about over-requesting.\n\n"
-            "**Large files (>512 KB):** a whole-file read is refused with 'File too "
-            "large', but a bounded ``start_line``/``end_line`` range ALWAYS works (the "
-            "range caps the output, not the file size). Use grep_search to locate the "
-            "line, then read that range. This is also the way to satisfy the "
-            "read-before-edit gate before apply_diff on a large file.\n\n"
-            "**Batch your reads.** When you need multiple files, put them all in one "
-            "call — maximum 20 entries per batch. Each entry: ``{path, start_line?, "
-            "end_line?}``. Batched reads cut round trips dramatically.\n\n"
-            "For a SINGLE file you may instead pass top-level ``path`` (plus optional "
-            "``start_line`` / ``end_line``) without the ``reads`` wrapper.\n\n"
-            "**Prefer this over ``run_command cat/head/tail/sed``.** Dedicated reading "
-            "is faster, includes line numbers, and lets the UI display the file nicely.\n\n"
-            "**Supports BOTH relative project paths AND absolute paths:**\n"
-            "  • Relative paths (e.g. 'src/main.py') resolve within the project.\n"
-            "  • Absolute paths (e.g. '/home/user/report.pdf', '~/Documents/photo.png') "
-            "read from the local filesystem with format auto-detection:\n"
-            "    – **Images** (.png, .jpg, .gif, .webp, .bmp): Uploaded natively — you "
-            "will SEE the image and can analyze its content.\n"
-            "    – **PDFs** (.pdf): Extracts text with layout preservation.\n"
-            "    – **Office docs** (.docx, .xlsx, .pptx): Extracts text and tables as "
-            "Markdown.\n"
-            "    – **Text files**: Reads with auto encoding detection.\n"
-            "Also handles ``file://`` URIs — strip the prefix and pass the path."
+            "Read one or more files with line numbers and optional ranges. Read WIDE "
+            "within the round budget: for 1-2 relevant files request 200+ lines or a "
+            "whole small file instead of repeated 50-line fragments; for 3+ files use "
+            "focused ranges or `grep_search`. An explicit start/end range is "
+            "authoritative and never widened. Whole-file reads above 512 KB are "
+            "refused, but bounded ranges always work and satisfy read-before-edit. "
+            "Batch up to 20 independent ranges while keeping total expected content "
+            "near 24k tokens; use top-level `path` for one file. Prefer this over shell "
+            "cat/head/tail/sed. Relative paths use the project; absolute, `~`, and "
+            "`file://` paths are supported. Images are shown natively; PDFs extract "
+            "layout text; Office files extract Markdown text/tables; text uses "
+            "encoding detection."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "reads": {
                     "type": "array",
-                    "description": "Array of file-read specs (batch mode). Each entry: {path, start_line?, end_line?}.",
+                    "description": "Batch file/range specs: `{path, start_line?, end_line?}` (max 20).",
                     "items": {
                         "type": "object",
                         "properties": {
                             "path": {
                                 "type": "string",
-                                "description": (
-                                    "File path — relative from project root (e.g. 'lib/server.py') "
-                                    "or absolute (e.g. '/home/user/data.csv', '~/report.pdf'). "
-                                    "Supports ~ expansion."
-                                )
+                                "description": "Relative or absolute file path; supports `~`."
                             },
-                            "start_line": {"type": "integer", "description": "Start line (1-based, optional)"},
-                            "end_line": {"type": "integer", "description": "End line (inclusive, optional)"}
+                            "start_line": {"type": "integer", "minimum": 1, "description": "Start line (1-based, optional)"},
+                            "end_line": {"type": "integer", "minimum": 1, "description": "End line (inclusive, optional)"}
                         },
                         "required": ["path"]
                     }
@@ -573,13 +556,12 @@ READ_FILES_TOOL = {
                 "path": {
                     "type": "string",
                     "description": (
-                        "Single-file shorthand — file path (relative or absolute, ~ expansion "
-                        "supported). Use INSTEAD of 'reads' when reading just one file. "
-                        "Ignored when 'reads' is provided."
+                        "Single-file path; ignored when `reads` is present. "
+                        "Relative, absolute, and `~` supported."
                     )
                 },
-                "start_line": {"type": "integer", "description": "Start line (1-based, optional) — only with top-level 'path'."},
-                "end_line": {"type": "integer", "description": "End line (inclusive, optional) — only with top-level 'path'."}
+                "start_line": {"type": "integer", "minimum": 1, "description": "Start line (1-based, optional) — only with top-level 'path'."},
+                "end_line": {"type": "integer", "minimum": 1, "description": "End line (inclusive, optional) — only with top-level 'path'."}
             }
         }
     }
@@ -598,10 +580,8 @@ READ_FILES_TOOL = {
 # model already does).  Per-round undo/redo of file changes still works
 # end-to-end through the file-history store.
 _MULTIROOT_PATH_HINT = (
-    " In a multi-root workspace, target a non-primary root with either an "
-    "ABSOLUTE path (simplest) or the 'rootname:' prefix (e.g. "
-    "'otherroot:src/foo.py'); a bare relative path resolves under the PRIMARY "
-    "root."
+    " Multi-root: use an absolute path or `rootname:subdir`; a bare relative "
+    "path uses the primary root."
 )
 
 

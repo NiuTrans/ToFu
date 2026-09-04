@@ -216,15 +216,5 @@ class TestFlowAdapterForwarding(unittest.TestCase):
                                 'detail': 'Endpoint unreachable… (attempt 1)',
                                 'attempt': 1}])
 
-    def test_agent_runner_step_phase_meta_passthrough(self):
-        """Structured fields travel SubAgent → endpoint adapter through the
-        default runner's ``step_phase`` ``**meta`` passthrough."""
-        src_path = os.path.join(ROOT, 'lib', 'orchestration_agent_runner.py')
-        with open(src_path, encoding='utf-8') as f:
-            src = f.read()
-        self.assertIn("'type': 'step_phase'", src)
-        self.assertRegex(src, r"'detail': chunk,\s+\*\*meta")
-
-
 if __name__ == '__main__':
     unittest.main()

@@ -21,20 +21,12 @@ GENERATE_IMAGE_TOOL = {
     "function": {
         "name": "generate_image",
         "description": (
-            "Generate or edit an image. "
-            "Use this when the user asks you to create, draw, design, visualize, "
-            "or EDIT/MODIFY an image, illustration, diagram, logo, or any visual content. "
-            "For image EDITING: if the user provides an image (or refers to one you "
-            "generated earlier in this conversation) and asks to modify it — change "
-            "background, recolor, add/remove objects, restyle, etc. — pass that image's "
-            "URL or path as source_image and describe the change in prompt. Editing "
-            "preserves the rest of the source image and is automatically routed to a "
-            "capable model. After every successful generation/edit, this tool reports "
-            "the saved image reference (a project path or an '/api/images/...' URL) in "
-            "its result text — reuse that exact value as source_image to edit the image "
-            "you just produced, instead of generating a new one from scratch. "
-            "Provide a detailed English prompt for best results. "
-            "You can optionally specify aspect ratio and resolution."
+            "Create/draw/design an image, or edit one supplied by the user or "
+            "produced earlier. For edits, pass the exact source_image reference and "
+            "describe only the desired changes; a capable edit model preserves "
+            "unmentioned content. Success returns a project path or /api/images/... "
+            "reference—reuse it for later edits instead of regenerating. Use a "
+            "detailed English prompt; aspect_ratio and resolution are optional."
         ),
         "parameters": {
             "type": "object",
@@ -42,61 +34,44 @@ GENERATE_IMAGE_TOOL = {
                 "prompt": {
                     "type": "string",
                     "description": (
-                        "Detailed description of the image to generate or edit instruction. "
-                        "For generation: describe the full image (style, composition, colors, lighting). "
-                        "For editing: describe what changes to make to the source image "
-                        "(e.g. 'change the background to a beach sunset', 'add sunglasses to the person', "
-                        "'convert to watercolor painting style'). Use English for best results."
+                        "Detailed English scene (style, composition, colors, "
+                        "lighting) or edit instruction describing only desired changes."
                     )
                 },
                 "source_image": {
                     "type": "string",
                     "description": (
-                        "URL of an existing image to edit/modify. "
-                        "Use this when the user wants to modify an existing image rather than "
-                        "create one from scratch. Can be a local URL (e.g. '/api/images/gen_xxx.png') "
-                        "or a remote URL. When provided, the prompt should describe the desired edits. "
-                        "If not provided, a new image is generated from scratch."
+                        "Existing image URL/path to edit, including local "
+                        "/api/images/... or a remote URL. Use the exact result "
+                        "reference; omit to generate a new image."
                     )
                 },
                 "aspect_ratio": {
                     "type": "string",
-                    "description": (
-                        "Aspect ratio of the image. "
-                        "Options: '1:1' (square), '16:9' (landscape), '9:16' (portrait), "
-                        "'4:3', '3:4'. Default: '1:1'."
-                    ),
+                    "description": "Aspect ratio; default 1:1.",
                     "enum": ["1:1", "16:9", "9:16", "4:3", "3:4"]
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "Image resolution. '1K' for standard, '2K' for high-res. Default: '1K'.",
+                    "description": "1K standard (default) or 2K high resolution.",
                     "enum": ["1K", "2K"]
                 },
                 "output_path": {
                     "type": "string",
                     "description": (
-                        "Optional relative file path within the project to save the generated image. "
-                        "Example: 'assets/images/hero.png', 'static/logo.webp'. "
-                        "If provided and a project is active, the image will be saved to this path "
-                        "inside the project directory. The directory will be created if it doesn't exist. "
-                        "If not provided, the image is still saved to the server's uploads folder.\n"
-                        "**Multi-root workspaces**: prefix with `rootname:` to target a specific "
-                        "non-primary root (e.g. 'hope-mcp:assets/logo.png'). Plain relative paths "
-                        "resolve under the primary root. NEVER bake the colon into the filename — "
-                        "writing 'hope-mcp:assets/logo.png' as a literal name would create a "
-                        "top-level dir whose name contains a colon, which is almost never intended."
+                        "Optional project-relative destination; missing directories "
+                        "are created. If omitted or no project is active, saves to "
+                        "server uploads. Multi-root: rootname:subdir targets that root; "
+                        "bare relative uses primary. The prefix is routing, not a "
+                        "literal filename."
                     )
                 },
                 "svg": {
                     "type": "boolean",
                     "description": (
-                        "Whether to also convert the generated PNG to an SVG vector file. "
-                        "When true, uses vtracer to trace the PNG into a clean SVG with "
-                        "automatic background removal. The SVG is saved alongside the PNG "
-                        "with the same name but .svg extension. "
-                        "Useful for logos, icons, mascots, and illustrations that need to "
-                        "scale without pixelation. Default: false."
+                        "Also use vtracer with background removal to save a "
+                        "same-name .svg beside the PNG; useful for scalable logos, "
+                        "icons, and illustrations. Default false."
                     )
                 }
             },

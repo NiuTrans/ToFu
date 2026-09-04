@@ -272,6 +272,26 @@ def test_normalize_script():
     assert out['segments'][1]['speaker'] == 'host'
     assert out['segments'][1]['est_seconds'] == 0.0, 'LLM est must be discarded'
     assert out['segments'][0]['text'].startswith('有数字')
+    assert out['segments_dropped'] == 0
+
+
+def test_normalize_caps_segments_and_the_quality_gate_reports_the_drop():
+    from lib.paper.podcast_engine._script import normalize_script
+    from lib.paper.podcast_engine._validate import check_structure
+
+    raw = {
+        'title': 'too many',
+        'segments': [
+            {'section': 'method', 'text': f'第 {index} 段' + ('内容' * 30)}
+            for index in range(30)
+        ],
+    }
+    script = normalize_script(raw, mode='short', lang='zh')
+
+    assert len(script['segments']) == 24
+    assert script['segments_dropped'] == 6
+    assert any('段落超过上限 24' in issue for issue in
+               check_structure(script, [], mode='short'))
     _ok('normalize: ids assigned, defaults filled, junk dropped, LLM est discarded')
 
 
@@ -468,6 +488,41 @@ def test_critic_disabled_by_env():
     _ok('pipeline: TOFU_PAPER_PODCAST_CRITIC=0 skips the critic round')
 
 
+def test_script_dispatch_is_abortable_and_retry_bounded():
+    import lib.paper.podcast_engine._script as script_module
+    from lib.paper.podcast_engine._errors import PodcastGenerationAborted
+
+    signal = {'aborted': False}
+    calls = []
+    original = script_module.dispatch_stream
+    old_budget = os.environ.get('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS')
+
+    def interrupted(_messages, **kwargs):
+        calls.append(kwargs)
+        signal['aborted'] = True
+        raise RuntimeError('transport stopped')
+
+    script_module.dispatch_stream = interrupted
+    os.environ['TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS'] = '3'
+    try:
+        with pytest.raises(PodcastGenerationAborted):
+            script_module.generate_script(
+                source_text=SRC, lang='zh', mode='short', title='t',
+                images=[], model=None,
+                abort_check=lambda: signal['aborted'])
+    finally:
+        script_module.dispatch_stream = original
+        if old_budget is None:
+            os.environ.pop('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', None)
+        else:
+            os.environ['TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS'] = old_budget
+
+    assert len(calls) == 1
+    assert calls[0]['max_retries'] == 2
+    assert calls[0]['max_429_attempts'] == 3
+    assert callable(calls[0]['abort_check'])
+
+
 def main():
     print()
     print(_color('═══ Paper Podcast Script Layer Tests ═══', '36'))
@@ -488,6 +543,7 @@ def main():
         test_NEUTER_unicode_gate_loadbearing,
         test_parse_script_json,
         test_normalize_script,
+        test_normalize_caps_segments_and_the_quality_gate_reports_the_drop,
         test_render_figure_list,
         test_generate_script_happy_path,
         test_generate_script_gate_revision,
@@ -495,6 +551,7 @@ def main():
         test_generate_script_critic_revision,
         test_generate_script_streams_progress,
         test_critic_disabled_by_env,
+        test_script_dispatch_is_abortable_and_retry_bounded,
     ]
     for fn in tests:
         try:

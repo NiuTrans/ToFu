@@ -20,7 +20,10 @@ from lib import translate_refusal
 from lib.log import get_logger
 
 from ..dedup import _dedup_repetition_loop
-from ..errors import TranslationContentRefused
+from ..errors import (
+    TranslationContentRefused,
+    TranslationNoAdmissibleProvider,
+)
 from ..prompt import _wrap_for_translation
 from ._split import _ends_midsentence
 
@@ -45,72 +48,11 @@ _OVERGEN_ABS = 800
 # length gates.
 _OVERGEN_MIN_INPUT = 20
 
-# ── Identity-invariant content detection ──
-# A URL or filesystem-path token (whole content, no internal whitespace).
-# Covers scheme://… URLs and POSIX / home / relative / Windows-drive paths.
-_URL_OR_PATH_RE = re.compile(
-    r'^(?:'
-    r'[A-Za-z][A-Za-z0-9+.\-]*://'   # scheme://  (http, https, ftp, file, ws…)
-    r'|/'                            # POSIX absolute
-    r'|~/'                           # home-relative
-    r'|\.{1,2}/'                     # ./ or ../ relative
-    r'|[A-Za-z]:[\\/]'               # Windows drive
-    r')\S*$'
-)
-# Any Unicode letter (script-agnostic — CJK, Latin, Cyrillic, kana, …). Content
-# with NO letter at all (digits / symbols / punctuation / whitespace only) has
-# nothing to translate in any language. ``[^\W\d_]`` = a word char that is
-# neither a digit nor an underscore = a letter.
-_HAS_LETTER_RE = re.compile(r'[^\W\d_]', re.UNICODE)
-
-
 def _is_identity_invariant(text, target):
-    """Return ``(bool, reason)`` — True when ``text`` legitimately equals its
-    own translation, so no model call is needed.
+    """Compatibility hook for the shared whole-document identity policy."""
+    from lib.translate.skip_policy import identity_invariant_reason
 
-    Three shapes never need translating and, worse, provoke the no-op detector
-    into burning the whole retry budget across many models when the model
-    correctly echoes them — surfacing a ``ValueError`` for content that never
-    needed a translation (observed: a 98-char absolute path burned 9 model
-    attempts, task ``inc-translate-89dd9bf7``):
-
-    * (a) no translatable letters — pure symbols / digits / punctuation.
-    * (b) a single path or URL token (whole content, no internal whitespace).
-    * (c) already predominantly in the target language with negligible foreign
-          script — there is essentially nothing to translate. A MIXED
-          bilingual message is deliberately EXCLUDED (its foreign part still
-          needs the model), so the threshold is stricter than the plain
-          "predominantly target" ratio.
-
-    Pure predicate (no I/O) so the caller can short-circuit before any MT / LLM
-    call. Deliberately conservative: a false negative merely falls through to
-    the normal path (one wasted call at worst); a false positive would skip a
-    genuinely-needed translation, so the bar is set to avoid that.
-    """
-    if not text:
-        return False, ''
-    # (a) no translatable letters anywhere.
-    if not _HAS_LETTER_RE.search(text):
-        return True, 'no translatable letters (symbols/digits only)'
-    # (b) a lone path / URL token (single token, no internal whitespace).
-    if not any(ch.isspace() for ch in text) and _URL_OR_PATH_RE.match(text):
-        return True, 'path-or-URL token'
-    # (c) already in the target language (monolingual, negligible foreign script).
-    from lib.text_lang import (
-        cjk_ratio, is_predominantly_chinese, is_predominantly_english,
-        latin_ratio,
-    )
-    tl = (target or '').lower()
-    _is_zh_target = (tl.startswith('chinese') or 'zh' in tl)
-    _is_en_target = (tl == 'en' or tl.startswith('english')
-                     or tl.startswith('en-') or tl.startswith('en_'))
-    if _is_zh_target:
-        if is_predominantly_chinese(text) and latin_ratio(text) < 0.15:
-            return True, 'source already Chinese (target Chinese)'
-    elif _is_en_target:
-        if is_predominantly_english(text) and cjk_ratio(text) < 0.05:
-            return True, 'source already English (target English)'
-    return False, ''
+    return identity_invariant_reason(text, target)
 
 
 def _build_trace(*, path, model, in_chars, out_chars, attempts=1,
@@ -136,7 +78,9 @@ def _build_trace(*, path, model, in_chars, out_chars, attempts=1,
 def _translate_freetext(text, system_prompt, chunk_label='',
                         source='', target='', status_cb=None,
                         progress_cb=None, overall_deadline=None,
-                        use_cache=True):
+                        use_cache=True, abort_check=None,
+                        max_429_attempts=None,
+                        defer_on_shared_contention=False):
     """Translate free-text in a SINGLE LLM call — no input splitting.
 
     Public free-text entry point used by every caller (server auto-translate,
@@ -156,34 +100,58 @@ def _translate_freetext(text, system_prompt, chunk_label='',
         text, system_prompt, chunk_label=chunk_label,
         source=source, target=target, status_cb=status_cb,
         progress_cb=progress_cb, overall_deadline=overall_deadline,
-        use_cache=use_cache)
+        use_cache=use_cache, abort_check=abort_check,
+        max_429_attempts=max_429_attempts,
+        defer_on_shared_contention=defer_on_shared_contention)
 
 
 def _dispatch_translation_candidate(
         messages, *, chunk_label, max_tokens, timeout, max_retries,
         excluded_models, progress_cb, deadline_exceeded,
-        remaining_deadline_seconds):
+        remaining_deadline_seconds, prefer_model=None, strict_model=False,
+        stream=False, capability='cheap', temperature=1,
+        max_429_attempts=None, defer_on_shared_contention=False):
     """Run one translation attempt and normalize stream/non-stream results."""
-    from lib.llm_dispatch import dispatch_stream, smart_chat
+    from lib.llm_dispatch import dispatch_chat, dispatch_stream, smart_chat
+    from lib.key_stats import strict_billing_stop_admission
+    from lib.translate.model_gate import translation_model_slot
+    from lib.translate.policy import translation_max_429_attempts
 
-    if progress_cb is None:
-        return smart_chat(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=1,
-            capability='cheap',
-            log_prefix=f'[Translate{chunk_label}]',
-            timeout=min(float(timeout),
-                        max(0.1, remaining_deadline_seconds())),
-            max_retries=max_retries,
-            exclude_models=excluded_models or None,
-            abort_check=deadline_exceeded,
-        )
+    if max_429_attempts is None:
+        max_429_attempts = translation_max_429_attempts()
+
+    if progress_cb is None and not stream:
+        with strict_billing_stop_admission():
+            with translation_model_slot(abort_check=deadline_exceeded):
+                dispatch = dispatch_chat if strict_model else smart_chat
+                model_arguments = (
+                    {'prefer_model': prefer_model, 'strict_model': strict_model}
+                    if strict_model else {'model': prefer_model}
+                )
+                return dispatch(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    capability=capability,
+                    log_prefix=f'[Translate{chunk_label}]',
+                    timeout=min(float(timeout),
+                                max(0.1, remaining_deadline_seconds())),
+                    max_retries=max_retries,
+                    exclude_models=excluded_models or None,
+                    abort_check=deadline_exceeded,
+                    max_429_attempts=max_429_attempts,
+                    defer_on_shared_contention=defer_on_shared_contention,
+                    **model_arguments,
+                )
 
     stream_buffer = []
 
     def on_content_delta(delta):
-        if not delta:
+        # ``dispatch_stream`` already returns the authoritative assembled
+        # message. Keep a second copy only when a caller explicitly needs
+        # progressive previews; paper translation streams for transport
+        # verification without paying duplicate output memory.
+        if not delta or progress_cb is None:
             return
         stream_buffer.append(delta)
         try:
@@ -193,17 +161,23 @@ def _dispatch_translation_candidate(
                          chunk_label, callback_error)
 
     from lib.llm.stream_result import require_verified_provider_stream_result
-    stream_result = require_verified_provider_stream_result(dispatch_stream(
-        messages,
-        on_content=on_content_delta,
-        max_tokens=max_tokens,
-        temperature=1,
-        capability='cheap',
-        log_prefix=f'[Translate{chunk_label}]',
-        max_retries=max_retries,
-        exclude_models=excluded_models or None,
-        abort_check=deadline_exceeded,
-    ), context='streaming translation candidate')
+    with strict_billing_stop_admission():
+        with translation_model_slot(abort_check=deadline_exceeded):
+            stream_result = require_verified_provider_stream_result(dispatch_stream(
+                messages,
+                on_content=on_content_delta,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                capability=capability,
+                prefer_model=prefer_model,
+                strict_model=strict_model,
+                log_prefix=f'[Translate{chunk_label}]',
+                max_retries=max_retries,
+                exclude_models=excluded_models or None,
+                abort_check=deadline_exceeded,
+                max_429_attempts=max_429_attempts,
+                defer_on_shared_contention=defer_on_shared_contention,
+            ), context='streaming translation candidate')
     stream_message = stream_result.message
     finish_reason = stream_result.provider_finish_reason
     usage = stream_result.usage
@@ -217,44 +191,153 @@ def _dispatch_translation_candidate(
     return content, normalized_usage
 
 
+def _try_translation_fast_paths(
+    chunk,
+    *,
+    source,
+    target,
+    chunk_label,
+    use_cache,
+    allow_mt,
+    abort_requested,
+    notify,
+):
+    """Return a cache/identity/MT result, or ``None`` for LLM fallback."""
+    from lib.llm_errors import AbortedError
+    from lib.translate.errors import TranslationProviderQueueFull
+
+    cached = translate_cache.get(chunk, source, target) if use_cache else None
+    if cached and cached.get('translated'):
+        cached_text = cached['translated']
+        cached_model = cached.get('model', '') or 'cache'
+        logger.info('[Translate%s] Cache hit: %d→%d chars model=%s',
+                    chunk_label, len(chunk), len(cached_text), cached_model)
+        return cached_text, {
+            'model': cached_model,
+            '_dispatch': {'model': cached_model},
+            '_cache_hit': True,
+            '_translate_trace': _build_trace(
+                path='cache', model=cached_model, in_chars=len(chunk),
+                out_chars=len(cached_text), verdict='cache', target=target),
+        }
+
+    invariant, invariant_reason = _is_identity_invariant(
+        chunk.strip(), target)
+    if invariant:
+        passthrough = chunk.strip()
+        logger.info(
+            '[Translate%s] Identity-invariant content accepted verbatim '
+            '(%d chars, reason=%s) — skipping translation',
+            chunk_label, len(passthrough), invariant_reason)
+        if use_cache:
+            translate_cache.put(
+                chunk, source, target, passthrough, model='identity')
+        return passthrough, {
+            'model': 'identity',
+            '_dispatch': {'model': 'identity'},
+            '_identity_invariant': True,
+            '_translate_trace': _build_trace(
+                path='identity', model='identity', in_chars=len(chunk),
+                out_chars=len(passthrough), verdict='identity', target=target),
+        }
+
+    from lib.mt_provider import is_mt_configured, mt_translate_chunked
+    if not allow_mt or not is_mt_configured():
+        return None
+    try:
+        from lib.translate.model_gate import translation_model_slot
+
+        started_at = time.time()
+        with translation_model_slot(abort_check=abort_requested):
+            result = mt_translate_chunked(chunk, source=source, target=target)
+        if abort_requested():
+            raise AbortedError('Translation aborted during MT request')
+        elapsed = time.time() - started_at
+        logger.info('[Translate%s] MT provider: %d→%d chars in %.1fs',
+                    chunk_label, len(chunk), len(result), elapsed)
+        translate_cache.put(
+            chunk, source, target, result, model='mt:niutrans')
+        return result, {
+            'model': 'mt:niutrans',
+            '_dispatch': {'model': 'mt:niutrans'},
+            '_translate_trace': _build_trace(
+                path='mt', model='mt:niutrans', in_chars=len(chunk),
+                out_chars=len(result), elapsed=elapsed, verdict='mt',
+                target=target),
+        }
+    except (TranslationProviderQueueFull, AbortedError):
+        raise
+    except Exception as exc:
+        logger.warning(
+            '[Translate%s] MT provider failed, falling back to LLM: %s',
+            chunk_label, exc)
+        notify('mt_fallback', 1, 0, str(exc)[:120])
+        return None
+
+
+class _TranslationDeadline:
+    """One abort-aware monotonic deadline shared by dispatch and backoff."""
+
+    __slots__ = ('abort_requested', 'seconds', 'started_at', 'deadline_at')
+
+    def __init__(self, seconds, abort_requested):
+        self.abort_requested = abort_requested
+        self.seconds = max(0.0, float(seconds))
+        self.started_at = time.monotonic()
+        self.deadline_at = self.started_at + self.seconds
+
+    def exceeded(self):
+        return self.abort_requested() or time.monotonic() >= self.deadline_at
+
+    def remaining(self):
+        return max(0.0, self.deadline_at - time.monotonic())
+
+    def sleep(self, seconds):
+        from lib.llm_errors import AbortedError
+
+        until = min(
+            self.deadline_at,
+            time.monotonic() + max(0.0, float(seconds)),
+        )
+        while time.monotonic() < until:
+            if self.abort_requested():
+                raise AbortedError('Translation aborted during retry backoff')
+            time.sleep(min(0.1, max(0.0, until - time.monotonic())))
+
+
+def _raise_cached_translation_refusal(chunk, source, target, *,
+                                      chunk_label, max_content_retries):
+    """Replay a fresh content-shape refusal without burning the roster again."""
+    refusal = translate_refusal.get(chunk, source, target)
+    if not refusal:
+        return
+    logger.info(
+        '[Translate%s] Refusal marker hit: verdict=%s model=%s — replaying '
+        'cached refusal with zero dispatches',
+        chunk_label, refusal.get('verdict'), refusal.get('model'))
+    raise TranslationContentRefused(
+        refusal['verdict'],
+        f"{refusal.get('reason', '')} (cached refusal, 0 dispatches)",
+        attempts=0,
+        content_fails=refusal.get('content_fails') or max_content_retries,
+    )
+
+
 def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                          source='', target='', status_cb=None,
                          progress_cb=None, overall_deadline=None,
-                         use_cache=True):
-    """Translate a single chunk of text.
+                         use_cache=True, abort_check=None, prefer_model=None,
+                         strict_model=False, allow_mt=True, stream=False,
+                         capability='cheap', temperature=1,
+                         accept_truncated=True, max_429_attempts=None,
+                         defer_on_shared_contention=False):
+    """Translate one chunk through bounded cache → MT → LLM fallbacks.
 
-    If a machine translation provider is configured (Settings → 机器翻译),
-    uses that directly — no LLM prompt needed, faster and cheaper.
-    Falls back to LLM cheap model if MT is not configured or fails.
-
-    Includes truncation detection: if the model produces suspiciously short
-    output (< 30% of input) or hits max_tokens (finish_reason='length'),
-    the translation is retried with a fresh dispatch (likely a different model).
-
-    Args:
-        chunk: Text to translate.
-        system_prompt: LLM system prompt (used only for LLM fallback).
-        chunk_label: Label for logging (e.g. ':chunk1/3').
-        source: Source language name/code (for MT provider).
-        target: Target language name/code (for MT provider).
-        status_cb: Optional callback ``fn(dict)`` invoked when a transient
-            retry happens (rate-limit, dispatch error, empty/truncated
-            output).  The dict carries ``{kind, attempt, elapsed, detail}``
-            and is surfaced to the frontend poll endpoint as
-            ``statusMessage`` so users see WHY a translation is slow.
-        progress_cb: Optional callback ``fn(text_so_far)`` invoked as
-            streamed text deltas arrive during the LLM path.  When set,
-            the LLM dispatch switches to ``dispatch_stream`` so the
-            frontend can render a live preview of the translation.
-            Ignored on the MT-provider fast path (single HTTP, no stream).
-            Cache hits skip the callback entirely.
-        overall_deadline: Optional per-call wall-clock budget in seconds.
-            The retry loop refuses to start a new attempt after this many
-            seconds and raises ``ValueError`` if no result was produced.
-            Defaults to 600 s (10 min) which fits the background async-
-            translate path; the synchronous send-path wrapper passes a
-            tighter budget so the HTTP request returns within the
-            frontend's safety window.
+    ``status_cb`` receives retry state, ``progress_cb`` receives streamed LLM
+    text, and ``abort_check`` is honored before dispatch and during backoff.
+    Artifact producers disable ``accept_truncated`` so partial output cannot be
+    published; reconstructible previews may additionally bound 429 attempts or
+    yield to active shared contention.
     """
     def _notify(kind, attempt, elapsed, detail=''):
         """Safely invoke status_cb — never let caller's callback break us."""
@@ -270,74 +353,35 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
         except Exception as e:
             logger.debug('[Translate%s] status_cb failed: %s', chunk_label, e)
 
-    # ── Cache lookup (sha256 of (target, source, text)) ──
-    # use_cache=False forces a fresh translation — used by the truncation
-    # repair script, where the on-disk cache may hold the SAME truncated
-    # output we are trying to replace (it was put() there by the original
-    # bad run).  The fresh result still refreshes the cache via put() below.
-    cached = translate_cache.get(chunk, source, target) if use_cache else None
-    if cached and cached.get('translated'):
-        cached_text = cached['translated']
-        cached_model = cached.get('model', '') or 'cache'
-        logger.info('[Translate%s] Cache hit: %d→%d chars model=%s',
-                    chunk_label, len(chunk), len(cached_text), cached_model)
-        return cached_text, {'model': cached_model,
-                             '_dispatch': {'model': cached_model},
-                             '_cache_hit': True,
-                             '_translate_trace': _build_trace(
-                                 path='cache', model=cached_model,
-                                 in_chars=len(chunk), out_chars=len(cached_text),
-                                 verdict='cache', target=target)}
+    from lib.llm_errors import AbortedError
+    from lib.translate.errors import TranslationProviderQueueFull
 
-    # ── Identity-invariant short-circuit ──
-    # Some content legitimately equals its own translation: a lone path/URL,
-    # pure symbols/digits, or text already in the target language. Sending it
-    # through the LLM makes a correct model echo it verbatim, which the no-op
-    # detector below reads as a FAILURE — burning the whole retry budget across
-    # many models and finally raising ValueError for content that never needed
-    # translating (observed: a 98-char absolute path burned 9 model attempts,
-    # task inc-translate-89dd9bf7). Accept it verbatim BEFORE the retry loop.
-    _inv, _inv_reason = _is_identity_invariant(chunk.strip(), target)
-    if _inv:
-        _passthrough = chunk.strip()
-        logger.info('[Translate%s] Identity-invariant content accepted verbatim '
-                    '(%d chars, reason=%s) — skipping translation',
-                    chunk_label, len(_passthrough), _inv_reason)
-        if use_cache:
-            translate_cache.put(chunk, source, target, _passthrough,
-                                model='identity')
-        return _passthrough, {
-            'model': 'identity', '_dispatch': {'model': 'identity'},
-            '_identity_invariant': True,
-            '_translate_trace': _build_trace(
-                path='identity', model='identity', in_chars=len(chunk),
-                out_chars=len(_passthrough), verdict='identity', target=target)}
+    def _abort_requested():
+        return bool(abort_check and abort_check())
 
-    # ── Try dedicated MT provider first (if configured) ──
-    from lib.mt_provider import is_mt_configured, mt_translate_chunked
-    if is_mt_configured():
-        try:
-            t0 = time.time()
-            # mt_translate_chunked handles NiuTrans 5000-char limit internally
-            result = mt_translate_chunked(chunk, source=source, target=target)
-            elapsed = time.time() - t0
-            logger.info('[Translate%s] MT provider: %d→%d chars in %.1fs',
-                        chunk_label, len(chunk), len(result), elapsed)
-            translate_cache.put(chunk, source, target, result, model='mt:niutrans')
-            # Return with a synthetic usage dict for compatibility
-            return result, {'model': 'mt:niutrans', '_dispatch': {'model': 'mt:niutrans'},
-                            '_translate_trace': _build_trace(
-                                path='mt', model='mt:niutrans',
-                                in_chars=len(chunk), out_chars=len(result),
-                                elapsed=elapsed, verdict='mt', target=target)}
-        except Exception as e:
-            logger.warning('[Translate%s] MT provider failed, falling back to LLM: %s',
-                           chunk_label, e)
-            _notify('mt_fallback', 1, 0, str(e)[:120])
-            # Fall through to LLM translation below
+    if _abort_requested():
+        raise AbortedError('Translation aborted before dispatch')
 
+    fast_result = _try_translation_fast_paths(
+        chunk,
+        source=source,
+        target=target,
+        chunk_label=chunk_label,
+        use_cache=use_cache,
+        allow_mt=allow_mt,
+        abort_requested=_abort_requested,
+        notify=_notify,
+    )
+    if fast_result is not None:
+        return fast_result
+
+    from lib.llm_dispatch import (
+        DispatchNoAdmissibleSlot,
+        DispatchRateLimitBudgetExceeded,
+        DispatchSharedContentionDeferred,
+    )
     from lib.llm_dispatch.factory import get_dispatcher
-    from lib.llm import RateLimitError
+    from lib.llm import BadRequestError, RateLimitError, RequestScopedError
 
     clen = len(chunk)
     _target_is_chinese = ((target or '').lower().startswith('chinese')
@@ -360,9 +404,6 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     #     times (different model usually fixes it; after that the issue
     #     is more likely with the input itself).
     _MAX_CONTENT_RETRIES = 5
-    # Wall-clock budget for the whole retry loop. Defaults to 10min so the
-    # background async-translate path can ride out a quota reset; the
-    # send-path wrapper passes a tighter budget (see routes/chat.py).
     _OVERALL_DEADLINE_SEC = (
         max(0.0, float(overall_deadline))
         if overall_deadline is not None else 600.0)
@@ -370,19 +411,18 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     _BACKOFF_MAX = 30.0
 
     _start_ts = time.time()
-    _start_mono = time.monotonic()
-    _deadline_at = _start_mono + _OVERALL_DEADLINE_SEC
-
-    def _deadline_exceeded():
-        return time.monotonic() >= _deadline_at
-
-    def _remaining_deadline_seconds():
-        return max(0.0, _deadline_at - time.monotonic())
+    _deadline = _TranslationDeadline(
+        _OVERALL_DEADLINE_SEC, _abort_requested)
+    _start_mono = _deadline.started_at
+    _deadline_exceeded = _deadline.exceeded
+    _remaining_deadline_seconds = _deadline.remaining
+    _sleep_backoff = _deadline.sleep
 
     _attempt = 0
     _content_fail_count = 0
     _dispatch_fail_count = 0
     _last_err = None
+    _terminal_dispatch_error = None
     _terminal_verdict = 'ok'
     c, u = '', None
     # ── Models proven bad for THIS chunk ──
@@ -393,25 +433,10 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     _excluded_models: set[str] = set()
     _dispatcher = get_dispatcher()
 
-    # ── Refusal-marker replay ──
-    # A chunk refused after the FULL content budget was refused for its
-    # content shape, not for an unlucky model pick — re-running the roster
-    # on every page load just burns 5 dispatches to reach the same verdict
-    # (production: one 488-char chunk refused 36×/day). Replay the stored
-    # refusal instantly with zero dispatches; the marker carries a TTL so a
-    # future healthier roster gets one fresh attempt. use_cache=False (the
-    # repair-script path) bypasses the replay and re-drives fresh.
     if use_cache:
-        _ref = translate_refusal.get(chunk, source, target)
-        if _ref:
-            logger.info('[Translate%s] Refusal marker hit: verdict=%s model=%s '
-                        '— replaying cached refusal with zero dispatches',
-                        chunk_label, _ref.get('verdict'), _ref.get('model'))
-            raise TranslationContentRefused(
-                _ref['verdict'],
-                f"{_ref.get('reason', '')} (cached refusal, 0 dispatches)",
-                attempts=0,
-                content_fails=_ref.get('content_fails') or _MAX_CONTENT_RETRIES)
+        _raise_cached_translation_refusal(
+            chunk, source, target, chunk_label=chunk_label,
+            max_content_retries=_MAX_CONTENT_RETRIES)
 
     # Emit a 'started' event up front so callers polling the status
     # side-channel see something within the first poll tick — without
@@ -442,7 +467,100 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                 progress_cb=progress_cb,
                 deadline_exceeded=_deadline_exceeded,
                 remaining_deadline_seconds=_remaining_deadline_seconds,
+                prefer_model=prefer_model,
+                strict_model=strict_model,
+                stream=stream,
+                capability=capability,
+                temperature=temperature,
+                max_429_attempts=max_429_attempts,
+                defer_on_shared_contention=defer_on_shared_contention,
             )
+        except TranslationProviderQueueFull as queue_error:
+            _notify(
+                'provider_queue_saturated',
+                _attempt,
+                _elapsed,
+                str(queue_error),
+            )
+            raise
+        except AbortedError:
+            if _abort_requested():
+                _notify('aborted', _attempt, _elapsed,
+                        'translation cancelled by owner')
+                raise
+            _notify('deadline_exceeded', _attempt, _elapsed,
+                    'translation deadline expired during dispatch')
+            break
+        except DispatchSharedContentionDeferred as contention_deferred:
+            _dispatch_fail_count += 1
+            _last_err = type(contention_deferred).__name__
+            logger.info(
+                '[Translate%s] Optional work yielded to active shared '
+                'contention before transport',
+                chunk_label,
+            )
+            _notify(
+                'shared_contention_deferred',
+                _attempt,
+                _elapsed,
+                'translation preview yielded to active model contention',
+            )
+            raise
+        except DispatchNoAdmissibleSlot as admission_error:
+            _dispatch_fail_count += 1
+            _last_err = type(admission_error).__name__
+            logger.warning(
+                '[Translate%s] No billing-healthy slot is admissible; '
+                'ending optional translation without outer backoff',
+                chunk_label,
+            )
+            _notify(
+                'no_admissible_slot',
+                _attempt,
+                _elapsed,
+                'no billing-healthy translation slot is available',
+            )
+            raise TranslationNoAdmissibleProvider() from admission_error
+        except DispatchRateLimitBudgetExceeded as budget_error:
+            _dispatch_fail_count += 1
+            _last_err = type(budget_error).__name__
+            logger.warning(
+                '[Translate%s] Rate-limit API budget exhausted after %d/%d '
+                'upstream attempts; ending optional translation',
+                chunk_label, budget_error.attempts, budget_error.limit,
+            )
+            _notify(
+                'rate_limit_budget_exhausted',
+                _attempt,
+                _elapsed,
+                f'upstream rate-limit budget exhausted '
+                f'({budget_error.attempts}/{budget_error.limit})',
+            )
+            raise
+        except (BadRequestError, RequestScopedError) as deterministic_error:
+            # Dispatch already applied its bounded pair/model policy. Replaying
+            # the identical payload in this outer loop cannot repair a 400,
+            # 404, or 422 and previously multiplied one terminal rejection into
+            # six full dispatch rounds plus exponential sleeps.
+            _dispatch_fail_count += 1
+            _last_err = (
+                f'{type(deterministic_error).__name__}: '
+                f'{deterministic_error}'
+            )
+            _terminal_dispatch_error = deterministic_error
+            logger.warning(
+                '[Translate%s] Deterministic dispatch rejection; ending '
+                'translation without outer retry: %s',
+                chunk_label,
+                deterministic_error,
+            )
+            _notify(
+                'dispatch_failed_final',
+                _attempt,
+                _elapsed,
+                str(deterministic_error)[:160],
+            )
+            break
         except RateLimitError as re_err:
             # All keys temporarily rate-limited — wait and retry forever
             # (within the overall deadline).  This is the most common transient
@@ -459,7 +577,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                            chunk_label, _attempt, _dispatch_fail_count, _elapsed, _sleep)
             _notify('rate_limited', _attempt, _elapsed,
                     f'all keys busy (fails={_dispatch_fail_count}, retry in {_sleep:.0f}s)')
-            time.sleep(min(_sleep, _remaining_deadline_seconds()))
+            _sleep_backoff(min(_sleep, _remaining_deadline_seconds()))
             continue
         except Exception as se:
             # Other dispatch errors (network, timeout, bad payload, etc.) —
@@ -484,7 +602,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                            chunk_label, _attempt, _dispatch_fail_count, se, _sleep)
             _notify('dispatch_error', _attempt, _elapsed,
                     f'{type(se).__name__}: {str(se)[:120]}')
-            time.sleep(min(_sleep, _remaining_deadline_seconds()))
+            _sleep_backoff(min(_sleep, _remaining_deadline_seconds()))
             continue
 
         # Coerce structured Anthropic-style content (list of blocks
@@ -531,7 +649,8 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             if _used_key and _used_model:
                 _dispatcher.record_truncation(_used_key, _used_model,
                                               error='empty translation output')
-                _excluded_models.add(_used_model)
+                if not strict_model:
+                    _excluded_models.add(_used_model)
             if _content_fail_count >= _MAX_CONTENT_RETRIES:
                 logger.error('[Translate%s] Still empty after %d content retries — giving up',
                              chunk_label, _content_fail_count)
@@ -590,11 +709,14 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             # MiniMax-M2.5 (lowest score in the cheap tier) every retry.
             if _used_key and _model:
                 _dispatcher.record_truncation(_used_key, _model, error=_reason)
-                _excluded_models.add(_model)
+                if not strict_model:
+                    _excluded_models.add(_model)
             if _content_fail_count >= _MAX_CONTENT_RETRIES:
+                action = 'accepting' if accept_truncated else 'rejecting'
                 logger.warning('[Translate%s] Still truncated after %d content retries: %s '
-                               '— accepting partial result (%d chars)',
-                               chunk_label, _content_fail_count, _reason, len(c))
+                               '— %s partial result (%d chars)',
+                               chunk_label, _content_fail_count, _reason,
+                               action, len(c))
                 _notify('truncated_final', _attempt, _elapsed,
                         f'truncated after {_content_fail_count} retries')
                 # 溯源: committing a KNOWN-incomplete translation is a silent
@@ -609,6 +731,12 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                               reason=_reason, target=target)
                 except Exception as _ae:
                     logger.debug('[Translate%s] audit_log failed: %s', chunk_label, _ae)
+                if not accept_truncated:
+                    raise TranslationContentRefused(
+                        'truncated', _reason,
+                        attempts=_attempt,
+                        content_fails=_content_fail_count,
+                    )
                 _terminal_verdict = 'truncated'
                 break  # accept best-effort
             logger.warning('[Translate%s] Truncated translation (attempt %d, content_fails=%d): %s '
@@ -658,7 +786,8 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             _last_err = _noop_reason
             if _used_key and _model:
                 _dispatcher.record_truncation(_used_key, _model, error=_noop_reason)
-                _excluded_models.add(_model)
+                if not strict_model:
+                    _excluded_models.add(_model)
             if _content_fail_count >= _MAX_CONTENT_RETRIES:
                 logger.error('[Translate%s] Still no-op after %d content retries: %s '
                              '— giving up, will surface error',
@@ -722,7 +851,8 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             _last_err = _flip_reason
             if _used_key and _model:
                 _dispatcher.record_truncation(_used_key, _model, error=_flip_reason)
-                _excluded_models.add(_model)
+                if not strict_model:
+                    _excluded_models.add(_model)
             if _content_fail_count >= _MAX_CONTENT_RETRIES:
                 logger.error('[Translate%s] Still wrong-language after %d content retries: %s '
                              '— giving up, will surface error',
@@ -773,7 +903,8 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             _last_err = _overgen_reason
             if _used_key and _model:
                 _dispatcher.record_truncation(_used_key, _model, error=_overgen_reason)
-                _excluded_models.add(_model)
+                if not strict_model:
+                    _excluded_models.add(_model)
             if _content_fail_count >= _MAX_CONTENT_RETRIES:
                 logger.error('[Translate%s] Still over-generated after %d content retries: %s '
                              '— giving up, will surface error',
@@ -814,6 +945,8 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     # If every attempt produced an empty result, raise a clear error so the
     # caller can decide how to handle it (e.g. mark the task as failed).
     if not c or not c.strip():
+        if _terminal_dispatch_error is not None:
+            raise _terminal_dispatch_error
         raise ValueError(
             f'Empty translation result for chunk{chunk_label} after '
             f'{_attempt} attempts ({_dispatch_fail_count} dispatch fails, '

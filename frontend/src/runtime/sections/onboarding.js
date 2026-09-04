@@ -7,10 +7,9 @@
    the ONE question a new user can actually answer — "API key or
    subscription?" — and then drives the EXISTING surfaces:
 
-     API path   → probe (Api.providers.probe) + persist via
-                  Api.serverConfig.update({providers}) — the same partial
-                  merge the Settings save uses, so hot-reload applies and no
-                  settings session is needed.
+     API path   → probe (Api.providers.probe) compiles a secret-free v2 draft,
+                  then Api.modelRouting.createProvider stores the draft and
+                  its one credential through the owner-scoped CAS boundary.
      OAuth path → closes itself and hands off to Settings → 订阅登录, where
                   the battle-tested flow (popup / manual paste / curl helper
                   / egress line) takes over. Re-implementing any of that
@@ -187,7 +186,7 @@ function _obWire(step, data) {
 }
 
 // ══════════════════════════════════════════════════════
-//  API path — probe, then persist through the server-config merge
+//  API path — probe, then create one owner-scoped ProviderAccess
 // ══════════════════════════════════════════════════════
 
 function _obApiStatus(type, msg) {
@@ -224,34 +223,25 @@ async function _obApiSubmit() {
       return;
     }
 
-    var models = data.models || [];
-    models.forEach(function(model) {
-      model.catalog_managed = true;
-      model.catalog_source = 'provider';
-    });
-    var newProv = {
-      id: (data.brand || 'prov') + '_' + Date.now().toString(36),
-      name: data.name || 'Auto Provider',
-      base_url: baseUrl,
-      api_keys: [apiKey],
-      enabled: true,
-      models: models,
-      brand: data.brand || 'generic',
-      balance_url: data.balance_url || '',
-      model_catalog_sync: { mode: 'auto' },
-    };
-    if (data.thinking_format) newProv.thinking_format = data.thinking_format;
+    var bundle = data.provider_bundle;
+    var credentialId = data.credential_id;
+    if (!bundle || !credentialId || !bundle.provider) {
+      _obApiStatus('error', t('onboard.apiProbeFailed', { msg: 'invalid provider draft' }));
+      return;
+    }
+    bundle = JSON.parse(JSON.stringify(bundle));
+    bundle.credential_secrets = {};
+    bundle.credential_secrets[credentialId] = apiKey;
 
-    /* Persist through the SAME partial-merge route the Settings save uses:
-     * GET the live providers list, append, POST back. The server hot-reloads
-     * (dispatcher reset included), so the model dropdown is usable at once —
-     * no Settings session, no restart. */
-    var cfg = await Api.serverConfig.get();
-    var providers = (cfg && cfg.providers) || [];
-    var r = await Api.serverConfig.update({ providers: providers.concat([newProv]) });
-    var res = r ? await r.json().catch(function() { return {}; }) : {};
-    if (!res.ok) {
-      _obApiStatus('error', t('onboard.apiSaveFailed', { msg: res.error || 'unknown' }));
+    var authority = await Api.modelRouting.get();
+    var revision = Number(authority && authority.revision);
+    if (!Number.isInteger(revision) || revision < 0) {
+      _obApiStatus('error', t('onboard.apiSaveFailed', { msg: 'routing authority unavailable' }));
+      return;
+    }
+    var created = await Api.modelRouting.createProvider(bundle, revision);
+    if (!created || !created.ok) {
+      _obApiStatus('error', t('onboard.apiSaveFailed', { msg: (created && created.error) || 'unknown' }));
       return;
     }
 
@@ -260,7 +250,10 @@ async function _obApiSubmit() {
     if (typeof _loadServerConfigAndPopulate === 'function') {
       _loadServerConfigAndPopulate();
     }
-    _obRender('apiDone', { name: newProv.name, n: models.length });
+    _obRender('apiDone', {
+      name: bundle.provider.name,
+      n: Number(data.model_count || (bundle.offerings || []).length),
+    });
   } catch (e) {
     _obApiStatus('error', t('onboard.apiProbeFailed', { msg: e.message }));
   } finally {
@@ -274,14 +267,14 @@ async function _obApiSubmit() {
 
 function _obStartOAuth(provider) {
   _obClose();
-  if (typeof openSettings !== 'function') return;
-  openSettings();
-  if (typeof switchSettingsTab === 'function') switchSettingsTab('oauth');
+  if (typeof runtimeScope.openSettings !== 'function') return;
+  runtimeScope.openSettings();
+  if (typeof runtimeScope.switchSettingsTab === 'function') runtimeScope.switchSettingsTab('oauth');
   /* Auto-kick the login so the wizard's one click is the ONLY click before
    * the provider's own auth page. _oauthLogin drives the full existing flow
    * (popup + manual paste + curl helper), and the card's egress line keeps
    * explaining WHY a login cannot reach the provider when egress is down. */
-  if (typeof _oauthLogin === 'function') _oauthLogin(provider);
+  if (typeof runtimeScope._oauthLogin === 'function') runtimeScope._oauthLogin(provider);
 }
 
 if (typeof window !== 'undefined') {
@@ -291,4 +284,3 @@ if (typeof window !== 'undefined') {
   runtimeScope._obApiSubmit = _obApiSubmit;
   runtimeScope._obStartOAuth = _obStartOAuth;
 }
-

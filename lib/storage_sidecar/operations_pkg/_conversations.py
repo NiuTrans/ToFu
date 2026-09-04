@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Mapping
 import time
 from typing import Any
-import uuid
+
+import orjson
 
 
 from lib.log import get_logger
@@ -14,6 +16,19 @@ from lib.storage_sidecar.adapters.base import Session
 
 
 logger = get_logger(__name__)
+
+
+_ACTIVITY_DATE_BATCH_SIZE = 64
+_ACTIVITY_ARCHIVE_BATCH_SIZE = 4
+_ACTIVITY_DATE_MAX_INTERVALS = 366
+
+
+# Reverse-scanning JSON in Python only wins when the selected suffix is small.
+# Beyond this code-unit budget, orjson's authoritative full decoder is both
+# faster and already the compatibility fallback.  The cap also bounds corrupt
+# or highly skewed archives whose final message is unexpectedly enormous.
+_ARCHIVED_TAIL_SCAN_CODE_UNIT_BUDGET = 128 * 1024
+_TITLE_FILTER_SCAN_PAGE_SIZE = 512
 
 
 from lib.storage_sidecar.operations_pkg._common import (
@@ -26,6 +41,15 @@ from lib.storage_sidecar.operations_pkg._turns import (
     _mark_conversation_search_projection_dirty,
     _turn_public,
 )
+from lib.storage_sidecar.archived_message_codec import (
+    decode_archived_message_sequence_from_storage,
+)
+from lib.storage_sidecar.projection_codec import ProjectionCodecError
+from lib.storage_sidecar.turn_projection_head import (
+    discard_projection_cache_for_row,
+    projection_from_turn_row,
+    projection_head_state,
+)
 
 _CONVERSATION_METADATA = frozenset(
     {
@@ -37,89 +61,10 @@ _CONVERSATION_METADATA = frozenset(
     }
 )
 
-_LIVE_TURN_STATUSES = frozenset({"pending", "running"})
-_CLONE_RUNTIME_KEYS = frozenset({
-    "_activeAttemptId",
-    "_attemptId",
-    "_authoritativeActiveTaskIds",
-    "_commandPending",
-    "_needsStart",
-    "_streamCursor",
-    "_streaming",
-    "activeTaskId",
-    "approvalRequired",
-    "isStreaming",
-})
-_CLONE_TASK_ID_KEYS = frozenset({
-    "_proactiveTaskId",
-    "_taskId",
-    "_translateTaskId",
-    "taskId",
-})
-
-
-def _settings_without_live_runtime(raw: Any) -> dict[str, Any]:
-    settings = _load(raw) or {}
-    if not isinstance(settings, Mapping):
-        raise StorageError("database_integrity", "Conversation settings are malformed")
-    result = dict(settings)
-    result.pop("activeTaskId", None)
-    result.pop("_activeAttemptId", None)
-    return result
-
-
-def _clone_projection_value(
-    value: Any,
-    *,
-    turn_ids: Mapping[str, str],
-    archive_ids: Mapping[str, str],
-    task_ids: dict[str, str],
-) -> Any:
-    """Copy presentation data while severing every executable identity.
-
-    A duplicated conversation is independent history, not another handle to
-    the source task/attempt/project mutations.  Stable content fields remain;
-    runtime latches disappear; turn/archive references are remapped; historical
-    task identifiers become inert clone-local identifiers.
-    """
-    if isinstance(value, Mapping):
-        cloned: dict[str, Any] = {}
-        for raw_key, item in value.items():
-            key = str(raw_key)
-            if key in _CLONE_RUNTIME_KEYS:
-                continue
-            if key in {"_turnId", "turnId"} and isinstance(item, str):
-                replacement = turn_ids.get(item)
-                if replacement:
-                    cloned[key] = replacement
-                continue
-            if key in {"archiveId", "_compactionArchiveId"} \
-                    and isinstance(item, str):
-                cloned[key] = archive_ids.get(item, item)
-                continue
-            if key in _CLONE_TASK_ID_KEYS and isinstance(item, str) and item:
-                cloned[key] = task_ids.setdefault(
-                    item, f"clone-task-{uuid.uuid4().hex}"
-                )
-                continue
-            cloned[key] = _clone_projection_value(
-                item,
-                turn_ids=turn_ids,
-                archive_ids=archive_ids,
-                task_ids=task_ids,
-            )
-        return cloned
-    if isinstance(value, list):
-        return [
-            _clone_projection_value(
-                item,
-                turn_ids=turn_ids,
-                archive_ids=archive_ids,
-                task_ids=task_ids,
-            )
-            for item in value
-        ]
-    return value
+from lib.storage_sidecar.operations_pkg._conversation_clone import (
+    conversation_clone,
+    settings_without_live_runtime,
+)
 
 
 def _conversation_identity(payload: Mapping[str, Any]) -> tuple[str, int]:
@@ -150,9 +95,10 @@ def _conversation_document(
             "updated_at": int(row["updated_at_ms"]),
             "settings": settings,
             "msg_count": int(row["msg_count"]),
-            # Absent on metadata-only projections — the search corpus is
-            # as heavy as the archive itself (hundreds of MiB fleet-wide).
-            "search_text": str(row.get("search_text") or ""),
+            # Compatibility placeholder only. Search is an independently
+            # rebuilt projection; the frozen header copy is never authority
+            # and must not ride full transcript RPCs.
+            "search_text": "",
             "rev": int(row["rev"]),
         },
         "messages": messages if include_messages else [],
@@ -241,31 +187,549 @@ def _derive_turn_messages(session: Session, conv_id: str, user_id: Any) -> list:
         "ORDER BY ordinal",
         (conv_id, user_id),
     )
-    return [_turn_to_legacy_message(_turn_public(row)) for row in rows]
+    return [_turn_to_legacy_message(_turn_public(session, row)) for row in rows]
+
+
+def _message_window_bounds(
+    total_count: int,
+    window: int,
+    before_sequence: int | None,
+) -> tuple[int, int]:
+    end = (
+        total_count
+        if before_sequence is None
+        else max(0, min(before_sequence, total_count))
+    )
+    return max(0, end - window), end
+
+
+def _derive_turn_message_window(
+    session: Session,
+    conv_id: str,
+    user_id: int,
+    *,
+    window: int,
+    before_sequence: int | None,
+) -> tuple[list[dict[str, Any]], int, int, int]:
+    count_row = session.fetch_one(
+        "SELECT COUNT(*) AS c FROM storage_conversation_turns "
+        "WHERE conversation_id=? AND user_id=? AND lane_id='main'",
+        (conv_id, user_id),
+    )
+    total_count = int(count_row["c"]) if count_row else 0
+    start, end = _message_window_bounds(
+        total_count, window, before_sequence
+    )
+    if start == end:
+        return [], total_count, start, end
+    rows = session.fetch_all(
+        "SELECT * FROM storage_conversation_turns "
+        "WHERE conversation_id=? AND user_id=? AND lane_id='main' "
+        "ORDER BY ordinal LIMIT ? OFFSET ?",
+        (conv_id, user_id, end - start, start),
+    )
+    return (
+        [_turn_to_legacy_message(_turn_public(session, row)) for row in rows],
+        total_count,
+        start,
+        end,
+    )
+
+
+def _archived_conversation_messages(raw: Any) -> list[dict[str, Any]]:
+    """Decode one frozen pre-turn transcript for read compatibility only.
+
+    New writes never target ``messages_json``.  A non-empty value remains the
+    only durable transcript for conversations imported before the turn-native
+    cutover, so ignoring it would project intact history as an empty chat.
+    """
+    messages = _load(raw) or []
+    if not isinstance(messages, list) or not all(
+        isinstance(message, Mapping) for message in messages
+    ):
+        raise StorageError(
+            "database_integrity", "Archived conversation transcript is malformed"
+        )
+    try:
+        return decode_archived_message_sequence_from_storage(
+            [dict(message) for message in messages]
+        )
+    except ProjectionCodecError as exc:
+        raise StorageError(
+            "database_integrity",
+            "Archived conversation projection encoding is invalid",
+        ) from exc
+
+
+def _json_character(raw: str | bytes, index: int) -> str:
+    """Return one ASCII JSON syntax character without copying the archive."""
+    value = raw[index]
+    return chr(value) if isinstance(value, int) else value
+
+
+def _json_quote_is_escaped(raw: str | bytes, quote_index: int) -> bool:
+    """Whether a reverse-scanned quote has an odd backslash prefix."""
+    backslashes = 0
+    index = quote_index - 1
+    while index >= 0 and _json_character(raw, index) == "\\":
+        backslashes += 1
+        index -= 1
+    return bool(backslashes % 2)
+
+
+def _json_array_tail_bounds(
+    raw: str | bytes,
+    count: int,
+    *,
+    scan_code_unit_budget: int | None = None,
+) -> tuple[list[tuple[int, int]], bool] | None:
+    """Locate the last ``count`` top-level array values without decoding all.
+
+    JSON strings may contain commas, braces, escaped quotes, or arbitrary
+    Unicode; the reverse scanner treats only syntax outside strings as
+    structure. ``has_more`` says an earlier top-level value exists.
+    """
+    if count < 1 or (
+        scan_code_unit_budget is not None and scan_code_unit_budget < 1
+    ):
+        return None
+    scan_origin = len(raw) - 1
+    scan_floor = (
+        max(-1, scan_origin - scan_code_unit_budget)
+        if scan_code_unit_budget is not None
+        else -1
+    )
+    end = len(raw) - 1
+    while end >= 0 and _json_character(raw, end).isspace():
+        if end <= scan_floor:
+            return None
+        end -= 1
+    if end < 0 or _json_character(raw, end) != "]":
+        return None
+    value_end = end
+    index = end - 1
+    while index >= 0 and _json_character(raw, index).isspace():
+        if index <= scan_floor:
+            return None
+        index -= 1
+    if index >= 0 and _json_character(raw, index) == "[":
+        return ([], False)
+
+    depth = 0
+    in_string = False
+    reverse_bounds: list[tuple[int, int]] = []
+    while index >= 0:
+        if index <= scan_floor:
+            return None
+        character = _json_character(raw, index)
+        if in_string:
+            if character == '"' and not _json_quote_is_escaped(raw, index):
+                in_string = False
+            index -= 1
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "}]":
+            depth += 1
+        elif character in "{[":
+            if depth:
+                depth -= 1
+            elif character == "[":
+                value_start = index + 1
+                while (
+                    value_start < value_end
+                    and _json_character(raw, value_start).isspace()
+                ):
+                    value_start += 1
+                reverse_bounds.append((value_start, value_end))
+                return (list(reversed(reverse_bounds)), False)
+            else:
+                return None
+        elif character == "," and depth == 0:
+            value_start = index + 1
+            while (
+                value_start < value_end
+                and _json_character(raw, value_start).isspace()
+            ):
+                value_start += 1
+            reverse_bounds.append((value_start, value_end))
+            if len(reverse_bounds) >= count:
+                return (list(reversed(reverse_bounds)), True)
+            value_end = index
+            while (
+                value_end > 0
+                and _json_character(raw, value_end - 1).isspace()
+            ):
+                if value_end - 1 <= scan_floor:
+                    return None
+                value_end -= 1
+        index -= 1
+    return None
+
+
+def _json_array_head_bounds(
+    raw: str | bytes,
+    count: int,
+    *,
+    scan_code_unit_budget: int | None = None,
+) -> tuple[list[tuple[int, int]], bool] | None:
+    """Locate the first ``count`` top-level array values with bounded work."""
+    if count < 1 or (
+        scan_code_unit_budget is not None and scan_code_unit_budget < 1
+    ):
+        return None
+    index = 0
+    scan_ceiling = (
+        min(len(raw), scan_code_unit_budget)
+        if scan_code_unit_budget is not None
+        else len(raw)
+    )
+    while index < len(raw) and _json_character(raw, index).isspace():
+        if index >= scan_ceiling:
+            return None
+        index += 1
+    if index >= len(raw) or _json_character(raw, index) != "[":
+        return None
+    index += 1
+    while index < len(raw) and _json_character(raw, index).isspace():
+        if index >= scan_ceiling:
+            return None
+        index += 1
+    if index < len(raw) and _json_character(raw, index) == "]":
+        return ([], False)
+
+    value_start = index
+    depth = 0
+    in_string = False
+    escaped = False
+    bounds: list[tuple[int, int]] = []
+    while index < len(raw):
+        if index >= scan_ceiling:
+            return None
+        character = _json_character(raw, index)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+        elif character in "]}":
+            if depth:
+                depth -= 1
+            elif character == "]":
+                value_end = index
+                while (
+                    value_end > value_start
+                    and _json_character(raw, value_end - 1).isspace()
+                ):
+                    value_end -= 1
+                bounds.append((value_start, value_end))
+                return bounds, False
+            else:
+                return None
+        elif character == "," and depth == 0:
+            value_end = index
+            while (
+                value_end > value_start
+                and _json_character(raw, value_end - 1).isspace()
+            ):
+                value_end -= 1
+            bounds.append((value_start, value_end))
+            if len(bounds) >= count:
+                return bounds, True
+            index += 1
+            while index < len(raw) and _json_character(raw, index).isspace():
+                if index >= scan_ceiling:
+                    return None
+                index += 1
+            value_start = index
+            continue
+        index += 1
+    return None
+
+
+def _load_archived_window_fragments(
+    raw: str | bytes,
+    bounds: list[tuple[int, int]],
+) -> list[dict[str, Any]] | None:
+    fragments = [raw[left:right] for left, right in bounds]
+    if isinstance(raw, bytes):
+        encoded_window = b"[" + b",".join(fragments) + b"]"
+    else:
+        encoded_window = "[" + ",".join(fragments) + "]"
+    try:
+        candidates = orjson.loads(encoded_window)
+    except orjson.JSONDecodeError:
+        return None
+    if not isinstance(candidates, list) or not all(
+        isinstance(message, Mapping) for message in candidates
+    ):
+        return None
+    return [dict(message) for message in candidates]
+
+
+def _archived_conversation_tail_window(
+    raw: Any,
+    *,
+    window: int,
+    expected_count: int,
+) -> tuple[list[dict[str, Any]], int, int, int] | None:
+    """Decode a frozen archive's tail without materializing its old prefix.
+
+    The durable ``msg_count`` determines the requested absolute window. Basic
+    suffix-shape checks guard stale counts; any ambiguity returns ``None`` so
+    the caller preserves the full legacy decoder as the authority fallback.
+    """
+    if expected_count < 0:
+        return None
+    start, end = _message_window_bounds(expected_count, window, None)
+    wanted = end - start
+    if isinstance(raw, list):
+        if len(raw) != expected_count:
+            return None
+        candidates = raw[start:end]
+    elif isinstance(raw, (str, bytes)):
+        if wanted == 0:
+            bounds = _json_array_tail_bounds(raw, 1)
+            if bounds != ([], False):
+                return None
+            candidates = []
+        else:
+            # Average-size projection avoids entering the Python scanner when
+            # the requested suffix is predictably large.  The scanner's own
+            # cap catches skewed archives where only the last values are huge.
+            if (
+                expected_count > 0
+                and len(raw) * wanted
+                > _ARCHIVED_TAIL_SCAN_CODE_UNIT_BUDGET * expected_count
+            ):
+                return None
+            located = _json_array_tail_bounds(
+                raw,
+                wanted,
+                scan_code_unit_budget=(
+                    _ARCHIVED_TAIL_SCAN_CODE_UNIT_BUDGET
+                ),
+            )
+            if located is None:
+                return None
+            bounds, has_more = located
+            if len(bounds) != wanted or has_more != (expected_count > wanted):
+                return None
+            candidates = _load_archived_window_fragments(raw, bounds)
+            if candidates is None:
+                return None
+    else:
+        return None
+    if not isinstance(candidates, list) or not all(
+        isinstance(message, Mapping) for message in candidates
+    ):
+        return None
+    try:
+        decoded = decode_archived_message_sequence_from_storage(
+            [dict(message) for message in candidates]
+        )
+    except ProjectionCodecError:
+        return None
+    return decoded, expected_count, start, end
+
+
+def _archived_conversation_head_window(
+    raw: Any,
+    *,
+    window: int,
+    before_sequence: int,
+    expected_count: int,
+) -> tuple[list[dict[str, Any]], int, int, int] | None:
+    """Decode a frozen archive's first page without materializing its tail."""
+    if expected_count < 0:
+        return None
+    start, end = _message_window_bounds(
+        expected_count, window, before_sequence
+    )
+    wanted = end - start
+    if start != 0:
+        return None
+    if isinstance(raw, list):
+        if len(raw) != expected_count:
+            return None
+        candidates = raw[:end]
+    elif isinstance(raw, (str, bytes)):
+        if wanted == 0:
+            located = _json_array_head_bounds(raw, 1)
+            if located != ([], False):
+                return None
+            candidates = []
+        else:
+            if (
+                expected_count > 0
+                and len(raw) * wanted
+                > _ARCHIVED_TAIL_SCAN_CODE_UNIT_BUDGET * expected_count
+            ):
+                return None
+            located = _json_array_head_bounds(
+                raw,
+                wanted,
+                scan_code_unit_budget=(
+                    _ARCHIVED_TAIL_SCAN_CODE_UNIT_BUDGET
+                ),
+            )
+            if located is None:
+                return None
+            bounds, has_more = located
+            if len(bounds) != wanted or has_more != (expected_count > wanted):
+                return None
+            candidates = _load_archived_window_fragments(raw, bounds)
+            if candidates is None:
+                return None
+    else:
+        return None
+    if not isinstance(candidates, list) or not all(
+        isinstance(message, Mapping) for message in candidates
+    ):
+        return None
+    try:
+        decoded = decode_archived_message_sequence_from_storage(
+            [dict(message) for message in candidates]
+        )
+    except ProjectionCodecError:
+        return None
+    return decoded, expected_count, start, end
 
 
 def _conversation_get(session: Session, payload: Mapping[str, Any]) -> Any:
     conv_id, user_id = _conversation_identity(payload)
+    include_messages = bool(payload.get("derive_messages", True))
+    message_window = payload.get("message_window", 0)
+    if (
+        isinstance(message_window, bool)
+        or not isinstance(message_window, int)
+        or not 0 <= message_window <= 500
+    ):
+        raise StorageError(
+            "database_protocol_error", "Invalid conversation message window"
+        )
+    before_sequence = payload.get("before_sequence")
+    if before_sequence is not None and (
+        isinstance(before_sequence, bool)
+        or not isinstance(before_sequence, int)
+    ):
+        raise StorageError(
+            "database_protocol_error", "Invalid conversation message cursor"
+        )
+    if before_sequence is not None and not message_window:
+        raise StorageError(
+            "database_protocol_error",
+            "Conversation message cursor requires a message window",
+        )
+    if not include_messages and (message_window or before_sequence is not None):
+        raise StorageError(
+            "database_protocol_error",
+            "Conversation message window requires transcript projection",
+        )
+
     row = session.fetch_one(
         "SELECT id, user_id, title, created_at_ms, "
-        "updated_at_ms, settings_json, msg_count, search_text, rev "
+        "updated_at_ms, settings_json, msg_count, rev "
         "FROM storage_conversations WHERE id = ? AND user_id = ?",
         (conv_id, user_id),
     )
     if row is None:
         return None
-    _backfill_turn_message_counts(session, [row])
-    include_messages = bool(payload.get("derive_messages", True))
-    messages = (
-        _derive_turn_messages(session, conv_id, user_id)
-        if include_messages else []
+
+    messages: list[dict[str, Any]] = []
+    message_page = None
+    if include_messages:
+        if message_window:
+            messages, total_count, start, end = _derive_turn_message_window(
+                session,
+                conv_id,
+                user_id,
+                window=message_window,
+                before_sequence=before_sequence,
+            )
+            if total_count:
+                row["msg_count"] = total_count
+            else:
+                archive = session.fetch_one(
+                    "SELECT messages_json FROM storage_conversations "
+                    "WHERE id=? AND user_id=?",
+                    (conv_id, user_id),
+                )
+                if archive is None:
+                    raise StorageError(
+                        "database_integrity", "Conversation archive disappeared"
+                    )
+                archived_window = (
+                    _archived_conversation_tail_window(
+                        archive["messages_json"],
+                        window=message_window,
+                        expected_count=int(row["msg_count"]),
+                    )
+                    if before_sequence is None
+                    else _archived_conversation_head_window(
+                        archive["messages_json"],
+                        window=message_window,
+                        before_sequence=before_sequence,
+                        expected_count=int(row["msg_count"]),
+                    )
+                )
+                if archived_window is not None:
+                    messages, total_count, start, end = archived_window
+                else:
+                    archived = _archived_conversation_messages(
+                        archive["messages_json"]
+                    )
+                    total_count = len(archived)
+                    start, end = _message_window_bounds(
+                        total_count, message_window, before_sequence
+                    )
+                    messages = archived[start:end]
+                row["msg_count"] = total_count
+            message_page = {
+                "total_count": total_count,
+                "start": start,
+                "end": end,
+            }
+        else:
+            messages = _derive_turn_messages(session, conv_id, user_id)
+            if messages:
+                row["msg_count"] = len(messages)
+            else:
+                archive = session.fetch_one(
+                    "SELECT messages_json FROM storage_conversations "
+                    "WHERE id=? AND user_id=?",
+                    (conv_id, user_id),
+                )
+                if archive is None:
+                    raise StorageError(
+                        "database_integrity", "Conversation archive disappeared"
+                    )
+                messages = _archived_conversation_messages(
+                    archive["messages_json"]
+                )
+                row["msg_count"] = len(messages)
+    else:
+        _backfill_turn_message_counts(session, [row])
+    document = _conversation_document(
+        row,
+        include_messages=include_messages,
+        messages=messages,
     )
-    return _conversation_document(
-        row, include_messages=include_messages, messages=messages)
+    if message_page is not None:
+        document["message_page"] = message_page
+    return document
 
 
 def _backfill_turn_message_counts(session: Session, rows: list[dict]) -> None:
-    """Project exact main-lane counts from the sole transcript authority."""
+    """Prefer exact turn counts while preserving pre-turn archive counts."""
     if not rows:
         return
     identities = [
@@ -286,15 +750,202 @@ def _backfill_turn_message_counts(session: Session, rows: list[dict]) -> None:
         for item in counts
     }
     for row in rows:
-        row["msg_count"] = by_identity.get(
-            (str(row["id"]), int(row["user_id"])), 0)
+        count = by_identity.get((str(row["id"]), int(row["user_id"])))
+        if count is not None:
+            row["msg_count"] = count
+
+
+def _conversation_catalog_page(
+    session: Session,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return one bounded sidebar page plus its snapshot-consistent total.
+
+    Count and page reads execute inside the Sidecar query transaction.  The
+    owner/folder predicates therefore describe one authority snapshot while
+    the route avoids loading and projecting every conversation merely to
+    return its newest page.
+    """
+    user_id = _integer(payload, "user_id", minimum=1)
+    if payload.get("include_messages", False) is not False:
+        raise StorageError(
+            "database_protocol_error",
+            "Conversation catalog pages cannot include transcripts",
+        )
+    if payload.get("order_by", "updated_at_desc") != "updated_at_desc":
+        raise StorageError(
+            "database_protocol_error", "Invalid conversation catalog ordering"
+        )
+    limit = _integer(
+        payload, "limit", default=500, minimum=1, maximum=1000
+    )
+    settings_keys = payload.get("settings_keys")
+    if settings_keys is not None:
+        if not isinstance(settings_keys, list) or not all(
+            isinstance(key, str) and key for key in settings_keys
+        ):
+            raise StorageError(
+                "database_protocol_error",
+                "Invalid conversation settings projection",
+            )
+        settings_keys = list(dict.fromkeys(settings_keys))[:64]
+
+    folder_id = (
+        _required_text(payload, "folder_id", 512)
+        if "folder_id" in payload
+        else None
+    )
+    before_updated_at = payload.get("before_updated_at")
+    if before_updated_at is not None and (
+        not isinstance(before_updated_at, int)
+        or isinstance(before_updated_at, bool)
+        or before_updated_at < 0
+    ):
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid conversation catalog cursor timestamp",
+        )
+    before_id = payload.get("before_id", "")
+    if not isinstance(before_id, str) or len(before_id) > 256:
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid conversation catalog cursor id",
+        )
+    if before_updated_at is None and before_id:
+        raise StorageError(
+            "database_protocol_error",
+            "Conversation catalog cursor id requires a timestamp",
+        )
+
+    base_where = ["user_id = ?"]
+    base_params: list[Any] = [user_id]
+    if folder_id is not None:
+        folder_expression = (
+            "settings_json ->> 'folderId'"
+            if session.backend == "postgres"
+            else "json_extract(settings_json, '$.folderId')"
+        )
+        base_where.append(f"{folder_expression} = ?")
+        base_params.append(folder_id)
+
+    count_row = session.fetch_one(
+        "SELECT COUNT(*) AS c FROM storage_conversations WHERE "
+        + " AND ".join(base_where),
+        tuple(base_params),
+    )
+    total_count = int(count_row["c"]) if count_row else 0
+
+    page_where = list(base_where)
+    page_params = list(base_params)
+    if before_updated_at is not None:
+        page_where.append(
+            "(updated_at_ms < ? OR (updated_at_ms = ? AND id < ?))"
+        )
+        page_params.extend([before_updated_at, before_updated_at, before_id])
+    rows = session.fetch_all(
+        "SELECT id, user_id, title, created_at_ms, updated_at_ms, "
+        "settings_json, msg_count, rev FROM storage_conversations WHERE "
+        + " AND ".join(page_where)
+        + " ORDER BY updated_at_ms DESC, id DESC LIMIT ?",
+        tuple(page_params + [limit + 1]),
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    _backfill_turn_message_counts(session, rows)
+    return {
+        "items": [
+            _conversation_document(
+                row,
+                include_messages=False,
+                settings_keys=settings_keys,
+            )
+            for row in rows
+        ],
+        "total_count": total_count,
+        "has_more": has_more,
+    }
+
+
+def _conversation_title_match_ids(
+    session: Session,
+    *,
+    where: list[str],
+    params: list[Any],
+    order_by: str,
+    title_contains: str,
+    limit: int,
+) -> list[str]:
+    """Return an ordered, bounded title match without hauling metadata.
+
+    Python ``str.lower`` is the established conversation-reference contract.
+    SQLite's built-in ``lower`` only handles ASCII, while PostgreSQL behavior
+    depends on database collation.  Scan tiny keyset pages inside the storage
+    authority so both backends preserve the same Unicode semantics and only
+    matching rows proceed to the heavier document projection.
+    """
+    if limit <= 0:
+        return []
+    needle = title_contains.lower()
+    matched_ids: list[str] = []
+    cursor_updated_at: int | None = None
+    cursor_id = ""
+    while len(matched_ids) < limit:
+        page_where = list(where)
+        page_params = list(params)
+        if cursor_updated_at is not None:
+            page_where.append(
+                "(updated_at_ms < ? OR (updated_at_ms = ? AND id < ?))"
+            )
+            page_params.extend(
+                [cursor_updated_at, cursor_updated_at, cursor_id]
+            )
+        elif cursor_id:
+            page_where.append("id > ?")
+            page_params.append(cursor_id)
+        rows = session.fetch_all(
+            "SELECT id,title,updated_at_ms FROM storage_conversations WHERE "
+            + " AND ".join(page_where or ["1 = 1"])
+            + (
+                " ORDER BY updated_at_ms DESC, id DESC LIMIT ?"
+                if order_by == "updated_at_desc"
+                else " ORDER BY id ASC LIMIT ?"
+            ),
+            tuple(page_params + [_TITLE_FILTER_SCAN_PAGE_SIZE]),
+        )
+        if not rows:
+            break
+        for row in rows:
+            if needle in str(row["title"] or "").lower():
+                matched_ids.append(str(row["id"]))
+                if len(matched_ids) >= limit:
+                    break
+        if len(rows) < _TITLE_FILTER_SCAN_PAGE_SIZE:
+            break
+        last_row = rows[-1]
+        cursor_id = str(last_row["id"])
+        if order_by == "updated_at_desc":
+            cursor_updated_at = int(last_row["updated_at_ms"])
+    return matched_ids
 
 
 def _conversation_list(session: Session, payload: Mapping[str, Any]) -> Any:
+    catalog_page = payload.get("catalog_page", False)
+    if not isinstance(catalog_page, bool):
+        raise StorageError(
+            "database_protocol_error", "Invalid conversation catalog mode"
+        )
+    if catalog_page:
+        return _conversation_catalog_page(session, payload)
+
     user_id = _integer(payload, "user_id", minimum=1)
     project_path = (
         _required_text(payload, "project_path", 4096)
         if "project_path" in payload
+        else None
+    )
+    title_contains = (
+        _required_text(payload, "title_contains", 512)
+        if "title_contains" in payload
         else None
     )
     ids = payload.get("ids")
@@ -345,6 +996,7 @@ def _conversation_list(session: Session, payload: Mapping[str, Any]) -> Any:
         created_at_lt,
         ids,
         project_path,
+        title_contains,
     ):
         if value is not None:
             metadata_only = False
@@ -381,15 +1033,31 @@ def _conversation_list(session: Session, payload: Mapping[str, Any]) -> Any:
     if created_at_lt is not None:
         where.append("created_at_ms < ?")
         params.append(created_at_lt)
+    if title_contains is not None:
+        title_match_ids = _conversation_title_match_ids(
+            session,
+            where=where,
+            params=params,
+            order_by=order_by,
+            title_contains=title_contains,
+            limit=limit,
+        )
+        if not title_match_ids:
+            return []
+        where.append("id IN (%s)" % ",".join("?" for _ in title_match_ids))
+        params.extend(title_match_ids)
     if not where:
         where.append("1 = 1")
     # Metadata-only listings never touch turn projections or search fragments.
+    settings_projection = (
+        "'{}' AS settings_json" if settings_keys == [] else "settings_json"
+    )
     projection = (
-        "id, user_id, title, created_at_ms, "
-        "updated_at_ms, settings_json, msg_count, search_text, rev "
+        "id, user_id, title, messages_json, created_at_ms, "
+        f"updated_at_ms, {settings_projection}, msg_count, rev "
         if include_messages
         else "id, user_id, title, created_at_ms, "
-        "updated_at_ms, settings_json, msg_count, rev "
+        f"updated_at_ms, {settings_projection}, msg_count, rev "
     )
     rows = session.fetch_all(
         "SELECT "
@@ -414,7 +1082,7 @@ def _conversation_list(session: Session, payload: Mapping[str, Any]) -> Any:
 
 
 def _derive_turn_messages_bulk(session: Session, rows: list[dict]) -> None:
-    """Project every listed transcript from turns in one owner-aware query."""
+    """Project turns, falling back to frozen pre-cutover transcript archives."""
     if not rows:
         return
     identities = [
@@ -437,10 +1105,204 @@ def _derive_turn_messages_bulk(session: Session, rows: list[dict]) -> None:
         by_identity.setdefault(identity, []).append(turn_row)
     for row in rows:
         identity = (str(row["id"]), int(row["user_id"]))
-        row["_projected_messages"] = [
-            _turn_to_legacy_message(_turn_public(turn_row))
+        projected = [
+            _turn_to_legacy_message(_turn_public(session, turn_row))
             for turn_row in by_identity.get(identity, [])
         ]
+        row["_projected_messages"] = (
+            projected
+            if projected
+            else _archived_conversation_messages(row.get("messages_json"))
+        )
+
+
+def _activity_timestamp(value: Any) -> int:
+    """Mirror the report reader's tolerant timestamp coercion."""
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _activity_interval(
+    timestamp_ms: int,
+    boundaries_ms: list[int],
+) -> int | None:
+    if timestamp_ms < boundaries_ms[0] or timestamp_ms >= boundaries_ms[-1]:
+        return None
+    index = bisect_right(boundaries_ms, timestamp_ms) - 1
+    return index if 0 <= index < len(boundaries_ms) - 1 else None
+
+
+def _conversation_activity_dates(
+    session: Session,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Count owner conversations active in explicit calendar intervals.
+
+    Candidate headers are selected first. Turn-native transcripts project only
+    their timestamp scalar in bounded ID batches; frozen pre-Turn archives load
+    four at a time and decode one at a time. The response therefore grows with
+    the number of calendar intervals, never with transcript bytes.
+    """
+    user_id = _integer(payload, "user_id", minimum=1)
+    updated_at_gte = payload.get("updated_at_gte")
+    created_at_lt = payload.get("created_at_lt")
+    for value in (updated_at_gte, created_at_lt):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            raise StorageError(
+                "database_protocol_error", "Invalid conversation time filter"
+            )
+    if updated_at_gte is None:
+        raise StorageError(
+            "database_protocol_error", "updated_at_gte is required"
+        )
+    boundaries = payload.get("day_boundaries_ms")
+    if (
+        not isinstance(boundaries, list)
+        or not 2 <= len(boundaries) <= _ACTIVITY_DATE_MAX_INTERVALS + 1
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in boundaries
+        )
+        or any(left >= right for left, right in zip(boundaries, boundaries[1:]))
+    ):
+        raise StorageError(
+            "database_protocol_error", "Invalid activity date boundaries"
+        )
+    boundaries_ms = list(boundaries)
+    limit = _integer(payload, "limit", default=10_000, minimum=1, maximum=10_000)
+    where = ["user_id = ?", "updated_at_ms >= ?"]
+    params: list[Any] = [user_id, updated_at_gte]
+    if created_at_lt is not None:
+        where.append("created_at_ms < ?")
+        params.append(created_at_lt)
+    candidates = session.fetch_all(
+        "SELECT id,created_at_ms,updated_at_ms "
+        "FROM storage_conversations WHERE " + " AND ".join(where)
+        + " ORDER BY updated_at_ms DESC,id DESC LIMIT ?",
+        tuple(params + [limit]),
+    )
+    counts = [0] * (len(boundaries_ms) - 1)
+    projection_document_expression = (
+        "COALESCE(cp.projection_json,t.projection_json)")
+    timestamp_expression = (
+        f"{projection_document_expression} -> 'timestamp'"
+        if session.backend == "postgres"
+        else f"json_extract({projection_document_expression}, '$.timestamp')"
+    )
+    for start in range(0, len(candidates), _ACTIVITY_DATE_BATCH_SIZE):
+        batch = candidates[start:start + _ACTIVITY_DATE_BATCH_SIZE]
+        by_id = {str(row["id"]): row for row in batch}
+        ids = list(by_id)
+        placeholders = ",".join("?" for _ in ids)
+        turn_rows = session.fetch_all(
+            "SELECT t.turn_id,t.conversation_id,t.conversation_id AS cid,t.user_id,"
+            "t.current_attempt_id,t.status,t.projection_revision,"
+            "t.projection_checkpoint_revision,"
+            "t.projection_materialized_revision,t.projection_patch_count,"
+            "t.projection_patch_bytes,cp.turn_id AS checkpoint_turn_id,"
+            "t.created_at AS turn_created_at,"
+            f"{timestamp_expression} AS projection_timestamp "
+            "FROM storage_conversation_turns AS t LEFT JOIN "
+            "storage_turn_projection_checkpoints AS cp ON "
+            "cp.turn_id=t.turn_id AND cp.conversation_id=t.conversation_id "
+            "AND cp.user_id=t.user_id AND cp.attempt_id=t.current_attempt_id "
+            "AND cp.projection_revision=t.projection_checkpoint_revision "
+            "WHERE t.user_id=? AND t.lane_id='main' "
+            "AND t.conversation_id IN ("
+            + placeholders
+            + ") ORDER BY t.conversation_id,t.ordinal",
+            tuple([user_id, *ids]),
+        )
+        turn_backed: set[str] = set()
+        active_by_id: dict[str, set[int]] = {
+            conversation_id: set() for conversation_id in ids
+        }
+        for turn in turn_rows:
+            conversation_id = str(turn["cid"])
+            header = by_id.get(conversation_id)
+            if header is None:
+                continue
+            turn_backed.add(conversation_id)
+            projected = turn.get("projection_timestamp")
+            has_external_projection = (
+                turn.get("projection_checkpoint_revision") is not None
+                or turn.get("projection_materialized_revision") is not None
+                or bool(turn.get("projection_patch_count"))
+                or bool(turn.get("projection_patch_bytes"))
+            )
+            if has_external_projection:
+                head = projection_head_state(turn)
+                if (
+                    head.checkpoint_active
+                    and turn.get("checkpoint_turn_id") is None
+                ):
+                    raise StorageError(
+                        "database_integrity",
+                        "Turn projection checkpoint is missing",
+                    )
+                if head.active:
+                    projected = projection_from_turn_row(
+                        session, turn).get("timestamp")
+            message_value = (
+                projected if projected else turn.get("turn_created_at")
+            )
+            fallback = _activity_timestamp(
+                header.get("updated_at_ms") or header.get("created_at_ms") or 0
+            )
+            timestamp_ms = _activity_timestamp(message_value) or fallback
+            interval = _activity_interval(timestamp_ms, boundaries_ms)
+            if interval is not None:
+                active_by_id[conversation_id].add(interval)
+        legacy_ids = [
+            conversation_id
+            for conversation_id in ids
+            if conversation_id not in turn_backed
+        ]
+        for legacy_start in range(
+            0, len(legacy_ids), _ACTIVITY_ARCHIVE_BATCH_SIZE
+        ):
+            archive_ids = legacy_ids[
+                legacy_start:legacy_start + _ACTIVITY_ARCHIVE_BATCH_SIZE
+            ]
+            archive_placeholders = ",".join("?" for _ in archive_ids)
+            archives = session.fetch_all(
+                "SELECT id,messages_json FROM storage_conversations "
+                "WHERE user_id=? AND id IN ("
+                + archive_placeholders
+                + ") ORDER BY id",
+                tuple([user_id, *archive_ids]),
+            )
+            by_archive_id = {str(row["id"]): row for row in archives}
+            if set(by_archive_id) != set(archive_ids):
+                raise StorageError(
+                    "database_integrity", "Conversation archive disappeared"
+                )
+            for conversation_id in archive_ids:
+                header = by_id[conversation_id]
+                fallback = _activity_timestamp(
+                    header.get("updated_at_ms")
+                    or header.get("created_at_ms")
+                    or 0
+                )
+                for message in _archived_conversation_messages(
+                    by_archive_id[conversation_id].get("messages_json")
+                ):
+                    timestamp_ms = _activity_timestamp(
+                        message.get("timestamp", 0)
+                    ) or fallback
+                    interval = _activity_interval(timestamp_ms, boundaries_ms)
+                    if interval is not None:
+                        active_by_id[conversation_id].add(interval)
+        for active_intervals in active_by_id.values():
+            for interval in active_intervals:
+                counts[interval] += 1
+    return {"candidate_count": len(candidates), "counts": counts}
 
 
 def _conversation_count(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -751,6 +1613,14 @@ def _drop_active_conversation_rows(
     either while the conversation header and turns are absent.
     """
     _mark_conversation_search_projection_dirty(session, conv_id, user_id)
+    cached_turns = session.fetch_all(
+        "SELECT turn_id,conversation_id,user_id,current_attempt_id "
+        "FROM storage_conversation_turns WHERE conversation_id=? AND user_id=? "
+        "AND current_attempt_id IS NOT NULL",
+        (conv_id, user_id),
+    )
+    for cached_turn in cached_turns:
+        discard_projection_cache_for_row(session, cached_turn)
     timer_ids = session.fetch_all(
         "SELECT id FROM storage_timers WHERE conv_id=? AND user_id=?",
         (conv_id, user_id),
@@ -784,9 +1654,19 @@ def _drop_active_conversation_rows(
         (conv_id, user_id),
     )
     session.execute(
+        "DELETE FROM storage_raw_archives "
+        "WHERE conversation_id=? AND user_id=?",
+        (conv_id, user_id),
+    )
+    session.execute(
         "DELETE FROM storage_generation_attempts WHERE turn_id IN ("
         "SELECT turn_id FROM storage_conversation_turns "
         "WHERE conversation_id=? AND user_id=?)",
+        (conv_id, user_id),
+    )
+    session.execute(
+        "DELETE FROM storage_turn_projection_checkpoints "
+        "WHERE conversation_id=? AND user_id=?",
         (conv_id, user_id),
     )
     if not retain_recoverable_rows:
@@ -849,6 +1729,35 @@ def _purge_conversation_identity(
     return bool(active or trashed_turns or trashed_header)
 
 
+def _materialize_external_turn_projections_for_trash(
+    session: Session,
+    conv_id: str,
+    user_id: int,
+) -> None:
+    """Fold only checkpoint/head Turns into self-contained trash rows."""
+    rows = session.fetch_all(
+        "SELECT * FROM storage_conversation_turns "
+        "WHERE conversation_id=? AND user_id=? AND ("
+        "projection_checkpoint_revision IS NOT NULL OR "
+        "projection_materialized_revision IS NOT NULL OR "
+        "projection_patch_count<>0 OR projection_patch_bytes<>0) "
+        "ORDER BY turn_id",
+        (conv_id, user_id),
+    )
+    for row in rows:
+        projection = projection_from_turn_row(session, row)
+        changed = session.execute(
+            "UPDATE storage_conversation_trash_turns SET projection_json=? "
+            "WHERE conversation_id=? AND user_id=? AND turn_id=?",
+            (_dump(projection), conv_id, user_id, str(row["turn_id"])),
+        )
+        if changed != 1:
+            raise StorageError(
+                "database_integrity",
+                "Turn disappeared while its trash projection was materialized",
+            )
+
+
 def _conversation_delete(session: Session, payload: Mapping[str, Any]) -> Any:
     """Atomically move one live conversation into the recoverable trash.
 
@@ -860,7 +1769,8 @@ def _conversation_delete(session: Session, payload: Mapping[str, Any]) -> Any:
     conv_id, user_id = _conversation_identity(payload)
     session.lock_key("conversation", f"{user_id}:{conv_id}")
     header = session.fetch_one(
-        "SELECT title,created_at_ms,updated_at_ms,settings_json,msg_count,rev "
+        "SELECT title,messages_json,created_at_ms,updated_at_ms,settings_json,"
+        "msg_count,rev "
         "FROM storage_conversations WHERE id=? AND user_id=?",
         (conv_id, user_id),
     )
@@ -879,6 +1789,13 @@ def _conversation_delete(session: Session, payload: Mapping[str, Any]) -> Any:
         (conv_id, user_id),
     )
     main_count = int(count_row["c"] or 0) if count_row else 0
+    # Turn-native conversations keep msg_count=0 as a placeholder because
+    # their transcript lives in storage_conversation_turns.  Pre-turn
+    # archives are the reverse: msg_count is the only sidebar-visible size
+    # for the frozen messages_json transcript, so preserve it verbatim when
+    # non-zero instead of overwriting it with the (zero) turn count.
+    archived_count = int(header["msg_count"] or 0)
+    trash_msg_count = archived_count or main_count
     session.execute(
         "DELETE FROM storage_conversation_trash_turns "
         "WHERE conversation_id=? AND user_id=?",
@@ -891,17 +1808,22 @@ def _conversation_delete(session: Session, payload: Mapping[str, Any]) -> Any:
     )
     session.execute(
         "INSERT INTO storage_conversation_trash("
-        "conversation_id,user_id,title,created_at_ms,updated_at_ms,"
-        "settings_json,msg_count,rev,deleted_at_ms) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "conversation_id,user_id,title,messages_json,created_at_ms,"
+        "updated_at_ms,settings_json,msg_count,rev,deleted_at_ms) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             conv_id,
             user_id,
             str(header["title"] or "New Chat"),
+            # Pre-turn conversations keep their ONLY durable transcript in
+            # messages_json; dropping it here would make restore return an
+            # empty chat.  Pass the raw bytes through unchanged so SQLite
+            # keeps the JSONDOC BLOB (``str(b'...')`` would corrupt it).
+            header["messages_json"] or _dump([]),
             int(header["created_at_ms"] or 0),
             int(header["updated_at_ms"] or 0),
-            _dump(_settings_without_live_runtime(header["settings_json"])),
-            main_count,
+            _dump(settings_without_live_runtime(header["settings_json"])),
+            trash_msg_count,
             int(header["rev"] or 0),
             now,
         ),
@@ -918,6 +1840,8 @@ def _conversation_delete(session: Session, payload: Mapping[str, Any]) -> Any:
         "WHERE conversation_id=? AND user_id=?",
         (conv_id, user_id),
     )
+    _materialize_external_turn_projections_for_trash(
+        session, conv_id, user_id)
     session.execute(
         "UPDATE storage_conversation_trash_turns "
         "SET status='interrupted',settlement_json=?,updated_at=? "
@@ -963,7 +1887,7 @@ def _conversation_restore(session: Session, payload: Mapping[str, Any]) -> Any:
     if header is None:
         return {"restored": False, "conflict": False, "missing": True}
     restored_revision = int(header["rev"] or 0) + 1
-    settings = _settings_without_live_runtime(header["settings_json"])
+    settings = settings_without_live_runtime(header["settings_json"])
     session.execute(
         "INSERT INTO storage_conversations("
         "id,user_id,title,messages_json,created_at_ms,updated_at_ms,"
@@ -973,7 +1897,7 @@ def _conversation_restore(session: Session, payload: Mapping[str, Any]) -> Any:
             conv_id,
             user_id,
             str(header["title"] or "New Chat"),
-            _dump([]),
+            header["messages_json"] or _dump([]),
             int(header["created_at_ms"] or 0),
             int(header["updated_at_ms"] or 0),
             _dump(settings),
@@ -1020,165 +1944,14 @@ def _conversation_restore(session: Session, payload: Mapping[str, Any]) -> Any:
 
 
 def _conversation_clone(session: Session, payload: Mapping[str, Any]) -> Any:
-    """Create an independent settled turn graph from one active source."""
+    """Create an inert snapshot even while the source is generating."""
     source_id, user_id = _conversation_identity(payload)
-    destination_id = _required_text(payload, "destination_conv_id", 256)
-    for lock_id in sorted({source_id, destination_id}):
-        session.lock_key("conversation", f"{user_id}:{lock_id}")
-    source = session.fetch_one(
-        "SELECT * FROM storage_conversations WHERE id=? AND user_id=?",
-        (source_id, user_id),
+    return conversation_clone(
+        session,
+        payload,
+        source_id=source_id,
+        user_id=user_id,
     )
-    if source is None:
-        return {"cloned": False, "missing": True, "busy": False}
-    live = session.fetch_one(
-        "SELECT 1 AS present FROM storage_conversation_turns "
-        "WHERE conversation_id=? AND user_id=? "
-        "AND status IN ('pending','running') LIMIT 1",
-        (source_id, user_id),
-    )
-    if live is not None:
-        return {"cloned": False, "missing": False, "busy": True}
-    destination_taken = (
-        session.fetch_one(
-            "SELECT 1 AS present FROM storage_conversations WHERE id=?",
-            (destination_id,),
-        ) is not None
-        or session.fetch_one(
-            "SELECT 1 AS present FROM storage_conversation_trash "
-            "WHERE conversation_id=?",
-            (destination_id,),
-        ) is not None
-    )
-    if destination_taken:
-        raise StorageError("database_conflict", "Destination conversation exists")
-
-    raw_title = payload.get("title")
-    if raw_title is None:
-        title = f"{str(source['title'] or 'Untitled')} (copy)"
-    elif not isinstance(raw_title, str) or not raw_title.strip():
-        raise StorageError("database_protocol_error", "Invalid clone title")
-    else:
-        title = raw_title.strip()
-    now = int(time.time() * 1000)
-    source_turns = session.fetch_all(
-        "SELECT * FROM storage_conversation_turns "
-        "WHERE conversation_id=? AND user_id=? ORDER BY lane_id,ordinal",
-        (source_id, user_id),
-    )
-    turn_ids = {
-        str(turn["turn_id"]): str(uuid.uuid4()) for turn in source_turns
-    }
-    source_archives = session.fetch_all(
-        "SELECT archive_id,task_id FROM storage_compaction_archives "
-        "WHERE conversation_id=? AND user_id=? ORDER BY created_at_ms,archive_id",
-        (source_id, user_id),
-    )
-    archive_ids = {
-        str(row["archive_id"]): f"{time.time_ns():020d}_{uuid.uuid4().hex}"
-        for row in source_archives
-    }
-    task_ids: dict[str, str] = {}
-    settings = _settings_without_live_runtime(source["settings_json"])
-    main_count = sum(
-        1 for turn in source_turns if str(turn["lane_id"] or "main") == "main"
-    )
-    session.execute(
-        "INSERT INTO storage_conversations("
-        "id,user_id,title,messages_json,created_at_ms,updated_at_ms,"
-        "settings_json,msg_count,search_text,rev) "
-        "VALUES (?,?,?,?,?,?,?,?,?,0)",
-        (
-            destination_id,
-            user_id,
-            title[:500],
-            _dump([]),
-            now,
-            now,
-            _dump(settings),
-            main_count,
-            "",
-        ),
-    )
-    for turn in source_turns:
-        old_turn_id = str(turn["turn_id"])
-        raw_projection = _load(turn["projection_json"]) or {}
-        if not isinstance(raw_projection, Mapping):
-            raise StorageError("database_integrity", "Turn projection is malformed")
-        projection = _clone_projection_value(
-            raw_projection,
-            turn_ids=turn_ids,
-            archive_ids=archive_ids,
-            task_ids=task_ids,
-        )
-        parent_id = turn["parent_turn_id"]
-        mapped_parent = turn_ids.get(str(parent_id)) if parent_id else None
-        settlement = _load(turn["settlement_json"]) or {}
-        if not isinstance(settlement, Mapping):
-            raise StorageError("database_integrity", "Turn settlement is malformed")
-        session.execute(
-            "INSERT INTO storage_conversation_turns("
-            "turn_id,conversation_id,user_id,lane_id,parent_turn_id,ordinal,"
-            "actor,kind,run_id,status,current_attempt_id,projection_json,"
-            "projection_revision,settlement_json,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                turn_ids[old_turn_id],
-                destination_id,
-                user_id,
-                str(turn["lane_id"] or "main"),
-                mapped_parent,
-                int(turn["ordinal"]),
-                str(turn["actor"]),
-                str(turn["kind"] or "reply"),
-                "",
-                str(turn["status"]),
-                None,
-                _dump(projection),
-                1,
-                _dump(dict(settlement)),
-                int(turn["created_at"]),
-                int(turn["updated_at"]),
-            ),
-        )
-    _mark_conversation_search_projection_dirty(
-        session, destination_id, user_id)
-
-    for archive in source_archives:
-        old_archive_id = str(archive["archive_id"])
-        old_task_id = str(archive["task_id"] or "")
-        new_task_id = (
-            task_ids.setdefault(old_task_id, f"clone-task-{uuid.uuid4().hex}")
-            if old_task_id else ""
-        )
-        session.execute(
-            "INSERT INTO storage_compaction_archives("
-            "archive_id,conversation_id,user_id,messages_json,summary,receipt_json,trigger,"
-            "task_id,round_num,model,tokens_before,tokens_after,msgs_before,"
-            "msgs_after,reason,payload_size,created_at_ms) "
-            "SELECT ?,?,?,messages_json,summary,receipt_json,trigger,?,round_num,model,"
-            "tokens_before,tokens_after,msgs_before,msgs_after,reason,"
-            "payload_size,created_at_ms FROM storage_compaction_archives "
-            "WHERE archive_id=? AND conversation_id=? AND user_id=?",
-            (
-                archive_ids[old_archive_id],
-                destination_id,
-                user_id,
-                new_task_id,
-                old_archive_id,
-                source_id,
-                user_id,
-            ),
-        )
-    return {
-        "cloned": True,
-        "missing": False,
-        "busy": False,
-        "conversationId": destination_id,
-        "turnCount": len(source_turns),
-        "archiveCount": len(source_archives),
-        "rev": 0,
-    }
 
 
 def _conversation_purge(session: Session, payload: Mapping[str, Any]) -> Any:

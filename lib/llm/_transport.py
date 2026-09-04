@@ -9,6 +9,7 @@ import random
 import threading
 import time
 import weakref
+from concurrent.futures import Future
 
 import httpx
 import requests
@@ -19,6 +20,21 @@ from lib.llm_errors import AbortedError
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def transport_owner_scope(owner_user_id: object | None) -> str:
+    """Normalize an optional application owner for desktop bridge transport.
+
+    ``''`` means this model call has no owner and therefore may use only
+    server-side network routes. Any supplied identity must be a positive
+    repository owner; account subjects and booleans never become bridge scope.
+    """
+    if owner_user_id is None:
+        return ''
+    from lib.identity import require_user_id
+
+    return str(require_user_id(
+        owner_user_id, context='LLM desktop egress owner'))
 
 
 def _bounded_env_int(name, default, minimum, maximum):
@@ -178,11 +194,6 @@ def stream_idle_timeout_seconds() -> float:
 # are consumed above only as deprecated aliases for the transport-idle window.
 SEMANTIC_IDLE_TIMEOUT_S = 0.0
 NO_ACTIONABLE_OUTPUT_TIMEOUT_S = 0.0
-
-
-def semantic_idle_timeout_seconds() -> float:
-    """Deprecated compatibility seam; semantic inactivity never terminates."""
-    return 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,9 +566,6 @@ class StreamIdleWatchdog:
         self.notify_activity()
         self.progress.mark_transport_bytes(byte_count)
 
-    def notify_sse_event(self):
-        self.progress.mark_sse_event()
-
     def notify_reasoning_progress(self, text) -> bool:
         """Renew the rolling semantic clock for non-blank reasoning."""
         return self.progress.mark_reasoning(text)
@@ -565,10 +573,6 @@ class StreamIdleWatchdog:
     def notify_actionable_output(self):
         """Renew the rolling semantic deadline at a legacy callback seam."""
         self.progress.notify_actionable_output()
-
-    def semantic_stall_snapshot(self) -> dict:
-        """Return bounded timeout diagnostics for the current attempt."""
-        return self.progress.snapshot()
 
     def cancel(self):
         self._done.set()
@@ -670,6 +674,56 @@ async def async_abortable_sleep(seconds: float, abort_check=None, interval: floa
         remaining = deadline - time.monotonic()
         await asyncio.sleep(min(interval, max(0, remaining)))
 
+
+def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None):
+    """Run a blocking stream-open ``post_fn`` on a daemon thread while polling
+    ``is_aborted``, so a Stop pressed during the response-header wait lands
+    within one poll interval instead of whenever the upstream first speaks.
+
+    ``post_fn`` blocks until response headers arrive; before that point no
+    response handle exists, so the idle watchdog's ``resp.close()`` cannot
+    reach the socket (the read sits inside ``session.post``). On abort the
+    in-flight request cannot be cancelled through the requests API either:
+    the orphaned thread keeps the socket until the upstream answers or its
+    own timeout fires, then closes it. The abandon is deliberate — user Stop
+    responsiveness outranks one leaked half-open connection bounded by the
+    upstream's own timeout.
+    """
+    outcome: Future = Future()
+    abandoned = threading.Event()
+
+    def _run_post():
+        resp = None
+        try:
+            resp = post_fn()
+            outcome.set_result(resp)
+        except BaseException as error:  # re-raised in the caller thread below
+            outcome.set_exception(error)
+        finally:
+            if abandoned.is_set() and resp is not None:
+                try:
+                    resp.close()
+                except Exception as close_error:
+                    # Cleanup must not replace the already-delivered user
+                    # abort, but a failed close can retain a socket until
+                    # the peer timeout and therefore needs bounded evidence.
+                    logger.warning(
+                        '[Transport] abandoned response close failed: %s',
+                        type(close_error).__name__,
+                    )
+
+    worker = threading.Thread(
+        target=_run_post, name='llm-post-headers', daemon=True)
+    worker.start()
+    while True:
+        worker.join(poll_interval or ABORT_POLL_INTERVAL)
+        if not worker.is_alive():
+            break
+        if is_aborted is not None and is_aborted():
+            abandoned.set()
+            raise AbortedError(
+                'User aborted while awaiting response headers')
+    return outcome.result()
 
 def attach_limit_learned(usage, limit_learned):
     """Attach an auto-learned model-limit marker to a usage dict.

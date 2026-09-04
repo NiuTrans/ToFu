@@ -926,12 +926,12 @@ function _getSendMode() {
 }
 
 function _doSendOrGenerate() {
-  if (imageGenMode) { generateImageDirect(); return; }
+  if (imageGenMode) { runtimeScope.generateImageDirect?.(); return; }
   /* Empty-send while streaming = "take over from here" arm gesture.
    * During streaming the composer button IS the Stop button, so pressing
    * Enter on an empty input is a free, non-conflicting gesture. If autopilot
-   * is on we arm the in-flight task so the virtual user takes over when the
-   * current reply finishes. A non-empty send still queues a real message
+   * is on we queue a Goal continuation behind the current accepted turn. A
+   * non-empty send still queues a real message
    * (which takes priority over autopilot), so this only fires when empty. */
   const _inp = document.getElementById("userInput");
   const _empty = !(_inp && _inp.value.trim())
@@ -942,14 +942,13 @@ function _doSendOrGenerate() {
     const _streaming = _conv && typeof convIsBusy === 'function'
       && convIsBusy(_conv);
     if (typeof autopilotEnabled !== 'undefined' && autopilotEnabled) {
-      /* Empty-send = the explicit "hand it over to the virtual user" gesture.
-       * Always ARM (enqueue the persistent, cancellable armed-marker) so the
-       * pending sentinel shows in the queue bar and survives reload. */
+      /* Empty-send = the explicit "hand it over" gesture. ARM creates a
+       * cancellable durable continuation when a turn is currently live. */
       if (typeof _maybeArmAutopilot === 'function') _maybeArmAutopilot();
       /* If the conversation has already finished (no live task), also KICK so
        * the VU starts composing the next reply now — there is no end-of-turn
-       * hook to fire otherwise. While streaming, the armed in-flight task's
-       * hook handles the takeover at its natural stop. */
+       * hook to fire otherwise. While streaming, queue settlement dispatches
+       * the explicit continuation through the normal turn lane. */
       if (!_streaming && typeof _kickAutopilot === 'function') _kickAutopilot();
     }
     return;  // never call sendMessage() with empty input

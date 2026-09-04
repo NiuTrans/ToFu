@@ -1,0 +1,91 @@
+/* ══════════════════════════════════════════════════════
+   Remote-device picker (project folder browser)
+
+   The SAME feature's second surface: #remoteDevicesSection in index.html,
+   painted by project.js::_renderRemoteDevicesSection. Its classes were
+   unstyled for the same reason as the settings tab, so styling only the tab
+   would have left half the feature raw — the half a user meets while
+   attaching a remote worktree.
+   ══════════════════════════════════════════════════════ */
+
+.remote-devices-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
+}
+.remote-devices-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--s-ink-soft);
+  margin-bottom: 6px;
+}
+.remote-agent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+/* An offline agent's roots CANNOT be added (project.js omits the + button), so
+ * the row must look inert — otherwise the user waits for a click to work. */
+.remote-agent-row.remote-agent-offline {
+  background: var(--s-cream);
+  box-shadow: none;
+  color: var(--s-ink-soft);
+}
+.remote-agent-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--s-ink);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.remote-agent-offline .remote-agent-name { color: var(--s-ink-soft); }
+.remote-root-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0 3px 14px;
+  font-size: 11.5px;
+  color: var(--s-ink);
+}
+.remote-root-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.remote-root-add {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--s-ink);
+  background: var(--s-gold);
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.remote-root-add:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--s-ink);
+}
+.remote-root-add:active { transform: translate(1px, 1px); box-shadow: none; }

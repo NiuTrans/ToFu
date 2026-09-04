@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+from contextlib import contextmanager
+from concurrent.futures import Future
 from unittest.mock import patch
 
 import pytest
@@ -135,3 +138,90 @@ class TestStreamingFetchUrlDelegation:
             out = acc._execute_one('fetch_url', {'url': url})
         assert 'file asset' not in out
         assert out.startswith('Failed to fetch')
+
+    def test_streaming_fetch_binds_exact_task_browser_identity(self, monkeypatch):
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = _make_task()
+        task['_userId'] = '41'
+        task['config'] = {'browserClientId': 'browser-a'}
+        bindings = []
+
+        @contextmanager
+        def fake_binding(*, user_id='', client_id='', required_capabilities=()):
+            bindings.append((user_id, client_id, tuple(required_capabilities)))
+            yield (str(user_id), str(client_id), 'Default')
+
+        monkeypatch.setattr('lib.search_bridge.bind_search_browser', fake_binding)
+        url = 'https://example.com/page'
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        with patch(
+                'lib.tasks_pkg.handlers.search._core._fetch_url_one',
+                return_value={
+                    'url': url, 'page_content': 'ok', 'is_pdf': False,
+                    'raw_chars': 2, 'filtered_chars': 2, 'error_msg': None,
+                    'saved_path': None, 'is_asset': False,
+                }):
+            out = acc._execute_one('fetch_url', {'url': url})
+
+        assert str(out).endswith('\n\nok')
+        # One selection binding plus the actual fetch binding. Both retain the
+        # request owner/device instead of falling back to request globals.
+        assert bindings == [
+            ('41', 'browser-a', ()),
+            ('41', 'browser-a', ()),
+        ]
+
+    def test_failed_streaming_fetch_is_not_injected_as_authoritative_cache(
+            self):
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = _make_task()
+        url = 'https://offline.example/file'
+        failure = {
+            'url': url, 'page_content': None, 'is_pdf': False,
+            'raw_chars': 0, 'filtered_chars': 0,
+            'error_msg': 'browser temporarily offline',
+            'saved_path': None, 'is_asset': False,
+        }
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        with patch(
+                'lib.tasks_pkg.handlers.search._core._fetch_url_one',
+                return_value=failure):
+            content = acc._execute_one('fetch_url', {'url': url})
+        assert getattr(content, 'cacheable') is False
+
+        future = Future()
+        future.set_result(content)
+        acc._futures['tc-failed'] = (
+            future, 'fetch_url', {'url': url}, time.time())
+        acc._submitted_count = 1
+
+        assert acc.inject_into_cache(task) == 0
+        assert task['_tool_result_cache'] == {}
+
+    def test_serial_fetch_failure_marks_outcome_non_cacheable(self, monkeypatch):
+        import lib.tasks_pkg.handlers.search._core as core
+        import lib.tasks_pkg.handlers.search._handlers as handlers
+
+        url = 'https://offline.example/page'
+        monkeypatch.setattr(core, '_fetch_url_one', lambda *_a, **_k: {
+            'url': url, 'page_content': None, 'is_pdf': False,
+            'raw_chars': 0, 'filtered_chars': 0,
+            'error_msg': 'temporary browser outage',
+            'saved_path': None, 'is_asset': False,
+        })
+        monkeypatch.setattr(
+            handlers, '_finalize_tool_round', lambda *_a, **_k: None)
+
+        task = _make_task()
+        task['_userId'] = '41'
+        task['config'] = {}
+        round_entry = {}
+        _tc_id, content, _is_read = handlers._handle_fetch_url(
+            task, {}, 'fetch_url', 'tc-serial', {'url': url}, 1,
+            round_entry, {}, '', False,
+        )
+
+        assert content.startswith('Failed to fetch')
+        assert round_entry['_cacheableResult'] is False

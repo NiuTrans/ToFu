@@ -19,9 +19,8 @@ Static guard: the CSS max-width must fit the longest real model short-name.
 Ordering guards: the report/review dropdowns read the same ``_registeredModels``
 as the toolbar picker, so both axes (provider sections, in-section models)
 must sort through the SAME shared comparator (``_compareModelsByDisplayName``
-from settings/branding.js) — pinned by driving the real populate function
-with the real comparator chain, plus two NEUTER probes and a stale-bundle
-degraded-mode complement.
+composed from the typed model-display owner) — pinned by driving the real
+populate function with that public policy, plus two consumer NEUTER probes.
 
 Skips cleanly when node + jsdom aren't installed.
 """
@@ -29,20 +28,29 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._runtime_sections import (
+    native_module_path,
+    orchestration_legacy_test_root as _legacy_test_root,
+)
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = Path(__file__).resolve().parents[1]
 ROOT = _legacy_test_root()
 REPORT_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'report.js')
 STYLES_CSS = os.path.join(ROOT, 'static', 'styles.css')
 INDEX_HTML = os.path.join(ROOT, 'index.html')
+DISPLAY_NAMES_JS = native_module_path(
+    '.native/paper-model-display-names.js',
+    REPO_ROOT / 'frontend/src/core/model-display-names.ts',
+)
 
 
 def _node_deps_available() -> bool:
@@ -104,6 +112,7 @@ global._reportView = win._reportView = () => ({
 });
 global._registeredModels = win._registeredModels = [];
 global._hiddenModels = win._hiddenModels = new Set();
+global.runtimeScope = win.runtimeScope = { isChatModel: () => true };
 
 /* Load ONLY the picker functions out of the real shipped report.js — the file
    is a 2700-line module whose top level touches many other globals. Slicing by
@@ -212,16 +221,12 @@ def test_NEUTER_data_i18n_removal_is_loadbearing():
 # ═══ the toolbar picker uses (_compareModelsByDisplayName), on BOTH axes.
 
 #: Drives the REAL _populatePaperReportModelDropdown (spliced out of the
-#: shipped report.js) against a scrambled two-provider fixture, with the REAL
-#: comparator chain spliced out of settings/branding.js — nothing hand-copied,
-#: so "paper picker order == toolbar picker order" is pinned by construction.
-#: argv 'no-branding' simulates a stale bundle missing branding.js: the
-#: dropdown must degrade to arrival order, never die empty.
+#: shipped report.js) against a scrambled two-provider fixture and the typed
+#: display-name owner, so paper and toolbar ordering share one policy.
 _ORDER_HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[3];
-const NO_BRANDING = process.argv[4] === 'no-branding';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(`<!DOCTYPE html><body>
   <div class="paper-report-model-picker">
@@ -239,17 +244,8 @@ win.t = global.t = (k) => k;
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
-/* The REAL comparator chain (_modelShortName → _modelDisplaySortKey →
-   _MODEL_NAME_COLLATOR → _compareModelsByDisplayName), spliced at runtime
-   from settings/branding.js — the same single source of truth the toolbar
-   picker sorts with. */
-if (!NO_BRANDING) {
-  const bsrc = fs.readFileSync(path.join(ROOT, 'static/js/settings/branding.js'), 'utf8');
-  const bStart = bsrc.indexOf('function _modelShortName(');
-  const bEnd = bsrc.indexOf('/* Sort a list of {model_id} entries', bStart);
-  if (bStart < 0 || bEnd < 0) { console.log('FAIL harness_cannot_find_comparator_chain'); process.exit(0); }
-  eval(bsrc.slice(bStart, bEnd));
-}
+/* Load the same typed owner the application prelude composes. */
+(0, eval)(fs.readFileSync(process.argv[4], 'utf8'));
 
 /* Fixture: arrival order is scrambled on BOTH axes, and one model's friendly
    pricing name ("Alpha One") sorts OPPOSITE to its raw id ("gw/z-ultra") —
@@ -260,12 +256,22 @@ global._modelPricingCache = win._modelPricingCache = {
   'gw/claude-opus-5': { name: 'Claude Opus 5' },
   'zz/gemini-flash': { name: 'Gemini Flash' },
 };
+const displayNames = createModelDisplayNames({
+  lookupModelDisplayName: (modelId) =>
+    global._modelPricingCache && global._modelPricingCache[modelId]
+      ? global._modelPricingCache[modelId].name : '',
+  lookupProviderDisplayName: () => '',
+});
+global._modelShortName = win._modelShortName = displayNames.modelShortName;
+global._compareModelsByDisplayName = win._compareModelsByDisplayName =
+  displayNames.compareModelsByDisplayName;
 global._registeredModels = win._registeredModels = [
   { model_id: 'zz/gemini-flash',  provider_id: 'p2', provider_name: 'Zebra Provider' },
   { model_id: 'gw/claude-opus-5', provider_id: 'p1', provider_name: 'Acme Provider' },
   { model_id: 'gw/z-ultra',       provider_id: 'p1', provider_name: 'Acme Provider' },
 ];
 global._hiddenModels = win._hiddenModels = new Set();
+global.runtimeScope = win.runtimeScope = { isChatModel: () => true };
 
 let VIEW_MODEL = 'gw/claude-opus-5';
 global._reportView = win._reportView = () => ({
@@ -290,21 +296,13 @@ const sections = Array.from(dropdown.querySelectorAll('.paper-report-model-dropd
 const items = Array.from(dropdown.querySelectorAll('.paper-report-model-dropdown-item'))
   .map((el) => el.title);
 
-if (NO_BRANDING) {
-  /* Degraded mode: no comparator on a stale bundle — the dropdown must still
-     render every model (arrival order), never strand an empty list. This is
-     the complement probe: deleting the _canSort guard and calling the
-     comparator unguarded throws here and flips this FAIL. */
-  check('dropdown_still_renders_without_comparator', items.length === 3);
-} else {
-  check('sections_follow_provider_display_name',
-    JSON.stringify(sections) === JSON.stringify(['Acme Provider', 'Zebra Provider']));
-  check('items_follow_display_name_not_raw_id',
-    JSON.stringify(items) === JSON.stringify(['gw/z-ultra', 'gw/claude-opus-5', 'zz/gemini-flash']));
-  const firstItem = dropdown.querySelector('.paper-report-model-dropdown-item');
-  check('rendered_label_is_the_friendly_name',
-    !!(firstItem && firstItem.textContent === 'Alpha One'));
-}
+check('sections_follow_provider_display_name',
+  JSON.stringify(sections) === JSON.stringify(['Acme Provider', 'Zebra Provider']));
+check('items_follow_display_name_not_raw_id',
+  JSON.stringify(items) === JSON.stringify(['gw/z-ultra', 'gw/claude-opus-5', 'zz/gemini-flash']));
+const firstItem = dropdown.querySelector('.paper-report-model-dropdown-item');
+check('rendered_label_is_the_friendly_name',
+  !!(firstItem && firstItem.textContent === 'Alpha One'));
 
 console.log(out.join('\n'));
 process.exit(0);
@@ -330,7 +328,8 @@ def _run_order_harness_patched(marker: str, replacement: str) -> str:
         patched_harness = _ORDER_HARNESS.replace(
             "path.join(ROOT, 'static/js/paper/report.js')",
             repr(tmp_js).replace("'", '"'))
-        return _run_harness(patched_harness)
+        return _run_harness(
+            patched_harness, extra_argv=[DISPLAY_NAMES_JS])
     finally:
         try:
             os.remove(tmp_js)
@@ -347,21 +346,10 @@ def test_dropdown_orders_by_display_name():
     toolbar picker, so they must render the same ORDER: provider sections by
     provider name, in-section models by display name — never raw arrival
     order and never raw model_id order."""
-    out = _run_harness(_ORDER_HARNESS)
+    out = _run_harness(_ORDER_HARNESS, extra_argv=[DISPLAY_NAMES_JS])
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'paper model-picker ordering failures:\n' + out
     assert out.count('PASS') >= 3, f'expected >=3 PASS lines, got:\n{out}'
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_dropdown_renders_without_branding_js():
-    """Complement: on a stale bundle missing the comparator, the dropdown
-    must degrade to arrival order — not throw and strand an empty list."""
-    out = _run_harness(_ORDER_HARNESS, extra_argv=['no-branding'])
-    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'degraded-mode ordering failures:\n' + out
-    assert 'PASS dropdown_still_renders_without_comparator' in out, out
 
 
 @pytest.mark.skipif(not _node_deps_available(),
@@ -455,7 +443,6 @@ if __name__ == '__main__':
         test_model_label_survives_language_toggle()
         test_NEUTER_data_i18n_removal_is_loadbearing()
         test_dropdown_orders_by_display_name()
-        test_dropdown_renders_without_branding_js()
         test_NEUTER_item_sort_is_loadbearing()
         test_NEUTER_section_sort_is_loadbearing()
     else:

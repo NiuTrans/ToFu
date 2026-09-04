@@ -402,7 +402,6 @@ class TestProtocols:
             LLMService,
             TaskEventSink,
             ToolHandler,
-            TradingDataProvider,
         )
         # All should be Protocol classes
         assert hasattr(LLMService, "__protocol_attrs__") or hasattr(LLMService, "_is_protocol")

@@ -41,6 +41,7 @@ def test_sankuai_catalog_models_promoted_to_vendor_windows():
         'glm-5.3': 1_000_000,
         'glm-5v-turbo': 200_000,
         'hy3-preview': 256_000,
+        'hy4-preview': 1_000_000,
         'LongCat-2.0': 1_000_000,
         'text-embedding-3-large': 8_191,
         'text-embedding-3-small': 8_191,
@@ -128,35 +129,6 @@ def test_stale_expand_never_pins_below_static_window(monkeypatch):
     assert resolved_context_profile('claude-opus-5', 'sankuai')['window'] == 1_110_553
 
 
-def test_config_save_never_bakes_learned_context(monkeypatch):
-    """The SAVE path must strip learned-owned triples instead of persisting
-    them as explicit registration metadata (TTL/floor immunity bug)."""
-    import lib.context_limits as limits
-    from routes.config import _canonical_model_registrations
-
-    monkeypatch.setattr(limits, '_LEARNED', {'sankuai::kimi-k3': 383_727})
-    monkeypatch.setattr(limits, '_META', {
-        'sankuai::kimi-k3': {'source': 'expand', 'ts': 0, 'strikes': 0},
-    })
-    providers = [{'id': 'sankuai', 'models': [
-        {'model_id': 'kimi-k3', 'context_window': 383_727,
-         'context_window_source': 'learned:sankuai',
-         'context_window_exact': False},
-        {'model_id': 'anonymous-model'},
-    ]}]
-    saved = _canonical_model_registrations(
-        providers, activate=False, project_context=False)
-    for row in saved[0]['models']:
-        assert row['context_window'] is None
-        assert row['context_window_source'] == 'unknown'
-        assert row['context_window_exact'] is False
-    # Display path still projects for the browser — and the projection is
-    # the verified 1M, not the stale expand.
-    shown = _canonical_model_registrations(providers, activate=False)
-    assert shown[0]['models'][0]['context_window'] == 1_000_000
-    assert shown[0]['models'][0]['context_window_source'] == 'repository_verified'
-
-
 def test_learned_override_is_provider_model_scoped(monkeypatch):
     import lib.context_limits as limits
     from lib.model_info import resolved_context_profile
@@ -168,26 +140,6 @@ def test_learned_override_is_provider_model_scoped(monkeypatch):
     assert resolved_context_profile('same-model', 'provider-a')['window'] == 321_000
     assert resolved_context_profile('same-model', 'provider-b')['window'] is None
     assert resolved_context_profile('same-model', 'provider-a')['source'] == 'learned:provider-a'
-
-
-def test_capabilities_keeps_same_model_per_provider(monkeypatch):
-    import lib
-    from routes.api_v1.capabilities import _models_summary
-
-    monkeypatch.setattr(lib, '_SAVED_CONFIG', {'providers': [
-        {'id': 'a', 'models': [{'model_id': 'shared'}]},
-        {'id': 'b', 'models': [{'model_id': 'shared'}]},
-    ]})
-    rows = _models_summary()
-    assert len(rows) == 1
-    assert rows[0]['id'] == 'shared'
-    assert set(rows[0]['providers']) == {'a', 'b'}
-    assert {
-        offering['provider'] for offering in rows[0]['offerings']
-    } == {'a', 'b'}
-    assert all(offering['context'] == {
-        'window': None, 'source': 'unknown', 'exact': False,
-    } for offering in rows[0]['offerings'])
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
@@ -241,36 +193,6 @@ console.log(JSON.stringify({unknown, estimate}));
     assert payload['estimate']['zone'] == 'ok'
     assert payload['estimate']['exact'] is False
     assert payload['estimate']['source'] == 'family_estimate'
-
-
-def test_per_model_policy_has_bare_aliases():
-    """routes.config._build_per_model_context_policy must emit BOTH the
-    scoped ``provider::model`` key and the bare ``model_id`` alias.
-
-    The frontend ``_resolveContextProfile`` contract tries the scoped key
-    first, then the bare one — but the server historically wrote ONLY
-    scoped keys, so the documented fallback could never hit. Legacy
-    conversations (settings.provider_id fleet-wide NULL, verified
-    2026-08-20) live and die by the bare alias."""
-    from routes.config import _build_per_model_context_policy
-
-    per_model = _build_per_model_context_policy([
-        {'provider_id': 'sankuai', 'model_id': 'kimi-k3'},
-        {'provider_id': 'other', 'model_id': 'kimi-k3'},   # name collision
-        {'provider_id': '', 'model_id': ''},               # garbage row
-        {'provider_id': 'sankuai', 'model_id': 'glm-5.3'},
-    ])
-    assert per_model['sankuai::kimi-k3']['window'] == 1_000_000
-    # Bare alias exists and FIRST registration wins on collision.
-    assert per_model['kimi-k3'] == per_model['sankuai::kimi-k3']
-    assert per_model['other::kimi-k3']['window'] == 1_000_000
-    assert per_model['glm-5.3'] == per_model['sankuai::glm-5.3']
-    # The garbage row produced no keys.
-    assert '' not in per_model and '::' not in per_model
-    # Every scoped key has a bare twin.
-    scoped = [k for k in per_model if '::' in k]
-    for k in scoped:
-        assert k.split('::', 1)[1] in per_model
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')

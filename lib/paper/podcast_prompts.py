@@ -25,6 +25,11 @@ PODCAST_MODES = {
     'full': (900, 720, 1080),
 }
 
+# Hard TTS-call envelope. Prompted segments are 80–200 zh characters (or the
+# English equivalent); these ceilings leave ample structural headroom while a
+# malformed model response cannot create unbounded synthesis work.
+PODCAST_SEGMENT_LIMITS = {'short': 24, 'full': 64}
+
 #: Allowed segment ``section`` values. cold_open MUST be first and recap MUST
 #: be last (validator-enforced); the rest are free-form guidance.
 SCRIPT_SECTIONS = (
@@ -340,6 +345,7 @@ def build_critic_prompt(*, lang: str, script_text: str, figure_list: str,
 
 __all__ = [
     'PODCAST_MODES',
+    'PODCAST_SEGMENT_LIMITS',
     'SCRIPT_SECTIONS',
     'ZH_ABBREV_WATCHLIST',
     'GREEK_SPOKEN_ZH',

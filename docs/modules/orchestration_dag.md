@@ -17,65 +17,40 @@ removed response aliases live only in Git history.
 | Ephemeral and durable start | `lib/orchestration/runtime_start_service.py` |
 | Durable run application API | `lib/orchestration/run_service.py` |
 | Durable run repository | `lib/orchestration/sidecar_run_store.py` → Sidecar orchestration operations |
+| Chat GoalRun contract and lifecycle | `lib/goal_runs/contract.py`, `service.py` |
+| Chat GoalRun repository | `lib/goal_runs/repository.py` → Sidecar `goal.run.*` operations |
+| Runtime event durability, reduction, and timeline policy | `lib/orchestration/events.py` |
 | Mutations and human gates | `lib/orchestration/runtime_mutation_service.py`, `human_gate_service.py` |
 | HTTP composition | `routes/api_v1/orchestrations.py` |
-| Studio modules | `frontend/src/features/orchestration/` |
-| Retained browser delivery sections | `frontend/src/runtime/sections/orchestration*.js`, `api/orchestration*.js` |
+| Generated browser request contract and endpoint client | `frontend/src/features/orchestration/request-contracts.generated.ts`, `api-client.ts` |
+| Bounded startup saved-Flow catalogue | `frontend/src/features/orchestration/flow-catalog.ts` |
+| Studio and Task Mode typed modules | `frontend/src/features/orchestration/` |
+| Demand-loaded retained Studio presentation | manifest bundle `orchestration-presenters` from `frontend/src/runtime/sections/orchestration*.js` |
 
 `lib/orchestration/__init__.py` exports nothing. Import the focused owner; do
 not create another convenience facade.
 
 ## Product exposure contract
 
-Orchestration is experimental and remains behind `debug_mode`. With Debug
-Mode off, the Workflows and Tasks navigation entries, saved-workflow choices,
-and their mobile counterparts are hidden. Restoring a conversation does not
-project its stored `activeFlow` into the composer while the flag is off; turning
-the flag off also clears the painted selection for future turns. An already
-accepted turn keeps its immutable execution snapshot.
-
-The three user concepts have distinct jobs:
-
-- **Workflows** opens the Orchestration Studio authoring surface;
-- **Agent Mode** selects how the next accepted chat turn runs;
-- **Tasks** observes, approves, aborts, and reopens durable runs.
-
-Saved Studio definitions appear inside the Debug-only section of Agent Mode,
-not as a second toolbar selector. Autopilot appears there only once as a chat
-mode; its engine graph remains available as a Studio template but is not
-duplicated as a built-in workflow choice.
-
-“Save & use” is an editor-owned transaction. A successful save may select the
-definition for the current chat only when the same document token and revision
-are still current, the chat can change modes, and Studio closes successfully.
-A CAS conflict, failed save, intervening edit/document switch, busy chat, or
-failed close leaves Studio open and never changes `activeFlow`.
+Workflows, Agent/Goal Mode, and Tasks expose distinct authoring, next-turn, and
+durable-run responsibilities. Their debug gating, selection fencing, and
+visible-turn translation policy live in
+[`../ORCHESTRATION_PRODUCT_SURFACES.md`](../ORCHESTRATION_PRODUCT_SURFACES.md).
 
 ## Application boundary
 
-`OrchestrationApplicationServices` is the delivery-layer composition object.
-It supplies late-bound structural ports for definitions, authoring, durable
-runs, runtime starts, mutations, and human gates. HTTP and chat adapters parse
-transport input and project results; they do not select repositories, execute
-SQL, rebuild graphs, or classify domain outcomes.
+`OrchestrationApplicationServices` supplies late-bound ports for definitions,
+authoring, durable runs, starts, mutations, and human gates. HTTP/chat adapters
+only parse and project typed results; repositories, SQL, graphs, and outcome
+classification remain behind those ports. Registration creates the bounded
+`TaskRuntime`, container, and contract metadata; implementations load on the
+first authorized operation.
 
-The HTTP blueprint is split by use case:
-
-- `orchestration_definition_routes.py`: list/read/create/replace/delete;
-- `orchestration_authoring_routes.py`: validate, layout, compose, built-ins,
-  authoring contract, and plan;
-- `orchestration_runtime_routes.py`: ephemeral start and poll;
-- `orchestration_task_routes.py`: durable create/read/list/replay;
-- `orchestration_mutation_routes.py`: abort, delete, approval, and input.
-
-Shared parsing and projection belong in the sibling `*_http.py` modules.
-OpenAPI is projected from the same registries in `lib/orchestration/`; a route
-must not hand-author a competing schema.
-
-Authoring metadata may read the lightweight swarm role registry, but route and
-OpenAPI registration must not initialize swarm agents, schedulers, integration
-state, task handlers, or project tools. `lib.swarm` preserves its package-level
-API through lazy exports; execution modules load only when their symbol is used.
+Use-case routes live in `orchestration_{definition,authoring,runtime,task,
+mutation}_routes.py`; sibling `*_http.py` modules own shared parsing and
+projection. OpenAPI comes from `lib/orchestration/` registries. Registration
+may read lightweight role metadata but must not initialize agents, schedulers,
+integrations, task handlers, or project tools; those APIs remain lazy.
 
 ## Persistence and identity
 
@@ -122,8 +97,12 @@ python3 scripts/gen_orchestration_authoring_metadata.py
 python3 scripts/gen_orchestration_compatibility_defaults.py
 ```
 
-The HTTP contract generator owns both the endpoint artifact and the canonical
-response-contract artifact; there is no second response-contract generator.
+The HTTP contract generator writes only
+`frontend/src/features/orchestration/request-contracts.generated.ts`. It joins
+canonical paths, verbs, path/query/body mappings, response metadata, and
+browser method names into one immutable typed registry. Response adaptation is
+not another generated runtime: `frontend/src/core/http-result.ts` owns the
+status-preserving HTTP boundary and `api-client.ts` consumes it directly.
 
 The generated snapshot named `compatibility-defaults` is a build-time copy of
 current backend contracts. It is not permission to accept retired wire shapes.
@@ -142,13 +121,48 @@ current backend contracts. It is not permission to accept retired wire shapes.
    and run headers consume that result.
 7. Mutations return the versioned `tofu.orchestration.mutation/v1` envelope.
 
+For the `autopilot` projection, the chat adapter adds one required lifecycle
+around that flow:
+
+1. derive the objective from the current accepted human turn (never the first
+   message in the conversation and never a synthetic VU/review row);
+2. atomically start an owner/tenant/conversation-scoped GoalRun, superseding a
+   prior active goal with the typed reason `superseded_by_new_goal`;
+3. execute the graph and stamp every VU turn with that GoalRun id;
+4. accept a VU completion only with its parseable `remaining=0` progress
+   receipt; a bare/malformed done sentinel is not verification evidence;
+   `goal_completion_evidence_missing` and `goal_stop_rejected` remain durable
+   audit facts explaining why execution continued, without mutating generic
+   Studio state or adding end-user timeline noise;
+5. map the shared `TerminalOutcome` once to `completed`, `blocked`, `failed`,
+   or `cancelled`, then persist the transition before chat emits `done`.
+
+The machine-readable policy in `lib/goal_runs/contract.py` requires a
+long-term solution horizon, root-cause work, and verification evidence. The
+canonical worker and virtual-user prompts consume the same directive. A
+compatibility summary or marker-cleanup failure may not rewrite GoalRun truth;
+a failed required GoalRun transition fails the chat terminal boundary closed.
+The default Goal budget is 40 graph iterations, restoring the historical
+long-horizon allowance; all executor loops share a non-disableable 64-iteration
+hard ceiling. Invalid or extreme request overrides are normalized inside that
+finite range.
+
+Arming behind a live ordinary turn creates one deduplicated,
+`goal_continuation` queue command. It is lower priority than an ordinary human
+message, uses the same owner-scoped lane-idle fence as human input, and can be
+removed by disarm without deleting other queued work. Queue dispatch restores
+the server-stamped objective; a continuation missing that authority is retired
+instead of treating “continue” as a new objective.
+
 Ephemeral `TaskRuntime` state is process-local and bounded. Durable state and
 replay survive restart because the Sidecar is authoritative. A durable start
 failure must close the durable row; it must never leave an apparently active
 run without a worker.
 
 At worker/all-process startup, every non-terminal durable run is settled as
-`worker_lost` before clients reconnect. This is an explicit cross-owner
+`worker_lost` before clients reconnect. GoalRuns also receive an atomic typed
+`failed / worker_lost` transition event, so their semantic projection never
+falls back to a bare physical `error`. This is an explicit cross-owner
 Sidecar **maintenance** operation because all executor threads died with the
 previous process; ordinary run repositories and mutations remain bound to an
 explicit owner and tenant. Startup recovery must never impersonate the
@@ -158,6 +172,10 @@ personal owner or weaken request-time owner predicates.
 
 - One graph interpreter; plans and UI projections may inspect but not execute a
   second graph semantics.
+- One GoalRun lifecycle owner; queue markers and prompt sentinels are
+  projections/control tokens, never lifecycle authority.
+- One outer `_flow_managed` ownership marker survives every inner role turn;
+  scoped role execution may not erase it and reactivate compatibility hooks.
 - One terminal-outcome classifier across live, chat, durable, and replay
   surfaces.
 - One mutation result taxonomy and HTTP mapping.
@@ -170,6 +188,10 @@ personal owner or weaken request-time owner predicates.
   catch arbitrary programmer errors.
 - Frontend modules render declared semantics and never infer a role or outcome
   from a transport event name.
+
+- Flow role tools use one occurrence identity across live task events,
+  reconnect snapshots, and settled `toolRounds`; terminal projection may not
+  re-number or synthesize a second timeline.
 - Fault injection, worker-handoff cleanup, terminal fences, and replay cursor
   correction remain executable behavior.
 
@@ -188,24 +210,8 @@ personal owner or weaken request-time owner predicates.
 
 ## Test map
 
-Run the smallest relevant set first:
-
-```bash
-pytest -q tests/test_orchestration_definition_http.py \
-  tests/test_orchestration_definition_request_http.py \
-  tests/test_orchestration_definition_openapi.py
-pytest -q tests/test_orchestration_service.py \
-  tests/test_orchestration_run_service.py
-pytest -q tests/test_orchestration_engine.py \
-  tests/test_orchestration_outcome.py
-pytest -q tests/test_orchestration_mutation.py \
-  tests/test_orchestration_mutation_http.py
-pytest -q tests/test_api_contract_orchestrations_parity.py \
-  tests/test_frontend_orchestration_workspace.py \
-  tests/test_orchestration_product_design.py
-```
-
-For a complete domain gate, run all `tests/test_orchestration*.py` plus the
-frontend orchestration tests. Regenerate artifacts before the broad gate and
-do not compose the monolithic retained runtime when an unrelated section is
-dirty.
+Start with the matching `tests/test_orchestration_{definition,service,engine,
+outcome,mutation}*.py` owner, then HTTP/OpenAPI parity and the focused frontend
+workspace/product tests. The domain gate is all `test_orchestration*.py` plus
+frontend orchestration tests. Regenerate artifacts first; do not compose the
+monolithic retained runtime while an unrelated section is dirty.

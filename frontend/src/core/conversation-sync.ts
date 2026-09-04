@@ -9,9 +9,13 @@ import {
   type ConversationSyncApi,
   type ConversationSyncEvent,
   type ConversationSyncSnapshot,
+  type ConversationTurnPage,
   type ConnectionHealth,
   type TurnProjectionChange,
 } from '../api/conversation-sync.generated';
+import {
+  materializeSnapshotReferences,
+} from '../conversation/domain/tool-segment-references';
 import { createLifecycleScope, type LifecycleScope } from '../lifecycle';
 import { conversationConnectionHealth } from './connection-health';
 
@@ -22,7 +26,13 @@ export interface ConversationSyncCoordinatorOptions {
   streamClientId?: string;
   api: ConversationSyncApi;
   onSnapshot(snapshot: ConversationSyncSnapshot & { authoritativeFull: true }): void;
-  onAttemptEvent(event: AttemptEvent): boolean;
+  /** Publishes one sequence-checked history page synchronously. */
+  onTurnPage?(page: ConversationTurnPage): void;
+  onAttemptEvent(
+    event: AttemptEvent,
+    receivedAt: number,
+    serverPublishedAt: number,
+  ): boolean;
   onTurnDelta(delta: JsonRecord): boolean;
   onProtocolError?(error: Error): void;
   onHealth?(conversationId: string, health: ConnectionHealth): void;
@@ -38,6 +48,18 @@ export interface ConversationSyncConnection {
   close(): void;
   readonly cursor: string;
 }
+
+/* Hard ceiling for one snapshot read. The typed transport only enforces a
+ * timeout when one is declared, and an unbounded stalled GET never settles:
+ * fetchSnapshot coalesces callers into `snapshotPromise` and the turn
+ * runtime coalesces hydrations into one lane, so a single wedged read kept
+ * every current and future hydrate pending until the page was reloaded —
+ * the composer send lock then stayed latched and Enter/Send silently did
+ * nothing. A bounded read rejects instead, clearing both flights so the
+ * next hydrate retries against a healthy connection. 30s is far above a
+ * healthy tail-window snapshot yet far below any user tolerating a dead
+ * composer. */
+const SNAPSHOT_FETCH_TIMEOUT_MS = 30_000;
 
 const CHANGE_EVENT_NAMES = [
   'turn.upsert',
@@ -64,6 +86,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private source: EventSource | null = null;
   private sourceScope: LifecycleScope | null = null;
   private snapshotPromise: Promise<ConversationSyncSnapshot> | null = null;
+  private turnPageFlight: {
+    key: string;
+    promise: Promise<ConversationTurnPage>;
+  } | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
@@ -103,6 +129,32 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     this.open();
   }
 
+  /**
+   * Resume after a browser/network wake without crossing the snapshot boundary.
+   * A healthy source is retained; a stale or missing source reopens from the
+   * last durable cursor. The server remains responsible for proving cursor
+   * expiry with sync.reset_required, which then performs one recovery snapshot.
+   */
+  async wake(): Promise<void> {
+    if (this.closed) return;
+    this.shouldConnect = true;
+    if (!this.cursorValue) {
+      await this.hydrate(true);
+      return;
+    }
+    const health = conversationConnectionHealth.get(this.options.conversationId);
+    const frameAge = Date.now() - Number(health?.lastFrameAt || 0);
+    // A source opened by an immediately preceding wake has not had a chance
+    // to publish its first frame yet. Keep that connecting generation; using
+    // the pre-sleep lastFrameAt to judge it stale would churn one EventSource
+    // per pageshow/online hint after a long browser suspension.
+    if (this.source && health?.state !== 'connecting' && frameAge
+        > Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs) / 2) {
+      this.closeSource();
+    }
+    this.open();
+  }
+
   async hydrate(connect = true): Promise<ConversationSyncSnapshot> {
     this.shouldConnect = this.shouldConnect || connect;
     const snapshot = await this.fetchSnapshot('hydrate');
@@ -125,11 +177,73 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     }
   }
 
+  /**
+   * Fetch one older lane page against the exact locally-applied replay head.
+   * Equal callers share one request. A different overlapping page is rejected
+   * so user input cannot grow a hidden request queue. Publication stays inside
+   * the sequence check's synchronous turn: no stream/snapshot microtask can
+   * advance local authority between validation and Store ingestion.
+   */
+  async loadTurnPage(
+    laneId: string,
+    beforeOrdinal?: number,
+    limit = 64,
+  ): Promise<ConversationTurnPage> {
+    if (this.closed) throw new Error('Conversation sync coordinator is closed');
+    if (!this.cursorValue) {
+      throw new Error('Conversation history requires an authoritative snapshot');
+    }
+    const normalizedLaneId = laneId.trim();
+    if (!normalizedLaneId) throw new Error('Conversation history requires a lane');
+    if (beforeOrdinal !== undefined
+        && (!Number.isSafeInteger(beforeOrdinal) || beforeOrdinal < 0)) {
+      throw new Error('Conversation history has an invalid before ordinal');
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
+      throw new Error('Conversation history has an invalid page limit');
+    }
+    const key = `${normalizedLaneId}:${beforeOrdinal ?? 'head'}:${limit}`;
+    if (this.turnPageFlight) {
+      if (this.turnPageFlight.key === key) return this.turnPageFlight.promise;
+      throw new Error('A different conversation history page is already loading');
+    }
+    const expectedSequence = this.sequence;
+    /* Same wedged-flight guard as fetchSnapshot: an unbounded stalled page
+     * read kept `turnPageFlight` forever, rejecting every later page with
+     * "already loading" until reload. */
+    const request = this.options.api.turnPage(
+      this.options.conversationId,
+      normalizedLaneId,
+      expectedSequence,
+      beforeOrdinal,
+      limit,
+      { timeout: SNAPSHOT_FETCH_TIMEOUT_MS },
+    ).then((wirePage) => {
+      if (this.closed) throw new Error('Conversation sync coordinator is closed');
+      const page = materializeSnapshotReferences(wirePage);
+      if (page.conversationId !== this.options.conversationId
+          || page.laneId !== normalizedLaneId) {
+        throw new Error('Conversation history page identity mismatch');
+      }
+      if (page.syncSeq !== expectedSequence || this.sequence !== expectedSequence) {
+        throw new Error('Conversation history page is stale');
+      }
+      this.options.onTurnPage?.(page);
+      return page;
+    }).catch((cause: unknown) => {
+      this.protocolError(cause);
+      throw cause;
+    });
+    const flight = request.finally(() => { this.turnPageFlight = null; });
+    this.turnPageFlight = { key, promise: flight };
+    return flight;
+  }
+
   invalidate(_cursorHint?: string): void {
     if (this.closed || !this.shouldConnect) return;
     const health = conversationConnectionHealth.get(this.options.conversationId);
     const frameAge = Date.now() - Number(health?.lastFrameAt || 0);
-    if (this.source && frameAge
+    if (this.source && health?.state !== 'connecting' && frameAge
         > Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs) / 2) {
       this.closeSource();
     }
@@ -162,8 +276,14 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
           this.publishHealth(
             reason === 'hydrate' ? 'connecting' : 'recovering', reason,
           );
-          const request = this.options.api.snapshot(this.options.conversationId)
-            .then((snapshot) => {
+          const request = this.options.api.snapshot(
+            this.options.conversationId,
+            { timeout: SNAPSHOT_FETCH_TIMEOUT_MS },
+          )
+            .then((wireSnapshot) => {
+              const snapshot = materializeSnapshotReferences(
+                wireSnapshot,
+              );
               if (snapshot.conversationId !== this.options.conversationId) {
                 throw new Error('Conversation snapshot identity mismatch');
               }
@@ -214,6 +334,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
 
     const ingest = (message: MessageEvent<string>): void => {
       if (this.closed || sourceGeneration !== this.generation) return;
+      const receivedAt = Date.now();
       let event: ConversationSyncEvent;
       try {
         event = decodeConversationSyncEvent(JSON.parse(message.data) as unknown);
@@ -222,7 +343,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         void this.recover('invalid-stream-frame').catch(() => undefined);
         return;
       }
-      this.ingest(event, message.lastEventId || '');
+      this.ingest(event, message.lastEventId || '', receivedAt);
     };
 
     source.onopen = () => {
@@ -246,7 +367,11 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     };
   }
 
-  private ingest(event: ConversationSyncEvent, lastEventId: string): void {
+  private ingest(
+    event: ConversationSyncEvent,
+    lastEventId: string,
+    receivedAt: number,
+  ): void {
     if (event.conversationId !== this.options.conversationId) {
       this.protocolError(new Error('Conversation stream identity mismatch'));
       void this.recover('identity-mismatch').catch(() => undefined);
@@ -271,10 +396,14 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       void this.recover(event.reason).catch(() => undefined);
       return;
     }
-    this.applyChange(event, lastEventId);
+    this.applyChange(event, lastEventId, receivedAt);
   }
 
-  private applyChange(event: ConversationChange, lastEventId: string): void {
+  private applyChange(
+    event: ConversationChange,
+    lastEventId: string,
+    receivedAt: number,
+  ): void {
     if (!lastEventId) {
       this.protocolError(new Error('Conversation change has no replay cursor'));
       void this.recover('missing-event-cursor').catch(() => undefined);
@@ -296,7 +425,11 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         const attemptEvent = assertConversationSyncSchema<AttemptEvent>(
           'AttemptEvent', payload.event,
         );
-        applied = this.options.onAttemptEvent(attemptEvent);
+        applied = this.options.onAttemptEvent(
+          attemptEvent,
+          receivedAt,
+          Number(event.occurredAt || 0),
+        );
       } catch (error) {
         this.protocolError(error);
         applied = false;
@@ -323,6 +456,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         turns: Array.isArray(payload.turns) ? payload.turns : [],
         turnPatches,
         attempts: Array.isArray(payload.attempts) ? payload.attempts : [],
+        queueItemUpserts: Array.isArray(payload.queueItemUpserts)
+          ? payload.queueItemUpserts : [],
+        removedQueueIds: Array.isArray(payload.removedQueueIds)
+          ? payload.removedQueueIds : [],
         deletedTurnIds: Array.isArray(payload.deletedTurnIds)
           ? payload.deletedTurnIds : [],
       });

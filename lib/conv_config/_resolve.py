@@ -49,6 +49,23 @@ def resolve_conv_config(
     # Canonicalise legacy preset names ("opus" / "high" / "qwen" / etc.)
     # to actual model_ids so chat-pipeline routing always sees a real id.
     model = canonicalise_model_id(model_raw)
+    model_ref_raw = _pick(
+        ov.get('modelRef'), conv.get('modelRef'), is_active=is_active)
+    model_ref = None
+    if isinstance(model_ref_raw, Mapping):
+        candidate = dict(model_ref_raw)
+        if set(candidate) in (
+                {'creator_id', 'model_id'}, {'provider_id', 'offering_id'}):
+            model_ref = {
+                key: str(value).strip() for key, value in candidate.items()
+            }
+            if not all(model_ref.values()):
+                model_ref = None
+    preferred_provider_id = str(_pick(
+        ov.get('preferredProviderId'),
+        conv.get('preferredProviderId'),
+        is_active=is_active,
+    ) or '').strip()
     # Extract a depth from the same value when it was a compound preset
     # (matches JS: `if (['medium','high','xhigh','max'].includes(config.preset)
     # && !config.thinkingDepth) config.thinkingDepth = config.preset`).
@@ -77,6 +94,10 @@ def resolve_conv_config(
                                           defaults.get('thinkingEnabled', False)),
         'model': model,
         'preset': model,
+        'modelRef': model_ref,
+        'preferredProviderId': preferred_provider_id,
+        'routing': ({'preferred_provider_id': preferred_provider_id}
+                    if preferred_provider_id else {}),
         'systemPrompt': ov.get('systemPrompt') or defaults.get('systemPrompt') or '',
         # 'append' (default) → user prompt is prepended ON TOP of the
         # built-in Claude-Code static prompt. 'replace' → user prompt
@@ -267,11 +288,43 @@ def resolve_conv_settings(
 
     raw_model = conv.get('model') or ov.get('model') or server_model
     model = canonicalise_model_id(raw_model)
+    model_ref_raw = conv.get('modelRef') or ov.get('modelRef')
+    model_ref = None
+    if isinstance(model_ref_raw, Mapping):
+        candidate = dict(model_ref_raw)
+        if set(candidate) in (
+                {'creator_id', 'model_id'}, {'provider_id', 'offering_id'}):
+            model_ref = {
+                key: str(value).strip() for key, value in candidate.items()
+            }
+            if not all(model_ref.values()):
+                model_ref = None
+    preferred_provider_id = str(
+        conv.get('preferredProviderId')
+        if conv.get('preferredProviderId') is not None
+        else ov.get('preferredProviderId') or '').strip()
     legacy_depth = extract_legacy_thinking_depth(raw_model)
+    raw_image_count = conv.get('imageGenCount', ov.get('imageGenCount', 1))
+    try:
+        image_count = int(raw_image_count)
+    except (TypeError, ValueError):
+        image_count = 1
+    image_count = max(1, min(image_count, 16))
+    image_aspect = str(
+        conv.get('imageGenAspect') or ov.get('imageGenAspect') or '1:1')
+    if image_aspect not in {'1:1', '16:9', '9:16', '4:3', '3:4'}:
+        image_aspect = '1:1'
+    image_resolution = str(
+        conv.get('imageGenResolution')
+        or ov.get('imageGenResolution') or '1K').upper()
+    if image_resolution not in {'1K', '2K'}:
+        image_resolution = '1K'
 
     out = {
         'model': model,
         'preset': model,
+        'modelRef': model_ref,
+        'preferredProviderId': preferred_provider_id,
         'thinkingDepth': (conv.get('thinkingDepth')
                           or ov.get('thinkingDepth')
                           or legacy_depth),
@@ -287,6 +340,16 @@ def resolve_conv_settings(
         'schedulerEnabled': _coerce_bool(conv.get('schedulerEnabled')),
         'autopilotEnabled': _coerce_bool(conv.get('autopilotEnabled')),
         'imageGenEnabled': _coerce_bool(conv.get('imageGenEnabled')),
+        'imageGenMode': _coerce_bool(conv.get('imageGenMode')),
+        'imageGenModel': canonicalise_model_id(
+            conv.get('imageGenModel') or ov.get('imageGenModel') or ''),
+        'imageGenProviderId': str(
+            conv.get('imageGenProviderId')
+            if conv.get('imageGenProviderId') is not None
+            else ov.get('imageGenProviderId') or '').strip()[:256],
+        'imageGenCount': image_count,
+        'imageGenAspect': image_aspect,
+        'imageGenResolution': image_resolution,
         'humanGuidanceEnabled': _coerce_bool(conv.get('humanGuidanceEnabled')),
         'activeFlow': (conv.get('activeFlow') if isinstance(conv.get('activeFlow'), str)
                        else (ov.get('activeFlow') if isinstance(ov.get('activeFlow'), str) else '')),

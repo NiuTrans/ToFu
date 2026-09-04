@@ -32,6 +32,7 @@ from lib.tool_rejection import (
     is_unavailable_tool_rejection,
     tool_rejection_descriptor,
 )
+from lib.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
 from lib.tools.result_envelope import tool_result_error
 
 
@@ -474,16 +475,19 @@ def _gateway_failure_diagnostics(value: Any) -> list[dict[str, str]]:
         if not isinstance(error, Mapping):
             continue
         reason_code, detail = _tool_failure_diagnostic(error)
+        tool_name = _text(
+            error.get('name') or error.get('attempted') or 'tool request',
+            _IDENTIFIER_MAX_CHARS,
+        )
         diagnostics.append({
-            'toolName': _text(
-                error.get('name') or error.get('attempted') or 'tool request',
-                _IDENTIFIER_MAX_CHARS,
-            ),
+            'toolName': tool_name,
             'toolCallId': '',
             'status': 'skipped',
             'severity': 'warning',
             'reasonCode': reason_code,
             'detail': detail,
+            'summary': f'{tool_name} not run: argument validation failed',
+            'summaryKey': 'activity.tool.validationRejected',
         })
 
     results = payload.get('results')
@@ -646,13 +650,24 @@ def _fold_model_complete(
             'routeMode': _text(raw_event.get('routeMode'), 24),
             'routeDecision': _text(raw_event.get('routeDecision'), 80),
             'failureStage': _text(raw_event.get('failureStage'), 80),
-            'reasonCode': _text(raw_event.get('errorKind'), 160),
+            # An abort row's class name is always AbortedError — constant,
+            # zero-diagnostic English noise in the facts line. Keep the kind
+            # only for genuine failures.
+            'reasonCode': ('' if aborted
+                           else _text(raw_event.get('errorKind'), 160)),
             'detail': _diagnostic_text(raw_event.get('errorDetail')),
             'statusCode': _nonnegative_int(raw_event.get('statusCode')),
             'roundNum': _round_number(raw_event),
             # R{n} tag convention: roundNum is 1-based, llmRound is 0-based.
             'llmRound': _llm_round_anchor(raw_event, task),
         }
+        if aborted:
+            abort_url = _text(raw_event.get('errorUrl'), 400)
+            entry['detailKey'] = (
+                'activity.model.abortedWaiting' if abort_url
+                else 'activity.model.aborted')
+            if abort_url:
+                entry['detailArgs'] = {'url': abort_url}
         _append_or_update(entries, entry)
     _close_request_status_entries(
         entries,
@@ -670,15 +685,45 @@ def _fold_tool_event(
     event_type = str(raw_event.get('type') or '')
     tool_call_id = _text(raw_event.get('toolCallId'), 160)
     tool_name = _text(raw_event.get('toolName'), 160) or 'tool'
-    span_id = _text(raw_event.get('spanId'), 160) or _stable_span(
-        'tool', task.get('_attemptId'), tool_call_id or seq,
-    )
+    round_num = _round_number(raw_event)
+    explicit_span_id = _text(raw_event.get('spanId'), 160)
+    if explicit_span_id:
+        span_id = explicit_span_id
+    elif round_num is not None:
+        # ``roundNum`` is the backend-owned occurrence identity for a tool
+        # row. Provider call ids are only correlation tokens: positional-id
+        # models recycle them across rounds, and the execution pipeline may
+        # remint one *after* its provisional tool_start was emitted. Anchoring
+        # the fallback span on the round keeps both cases occurrence-local:
+        # an old recycled id cannot overwrite a prior row, while a terminal
+        # event carrying the reminted id still settles its original start.
+        span_id = _stable_span(
+            'tool', task.get('_attemptId'), 'round', round_num,
+        )
+    else:
+        # Legacy progress/terminal frames sometimes omit roundNum. Adopt one
+        # uniquely open occurrence with the same provider id; ambiguity fails
+        # closed into a new diagnostic row instead of mutating an arbitrary
+        # historical call. A start without roundNum always earns a fresh span.
+        open_matches = [
+            entry for entry in entries
+            if event_type != EventType.TOOL_START
+            and entry.get('kind') == 'tool'
+            and entry.get('status') == 'running'
+            and _text(entry.get('toolCallId'), 160) == tool_call_id
+        ]
+        if len(open_matches) == 1:
+            span_id = _text(open_matches[0].get('spanId'), 160)
+        else:
+            span_id = _stable_span(
+                'tool', task.get('_attemptId'), tool_call_id or 'anonymous',
+                seq,
+            )
     index = _find_span(entries, span_id)
     if index is not None and tool_name == 'tool':
         tool_name = _text(entries[index].get('toolName'), 160) or tool_name
     if index is not None and not tool_call_id:
         tool_call_id = _text(entries[index].get('toolCallId'), 160)
-    round_num = _round_number(raw_event)
     parent_span = _text(
         raw_event.get('parentSpanId') or task.get('_activeModelRequestSpan'), 160,
     )
@@ -703,17 +748,23 @@ def _fold_tool_event(
         ended_at = _nonnegative_int(raw_event.get('tEnd')) or now
         for offset, diagnostic in enumerate(diagnostics):
             child_call_id = diagnostic.get('toolCallId') or tool_call_id
-            if diagnostic.get('toolCallId') and any(
-                    entry.get('toolCallId') == diagnostic['toolCallId']
-                    for entry in entries):
+            matching_child_entries = [
+                entry for entry in entries
+                if diagnostic.get('toolCallId')
+                and entry.get('toolCallId') == diagnostic['toolCallId']
+                and ':gateway-' not in str(entry.get('id') or '')
+            ]
+            if len(matching_child_entries) == 1:
                 # The actual child lifecycle is more authoritative and already
-                # contains its own timing/result envelope.
+                # contains its own timing/result envelope. Multiple historical
+                # matches are ambiguous (legacy recycled IDs), so they must not
+                # suppress this occurrence-local gateway diagnostic.
                 continue
             child_name = diagnostic.get('toolName') or 'tool request'
             child_status = diagnostic.get('status') or 'failed'
             child_span = _stable_span(
-                'tool', task.get('_attemptId'),
-                diagnostic.get('toolCallId') or f'{tool_call_id}:{offset}',
+                'gateway-tool', task.get('_attemptId'), span_id,
+                diagnostic.get('toolCallId') or tool_call_id, offset,
             )
             _append_or_update(entries, {
                 'id': _entry_id(task, seq, f':gateway-{offset}'),
@@ -727,8 +778,12 @@ def _fold_tool_event(
                 'kind': 'tool',
                 'status': child_status,
                 'severity': diagnostic.get('severity') or 'error',
-                'summary': f'{child_name} {child_status}',
-                'summaryKey': f'activity.tool.{child_status}',
+                'summary': (
+                    diagnostic.get('summary')
+                    or f'{child_name} {child_status}'),
+                'summaryKey': (
+                    diagnostic.get('summaryKey')
+                    or f'activity.tool.{child_status}'),
                 'summaryArgs': {'tool': child_name},
                 'detail': diagnostic.get('detail'),
                 'reasonCode': diagnostic.get('reasonCode'),
@@ -766,6 +821,15 @@ def _fold_tool_event(
             if progress_detail:
                 entry['detail'] = progress_detail
             _append_or_update(entries, entry)
+        return
+    if raw_event.get(SUPERSEDED_PROVIDER_ATTEMPT_FIELD) is True:
+        # A discarded provider-attempt announcement settling, not a tool
+        # execution: its adopted twin owns the real lifecycle. Close the
+        # running span the early tool_start opened instead of surfacing a
+        # misleading "{tool} stopped" warning row for a call that was never
+        # actually executed or lost.
+        if index is not None:
+            entries.pop(index)
         return
     raw_status = str(raw_event.get('status') or '').lower()
     rejection = tool_rejection_descriptor(raw_event)
@@ -1166,7 +1230,9 @@ def fold_activity_timeline(
         _close_open_entries(
             entries, status='aborted', severity='warning', ended_at=occurred_at,
         )
-    elif event_type in {EventType.RETRY_RESET, EventType.BUDGET_WARNING}:
+    # 'budget_warning' is historical: no longer emitted, still rendered for
+    # pre-removal transcripts.
+    elif event_type in {EventType.RETRY_RESET, 'budget_warning'}:
         detail = _diagnostic_text(
             raw_event.get('detail') or raw_event.get('content') or event_type,
         )

@@ -257,6 +257,14 @@ def _strip_managed(messages: list[dict[str, Any]]) -> None:
 
 
 def _envelope(block: ContextBlock, text: str) -> str:
+    if block.id == 'project_context':
+        # Project state is neutral request data.  It must remain a final
+        # user-role suffix and must never masquerade as a system reminder.
+        return (
+            f'<!-- tofu-context:{block.id}:start -->\n'
+            f'{text}\n'
+            f'<!-- tofu-context:{block.id}:end -->'
+        )
     return (
         f'<!-- tofu-context:{block.id}:start -->\n'
         '<system-reminder>\n'

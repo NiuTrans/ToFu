@@ -107,7 +107,7 @@ global.WebSocket = class WebSocket {
 """ + PUSH_RUNTIME.read_text(encoding='utf-8') + r"""
 pushConnect();
 console.log(JSON.stringify({
-  requestId: pushSocketRequestId(),
+  requestId: _push.socketRequestId(),
   url: global.capturedUrl,
 }));
 """

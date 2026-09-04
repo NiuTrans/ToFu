@@ -18,14 +18,19 @@ import type {
   TurnFileChangesBlock,
   TurnImageAttachment,
   TurnImageGeneration,
+  TurnLastRoundUsage,
   TurnMessageInjection,
+  TurnMediaAttachment,
+  TurnModelRoute,
   TurnOrchestration,
   TurnOrigin,
   TurnPlanExecution,
   TurnProvenance,
   TurnProjection,
+  RouteSnapshot,
   TurnProposedPlan,
   TurnRecord,
+  TurnRolledBackEntry,
   TurnStallInjection,
   TurnStatus,
   TurnTranslation,
@@ -46,6 +51,14 @@ import {
   presentTurnFinish,
   type TurnFinishPresentation,
 } from './turn-finish';
+import {
+  activityAnchorIndex,
+  activityAnchorWindows,
+  activityBlockLlmRound,
+  activityEntryIsVisible,
+  resolveActivityAnchorWindow,
+  type AnchoredActivityEntry,
+} from './activity-anchor';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -53,6 +66,7 @@ export type ConversationBlockKind =
   | 'text'
   | 'thinking'
   | 'tool'
+  | 'program'
   | 'attachments'
   | 'injections'
   | 'provenance'
@@ -61,11 +75,13 @@ export type ConversationBlockKind =
   | 'context'
   | 'compaction'
   | 'image-generation'
+  | 'rolled-back'
   | 'proposed-plan'
   | 'plan-execution'
   | 'artifacts'
   | 'autopilot-run-notice'
   | 'activity-event'
+  | 'queue-status'
   | 'live-status';
 
 export type BlockIdentitySource = 'contract' | 'compatibility';
@@ -98,6 +114,8 @@ export interface ThinkingBlockViewModel extends ConversationBlockBase {
   displayMode: TranslationDisplayMode;
   terminal: boolean;
   signature?: string;
+  /** Projected reasoning identities represented by this disclosure, in order. */
+  memberBlockIds: ReadonlyArray<string>;
 }
 
 export interface ToolBlockViewModel extends ConversationBlockBase {
@@ -109,11 +127,19 @@ export interface ToolBlockViewModel extends ConversationBlockBase {
   round?: TurnToolRound;
 }
 
+/** Display-only parent for native PTC or local ToolScript child calls. */
+export interface ProgramBlockViewModel extends ConversationBlockBase {
+  kind: 'program';
+  programCallId: string;
+  round: TurnToolRound;
+}
+
 export interface AttachmentsBlockViewModel extends ConversationBlockBase {
   kind: 'attachments';
   images: ReadonlyArray<TurnImageAttachment>;
   videos: ReadonlyArray<TurnVideoAttachment>;
   pdfTexts: ReadonlyArray<TurnDocumentAttachment>;
+  mediaAttachments: ReadonlyArray<TurnMediaAttachment>;
   conversationReferences: ReadonlyArray<TurnConversationReference>;
   replyQuotes: ReadonlyArray<string>;
 }
@@ -153,6 +179,11 @@ export interface CompactionBlockViewModel extends ConversationBlockBase {
   kind: 'compaction';
   value: TurnCompaction;
   summaryMarkdown: string;
+}
+
+export interface RolledBackBlockViewModel extends ConversationBlockBase {
+  kind: 'rolled-back';
+  value: TurnRolledBackEntry;
 }
 
 export interface ImageGenerationBlockViewModel extends ConversationBlockBase {
@@ -230,10 +261,20 @@ export interface LiveStatusBlockViewModel extends ConversationBlockBase {
   value: TransientTurnPresentation;
 }
 
+export interface QueueStatusBlockViewModel extends ConversationBlockBase {
+  kind: 'queue-status';
+  value: {
+    queueId: string;
+    position: number;
+    text: string;
+  };
+}
+
 export type ConversationBlockViewModel =
   | TextBlockViewModel
   | ThinkingBlockViewModel
   | ToolBlockViewModel
+  | ProgramBlockViewModel
   | AttachmentsBlockViewModel
   | InjectionsBlockViewModel
   | ProvenanceBlockViewModel
@@ -242,11 +283,13 @@ export type ConversationBlockViewModel =
   | ContextBlockViewModel
   | CompactionBlockViewModel
   | ImageGenerationBlockViewModel
+  | RolledBackBlockViewModel
   | ProposedPlanBlockViewModel
   | PlanExecutionBlockViewModel
   | ArtifactsBlockViewModel
   | AutopilotRunNoticeBlockViewModel
   | ActivityEventBlockViewModel
+  | QueueStatusBlockViewModel
   | LiveStatusBlockViewModel;
 
 export interface TurnMetadataViewModel {
@@ -255,10 +298,18 @@ export interface TurnMetadataViewModel {
   providerId?: string;
   thinkingDepth?: string | number;
   usage?: UnknownRecord;
-  lastRoundUsage?: UnknownRecord;
+  /** Client-side cost-cache signature for settled turns whose projection
+   *  lacks an authoritative cost; changes when the async batch lookup lands
+   *  so the surface footer compare sees the fill. Undefined while unknown
+   *  or when projection.cost already covers the render. */
+  costSignature?: string;
+  lastRoundUsage?: TurnLastRoundUsage;
+  /** The exact credential-redacted route that authored this Turn. */
+  routeSnapshot?: RouteSnapshot;
   modifiedFiles?: number;
   modifiedFileList?: ReadonlyArray<unknown>;
   todoState?: UnknownRecord;
+  waitingOn?: UnknownRecord;
   orchestration?: TurnOrchestration;
   origin?: TurnOrigin;
   fallback?: {
@@ -291,6 +342,10 @@ export interface ConversationPresentationState {
     ReadonlyArray<ConversationArtifactViewModel>
   >;
   expandedBranchLaneId?: string | null;
+  /** Per-turn client cost-cache signatures (turnId → rendered cost value).
+   *  The batch fill mutates no Turn fact, so it must ride presentation
+   *  state to reach the footer re-render compare. */
+  costSignatureByTurnId?: ReadonlyMap<string, string>;
   /** Local debug preference; task identity still comes from Turn attempts. */
   requestInspectorEnabled?: boolean;
   /** Backend-authored run conclusions; never projected into transcript text. */
@@ -310,6 +365,7 @@ export interface TranslationActivity {
 
 export interface ConversationTurnViewModel {
   turnId: string;
+  presentationId: string;
   laneId: string;
   parentTurnId: string | null;
   ordinal: number;
@@ -337,6 +393,7 @@ export type ConversationTurnAction =
   | 'resume'
   | 'translate'
   | 'export'
+  | 'promote-decision'
   | 'branch'
   | 'delete';
 
@@ -358,6 +415,11 @@ export interface ConversationLaneViewModel {
   expanded: boolean;
   live: boolean;
   humanTurnCount: number;
+  history?: {
+    nextBeforeOrdinal: number | null;
+    hasMore: boolean;
+    totalTurns: number;
+  };
   turns: ReadonlyArray<ConversationTurnViewModel>;
 }
 
@@ -494,6 +556,30 @@ function claimedBlockId(
   return blockId;
 }
 
+function richToolRoundsBySegment(
+  turn: TurnRecord,
+): ReadonlyArray<TurnToolRound | undefined> {
+  const rounds = turn.projection.toolRounds ?? [];
+  const roundQueues = new Map<string, TurnToolRound[]>();
+  rounds.forEach((round) => {
+    const callId = typeof round.toolCallId === 'string'
+      ? round.toolCallId.trim() : '';
+    if (!callId) return;
+    const queue = roundQueues.get(callId);
+    if (queue) queue.push(round);
+    else roundQueues.set(callId, [round]);
+  });
+  const consumed = new Map<string, number>();
+  return (turn.projection.segments ?? []).map((segment) => {
+    if (segment.type !== 'tool_use') return undefined;
+    const callId = segment.id.trim();
+    if (!callId) return segment._round;
+    const occurrence = consumed.get(callId) ?? 0;
+    consumed.set(callId, occurrence + 1);
+    return segment._round ?? roundQueues.get(callId)?.[occurrence];
+  });
+}
+
 function blockFromSegment(
   turn: TurnRecord,
   segment: TurnContentSegment,
@@ -501,7 +587,8 @@ function blockFromSegment(
   claims: Map<string, number>,
   diagnostics: ConversationViewModelDiagnostics,
   translationMode: TranslationDisplayMode,
-  translationActivity?: TranslationActivity,
+  translationActivity: TranslationActivity | undefined,
+  richRoundsBySegment: ReadonlyArray<TurnToolRound | undefined>,
 ): ConversationBlockViewModel {
   const identitySource: BlockIdentitySource = 'contract';
   const blockId = claimedBlockId(
@@ -575,13 +662,11 @@ function blockFromSegment(
         ? durable ?? livePreview ?? markdown : markdown,
       displayMode,
       terminal: Boolean(segment.terminal),
+      memberBlockIds: [blockId],
       ...(segment.signature ? { signature: segment.signature } : {}),
     };
   }
-  const richRound = segment._round
-    ?? turn.projection.toolRounds?.find((round) => (
-      Boolean(segment.id) && round.toolCallId === segment.id
-    ));
+  const richRound = richRoundsBySegment[occurrence] ?? segment._round;
   return {
     blockId,
     kind: 'tool',
@@ -593,6 +678,65 @@ function blockFromSegment(
     result: segment.result,
     ...(richRound ? { round: richRound } : {}),
   };
+}
+
+function addProgramBlocks(
+  turn: TurnRecord,
+  blocks: ConversationBlockViewModel[],
+  claims: Map<string, number>,
+  diagnostics: ConversationViewModelDiagnostics,
+): void {
+  const rounds = turn.projection.toolRounds ?? [];
+  rounds.forEach((round, roundIndex) => {
+    if (round._programSynthetic !== true) return;
+    const rawCallId = round._programCallId;
+    const programCallId = typeof rawCallId === 'string' && rawCallId.trim()
+      ? rawCallId : `round-${String(round.roundNum ?? roundIndex)}`;
+    const block: ProgramBlockViewModel = {
+      blockId: claimedBlockId(
+        turn.turnId, `program:${programCallId}`, 'contract', claims, diagnostics,
+      ),
+      kind: 'program',
+      identitySource: 'contract',
+      source: round,
+      programCallId,
+      round,
+    };
+
+    /* Program parents are display-only and intentionally absent from segments.
+     * Prefer their declared child identities, then the next durable tool round,
+     * so the parent stays immediately before its ordinary child cards even
+     * when a resumed attempt restarts llmRound numbering. A childless parse
+     * failure falls back to the end of its authored model round. */
+    const childIds = new Set(
+      (Array.isArray(round.childCallIds) ? round.childCallIds : [])
+        .filter((value): value is string => typeof value === 'string' && !!value),
+    );
+    let insertAt = childIds.size ? blocks.findIndex((candidate) => (
+      candidate.kind === 'tool' && childIds.has(candidate.toolCallId)
+    )) : -1;
+    if (insertAt < 0) {
+      const followingToolIds = new Set(
+        rounds.slice(roundIndex + 1).flatMap((candidate) => (
+          typeof candidate.toolCallId === 'string' && candidate.toolCallId
+            ? [candidate.toolCallId] : []
+        )),
+      );
+      insertAt = blocks.findIndex((candidate) => (
+        candidate.kind === 'tool' && followingToolIds.has(candidate.toolCallId)
+      ));
+    }
+    if (insertAt < 0) {
+      const llmRound = activityBlockLlmRound(block);
+      for (let index = blocks.length - 1; index >= 0; index -= 1) {
+        if (activityBlockLlmRound(blocks[index]) === llmRound) {
+          insertAt = index + 1;
+          break;
+        }
+      }
+    }
+    blocks.splice(insertAt < 0 ? blocks.length : insertAt, 0, block);
+  });
 }
 
 function addProjectionSidecarBlocks(
@@ -607,7 +751,8 @@ function addProjectionSidecarBlocks(
   const contractBlockId = (proposed: string): string => claimedBlockId(
     turn.turnId, proposed, 'contract', claims, diagnostics,
   );
-  if (projection.images?.length || projection.videos?.length
+  if (projection.images?.length || projection.attachments?.length
+      || projection.videos?.length
       || projection.pdfTexts?.length || projection.convRefs?.length
       || projection.replyQuotes?.length) {
     blocks.unshift({
@@ -618,6 +763,7 @@ function addProjectionSidecarBlocks(
       images: asArray(projection.images),
       videos: asArray(projection.videos),
       pdfTexts: asArray(projection.pdfTexts),
+      mediaAttachments: asArray(projection.attachments),
       conversationReferences: asArray(projection.convRefs),
       replyQuotes: projection.replyQuotes ?? [],
     });
@@ -695,9 +841,7 @@ function addProjectionSidecarBlocks(
       const anchorIndex = anchorLlmRound == null ? -1 : blocks.findIndex((candidate) => {
         if (candidate.kind === 'attachments' || candidate.kind === 'injections'
             || candidate.kind === 'provenance') return false;
-        const source = candidate.source as { llmRound?: number | null };
-        const candidateRound = candidate.kind === 'tool'
-          ? candidate.round?.llmRound ?? source.llmRound : source.llmRound;
+        const candidateRound = activityBlockLlmRound(candidate);
         return candidateRound === anchorLlmRound;
       });
       blocks.splice(anchorIndex >= 0 ? anchorIndex : blocks.length, 0, block);
@@ -788,9 +932,10 @@ function addProjectionSidecarBlocks(
     });
   }
   const activityTimeline = projection.activityTimeline;
-  const activityEntries = visibleActivityEntries(
-    activityTimeline, projection.toolRounds ?? [],
-  );
+  const activityEntries = [
+    ...visibleActivityEntries(activityTimeline, projection.toolRounds ?? []),
+    ...routeSnapshotActivityEntries(projection.routeSnapshot),
+  ];
   const terminalError = turn.status === 'failed'
     ? normalizeErrorEnvelope(turn.settlement?.error) : null;
   const terminalErrorEntry = terminalError
@@ -798,15 +943,25 @@ function addProjectionSidecarBlocks(
       entry.kind === 'error' && entry.status === 'failed'
     ))
     : undefined;
-  if (activityTimeline && activityEntries.length) {
+  const terminalStatusCode = typeof terminalError?.statusCode === 'number'
+    && Number.isInteger(terminalError.statusCode)
+    ? terminalError.statusCode : undefined;
+  if (activityEntries.length) {
     /* Diagnostic rows anchor inline where they happened: a tool-linked row
      * sits right under its tool block, everything else rides its 0-based
      * model round so the transcript keeps the interleaved
      * thinking → content → tool flow instead of one consolidated tail. */
-    const anchorWindows = activityAnchorWindows(activityTimeline, blocks);
+    const anchorWindows = activityTimeline
+      ? activityAnchorWindows(activityTimeline, blocks) : new Map();
     for (const entry of activityEntries) {
+      const isTerminalErrorEntry = entry.id === terminalErrorEntry?.id
+        && terminalError != null;
+      const presentedEntry = isTerminalErrorEntry
+        && entry.statusCode == null && terminalStatusCode != null
+        ? { ...entry, statusCode: terminalStatusCode }
+        : entry;
       const anchor = activityAnchorIndex(
-        blocks, entry, anchorWindows.get(entry.id),
+        blocks, entry, resolveActivityAnchorWindow(anchorWindows, entry),
       );
       blocks.splice(anchor, 0, {
         blockId: claimedBlockId(
@@ -814,38 +969,10 @@ function addProjectionSidecarBlocks(
         ),
         kind: 'activity-event',
         identitySource: 'contract',
-        source: entry,
-        value: entry,
-        ...(entry.id === terminalErrorEntry?.id && terminalError
+        source: presentedEntry,
+        value: presentedEntry,
+        ...(isTerminalErrorEntry
           ? { terminalError } : {}),
-      });
-    }
-    const droppedCount = activityTimeline.droppedCount ?? 0;
-    if (droppedCount > 0) {
-      const droppedEntry: TurnActivityEntry = {
-        id: 'dropped',
-        spanId: 'dropped',
-        seq: activityEntries[0]?.seq ?? 0,
-        occurredAt: activityEntries[0]?.occurredAt ?? 0,
-        kind: 'system',
-        status: 'skipped',
-        severity: 'info',
-        count: 1,
-        summary: `${droppedCount} older timeline events were compacted`,
-        summaryKey: 'activity.timeline.olderCompacted',
-        summaryArgs: { count: droppedCount },
-      };
-      const firstEvent = blocks.findIndex((block) => (
-        block.kind === 'activity-event'
-      ));
-      blocks.splice(firstEvent >= 0 ? firstEvent : blocks.length, 0, {
-        blockId: claimedBlockId(
-          turn.turnId, 'activity:dropped', 'contract', claims, diagnostics,
-        ),
-        kind: 'activity-event',
-        identitySource: 'contract',
-        source: droppedEntry,
-        value: droppedEntry,
       });
     }
   }
@@ -863,6 +990,8 @@ function addProjectionSidecarBlocks(
       summaryKey: 'activity.error.failed',
       reasonCode: terminalError.kind,
       ...(terminalError.model ? { model: terminalError.model } : {}),
+      ...(terminalStatusCode == null
+        ? {} : { statusCode: terminalStatusCode }),
     };
     blocks.push({
       blockId: claimedBlockId(
@@ -874,6 +1003,37 @@ function addProjectionSidecarBlocks(
       value: terminalEntry,
       terminalError,
     });
+  }
+
+  const rolledBack = projection.rolledBack;
+  if (rolledBack?.length) {
+    const rolledBlocks: ConversationBlockViewModel[] = [];
+    for (const entry of rolledBack) {
+      if (!entry || typeof entry.blockId !== 'string'
+          || !entry.blockId.trim()) continue;
+      if (!String(entry.content ?? '').trim()
+          && !String(entry.thinking ?? '').trim()) continue;
+      rolledBlocks.push({
+        blockId: claimedBlockId(
+          turn.turnId, entry.blockId, 'contract', claims, diagnostics,
+        ),
+        kind: 'rolled-back',
+        identitySource: 'contract',
+        source: entry,
+        value: entry,
+      });
+    }
+    if (rolledBlocks.length) {
+      /* The rewound tail belongs where it was generated: after the retained
+       * rounds, before the terminal lanes the resumed attempt re-streams. */
+      const firstTerminal = blocks.findIndex((candidate) => (
+        (candidate.kind === 'text' || candidate.kind === 'thinking')
+        && candidate.terminal
+      ));
+      blocks.splice(
+        firstTerminal >= 0 ? firstTerminal : blocks.length, 0, ...rolledBlocks,
+      );
+    }
   }
 }
 
@@ -899,7 +1059,7 @@ function boundedActivityText(value: unknown, maxChars: number): string {
 function legacyGatewayValidationEntries(
   entry: TurnActivityEntry,
   toolRounds: ReadonlyArray<TurnToolRound>,
-): ReadonlyArray<TurnActivityEntry> {
+): ReadonlyArray<AnchoredActivityEntry> {
   const round = toolRounds.find((candidate) => (
     candidate.toolCallId === entry.toolCallId
     && candidate.toolName === 'execute_tools'
@@ -927,23 +1087,27 @@ function legacyGatewayValidationEntries(
       ...entry,
       id: `${entry.id}:validation-${index}`,
       spanId: `${entry.spanId}:validation-${index}`,
+      /* Synthesized rows are absent from the raw timeline, so the chronology
+       * windows map has no key for them: inherit the parent gateway row's
+       * window instead of degrading to an unbounded round scan. */
+      anchorEntryId: entry.id,
       kind: 'tool',
       status: 'skipped',
       severity: 'warning',
-      summary: `${toolName} skipped`,
-      summaryKey: 'activity.tool.skipped',
+      summary: `${toolName} not run: argument validation failed`,
+      summaryKey: 'activity.tool.validationRejected',
       summaryArgs: { tool: toolName },
       ...(detail ? { detail } : {}),
       reasonCode: boundedActivityText(error.code, 160) || 'gateway_validation',
       toolName,
-    } satisfies TurnActivityEntry];
+    } satisfies AnchoredActivityEntry];
   });
 }
 
 function visibleActivityEntries(
   timeline: TurnActivityTimeline | undefined,
   toolRounds: ReadonlyArray<TurnToolRound>,
-): ReadonlyArray<TurnActivityEntry> {
+): ReadonlyArray<AnchoredActivityEntry> {
   /* Routine info facts are already owned by inline tool blocks and live
    * status. A settled compaction receipt is the deliberate exception: it is a
    * durable context boundary with accounting + archive identity, not another
@@ -955,148 +1119,108 @@ function visibleActivityEntries(
   });
 }
 
-function activityEntryIsVisible(entry: TurnActivityEntry): boolean {
-  return entry.severity !== 'info' || (
-    entry.reasonCode === 'context_compaction'
-    && Boolean(entry.archiveId)
-  );
+/** Project v2 failover decisions into the same chronological diagnostic lane
+ * as retries and model switches. The snapshot remains the durable authority;
+ * these rows are presentation-only and contain no credential secret. */
+function routeSnapshotActivityEntries(
+  snapshot: RouteSnapshot | undefined,
+): ReadonlyArray<TurnActivityEntry> {
+  if (!snapshot) return [];
+  const selectedModel = snapshot.selected_model?.model_id
+    ?? snapshot.provider_scoped_selection?.offering_id ?? '';
+  const actualModel = snapshot.actual_model?.model_id
+    ?? snapshot.offering_id ?? snapshot.wire_model_id;
+  return snapshot.transitions.flatMap((transition, index) => {
+    if (transition.kind === 'initial') return [];
+    const fromProvider = transition.from?.provider_id ?? snapshot.preferred_provider_id;
+    const fromRoute = transition.from
+      ? `${transition.from.provider_id}/${transition.from.offering_id}`
+      : selectedModel;
+    const toRoute = `${transition.to.provider_id}/${transition.to.offering_id}`;
+    const kindLabel = transition.kind === 'model_fallback'
+      ? 'Model fallback' : 'Provider failover';
+    return [{
+      id: `route-snapshot:${index}`,
+      spanId: `route-snapshot:${index}`,
+      seq: Number.MAX_SAFE_INTEGER - snapshot.transitions.length + index,
+      occurredAt: Math.max(0, Math.round(snapshot.recorded_at * 1000)),
+      kind: 'model',
+      status: 'switched',
+      severity: 'warning',
+      count: 1,
+      summary: `${kindLabel}: ${fromRoute} → ${toRoute}`,
+      detail: `Final route: ${snapshot.provider_id}/${snapshot.offering_id}`
+        + ` · ${snapshot.connection_id}/${snapshot.deployment_id}`
+        + ` · request ID ${snapshot.wire_model_id}`,
+      model: actualModel,
+      providerId: snapshot.provider_id,
+      reasonCode: transition.reason,
+      fromModel: transition.kind === 'model_fallback' ? selectedModel : fromProvider,
+      toModel: transition.kind === 'model_fallback' ? actualModel : transition.to.provider_id,
+    } satisfies TurnActivityEntry];
+  });
 }
 
-function activityBlockLlmRound(
-  block: ConversationBlockViewModel,
-): number | null {
-  const source = block.source as { llmRound?: number | null };
-  const round = block.kind === 'tool'
-    ? block.round?.llmRound ?? source.llmRound
-    : source.llmRound;
-  return typeof round === 'number' && Number.isInteger(round) ? round : null;
-}
+const ADJACENT_THINKING_SEPARATOR = '\n\n';
 
 /**
- * Chronological bounds for one diagnostic row, derived from the durable
- * timeline rather than from round numbers.  ``llmRound`` is only monotonic
- * within ONE execution attempt: a continued/resumed turn restarts the model
- * round counter at 0, so an unbounded round scan can anchor an earlier
- * attempt's error after content that did not exist yet (the resumed run's
- * fresh round-0/1/2 tool blocks sort below a round-19 failure).  Tool rows
- * in the timeline pin tool blocks to real chronology: a diagnostic sits
- * after the latest tool row that precedes it and before the earliest tool
- * row that follows it.  Round-riding semantics stay intact inside that
- * window.
+ * Present uninterrupted reasoning as one disclosure without changing Turn
+ * authority. Hidden transport/gateway shells are intentionally not reader-
+ * visible boundaries, while any rendered tool, program, prose, or diagnostic
+ * block ends the run. The first projected block remains the DOM identity so a
+ * live run can grow without replacing the disclosure node; memberBlockIds
+ * retains every durable per-round identity for diagnostics.
  */
-interface ActivityAnchorWindow {
-  afterToolCallId?: string;
-  beforeToolCallId?: string;
-}
-
-function activityAnchorWindows(
-  timeline: TurnActivityTimeline,
-  blocks: ReadonlyArray<ConversationBlockViewModel>,
-): Map<string, ActivityAnchorWindow> {
-  const toolCallIds = new Set<string>();
-  for (const block of blocks) {
-    if (block.kind === 'tool' && block.toolCallId) {
-      toolCallIds.add(block.toolCallId);
+function coalesceAdjacentThinkingBlocks(
+  blocks: ConversationBlockViewModel[],
+): void {
+  const coalesced: ConversationBlockViewModel[] = [];
+  for (let index = 0; index < blocks.length;) {
+    const first = blocks[index];
+    if (first.kind !== 'thinking') {
+      coalesced.push(first);
+      index += 1;
+      continue;
     }
-  }
-  const entries = timeline.entries ?? [];
-  const windows = new Map<string, ActivityAnchorWindow>();
-  let spine = '';
-  for (const entry of entries) {
-    if (activityEntryIsVisible(entry)) {
-      windows.set(entry.id, spine ? { afterToolCallId: spine } : {});
-    }
-    if (entry.toolCallId && toolCallIds.has(entry.toolCallId)) {
-      spine = entry.toolCallId;
-    }
-  }
-  let limit = '';
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (activityEntryIsVisible(entry)) {
-      const anchorWindow = windows.get(entry.id);
-      if (anchorWindow && limit) anchorWindow.beforeToolCallId = limit;
-    }
-    if (entry.toolCallId && toolCallIds.has(entry.toolCallId)) {
-      limit = entry.toolCallId;
-    }
-  }
-  return windows;
-}
-
-function activityAnchorIndex(
-  blocks: ReadonlyArray<ConversationBlockViewModel>,
-  entry: TurnActivityEntry,
-  anchorWindow?: ActivityAnchorWindow,
-): number {
-  if (entry.toolCallId) {
-    const toolIndex = blocks.findIndex((candidate) => (
-      candidate.kind === 'tool' && candidate.toolCallId === entry.toolCallId
-    ));
-    if (toolIndex >= 0) {
-      let end = toolIndex + 1;
-      while (end < blocks.length) {
-        const next = blocks[end];
-        if (next.kind !== 'activity-event'
-            || next.value.toolCallId !== entry.toolCallId) break;
-        end += 1;
-      }
-      return end;
-    }
-  }
-  /* Confine the scan to blocks the timeline proves existed when this row
-   * was recorded; a missing bound degrades to the legacy unbounded scan. */
-  let start = 0;
-  let end = blocks.length;
-  if (anchorWindow?.afterToolCallId) {
-    const spineIndex = blocks.findIndex((candidate) => (
-      candidate.kind === 'tool'
-      && candidate.toolCallId === anchorWindow.afterToolCallId
-    ));
-    if (spineIndex >= 0) start = spineIndex + 1;
-  }
-  if (anchorWindow?.beforeToolCallId) {
-    const limitIndex = blocks.findIndex((candidate) => (
-      candidate.kind === 'tool'
-      && candidate.toolCallId === anchorWindow.beforeToolCallId
-    ));
-    if (limitIndex >= 0) end = Math.min(end, Math.max(start, limitIndex));
-  }
-  if (start >= end) {
-    /* The window brackets no content (one tool row bounding both sides, or
-     * adjacent tool rows): round numbers cannot order the rows sharing it,
-     * so keep timeline order by appending after the rows already there. */
-    let index = start;
-    while (index < blocks.length && blocks[index].kind === 'activity-event') {
+    const run: ThinkingBlockViewModel[] = [first];
+    index += 1;
+    while (index < blocks.length && blocks[index].kind === 'thinking') {
+      run.push(blocks[index] as ThinkingBlockViewModel);
       index += 1;
     }
-    return index;
-  }
-  const round = entry.llmRound;
-  if (round != null) {
-    for (let index = end - 1; index >= start; index -= 1) {
-      if (activityBlockLlmRound(blocks[index]) === round) return index + 1;
+    if (run.length === 1) {
+      coalesced.push(first);
+      continue;
     }
-    for (let index = end - 1; index >= start; index -= 1) {
-      const candidateRound = activityBlockLlmRound(blocks[index]);
-      if (candidateRound != null && candidateRound < round) return index + 1;
-    }
-    return start;
+    const everyDisplayTranslated = run.every(
+      (block) => block.displayMode === 'translated',
+    );
+    const everyDurablyTranslated = run.every(
+      (block) => block.translatedMarkdown !== undefined,
+    );
+    const markdown = run.map((block) => block.markdown)
+      .join(ADJACENT_THINKING_SEPARATOR);
+    const translatedMarkdown = everyDurablyTranslated
+      ? run.map((block) => block.translatedMarkdown ?? '')
+        .join(ADJACENT_THINKING_SEPARATOR)
+      : undefined;
+    coalesced.push({
+      blockId: first.blockId,
+      kind: 'thinking',
+      identitySource: first.identitySource,
+      source: first.source,
+      memberBlockIds: run.flatMap((block) => block.memberBlockIds),
+      markdown,
+      ...(translatedMarkdown !== undefined ? { translatedMarkdown } : {}),
+      displayMarkdown: everyDisplayTranslated
+        ? run.map((block) => block.displayMarkdown)
+          .join(ADJACENT_THINKING_SEPARATOR)
+        : markdown,
+      displayMode: everyDisplayTranslated ? 'translated' : 'original',
+      terminal: run[run.length - 1].terminal,
+    });
   }
-  /* Unanchored diagnostics happened before any model request (preflight
-   * schema isolation) or the turn never produced round-anchored content
-   * (terminal error): place them before the first anchored content block,
-   * after any earlier unanchored rows, falling back to the window end. */
-  for (let index = start; index < end; index += 1) {
-    const candidate = blocks[index];
-    if (candidate.kind === 'text' || candidate.kind === 'thinking'
-        || candidate.kind === 'tool'
-        || (candidate.kind === 'activity-event'
-          && candidate.value.llmRound != null)) {
-      return index;
-    }
-  }
-  return end;
+  blocks.splice(0, blocks.length, ...coalesced);
 }
 
 /**
@@ -1127,7 +1251,7 @@ function settleThinkingActivity(
       block.terminal = settled || laterContent;
     }
     if (block.kind === 'thinking' || block.kind === 'text'
-        || block.kind === 'tool') {
+        || block.kind === 'tool' || block.kind === 'program') {
       laterContent = true;
     }
   }
@@ -1142,13 +1266,15 @@ export function selectTurnBlocks(
 ): ReadonlyArray<ConversationBlockViewModel> {
   const segments = turn.projection.segments ?? [];
   const claims = new Map<string, number>();
+
+  const richRoundsBySegment = richToolRoundsBySegment(turn);
   const blocks = segments.flatMap((segment, index) => {
     if ((segment.type === 'tool_use' && segment.name === 'execute_tools')
         || (turn.projection.compaction && segment.type === 'text'
           && (segment.terminal || segment.deliverable))) return [];
     const block = blockFromSegment(
       turn, segment, index, claims, diagnostics, translationMode,
-      translationActivity,
+      translationActivity, richRoundsBySegment,
     );
     /* Empty stream placeholders have no visual authority. Live progress is a
      * dedicated block, so retaining blank prose/thinking here only creates an
@@ -1157,9 +1283,11 @@ export function selectTurnBlocks(
         && !block.displayMarkdown.trim()) return [];
     return [block];
   });
+  addProgramBlocks(turn, blocks, claims, diagnostics);
   addProjectionSidecarBlocks(
     turn, blocks, claims, diagnostics, translationMode, translationActivity,
   );
+  coalesceAdjacentThinkingBlocks(blocks);
   settleThinkingActivity(turn, blocks);
   const transient = transientTurnPresentation(turn);
   if (transient) {
@@ -1181,13 +1309,18 @@ function metadataFrom(
   blocks: ReadonlyArray<ConversationBlockViewModel>,
   preferredTranslationMode: TranslationDisplayMode,
   activity?: TranslationActivity,
+  costSignature?: string,
 ): TurnMetadataViewModel {
   const hasFallback = Boolean(
     projection.fallbackModel || projection.fallbackFrom
     || projection.fallbackReason || projection.fallbackKind,
   );
   const fallbackInTimeline = (projection.activityTimeline?.entries ?? [])
-    .some((entry) => entry.status === 'switched');
+    .some((entry) => entry.status === 'switched') || Boolean(
+      projection.routeSnapshot?.transitions.some(
+        (transition) => transition.kind !== 'initial',
+      ),
+    );
   const translationAvailable = blocks.some((block) => (
     (block.kind === 'text' || block.kind === 'thinking')
       && Boolean(block.translatedMarkdown)
@@ -1203,13 +1336,17 @@ function metadataFrom(
     ...(projection.thinkingDepth != null
       ? { thinkingDepth: projection.thinkingDepth } : {}),
     ...(projection.usage ? { usage: projection.usage } : {}),
+    ...(costSignature ? { costSignature } : {}),
     ...(projection.lastRoundUsage
       ? { lastRoundUsage: projection.lastRoundUsage } : {}),
+    ...(projection.routeSnapshot
+      ? { routeSnapshot: projection.routeSnapshot } : {}),
     ...(projection.modifiedFiles != null
       ? { modifiedFiles: projection.modifiedFiles } : {}),
     ...(projection.modifiedFileList
       ? { modifiedFileList: projection.modifiedFileList } : {}),
     ...(projection.todoState ? { todoState: projection.todoState } : {}),
+    ...(projection.waitingOn ? { waitingOn: projection.waitingOn } : {}),
     ...(projection.orchestration
       ? { orchestration: projection.orchestration } : {}),
     ...(projection.origin ? { origin: projection.origin } : {}),
@@ -1275,6 +1412,7 @@ function actionsFor(
         disabled,
       },
       { action: 'export', disabled: false },
+      { action: 'promote-decision', disabled },
       { action: 'branch', disabled },
     );
   }
@@ -1303,7 +1441,11 @@ function autopilotNoticeReason(value: unknown): AutopilotRunNoticeReason | null 
     ? value as AutopilotRunNoticeReason : null;
 }
 
-function liveAttemptPresentation(value: unknown): TransientTurnPresentation {
+function liveAttemptPresentation(
+  value: unknown,
+  durableStatus: TurnRecord['status'],
+  taskBound: boolean,
+): TransientTurnPresentation {
   const phase = value && typeof value === 'object' && !Array.isArray(value)
     ? value as UnknownRecord : {};
   const stringValue = (field: string): string => (
@@ -1325,13 +1467,37 @@ function liveAttemptPresentation(value: unknown): TransientTurnPresentation {
       .filter((entry): entry is [string, string | number] => (
         typeof entry[1] === 'string' || typeof entry[1] === 'number'
       ))) : undefined;
+  const rawModelRoute = phase.modelRoute && typeof phase.modelRoute === 'object'
+      && !Array.isArray(phase.modelRoute)
+    ? phase.modelRoute as UnknownRecord : undefined;
+  const modelRoute = rawModelRoute
+      && typeof rawModelRoute.selectedModel === 'string'
+      && typeof rawModelRoute.resolvedModel === 'string'
+      && typeof rawModelRoute.role === 'string'
+      && (rawModelRoute.tier === 'light'
+        || rawModelRoute.tier === 'standard'
+        || rawModelRoute.tier === 'heavy')
+      && (rawModelRoute.kind === 'selected'
+        || rawModelRoute.kind === 'role_tier')
+    ? rawModelRoute as TurnModelRoute : undefined;
+  const reportedPhase = stringValue('phase');
+  const fallbackPhase = durableStatus === 'pending'
+    ? (taskBound ? 'executor_queued' : 'executor_preparing')
+    : 'worker_starting';
+  const fallbackDetailKey = durableStatus === 'pending'
+    ? (taskBound
+      ? 'stream.phase.executorQueued'
+      : 'stream.phase.executorPreparing')
+    : 'stream.phase.workerStarting';
   return {
     kind: 'attempt',
-    phase: stringValue('phase') || 'waiting',
+    phase: reportedPhase || fallbackPhase,
     ...(numberValue('seq') == null ? {} : { seq: numberValue('seq') }),
-    label: stringValue('label') || 'Waiting for the agent…',
+    label: stringValue('label'),
     detail: stringValue('detail'),
-    ...(stringValue('detailKey') ? { detailKey: stringValue('detailKey') } : {}),
+    ...(stringValue('detailKey')
+      ? { detailKey: stringValue('detailKey') }
+      : (reportedPhase ? {} : { detailKey: fallbackDetailKey })),
     ...(detailArgs && Object.keys(detailArgs).length ? { detailArgs } : {}),
     ...(stringArray('tools')?.length ? { tools: stringArray('tools') } : {}),
     ...(stringValue('toolContext')
@@ -1343,6 +1509,7 @@ function liveAttemptPresentation(value: unknown): TransientTurnPresentation {
     ...(numberValue('statusCode') == null
       ? {} : { statusCode: numberValue('statusCode') }),
     ...(stringValue('model') ? { model: stringValue('model') } : {}),
+    ...(modelRoute ? { modelRoute } : {}),
     ...(numberValue('thinkingLength') == null
       ? {} : { thinkingLength: numberValue('thinkingLength') }),
   };
@@ -1358,8 +1525,12 @@ function waitingPlaceholderRedundant(
   liveStatus: TransientTurnPresentation,
   blocks: ReadonlyArray<ConversationBlockViewModel>,
 ): boolean {
-  if (liveStatus.phase !== 'waiting') return false;
-  if (liveStatus.detail || liveStatus.detailKey || liveStatus.model
+  const isBareWaiting = liveStatus.phase === 'waiting'
+    && !liveStatus.detailKey;
+  const isWorkerEntryFallback = liveStatus.phase === 'worker_starting'
+    && liveStatus.detailKey === 'stream.phase.workerStarting';
+  if (!isBareWaiting && !isWorkerEntryFallback) return false;
+  if (liveStatus.detail || liveStatus.model
       || liveStatus.toolContext || liveStatus.tools?.length) return false;
   const tail = blocks[blocks.length - 1];
   if (!tail) return false;
@@ -1434,6 +1605,14 @@ export function selectConversationViewModel(
   presentation: ConversationPresentationState = {},
 ): ConversationViewModel {
   const autopilotNoticesByTurn = selectAutopilotRunNotices(state, presentation);
+  const nativeQueueByInputTurn = new Map(
+    state.queueItems.flatMap((item) => (
+      item.inputTurnId ? [[item.inputTurnId, item] as const] : []
+    )),
+  );
+  const queuedOutputTurnIds = new Set(
+    state.queueItems.flatMap((item) => item.outputTurnId ? [item.outputTurnId] : []),
+  );
   const latestAttemptByTurn = new Map<string, {
     taskId: string;
     createdAt: number;
@@ -1449,10 +1628,21 @@ export function selectConversationViewModel(
       });
     }
   }
+  /* Conversation-level livePhase belongs to the newest durable active Turn.
+   * Transient lifecycle Turns (send preparation, virtual-user warm-up, image
+   * work) already carry their own live-status block. Letting a later transient
+   * row win this selection strips the phase from the real active assistant and
+   * briefly renders that Turn as a header-only ghost while a new message is
+   * being prepared. */
   const mainLiveTurnId = [...(state.laneOrder.main ?? [])].reverse()
     .find((turnId) => {
       const turn = state.turnsById[turnId];
-      return turn?.status === 'pending' || turn?.status === 'running';
+      if (!turn || (turn.status !== 'pending' && turn.status !== 'running')) {
+        return false;
+      }
+      const attempt = turn.currentAttemptId
+        ? state.attemptsById[turn.currentAttemptId] : undefined;
+      return !transientTurnPresentation(turn) && !attempt?.queueBinding;
     }) ?? null;
   const laneOwners = new Map<string, LaneOwner>();
   let descriptorOrder = 0;
@@ -1518,6 +1708,7 @@ export function selectConversationViewModel(
       (turnId): ConversationTurnViewModel[] => {
         const turn = state.turnsById[turnId];
         if (!turn) return [];
+        if (queuedOutputTurnIds.has(turn.turnId)) return [];
         const branches = (childrenByTurn.get(turn.turnId) ?? [])
           .map((childLaneId) => selectLane(childLaneId, nextStack));
         const role = roleFor(turn);
@@ -1534,6 +1725,20 @@ export function selectConversationViewModel(
           ),
           ...(autopilotNoticesByTurn.get(turn.turnId) ?? []),
         ];
+        const queueItem = nativeQueueByInputTurn.get(turn.turnId);
+        if (queueItem) {
+          blocks.push({
+            blockId: `queue:${queueItem.queueId}`,
+            kind: 'queue-status',
+            identitySource: 'contract',
+            source: queueItem,
+            value: {
+              queueId: queueItem.queueId,
+              position: Number(queueItem.position || 0),
+              text: queueItem.text || '',
+            },
+          });
+        }
         const artifacts = presentation.artifactsByTurn?.get(turn.turnId);
         if (artifacts?.length) {
           blocks.push({
@@ -1546,9 +1751,15 @@ export function selectConversationViewModel(
         }
         if (turn.turnId === mainLiveTurnId
             && !blocks.some((block) => block.kind === 'live-status')) {
+          const currentAttempt = turn.currentAttemptId
+            ? state.attemptsById[turn.currentAttemptId] : undefined;
           const phaseSource = state.livePhase && typeof state.livePhase === 'object'
-            ? state.livePhase as object : turn;
-          const liveStatus = liveAttemptPresentation(state.livePhase);
+            ? state.livePhase as object : currentAttempt ?? turn;
+          const liveStatus = liveAttemptPresentation(
+            phaseSource,
+            turn.status,
+            Boolean(currentAttempt?.taskId),
+          );
           /* A withheld-push wedge means no newer frame can arrive, so any
            * livePhase on record is stale. Present the honest storage-wedge
            * status instead of the misleading generic waiting placeholder
@@ -1584,9 +1795,17 @@ export function selectConversationViewModel(
         const metadata = metadataFrom(
           turn.projection, blocks, preferredTranslationMode,
           translationActivity,
+          /* An authoritative projection cost is covered by the
+           * projectionRevision footer compare; only the client-side batch
+           * fill (historical turns without a stamped cost) needs the
+           * presentation-state signature. */
+          turn.projection.cost
+            ? undefined
+            : presentation.costSignatureByTurnId?.get(turn.turnId),
         );
         return [{
           turnId: turn.turnId,
+          presentationId: turn.presentationId || turn.turnId,
           laneId: turn.laneId || laneId,
           parentTurnId: turn.parentTurnId ?? null,
           ordinal: Number(turn.ordinal || 0),
@@ -1625,6 +1844,8 @@ export function selectConversationViewModel(
         || presentation.expandedBranchLaneId === laneId,
       live: turns.some((turn) => turn.status === 'pending' || turn.status === 'running'),
       humanTurnCount: turns.filter((turn) => turn.actor === 'human').length,
+      ...(state.historyByLane?.[laneId]
+        ? { history: { ...state.historyByLane[laneId] } } : {}),
       turns,
     };
   };
@@ -1634,7 +1855,9 @@ export function selectConversationViewModel(
     .filter((laneId) => laneId !== 'main' && !selectedLanes.has(laneId))
     .sort()
     .map((laneId) => selectLane(laneId, new Set()));
-  const queue = state.queueItems.filter((item) => item.kind !== 'autopilot')
+  const queue = state.queueItems.filter(
+    (item) => item.kind !== 'autopilot' && !item.inputTurnId,
+  )
     .sort((left, right) => Number(left.position || 0) - Number(right.position || 0))
     .map((item) => ({
       queueId: item.queueId,

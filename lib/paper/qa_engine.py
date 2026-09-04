@@ -2,10 +2,13 @@
 
 Runs the SAME tool-calling loop the report engine proves (web_search /
 fetch_url via ``execute_paper_tool``), but for a single user question. The
-message context is built by ``qa_context.build_qa_messages`` — full generated
-report + question-relevant paper sections — so the model can answer both
-"what did you mean in the Limitations section?" (from the report) and "find
-the follow-up paper" (via tools), without the legacy 100k blind truncation.
+message context is built by ``qa_context.build_qa_messages`` —
+generated-report and paper sections selected under one shared budget — so the
+model can answer both "what did you mean in the Limitations section?" (from
+the report) and "find the follow-up paper" (via tools), without the legacy
+100k blind truncation.
+Three consecutive identical call+world rounds halt as an honest task error
+before the fourth duplicate tool execution can spend more resources.
 
 Emits chat-compatible events (tool_start / tool_done / delta / done / error)
 so the frontend reuses ``renderToolRoundsHTML`` and the report poll renderer.
@@ -15,12 +18,14 @@ import json
 import time
 
 import lib as _lib
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 from lib.tasks_pkg.tool_display import tool_round_label as _display_query_for
 from lib.tool_input_repair import parse_and_repair_tool_args
 
+from .agent_loop_policy import run_guarded_paper_agent_loop
+from .agent_usage import PaperAgentUsageMeter
 from .qa_runtime import _append_qa_event, _cleanup_stale_qa_tasks, _qa_runtime
 from .tools import (
     PaperToolResultBudgetV2,
@@ -52,6 +57,9 @@ def _run_qa_task(task, messages):
         return abort_event.is_set()
 
     model_name = model or _lib.LLM_MODEL
+    _agent_usage = PaperAgentUsageMeter.for_stage(
+        'qa', fallback_model=model_name)
+    task['agentUsageV1'] = _agent_usage.snapshot()
     t0 = time.time()
     full_content = ''
     question = task.get('question', '')
@@ -119,6 +127,9 @@ def _run_qa_task(task, messages):
             task['full_text'] = full_content
             _append_qa_event(task, {'type': 'delta_reset'})
         messages.append(msg)
+
+    def _publish_agent_usage(_rnd, _msg, _finish, _usage):
+        task['agentUsageV1'] = _agent_usage.snapshot()
 
     def _execute_tool(rnd, tc):
         fn_name = tc['function']['name']
@@ -195,11 +206,15 @@ def _run_qa_task(task, messages):
             tool_arguments=fn_args)
 
     try:
-        _outcome = run_agent_loop(
+        _outcome = run_guarded_paper_agent_loop(
+            context='Paper Q&A agent',
+            allow_aborted_outcome=True,
+            usage_meter=_agent_usage,
             abort=abort_signal,
             round_tools=paper_tools,
             dispatch=_dispatch,
             execute_tool=_execute_tool,
+            on_round_result=_publish_agent_usage,
             on_tool_round=_begin_tool_round,
             on_round_end=_result_budget.finish_round,
         )
@@ -214,10 +229,10 @@ def _run_qa_task(task, messages):
                 terminal_event_fields={
                     'type': 'aborted', 'partial': full_content,
                     'paperHash': task['paper_hash'],
+                    'agentUsageV1': _agent_usage.snapshot(),
                 },
             )
             return
-
         elapsed = time.time() - t0
         logger.info('[Paper:QA] Task %s complete — %d chars, %.1fs',
                     task['task_id'], len(full_content), elapsed)
@@ -227,6 +242,7 @@ def _run_qa_task(task, messages):
             terminal_event_fields={
                 'type': 'done', 'answer': full_content,
                 'paperHash': task['paper_hash'],
+                'agentUsageV1': _agent_usage.snapshot(),
             },
         )
 
@@ -240,8 +256,12 @@ def _run_qa_task(task, messages):
             task_id,
             error=envelope,
             error_context='paper-qa',
+            terminal_event_fields={
+                'agentUsageV1': _agent_usage.snapshot(),
+            },
         )
     finally:
+        task['agentUsageV1'] = _agent_usage.snapshot()
         _cleanup_stale_qa_tasks()
 
 

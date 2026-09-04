@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 import lib.slides.recipe as recipe
@@ -48,8 +50,37 @@ def test_research_keeps_only_url_grounded_unique_cards(monkeypatch):
     assert next(q for q in out['queries'] if q['lane'] == 'official')['deepen']
 
 
+def test_research_enforces_result_limit_against_misbehaving_adapters():
+    lock = threading.Lock()
+    yielded = {'current': 0, 'official': 0, 'background': 0}
+
+    def _search(query, **kwargs):
+        lane = ('current' if kwargs.get('freshness') else
+                'official' if kwargs.get('deepen') else 'background')
+
+        def _unbounded_adapter():
+            for index in range(1000):
+                with lock:
+                    yielded[lane] += 1
+                yield {
+                    'title': f'{lane}-{index}',
+                    'url': f'https://{lane}.example/{index}',
+                    'snippet': f'{lane} fact {index}',
+                }
+
+        return _unbounded_adapter()
+
+    out = research_topic('bounded research', search_fn=_search)
+
+    assert out['degraded'] is False
+    assert yielded == {'current': 12, 'official': 12, 'background': 12}
+    assert len(out['cards']) == 12
+
+
 def test_outline_receives_cards_and_attaches_referenced_sources(monkeypatch):
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', '7')
     seen = {}
+    abort_event = threading.Event()
     reply = (
         '{"title":"T","scenario":"tech-engineering","pages":['
         '{"pageType":"cover","key_message":"Open","content_notes":"[S1] fact"},'
@@ -59,6 +90,7 @@ def test_outline_receives_cards_and_attaches_referenced_sources(monkeypatch):
 
     def _llm(messages, **kwargs):
         seen['prompt'] = messages[0]['content']
+        seen['kwargs'] = kwargs
         return reply, {}
 
     monkeypatch.setattr(recipe, '_llm_chat', _llm)
@@ -67,6 +99,7 @@ def test_outline_receives_cards_and_attaches_referenced_sources(monkeypatch):
             'published_at': '2026-08-09', 'query_lane': 'current',
             'query_lanes': ['current'], 'freshness': 'month'}
     ctx = {'topic': 'T', 'lang': 'zh', 'max_pages': 6, 'style': '',
+           'abort_event': abort_event,
            'artifacts': {'research': {'cards': [card],
                                       'as_of': '2026-08-10T12:00:00+08:00'}},
            '_outline_gate_feedback': ['must fix current price']}
@@ -81,6 +114,35 @@ def test_outline_receives_cards_and_attaches_referenced_sources(monkeypatch):
     assert '_outline_gate_feedback' not in ctx
     assert out['pages'][1]['sources'] == [card]
     assert out['pages'][-1]['sources'] == []
+    assert seen['kwargs']['max_retries'] == 2
+    assert seen['kwargs']['max_429_attempts'] == 7
+    assert seen['kwargs']['abort_check']() is False
+
+
+def test_outline_discards_a_reply_that_arrives_after_abort(monkeypatch):
+    from lib.production.stages import StageAborted
+
+    abort_event = threading.Event()
+    calls = []
+    reply = (
+        '{"title":"T","scenario":"tech-engineering","pages":['
+        '{"pageType":"cover","key_message":"A"},'
+        '{"pageType":"content","key_message":"B"},'
+        '{"pageType":"final","key_message":"C"}]}'
+    )
+
+    def late_reply(messages, **kwargs):
+        calls.append('dispatch')
+        abort_event.set()
+        return reply, {}
+
+    monkeypatch.setattr(recipe, '_llm_chat', late_reply)
+    ctx = {'topic': 'T', 'lang': 'zh', 'max_pages': 6, 'style': '',
+           'abort_event': abort_event,
+           'artifacts': {'research': {'cards': []}}}
+    with pytest.raises(StageAborted, match='slides outline'):
+        recipe._run_outline(ctx)
+    assert calls == ['dispatch']
 
 
 def test_current_price_signal_rejects_outline_that_ignores_it():

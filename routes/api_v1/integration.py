@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from quart import Blueprint
 
-from lib.api_response import api_bad_request, api_payload
+from lib.api_response import api_bad_request, api_internal_error, api_payload
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.rate_limiter import rate_limit
@@ -33,7 +33,12 @@ def _error(exc: Exception):
     if exc.__class__.__name__ in {'IntegrationError', 'IntegrationStateError'}:
         return api_bad_request(str(exc))
     logger.exception('[Integration.v1] operation failed')
-    return api_payload({'ok': False, 'error': str(exc)}, 500)
+    return api_internal_error(
+        exc,
+        context='project:integration',
+        source='routes.api_v1.integration',
+        log_traceback=False,
+    )
 
 
 @api_v1_integration_bp.route('/api/v1/project/integration/status', methods=['GET'])
@@ -58,7 +63,7 @@ def integration_create_route():
     try:
         result = _integration_api('create_workspace')(
             _project_path(str(data.get('path') or '')),
-            str(data.get('taskId') or ''), str(data.get('title') or ''),
+            str(data.get('workId') or ''), str(data.get('title') or ''),
             user_id=int(request_user_id()),
         )
         return api_payload(result)
@@ -76,7 +81,7 @@ def integration_register_route():
     try:
         result = _integration_api('register_workspace')(
             _project_path(str(data.get('path') or '')),
-            str(data.get('taskId') or ''), str(data.get('workspacePath') or ''),
+            str(data.get('workId') or ''), str(data.get('workspacePath') or ''),
             str(data.get('title') or ''), managed=False,
             user_id=int(request_user_id()),
         )
@@ -91,7 +96,7 @@ def _task_action(function):
     try:
         result = function(
             _project_path(str(data.get('path') or '')),
-            str(data.get('taskId') or ''),
+            str(data.get('workId') or ''),
             user_id=int(request_user_id()),
         )
         return api_payload(result)
@@ -113,7 +118,26 @@ def integration_checkpoint_route():
 @rate_limit(limit=60, per=60)
 @api_meta(summary='Checkpoint and enqueue a writer workspace', tags=['project'])
 def integration_submit_route():
-    return _task_action(_integration_api('submit_workspace'))
+    data = parse_body()
+    try:
+        path = _project_path(str(data.get('path') or ''))
+        work_id = str(data.get('workId') or '')
+        owner_user_id = int(request_user_id())
+        from lib.conversations.project_brain import run_all_enabled_checkers
+        results = run_all_enabled_checkers(
+            path, user_id=owner_user_id, work_id=work_id,
+            reason='integration')
+        failed = [result for result in results if not result.get('ok')]
+        if failed:
+            labels = ', '.join(str(item.get('label') or 'checker')
+                               for item in failed)
+            return api_bad_request(
+                f'Integration rejected because checker(s) failed: {labels}')
+        return api_payload(_integration_api('submit_workspace')(
+            path, work_id, user_id=owner_user_id))
+    except Exception as exc:
+        logger.debug('[Integration.v1] submit request failed: %s', exc)
+        return _error(exc)
 
 
 @api_v1_integration_bp.route('/api/v1/project/integration/retry', methods=['POST'])
@@ -121,7 +145,26 @@ def integration_submit_route():
 @rate_limit(limit=60, per=60)
 @api_meta(summary='Retry an existing quarantined checkpoint', tags=['project'])
 def integration_retry_route():
-    return _task_action(_integration_api('retry_workspace'))
+    data = parse_body()
+    try:
+        path = _project_path(str(data.get('path') or ''))
+        work_id = str(data.get('workId') or '')
+        owner_user_id = int(request_user_id())
+        from lib.conversations.project_brain import run_all_enabled_checkers
+        results = run_all_enabled_checkers(
+            path, user_id=owner_user_id, work_id=work_id,
+            reason='integration_retry')
+        failed = [result for result in results if not result.get('ok')]
+        if failed:
+            labels = ', '.join(str(item.get('label') or 'checker')
+                               for item in failed)
+            return api_bad_request(
+                f'Integration retry rejected because checker(s) failed: {labels}')
+        return api_payload(_integration_api('retry_workspace')(
+            path, work_id, user_id=owner_user_id))
+    except Exception as exc:
+        logger.debug('[Integration.v1] retry request failed: %s', exc)
+        return _error(exc)
 
 
 @api_v1_integration_bp.route('/api/v1/project/integration/discard', methods=['POST'])
@@ -139,8 +182,18 @@ def integration_discard_route():
 def integration_promote_route():
     data = parse_body()
     try:
+        path = _project_path(str(data.get('path') or ''))
+        from lib.conversations.project_brain import run_all_enabled_checkers
+        results = run_all_enabled_checkers(
+            path, user_id=int(request_user_id()), reason='release')
+        failed = [result for result in results if not result.get('ok')]
+        if failed:
+            labels = ', '.join(str(item.get('label') or 'checker')
+                               for item in failed)
+            return api_bad_request(
+                f'Release rejected because checker(s) failed: {labels}')
         return api_payload(_integration_api('promote_stable')(
-            _project_path(str(data.get('path') or '')),
+            path,
             user_id=int(request_user_id()),
             acknowledge_head_divergence=bool(
                 data.get('acknowledgeHeadDivergence', False)),

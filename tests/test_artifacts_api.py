@@ -307,6 +307,28 @@ class TestRoutes:
         resp = flask_client.get('/api/v1/artifacts/does-not-exist')
         assert resp.status_code == 404
 
+    def test_pdf_render_failure_does_not_expose_worker_diagnostics(
+            self, flask_app, flask_client, monkeypatch):
+        from lib.artifacts import create_artifact
+        from lib.artifacts.pdf_export import PdfRenderError
+        with flask_app.app_context():
+            meta = create_artifact(
+                conv_id='conv-pdf-error', content='# PDF\n',
+                format='markdown', source='write_file', title='pdf.md')
+
+        secret = '/private/playwright/path?token=do-not-expose'
+        monkeypatch.setattr(
+            'lib.artifacts.pdf_export.render_artifact_pdf',
+            lambda _artifact_id: (_ for _ in ()).throw(
+                PdfRenderError(secret)),
+        )
+        response = flask_client.get(
+            f'/api/artifacts/{meta["id"]}/export?format=pdf')
+        assert response.status_code == 503
+        body = response.get_json()
+        assert body['error'] == 'pdf_render_failed'
+        assert secret not in str(body)
+
     def test_full_round_trip(self, flask_app, flask_client):
         from lib.artifacts import create_artifact
         body = '# Routed\n\nHello.'

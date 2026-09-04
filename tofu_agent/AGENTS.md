@@ -3,7 +3,7 @@
 ## Scope and first reads
 
 `tofu_agent/` is the packageable, storage-free agent kernel and lightweight
-sidecar, including its small provider setup page. Read
+sidecar, including its small model-routing setup page. Read
 `docs/DEVELOPER_RUNTIME.md` and `docs/HEADLESS_API.md`.
 
 ## Editing rules
@@ -16,9 +16,9 @@ sidecar, including its small provider setup page. Read
   cannot imply durability across restart.
 - Keep sync/async and CLI/server/embed entry points behaviorally aligned on
   validation, cancellation, events, results, and typed failures.
-- Provider configuration is explicit, redacted, and atomically stored only in
-  the documented developer-runtime location. The setup UI must remain small and
-  independent of the full ChatUI.
+- Model-routing configuration uses the complete v2 contract, is redacted, and
+  is atomically stored only in the documented developer-runtime location. The
+  setup UI must remain small and independent of the full Tofu application.
 - Load optional providers and tools lazily. Bound concurrency, queues, context,
   output, retries, subprocesses, and shutdown.
 - Public API changes update the headless contract, capability projection,

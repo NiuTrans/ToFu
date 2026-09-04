@@ -34,6 +34,7 @@ import subprocess
 import pytest
 
 from tests._jsdom import JS_DIR, ROOT, run_harness
+from tests._paper_vite import compiled_typescript
 
 pytestmark = pytest.mark.unit
 
@@ -172,11 +173,9 @@ def _run_qa_contract(qa_js: str) -> None:
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
                     reason='node + vite test bundler dev dependency required')
-def test_vite_paper_qa_contract(tmp_path):
-    built = tmp_path / 'paper-qa.js'
-    compiled = subprocess.run(
-        [ESBUILD, QA_TS, '--bundle', '--format=iife', '--platform=browser',
-         f'--outfile={built}'],
-        capture_output=True, text=True, timeout=60)
-    assert compiled.returncode == 0, compiled.stderr
-    _run_qa_contract(str(built))
+def test_vite_paper_qa_contract():
+    with compiled_typescript(
+        QA_TS,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        _run_qa_contract(built)

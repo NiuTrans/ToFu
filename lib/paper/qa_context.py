@@ -13,29 +13,133 @@ be answered). This module fixes both:
     ``arxiv._rerank_by_title``), always keep the head (title/abstract/intro),
     and greedily fill a character budget — so a long paper contributes its
     *relevant* sections instead of just its first 100k chars.
-  • ``build_qa_messages`` — assemble the final message list: a system prompt
-    carrying the FULL report (small, always kept) + the selected paper
-    sections, then the recent dialogue.
+  • ``build_qa_messages`` — assemble the final message list under one shared
+    report/paper budget plus a separately bounded recent-dialogue budget.
+    Both source types use question-aware selection, so an agent tool loop does
+    not repeatedly resend two independent 60k prefixes.
 """
 
+from collections.abc import Mapping
 import re
 
 from lib.log import get_logger
+from lib.paper.contracts import (
+    PAPER_QA_HISTORY_MAX_CHARS,
+    PAPER_QA_HISTORY_MAX_MESSAGES,
+    PAPER_QA_HISTORY_MESSAGE_MAX_CHARS,
+    PAPER_QA_SOURCE_CONTEXT_MAX_CHARS,
+)
 
 logger = get_logger(__name__)
 
-# Defaults tuned so the whole prompt (report + sections + history) stays within
-# a comfortable window. The report is kept in full; paper sections fill the
-# rest up to this budget.
-_DEFAULT_SECTION_BUDGET = 60000
-_REPORT_CAP = 60000          # generated reports run ~40-55k chars; cap defensively
+# Report and paper share one source budget. Recent dialogue has its own hard
+# aggregate and per-message bounds from ``paper.contracts``.
+_DEFAULT_SECTION_BUDGET = PAPER_QA_SOURCE_CONTEXT_MAX_CHARS
 _FALLBACK_CHUNK_CHARS = 3500
-_MAX_HISTORY_MSGS = 10
+_ASCII_TOKEN_RE = re.compile(r'[a-z0-9]+')
+_CJK_RUN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff]+')
+_OMITTED_HISTORY_MARKER = '\n[… middle of message omitted …]\n'
+_OMITTED_SECTIONS_MARKER = (
+    '\n\n[… omitted sections not relevant to this question …]\n'
+)
 
 
 def _token_set(s):
-    """Lowercase alphanumeric token set for lexical overlap scoring."""
-    return set(re.findall(r'[a-z0-9]+', (s or '').lower()))
+    """Return bounded lexical units for Latin text and CJK questions.
+
+    Single-character CJK tokenization makes common glyphs dominate overlap;
+    adjacent bigrams retain useful phrases such as ``随机种子`` while needing
+    no model call or language-specific segmenter.
+    """
+    if not isinstance(s, str) or not s:
+        return set()
+    lowered = s.lower()
+    tokens = set(_ASCII_TOKEN_RE.findall(lowered))
+    for run in _CJK_RUN_RE.findall(lowered):
+        if len(run) == 1:
+            tokens.add(run)
+            continue
+        tokens.update(run[index:index + 2] for index in range(len(run) - 1))
+    return tokens
+
+
+def _allocate_source_budgets(paper_chars, report_chars, total_chars):
+    """Split one cap between primary paper text and its derived report.
+
+    Each source gets half when both are large. Unused capacity is offered to
+    the paper first, then the report, so short inputs still pass in full.
+    """
+    total = max(0, int(total_chars or 0))
+    paper_size = max(0, int(paper_chars or 0))
+    report_size = max(0, int(report_chars or 0))
+    if not report_size:
+        return min(paper_size, total), 0
+    if not paper_size:
+        return 0, min(report_size, total)
+
+    paper_budget = min(paper_size, total // 2)
+    report_budget = min(report_size, total - total // 2)
+    remaining = total - paper_budget - report_budget
+    paper_extra = min(remaining, paper_size - paper_budget)
+    paper_budget += paper_extra
+    remaining -= paper_extra
+    report_budget += min(remaining, report_size - report_budget)
+    return paper_budget, report_budget
+
+
+def _clip_history_content(content, max_chars):
+    """Keep both ends of one dialogue message within an exact char cap."""
+    if len(content) <= max_chars:
+        return content
+    if max_chars <= len(_OMITTED_HISTORY_MARKER):
+        return content[:max_chars]
+    available = max_chars - len(_OMITTED_HISTORY_MARKER)
+    head_chars = (available + 1) // 2
+    tail_chars = available - head_chars
+    return (
+        content[:head_chars]
+        + _OMITTED_HISTORY_MARKER
+        + (content[-tail_chars:] if tail_chars else '')
+    )
+
+
+def _bounded_history(history):
+    """Validate and newest-first admit recent dialogue under finite memory."""
+    offered = history if isinstance(history, list) else []
+    candidates = offered[-PAPER_QA_HISTORY_MAX_MESSAGES:]
+    truncated = len(candidates) != len(offered)
+    remaining = PAPER_QA_HISTORY_MAX_CHARS
+    newest_first = []
+    for message in reversed(candidates):
+        if not isinstance(message, Mapping):
+            truncated = True
+            continue
+        role = message.get('role')
+        content = message.get('content')
+        if role not in ('user', 'assistant') or not isinstance(content, str):
+            truncated = True
+            continue
+        content = content.strip()
+        if not content:
+            truncated = True
+            continue
+        if remaining <= 0:
+            truncated = True
+            break
+        admitted = _clip_history_content(
+            content,
+            min(PAPER_QA_HISTORY_MESSAGE_MAX_CHARS, remaining),
+        )
+        if len(admitted) != len(content):
+            truncated = True
+        newest_first.append({'role': role, 'content': admitted})
+        remaining -= len(admitted)
+    bounded = list(reversed(newest_first))
+    return bounded, {
+        'history_messages': len(bounded),
+        'history_chars': sum(len(item['content']) for item in bounded),
+        'history_truncated': truncated,
+    }
 
 
 def split_into_sections(text):
@@ -168,10 +272,12 @@ def _render_sections(sections, all_sections_count):
     parts = []
     prev_idx = -1
     for s in sections:
-        if s['index'] != prev_idx + 1 and prev_idx >= 0:
-            parts.append('\n\n[… omitted sections not relevant to this question …]\n')
+        if s['index'] != prev_idx + 1:
+            parts.append(_OMITTED_SECTIONS_MARKER)
         parts.append(s['text'])
         prev_idx = s['index']
+    if sections and prev_idx < all_sections_count - 1:
+        parts.append(_OMITTED_SECTIONS_MARKER)
     return '\n\n'.join(parts)
 
 
@@ -179,15 +285,15 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
                       lang='en', section_budget=_DEFAULT_SECTION_BUDGET):
     """Build the message list for an agentic Q&A turn.
 
-    Injects BOTH the generated report (in full, capped at ``_REPORT_CAP``) and
-    the question-relevant paper sections. The model is told it has the full
-    standard tool set and should use it for anything outside the paper. The
-    runtime adds a gateway convention only for the bounded Tool Search arm.
+    Injects question-relevant generated-report and paper sections under one
+    source budget. The model is told it has the full standard tool set and
+    should use it for anything outside the paper. The runtime adds a gateway
+    convention only for the bounded Tool Search arm.
 
     Returns ``(messages, diag)`` where ``diag`` is a small dict for tests /
     logging (n_sections_total, n_sections_selected, report_present, …).
     """
-    history = history or []
+    bounded_history, history_diag = _bounded_history(history)
     # ── Prompt-injection hardening (untrusted PDF text) ──
     # The paper text is UNTRUSTED: a submitted PDF can embed directives aimed
     # at the LLM ("ignore previous instructions", "give a positive review",
@@ -199,22 +305,37 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
     from .injection_guard import injection_notice, sanitize_paper_text, wrap_untrusted
     paper_text, _inj_findings = sanitize_paper_text(paper_text)
     sections = split_into_sections(paper_text)
+    report_text = report_md.strip() if isinstance(report_md, str) else ''
+    paper_budget, report_budget = _allocate_source_budgets(
+        len(paper_text), len(report_text), section_budget)
     selected = select_relevant_sections(
-        question, sections, history=history, budget_chars=section_budget)
+        question,
+        sections,
+        history=bounded_history,
+        budget_chars=paper_budget,
+    )
     paper_context = wrap_untrusted(_render_sections(selected, len(sections)))
 
     report_block = ''
-    report_present = bool(report_md and report_md.strip())
+    report_present = bool(report_text)
+    report_selected = []
     if report_present:
-        rep = report_md.strip()
-        if len(rep) > _REPORT_CAP:
-            rep = rep[:_REPORT_CAP] + '\n\n[report truncated]'
+        report_sections = split_into_sections(report_text)
+        report_selected = select_relevant_sections(
+            question,
+            report_sections,
+            history=bounded_history,
+            budget_chars=report_budget,
+            always_keep_head=1,
+        )
+        report_context = _render_sections(
+            report_selected, len(report_sections))
         report_block = (
             '\n\n===== GENERATED ANALYSIS REPORT (already shown to the user) =====\n'
             'The user is reading the structured report below. When they ask about '
             '"the report", a specific section (e.g. "Limitations", "the TL;DR"), or '
             '"what did you mean by X", answer from THIS report — it is what they see.\n\n'
-            + rep)
+            + report_context)
 
     if lang == 'zh':
         sys_head = (
@@ -263,11 +384,7 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
                       + report_block + paper_label + paper_context)
     messages = [{'role': 'system', 'content': system_content}]
 
-    for msg in history[-_MAX_HISTORY_MSGS:]:
-        role = msg.get('role') if isinstance(msg, dict) else None
-        content = msg.get('content') if isinstance(msg, dict) else None
-        if role in ('user', 'assistant') and content:
-            messages.append({'role': role, 'content': content})
+    messages.extend(bounded_history)
 
     # The current question is appended by the caller as the last user turn IF
     # not already present in history; here we ensure it's the final message.
@@ -278,11 +395,25 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
         'n_sections_total': len(sections),
         'n_sections_selected': len(selected),
         'paper_context_chars': len(paper_context),
+        'paper_source_budget_chars': paper_budget,
+        'paper_source_chars': sum(len(item['text']) for item in selected),
         'report_present': report_present,
+        'report_sections_total': (
+            len(report_sections) if report_present else 0),
+        'report_sections_selected': len(report_selected),
+        'report_source_budget_chars': report_budget,
+        'report_source_chars': sum(
+            len(item['text']) for item in report_selected),
+        'source_context_budget_chars': int(section_budget),
         'system_chars': len(system_content),
+        **history_diag,
     }
-    logger.info('[Paper:QA] Built messages — sections %d/%d, paper %d chars, '
-                'report=%s, system=%d chars',
+    logger.info('[Paper:QA] Built messages — paper sections %d/%d (%d chars), '
+                'report sections %d/%d (%d chars), history=%d/%d chars, '
+                'system=%d chars',
                 diag['n_sections_selected'], diag['n_sections_total'],
-                diag['paper_context_chars'], report_present, diag['system_chars'])
+                diag['paper_source_chars'], diag['report_sections_selected'],
+                diag['report_sections_total'], diag['report_source_chars'],
+                diag['history_messages'], diag['history_chars'],
+                diag['system_chars'])
     return messages, diag

@@ -781,7 +781,7 @@ def _record_run_command_changes(base_path, changes, conv_id=None, task_id=None):
             _record_modification(
                 base_path, 'run_command', rel,
                 original_content=original,
-                conv_id=conv_id, task_id=task_id,
+                conv_id=conv_id, task_id=task_id, action=ct,
             )
             recorded.append({'path': rel, 'action': 'deleted'})
         elif ct == 'created':
@@ -789,7 +789,7 @@ def _record_run_command_changes(base_path, changes, conv_id=None, task_id=None):
             _record_modification(
                 base_path, 'run_command', rel,
                 original_content=None,  # signals "didn't exist before"
-                conv_id=conv_id, task_id=task_id,
+                conv_id=conv_id, task_id=task_id, action=ct,
             )
             recorded.append({'path': rel, 'action': 'created'})
         elif ct == 'modified':
@@ -798,7 +798,7 @@ def _record_run_command_changes(base_path, changes, conv_id=None, task_id=None):
             _record_modification(
                 base_path, 'run_command', rel,
                 original_content=original,
-                conv_id=conv_id, task_id=task_id,
+                conv_id=conv_id, task_id=task_id, action=ct,
             )
             recorded.append({'path': rel, 'action': 'modified'})
     return recorded
@@ -856,7 +856,8 @@ def _format_run_output(command, stdout, stderr, exit_code, timed_out=False,
 
 def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None,
                      on_chunk=None, cwd_sink=None, on_spawn=None,
-                     credentials=None, on_grep_intercept=None):
+                     credentials=None, on_grep_intercept=None,
+                     runtime_context=None):
     """Execute a shell command with optional interactive stdin support.
 
     Args:
@@ -903,6 +904,11 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     """
     if not command or not command.strip():
         return 'Error: Empty command.'
+
+    if ((runtime_context is not None and runtime_context.cancellation_requested)
+            or (task is not None and task.get('aborted'))):
+        return _format_run_output(
+            command, '', '', -1, timed_out=False, aborted=True)
 
     if not base:
         base = os.path.expanduser('~')
@@ -1140,6 +1146,67 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     #   redirect splice and scanner budget ride the same exec-side-only seam.
     exec_command = _maybe_wrap_rm_with_trash(_exec_source, base)
 
+    # Build the child environment once. Besides avoiding duplicate policy
+    # work, this is the explicit seam where command egress can select one
+    # direct/proxy route without mutating process-global environment state.
+    # Only lightweight probes race; ``exec_command`` is still spawned once.
+    try:
+        child_env = _get_cmd_env(
+            base, credential_env, strip_credential_vars,
+            owner_user_id=(task or {}).get('_userId'))
+    except Exception as _env_e:
+        logger.error(
+            'run_command environment setup failed (cwd=%s): %s',
+            base, _env_e, exc_info=True)
+        return (f'$ {command}\n\n'
+                f'Error starting command: {_env_e}\n'
+                f'[exit code: -1]')
+
+    network_prepared = None
+    network_env_baseline = dict(child_env)
+    try:
+        from lib.project_mod.network_command import (
+            apply_network_environment,
+            format_network_preflight_failure,
+            prepare_network_command,
+        )
+        network_prepared = prepare_network_command(
+            command, child_env, task=task)
+        if network_prepared is not None and network_prepared.error:
+            logger.warning(
+                '[CommandNet] route unavailable target=%s routes=%s '
+                'decision=%s',
+                network_prepared.target.display_origin,
+                network_prepared.attempted_route_ids,
+                network_prepared.decision_reason)
+            return format_network_preflight_failure(
+                command, network_prepared)
+        apply_network_environment(child_env, network_prepared)
+        if network_prepared is not None and network_prepared.selected:
+            route = network_prepared.route
+            logger.info(
+                '[CommandNet] selected route=%s mode=%s target=%s '
+                'decision=%s probe_ms=%.0f',
+                route.route_id, route.mode,
+                network_prepared.target.display_origin,
+                network_prepared.decision_reason,
+                network_prepared.probe_ms)
+            _safe_on_chunk(
+                on_chunk, 'stderr',
+                '[network] selected %s for %s (%s)\n'
+                % (route.mode, network_prepared.target.display_origin,
+                   network_prepared.decision_reason))
+    except Exception as _network_e:
+        # The network layer is an optimization/policy adapter, not a second
+        # command authority. An internal planner fault preserves historical
+        # inherited-environment execution and remains visible in operations.
+        network_prepared = None
+        child_env.clear()
+        child_env.update(network_env_baseline)
+        logger.warning(
+            '[CommandNet] planning failed; using inherited route: %s',
+            _network_e, exc_info=True)
+
     # Sticky-cwd capture (layer 2): wrap the command so its FINAL cwd is
     #   written to a dedicated temp file, preserving the exit code. Only when a
     #   sink is provided AND not sandboxed — a jailed TMPDIR would make the
@@ -1167,23 +1234,6 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
 
     shell_prefix = SHELL_PREFIX
     full_command = f'{shell_prefix} {exec_command}' if shell_prefix else exec_command
-
-    # Build the child environment once.  Besides avoiding duplicate policy
-    # work, this is the explicit seam where an eligible Python subprocess may
-    # receive a bounded host-local PYTHONPYCACHEPREFIX.  The cache module keeps
-    # owner/workspace/interpreter authority and lifecycle out of this shell
-    # runner; any planning failure leaves the environment unchanged.
-    try:
-        child_env = _get_cmd_env(
-            base, credential_env, strip_credential_vars,
-            owner_user_id=(task or {}).get('_userId'))
-    except Exception as _env_e:
-        logger.error(
-            'run_command environment setup failed (cwd=%s): %s',
-            base, _env_e, exc_info=True)
-        return (f'$ {command}\n\n'
-                f'Error starting command: {_env_e}\n'
-                f'[exit code: -1]')
 
     python_cache_activation = None
     if _looks_like_python_command(command):
@@ -1243,26 +1293,40 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
         except Exception as _cache_e:
             logger.debug('[python-cache] release skipped: %s', _cache_e)
 
+    def _finalize_network_output(result_text):
+        if network_prepared is None:
+            return result_text
+        try:
+            from lib.project_mod.network_command import finalize_network_command
+            return finalize_network_command(network_prepared, result_text)
+        except Exception as _network_e:
+            logger.warning(
+                '[CommandNet] outcome finalization failed: %s',
+                _network_e, exc_info=True)
+            return result_text
+
     # ── Non-interactive fast path (no stdin_callback) ──
     if not stdin_callback:
         try:
-            return _run_command_simple(
+            result_text = _run_command_simple(
                 command, full_command, timeout, base, task=task,
                 on_chunk=on_chunk, on_spawn=on_spawn,
-                child_env=child_env,
+                runtime_context=runtime_context, child_env=child_env,
                 credential_env=credential_env,
                 strip_credential_vars=strip_credential_vars)
+            return _finalize_network_output(result_text)
         finally:
             _finalize_command()
 
     # ── Interactive path: Popen with stdin pipe + stdin detection ──
     try:
-        return _run_command_interactive(
+        result_text = _run_command_interactive(
             command, full_command, timeout, base, stdin_callback,
             on_chunk=on_chunk, task=task, on_spawn=on_spawn,
-            child_env=child_env,
+            runtime_context=runtime_context, child_env=child_env,
             credential_env=credential_env,
             strip_credential_vars=strip_credential_vars)
+        return _finalize_network_output(result_text)
     finally:
         _finalize_command()
 
@@ -1361,8 +1425,43 @@ def _safe_on_chunk(on_chunk, stream, text):
         logger.debug('[run_command] on_chunk callback raised: %s', e)
 
 
+class _BoundedCommandStream:
+    """Bound subprocess capture while the full stream flows through on_chunk."""
+
+    def __init__(self, limit=MAX_COMMAND_OUTPUT):
+        self.limit = max(1, int(limit))
+        self.head_limit = self.limit * 3 // 4
+        self.tail_limit = max(1, self.limit - self.head_limit)
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.total = 0
+
+    def append(self, chunk):
+        data = bytes(chunk or b'')
+        if not data:
+            return
+        self.total += len(data)
+        room = self.head_limit - len(self.head)
+        if room > 0:
+            self.head.extend(data[:room])
+            data = data[room:]
+        if data:
+            self.tail.extend(data)
+            if len(self.tail) > self.tail_limit:
+                del self.tail[:-self.tail_limit]
+
+    def render(self):
+        if self.total <= self.limit:
+            return bytes(self.head + self.tail)
+        marker = (
+            f'\n\n… [stream capture truncated: {self.total:,} bytes total] …\n\n'
+        ).encode('utf-8')
+        return bytes(self.head) + marker + bytes(self.tail)
+
+
 def _run_command_simple(command, full_command, timeout, base, task=None, on_chunk=None,
-                        on_spawn=None, child_env=None, credential_env=None,
+                        on_spawn=None, runtime_context=None, child_env=None,
+                        credential_env=None,
                         strip_credential_vars=None):
     """Execute command with abort-awareness + incremental output streaming.
 
@@ -1418,6 +1517,12 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             pass
 
     # Set stdout/stderr to non-blocking.  On platforms where this fails
+
+    unregister_cancel = None
+    if runtime_context is not None:
+        unregister_cancel = runtime_context.register_cancel_callback(
+            lambda: _signal_process_tree_termination(proc))
+
     # (Windows), safe_select_pipes degrades to short-timeout polling.
     nonblocking_ok = all(
         set_pipe_nonblocking(fd) for fd in (proc.stdout, proc.stderr)
@@ -1425,8 +1530,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
     if not nonblocking_ok:
         logger.debug('run_command: non-blocking pipe setup failed — using polling I/O')
 
-    stdout_chunks = []   # list[bytes]
-    stderr_chunks = []   # list[bytes]
+    stdout_chunks = _BoundedCommandStream()
+    stderr_chunks = _BoundedCommandStream()
     start_time = time.monotonic()
     timed_out = False
     aborted = False
@@ -1549,13 +1654,15 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
                 pass
 
+        if unregister_cancel is not None:
+            unregister_cancel()
     # Clean up task ref
     if task is not None:
         task.pop('_subprocess_pid', None)
         task.pop('_subprocess_pgid', None)
 
-    stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
-    stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
+    stdout = stdout_chunks.render().decode('utf-8', errors='replace')
+    stderr = stderr_chunks.render().decode('utf-8', errors='replace')
 
     if interrupted_by:
         return _format_run_output(command, stdout, stderr, -1,
@@ -1569,6 +1676,21 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
     logger.info('run_command done: exit=%d, stdout=%dch, stderr=%dch',
                 proc.returncode, len(stdout), len(stderr))
     return _format_run_output(command, stdout, stderr, proc.returncode)
+
+
+def _signal_process_tree_termination(proc):
+    """Request process-group termination without waiting on the caller thread."""
+    import signal
+
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except OSError:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
 
 
 def _kill_process_tree(proc):
@@ -1852,7 +1974,8 @@ def _collect_descendants(parent_pid):
 
 def _run_command_interactive(command, full_command, timeout, base, stdin_callback,
                               on_chunk=None, task=None, on_spawn=None,
-                              child_env=None, credential_env=None,
+                              runtime_context=None, child_env=None,
+                              credential_env=None,
                               strip_credential_vars=None):
     """Popen-based execution with stdin detection and interactive input.
 
@@ -1924,14 +2047,20 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
 
     # Get the inode of our stdin pipe so we can match it in /proc
+
+    unregister_cancel = None
+    if runtime_context is not None:
+        unregister_cancel = runtime_context.register_cancel_callback(
+            lambda: _signal_process_tree_termination(proc))
+
     try:
         stdin_pipe_ino = os.fstat(proc.stdin.fileno()).st_ino
     except OSError as _e_audit:
         logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
         stdin_pipe_ino = None
 
-    stdout_chunks = []
-    stderr_chunks = []
+    stdout_chunks = _BoundedCommandStream()
+    stderr_chunks = _BoundedCommandStream()
     start_time = time.monotonic()
     stdin_closed = False
     timed_out = False
@@ -1965,7 +2094,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                 # caller already surfaces [TIMEOUT] in stdout.
                 logger.info('run_command timed out after %ss (interactive)', timeout)
                 timed_out = True
-                proc.kill()
+                _kill_process_tree(proc)
                 break
 
             # Check if process has finished
@@ -2082,7 +2211,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     except Exception as e:
         logger.error('run_command interactive loop error: %s', e, exc_info=True)
         try:
-            proc.kill()
+            _kill_process_tree(proc)
         except OSError as _e_audit:
             logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
             pass
@@ -2100,14 +2229,15 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            _kill_process_tree(proc)
+        if unregister_cancel is not None:
+            unregister_cancel()
         if task is not None:
             task.pop('_subprocess_pid', None)
             task.pop('_subprocess_pgid', None)
 
-    stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
-    stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
+    stdout = stdout_chunks.render().decode('utf-8', errors='replace')
+    stderr = stderr_chunks.render().decode('utf-8', errors='replace')
 
     if interrupted_by:
         return _format_run_output(command, stdout, stderr, -1,

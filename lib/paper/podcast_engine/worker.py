@@ -15,8 +15,12 @@ import uuid
 from lib.agent_core.events import Phase, build_phase
 from lib.json_store import write_bytes_atomic
 from lib.log import audit_log, get_logger
+from lib.paper.contracts import PAPER_PODCAST_MAX_SOURCE_CHARS
 
-from lib.paper.podcast_engine._errors import AudioSynthesisAborted
+from lib.paper.podcast_engine._errors import (
+    AudioSynthesisAborted,
+    PodcastGenerationAborted,
+)
 
 logger = get_logger(__name__)
 
@@ -70,7 +74,8 @@ def load_source_text(
     # Parsed full text is private bookshelf data, so it crosses the typed,
     # owner-scoped repository rather than the global report cache boundary.
     from lib.paper.library_repository import PaperLibraryRepository
-    identity = PaperLibraryRepository(user_id).identity(paper_hash)
+    identity = PaperLibraryRepository(user_id).identity(
+        paper_hash, max_text_chars=PAPER_PODCAST_MAX_SOURCE_CHARS)
     if identity and identity.parsed_text.strip():
         return identity.parsed_text, 'parsed_text'
     return '', 'none'
@@ -104,7 +109,7 @@ def persist_podcast_row(paper_hash: str, mode: str, lang: str, voice: str,
         PaperArtifactRepository,
         PaperPodcast,
     )
-    PaperArtifactRepository(user_id).put_podcast(
+    saved = PaperArtifactRepository(user_id).put_podcast(
         PaperPodcast(
             paper_hash=paper_hash,
             mode=mode,
@@ -122,6 +127,8 @@ def persist_podcast_row(paper_hash: str, mode: str, lang: str, voice: str,
         ),
         command_id=f'paper.podcast.upsert:{uuid.uuid4().hex}',
     )
+    if not saved:
+        raise RuntimeError('Paper podcast repository did not confirm persistence')
 
 
 def load_interrupted_podcast(paper_hash: str, mode: str, lang: str,
@@ -253,7 +260,8 @@ def run_podcast_task(task):
             script, script_meta = generate_script(
                 source_text=source_text, lang=lang, mode=mode, title=title,
                 images=images, model=model, source_kind=source_kind,
-                on_event=lambda ev: _append_podcast_event(task, ev))
+                on_event=lambda ev: _append_podcast_event(task, ev),
+                abort_check=_aborted)
         task['script'] = script
         task['script_meta'] = script_meta
         _append_podcast_event(task, {'type': 'script', 'script': script,
@@ -262,7 +270,7 @@ def run_podcast_task(task):
             raise AudioSynthesisAborted()
 
         # ── Stage 2: TTS (degrade to script-only without a slot) ──
-        if not _tts.tts_available():
+        if not _tts.tts_available(owner_user_id=owner_user_id):
             script_meta = {**script_meta, 'degrade_reason': 'no_tts_slot'}
             persist_podcast_row(paper_hash, mode, lang, voice,
                                  status='script_only', script=script,
@@ -290,6 +298,7 @@ def run_podcast_task(task):
                               total=len(script.get('segments') or [])))
         audio = synthesize_script_audio(
             script, voice=voice or _tts.default_voice(),
+            owner_user_id=owner_user_id,
             abort_check=_aborted,
             on_segment_done=lambda d, t: (
                 task['progress'].update(done=d, total=t),
@@ -341,7 +350,7 @@ def run_podcast_task(task):
                   duration_sec=round(audio['duration_sec'], 1),
                   tts_model=audio['tts_model'])
 
-    except AudioSynthesisAborted:
+    except PodcastGenerationAborted:
         _podcast_runtime.abort(task_id)
         _podcast_runtime.finish(
             task_id, terminal_event_fields={'type': 'aborted'})

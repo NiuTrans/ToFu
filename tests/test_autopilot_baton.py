@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import uuid
 
 import pytest
@@ -162,3 +164,37 @@ def test_followup_claims_durable_attempt_and_uses_latest_settings(
     assert new_task['config']['preset'] == 'latest-preset'
     assert 'assistantMsgId' not in new_task['config']
     assert 'msgId' not in new_task['config']
+
+
+def test_concurrent_followup_replay_spawns_one_successor(
+    conversation_id,
+    monkeypatch,
+):
+    import lib.tasks_pkg.spawn as task_spawn
+    from lib.tasks_pkg.autopilot_baton import (
+        _append_conversation_autopilot_turns,
+        _start_followup_task,
+    )
+
+    task = _parent_task(conversation_id)
+    assert _append_conversation_autopilot_turns(
+        task,
+        conversation_id,
+        'vu-message-concurrent',
+        'continue once',
+        run_id='run-concurrent',
+    ) is not None
+    spawned: list[dict] = []
+    monkeypatch.setattr(
+        task_spawn, 'spawn_task', lambda new_task: spawned.append(new_task))
+    start_barrier = threading.Barrier(2)
+
+    def replay() -> str | None:
+        start_barrier.wait(timeout=5)
+        return _start_followup_task(task, conversation_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: replay(), range(2)))
+
+    assert len([result for result in results if result]) == 1
+    assert len(spawned) == 1

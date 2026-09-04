@@ -52,7 +52,16 @@ def test_bootstrap_template_fallback_is_managed_and_keeps_wire_pool():
     assert models[0]['catalog_source'] == 'template'
 
 
-def test_bootstrap_persists_live_provider_and_selected_default(
+def test_bootstrap_loader_projects_authored_offering_recipes():
+    templates = bootstrap._load_provider_templates()
+    by_key = {template['key']: template for template in templates}
+
+    assert 'meituan' in by_key
+    assert by_key['meituan']['offering_recipes']
+    assert by_key['meituan']['models'] == by_key['meituan']['offering_recipes']
+
+
+def test_bootstrap_stages_secret_free_provider_and_selected_default(
         tmp_path, monkeypatch):
     # Patch at the DEFINING module (facade-retained split 2026-08-21):
     # _bootstrap_persist_provider looks the name up inside
@@ -73,13 +82,16 @@ def test_bootstrap_persists_live_provider_and_selected_default(
     )
     cfg = json.loads(
         (tmp_path / 'config/server_config.json').read_text(encoding='utf-8'))
-    provider = cfg['providers'][0]
-    assert provider['api_keys'] == ['secret']
-    assert provider['models'] == models
-    assert provider['model_catalog_sync'] == {'mode': 'auto'}
+    assert 'providers' not in cfg
     assert cfg['presets']['opus'] == 'live'
     assert cfg['models']['LLM_MODEL'] == 'live'
     assert cfg['model_defaults']['default_model'] == 'live'
+    pending_path = tmp_path / 'config/.bootstrap-provider-pending.json'
+    pending = json.loads(pending_path.read_text(encoding='utf-8'))
+    assert pending['contract_version'] == 'tofu.bootstrap-provider-stage/v1'
+    assert pending['credential_env'] == 'LLM_API_KEYS'
+    assert pending['models'] == models
+    assert 'secret' not in pending_path.read_text(encoding='utf-8')
 
     # A later bootstrap refresh replaces managed rows but never loses a
     # private deployment the user explicitly pinned.
@@ -93,7 +105,9 @@ def test_bootstrap_persists_live_provider_and_selected_default(
     )
     cfg = json.loads(
         (tmp_path / 'config/server_config.json').read_text(encoding='utf-8'))
-    assert [m['model_id'] for m in cfg['providers'][0]['models']] == [
+    assert 'providers' not in cfg
+    pending = json.loads(pending_path.read_text(encoding='utf-8'))
+    assert [m['model_id'] for m in pending['models']] == [
         'new-live', 'private']
 
 

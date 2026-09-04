@@ -3,8 +3,10 @@
 This domain owns two Git modes. Isolated Project Brain writers become immutable
 checkpoints and serialized candidate/stable refs without mutating the canonical
 checkout. Model-only repositories may opt into task-end workspace snapshots with
-linear machine commits, no worktree, and no merge. Planning/dispatch lives in
-[`conversations_project_brain.md`](conversations_project_brain.md).
+linear machine commits, no worktree, and no merge. Automatic work lifecycle and
+runtime signals live in
+[`conversations_project_brain.md`](conversations_project_brain.md); there is no
+Board dispatch or handoff path.
 
 ## Ownership
 
@@ -15,7 +17,7 @@ linear machine commits, no worktree, and no merge. Planning/dispatch lives in
 | Shared forbidden-path and semantic-gate policy | `lib/git_checkpoint_policy.py` |
 | Owner-scoped transition API | `lib/integration_control.py` through `lib.storage` |
 | Durable transition authority | `lib/storage_sidecar/operation_domains/integration.py` |
-| Isolation creation/fail-closed dispatch | `lib/conversations/project_board.py` |
+| Isolation creation and fail-closed queueing | `lib/integration_control.py` |
 | REST projection | `routes/api_v1/integration.py` |
 | Retained UI | `frontend/src/runtime/sections/project-brain-integration.js` |
 
@@ -51,7 +53,7 @@ Shared canonical checkout (the default):
   share a checkout. Writes remain concurrent with containment, freshness,
   atomicity, attribution, and bounded-history safeguards, but shared mode does
   not create automatic Git commits.
-- Coordinate overlaps through freshness failures and Project Brain claims.
+- Coordinate overlaps through freshness failures and transient advisories.
 
 Opt-in linear mode:
 
@@ -116,14 +118,11 @@ recovery; it does not erase user work.
    overwriting another integration.
 7. Stable promotion evaluates the exact candidate tree and explicit
    canonical/candidate divergence acknowledgement.
-8. An isolated board epic cannot become `done` before its checkpoint reaches
-   candidate. A successful merge completes the board epic automatically, so
-   dependent epics are released only against source that actually contains
-   the dependency.
-9. Editing an epic's write-set updates the active integration metadata in the
-   same application operation. Once submitted, both checkpoint and declared
-   scope are immutable; a sync failure is returned instead of silently gating
-   against stale paths.
+8. The integration row is associated by automatic Project Work ID. Candidate
+   success or quarantine records narrative/Attention but never mutates the
+   already terminal work item.
+9. Submit/retry and release run the applicable immutable Checker versions
+   before Git publication. Any failure rejects or quarantines publication.
 
 ## Gate policy
 
@@ -132,7 +131,6 @@ Every candidate integration runs against the exact tree it would publish:
 - `git diff --check`;
 - forbidden-path policy for Git internals, dependency/cache/runtime trees,
   managed worktrees, bytecode, and `node_modules`;
-- the board-declared write-set, fetched from owner-scoped workspace metadata;
 - Python, JavaScript/module, and JSON syntax checks for changed files;
 - `TOFU_INTEGRATION_TEST_CMD` for application/configuration changes.
 
@@ -150,14 +148,6 @@ Stable advances only if `HEAD` and every non-ignored workspace byte match that
 commit both before and after the observational gate. Concurrent writes or a
 gate rewrite remain dirty for the next snapshot and invalidate promotion; they
 never block project tools.
-
-## Project Brain handoff
-
-`post_task` persists the declared write-set and requests an isolated workspace.
-Creation failure blocks the epic and starts no agent against the canonical
-tree. Queue payloads retain `boardTaskId`; the canonical turn retains
-`_boardTaskId`, `_brainDispatch`, and `_brainEpic` for UI attribution and
-stranded-kickoff recovery.
 
 ## Cost bounds and operations
 
@@ -204,7 +194,8 @@ confirmation for acknowledged divergence.
 - Candidate and stable ref updates are atomic and gate-bound.
 - Conflicts/gate failures quarantine evidence and never consume another model
   turn automatically.
-- Board write-set metadata is enforced at integration, not just scheduling.
+- Work-item `changedPaths` selects automatic Checkers; overlap advisories never
+  become Integration ownership or durable Board state.
 - Terminal records and canonical HEAD are never mutated by cleanup.
 - Linear commits never merge, stash, reset, checkout, clean, or push; stable
   promotion is a compare-and-swap ref move over a verified descendant whose
@@ -215,6 +206,6 @@ confirmation for acknowledged divergence.
 ```bash
 pytest -q tests/test_integration_control.py tests/test_integration_control_repository.py
 pytest -q tests/test_api_v1_integration_control.py tests/test_frontend_project_brain_integration.py
-pytest -q tests/test_project_board_isolation_fail_closed.py tests/test_project_brain_integration.py
+pytest -q tests/test_project_brain_signal_driven.py tests/test_project_brain_cutover.py
 pytest -q tests/test_linear_git_checkpoint.py tests/test_export_head_snapshot.py
 ```

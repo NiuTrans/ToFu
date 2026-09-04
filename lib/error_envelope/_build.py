@@ -145,6 +145,11 @@ def from_exception(exc: BaseException, *, model: str = '',
     if kind is None:
         kind = _classify_exception(exc)
     raw = str(exc)
+    status_code = getattr(exc, 'status_code', 0)
+    extensions = None
+    if (isinstance(status_code, int) and not isinstance(status_code, bool)
+            and 100 <= status_code <= 599):
+        extensions = {'statusCode': status_code}
     return make_envelope(
         kind,
         detail=raw[:200],
@@ -152,6 +157,7 @@ def from_exception(exc: BaseException, *, model: str = '',
         context=context,
         source=source,
         raw=raw,
+        extensions=extensions,
     )
 
 

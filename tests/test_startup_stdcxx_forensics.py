@@ -150,7 +150,10 @@ def test_forensics_line_discriminates_healthy_from_broken_binding():
         pytest.skip('host does not reproduce the mis-binding; nothing to discriminate')
     assert 'lib64' in broken_path, (
         'broken boot should report the SYSTEM libstdc++, got %r' % broken_path)
-    assert os.path.realpath(healthy_path).startswith(os.path.realpath(sys.prefix)), (
+    # In a venv layout the native libstdc++ ships with the BASE interpreter
+    # (sys.base_prefix), not the venv prefix (sys.prefix).
+    assert os.path.realpath(healthy_path).startswith(
+        os.path.realpath(sys.base_prefix)), (
         'healthy boot should report the interpreter env copy, got %r' % healthy_path)
 
 

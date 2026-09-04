@@ -16,16 +16,36 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 __all__ = [
-    'FINDING_SEVERITIES', 'normalise_asset_briefs', 'normalise_findings',
+    'CREATIVE_MODES', 'DEFAULT_CREATIVE_MODE', 'FINDING_SEVERITIES',
+    'MEDIA_QUERY_KINDS', 'normalise_asset_briefs', 'normalise_creative_mode',
+    'normalise_findings', 'normalise_media_queries',
     'normalise_narrative_core', 'normalise_source_ids',
 ]
 
 FINDING_SEVERITIES = ('blocker', 'major', 'minor')
+CREATIVE_MODES = ('standard', 'director')
+DEFAULT_CREATIVE_MODE = 'director'
+MEDIA_QUERY_KINDS = ('image', 'video', 'gif', 'webpage')
 _SOURCE_ID_RE = re.compile(r'^S\d+$')
 
 
 def _compact(value, *, limit: int) -> str:
     return re.sub(r'\s+', ' ', str(value or '')).strip()[:limit]
+
+
+def normalise_creative_mode(value, *, default: str = DEFAULT_CREATIVE_MODE) -> str:
+    """Return the bounded production strategy used in checkpoint identities.
+
+    ``standard`` performs one planning call. ``director`` drafts contrasting
+    candidates and asks an independent critic to choose. Unknown values fall
+    back to the caller-selected default so old manifests and API clients stay
+    resumable while the public surface remains finite.
+    """
+    fallback = str(default or DEFAULT_CREATIVE_MODE).strip().lower()
+    if fallback not in CREATIVE_MODES:
+        fallback = DEFAULT_CREATIVE_MODE
+    mode = str(value or '').strip().lower()
+    return mode if mode in CREATIVE_MODES else fallback
 
 
 def normalise_source_ids(raw, *, valid_ids=(), limit: int = 6) -> list[str]:
@@ -96,6 +116,45 @@ def normalise_asset_briefs(raw, *, allowed_roles,
         if semantic_target:
             brief['semantic_target'] = semantic_target
         out.append(brief)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def normalise_media_queries(raw, *, max_items: int = 4) -> list[dict]:
+    """Validate renderer-neutral requests for real image/video/web evidence.
+
+    This is deliberately a request contract, not a downloader. Capabilities
+    may satisfy it with a stock provider, supplied media, a browser capture,
+    or a generated still while preserving the semantic target in checkpoints.
+    """
+    out: list[dict] = []
+    cap = max(0, max_items)
+    if not isinstance(raw, list) or cap == 0:
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        query = _compact(item.get('query'), limit=500)
+        semantic_target = _compact(
+            item.get('semantic_target') or item.get('must_show'), limit=280)
+        if not query or not semantic_target:
+            continue
+        kind = str(item.get('kind') or 'image').strip().lower()
+        if kind not in MEDIA_QUERY_KINDS:
+            kind = 'image'
+        request = {
+            'kind': kind,
+            'query': query,
+            'semantic_target': semantic_target,
+        }
+        source_url = _compact(item.get('source_url'), limit=4096)
+        if source_url.startswith(('https://', 'http://')):
+            request['source_url'] = source_url
+        license_hint = _compact(item.get('license_hint'), limit=160)
+        if license_hint:
+            request['license_hint'] = license_hint
+        out.append(request)
         if len(out) >= cap:
             break
     return out

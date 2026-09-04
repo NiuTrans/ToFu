@@ -1,35 +1,43 @@
 # Task engine
 
-`lib/tasks_pkg/` executes one model/tool attempt. It is an executor, not a
-conversation repository and not a browser transport.
+`lib/tasks_pkg/` executes one model/tool attempt. It is an executor, not a conversation repository or browser transport.
 
 ## Boundary
 
-Input is an API-ready message list plus task configuration. Output is a stream
-of typed task events and cumulative executor state. For conversation work, the
-task is bound to a durable `(turnId, attemptId, userId)` before execution.
+Input is an API-ready message list plus task configuration. Output is a stream of typed task events and cumulative executor state. For conversation work, the task is bound to a durable `(turnId, attemptId, userId)` before execution.
 
 The authoritative flow is:
 
 ```text
 turn command
   -> pending generation attempt
-  -> claim + bind executor task
+  -> claim + bind executor task (pending/queued) -> worker entry + fenced start (running)
   -> model/tool loop
   -> append_event
-  -> turn.event.record (projection + carried task event)
+  -> turn.event.record (revision patch + carried task event)
   -> v3 conversation sync
 ```
 
-The task result table is recovery/diagnostic storage for executor state. It is
-not a second transcript. Conversation attempts keep renderable content, tool
-rounds, Flow node phases, and terminal settlement in turn authority.
+The task result table is recovery/diagnostic storage, not a second transcript; renderable content and settlement stay in turn authority. Normal and Flow chat share one finite FIFO Agent scheduler sized from effective CPU and memory/RSS headroom.
+Waiting consumes a bounded queue entry, not an Agent slot. The reaper may quarantine a proven-wedged Python thread and admit a bounded replacement; the old thread retires if it returns, so recovery cannot create unbounded thread growth. While a task is resident in that FIFO, `spawn.py` emits the registered `executor_queued` phase with one-based position, total queued work, active/configured slots, and monotonic wait seconds, refreshing only when evidence changes or at sparse 20-second/one-minute milestones. New arrivals behind a task do not invalidate its phase, avoiding queue-wide repaint amplification. A shared per-task lock orders the last queued phase before physical worker entry so late persistence cannot overwrite `workerStarting`; provider 429/backoff remains `retrying`, letting clients distinguish host scheduling from model/API capacity without guessing from elapsed time.
+After settlement, only terminal `round_committed` and `preference_learned`
+observers use standalone task replay; their dedicated settled-Turn CAS owns
+projection enrichment, while every other late frame retains the zombie fence.
+
+Automatic translation is triggered only after Turn authority settles. Its
+already-target skip is a whole-document identity decision: dominant-language
+classification alone is insufficient because a target-language opening may
+hide foreign-language sections later in the assistant content. Terminal root,
+Flow-visible child, and incremental segment paths share the conservative
+`lib/translate/skip_policy.py` predicate; mixed prose proceeds to translation,
+while symbols, bare paths/URLs, and genuinely monolingual target prose may be
+committed as an explicit no-op.
 
 ## Package map
 
 | Area | Owner |
 |---|---|
-| task registry, lifecycle, event buffer | `manager/` |
+| task registry, lifecycle, event buffer and residency policy | `manager/`, `lib/agent_core/task_runtime.py`, `lib/agent_core/task_runtime_policy.py` |
 | shared ReAct lifecycle | `lib/agent_loop.py` |
 | root-chat ReAct policy/wire adapter | `orchestrator/_root_agent_loop.py` |
 | tool parsing/execution | `tool_dispatch/`, `executor/` |
@@ -39,50 +47,38 @@ rounds, Flow node phases, and terminal settlement in turn authority.
 | orchestration projection/adoption evidence | `lib/orchestration_adoption.py` |
 | compaction | `compaction/` |
 | Flow-backed chat selection and delivery | `lib/orchestration_chat_flow_*.py` |
-| autonomous virtual-user policy | `autopilot.py`, `autopilot_baton.py` |
-| durable executor event log | `event_log.py` |
+| Goal Mode lifecycle/policy | `lib/goal_runs/` + Flow-backed chat adapters |
+| retired standalone-autopilot compatibility | `autopilot.py`, `autopilot_baton.py` |
+| durable executor event log and terminal timing projection | `event_log.py`, `turn_trace.py` |
 
-Facades may re-export stable entry points, but new implementation belongs in a
-cohesive leaf module. A facade must not preserve a retired behavior merely to
-keep an old monkeypatch path alive.
+Facades may re-export stable entry points, but new implementation belongs in a cohesive leaf module. A facade must not preserve a retired behavior merely to keep an old monkeypatch path alive.
 
 ## Shared ReAct lifecycle
 
-`run_agent_loop` is the sole LLM/tool round-loop authority for root chat,
-swarm workers, timer and research engines. It owns round numbering,
-continue/stop sites, the three abort placements, timeout counting and the
-post-tool checkpoint boundary. Root-specific request building, stream anomaly
-policy, budget/protocol gates, event projection and semantic loop detection live
-in `_root_agent_loop.py` as typed hooks. They return `LoopDirective`; they do
-not own a second LLM/tool `while` or infer completion from response text.
-FlowExecutor owns graph-level iteration only; role execution delegates through
-the shared agent runner.
+`run_agent_loop` is the sole LLM/tool round-loop authority for root chat, swarm workers, timer and research engines. It owns round numbering, continue/stop sites, three abort placements, timeout counting and the post-tool checkpoint. Root request building, anomaly policy, budget/protocol gates, event projection and semantic loop detection are typed `_root_agent_loop.py` hooks returning `LoopDirective`; they never own another LLM/tool `while` or infer completion from response text. FlowExecutor owns graph iteration only; role execution delegates through the shared agent runner.
 
-Two complementary guards bound non-recovering tool loops. Before execution,
-the exact-call guard fingerprints tool name, arguments, world version, and new
-evidence so repeated side effects stop without running again. After execution,
-a batch adapter may report stable `nonretryable_failure_signatures` only when
-every tool result is a canonical `tofu.tool-result/v2` error with
-`retryable=false`. The chassis ignores arguments for this second signal: a
-changed tab ID, selector, or path cannot make an unchanged capability denial
-recoverable. Swarm halts after three consecutive equal terminal-failure rounds
-with `exit_reason=nonretryable_tool_failure`, then performs one tool-less
-wrap-up. Any success, mixed result, retryable error, malformed envelope, legacy
-string, or changed code resets the streak; unknown results therefore fail open.
+Independent guards bound non-recovering tool loops. Before execution, exact-call identity fingerprints tool name, arguments, world version and new evidence so repeated side effects stop. After execution, stable `nonretryable_failure_signatures` accept only a canonical non-retryable typed error (the sparse model error or a legacy full `tofu.tool-result/v2` record); changed arguments cannot recover an unchanged denial.
+Swarm halts after three equal terminal-failure rounds with `exit_reason=nonretryable_tool_failure`, then performs one tool-less wrap-up. Any success, mixed/retryable/malformed or legacy result, or changed code resets the streak; unknown results fail open.
+Root post-dispatch policy also distinguishes byte-identical call/outcome loops from semantic no-progress no-ops and already-covered reads, gives one `_isMeta` safety correction, then stops continued waste.
+For V2 partial results, the guard reconstructs its server observation from sparse `toolContent` plus the non-model `tofu.tool-result-evidence/v1` round sidecar (and still reads legacy full envelopes). Range/cursor/limit and presentation-only changes retain one resource identity across registered idempotent tools; only the model-visible summary/items/error projection counts as evidence, so new pages remain productive but new artifact IDs cannot disguise an identical projection.
+The guard first directs the model to `read_tool_artifact`/`search_tool_artifact` or a visibly advancing narrower read, then stops one continued no-progress episode.
+When local PTC was actually projected, three productive single eligible-read rounds may instead earn a non-forcing `_isMeta` adoption hint; a still-serial task may receive another only after 24 completed rounds, both efficiency lanes share a four-hint task cap, native/off lanes never receive the PTC-specific hint, a same-round safety correction preempts it, and real user steering remains a hard boundary.
+Engine-authored stall/stream-continuation corrections and pure peer/swarm evidence are likewise transparent to current-user extraction; an inbox row containing human steering is not.
 
-## Model-round budget
+One provider response is an ordered occurrence list. Every response position is an independent model action even when tool name, arguments, caller, or provider call ID are byte-identical.
+Blank, recycled, or duplicate IDs are reminted before history/settlement so each assistant call retains exactly one adjacent result; equality never elects one physical owner for sibling positions.
+Only a byte-identical transport retransmission proven to target the same stable stream slot may be suppressed before execution. Across provider responses the same payload is likewise a fresh model action governed by ordinary evidence/world-state guards.
 
-Root execution has a finite model-API-round budget when `maxApiRounds` is unset
-or zero: 192 in personal mode and 512 in distributed mode. Operators may change
-the inherited default with `TOFU_TASK_MAX_API_ROUNDS`. Positive request values
-may raise or lower it but cannot exceed 1,024; malformed, zero, and negative
-values inherit the profile. Other task budgets remain opt-in.
+Continue replay groups history by ordered `(attemptId/taskId, llmRound, contiguous occurrence)`, never a Turn-wide `llmRound` dictionary. Attempt counters restart; merging equal numbers fabricates a provider batch, reorders history, multiplies checklist/tool context and can induce repetition.
+Legacy unstamped rows use contiguous order and observable `roundNum` resets without inventing ownership. Continue, checkpoint, segment, and cold-history reconstruction share one causal-prefix validator: explicitly superseded provider-attempt artifacts and identity-free display rows are transparent; any other identity-bearing malformed row stops replay before dependent calls.
+Exact result text is the execution receipt regardless of `done`, `error`, `rejected`, or `aborted` verdict, and structured arguments are canonicalized without mutating durable audit rows. A malformed supplied `toolHistory` fails the request before any partial history reaches a model.
+Resume text, tool rounds, checklist state, usage, and file metadata are validated and detached as one preflight before project setup or prefetch; hydration begins only after the whole snapshot is valid. The `todo_write` schema stays within 325 tokens and its current-state sidecar is bounded to 24 items per checklist, six nested levels, 64-character IDs, 512-character steps, 2,048-character replan reasons, an eight-entry history tail with explicit dropped count, and 1.5 MB serialized; the measured four-byte-Unicode maximum is 1,297,374 bytes, while raw tool rounds remain the complete durable audit. Every model-facing result, compaction attachment, and continuation reminder repeats each stable item ID, so folding the original call never asks the model to recreate checklist identity from prose.
+Checkpoint resume reconstructs its interrupted assistant/tool rounds through the same canonical wire projector used by the next ordinary conversation rebuild, inserts that suffix before the optional resume prefill, and separately retains the raw rounds for durable settlement. The resumed request therefore keeps tool evidence and remains a byte-stable cache prefix for its successor. Resume snapshots carry no round-count or serialized-byte ceiling: oversized histories are folded by working-set compaction before dispatch, never rejected.
 
-Before each provider call, root checks the completed `apiRounds` ledger. With
-`min(64, floor(limit / 3))` rounds left, it emits one `budget_warning` and one
-model-visible `_isMeta` reminder to finish and verify. At the hard limit it
-makes no provider call and settles with `task_budget_exceeded`, never verified
-completion. Other adopters enforce their own declared outer budgets.
+
+Swarm history is durable on the `spawn_agents` tool round: the returned handle identifies that wave, while `_swarmSnapshot` carries each agent's status, full result preview, token/timing/file counters, and bounded tool-call timeline. Agent callbacks stamp incremental/final snapshots when the handle is already visible. Tool settlement is the mandatory race-repair boundary: once it writes `toolContent`, it immediately reconciles the still-authoritative active session onto that exact round. This closes fast-agent completion before handle publication; the monotonic snapshot version and equality check make callback/settlement/replay writes idempotent. A detached CAS writer remains responsible only after the owning attempt settles.
+The persisted `toolContent` is usually the SPARSE `summary_items` model projection (`{"summary", "items": [handle]}`), from which `lib/tools/result_envelope.py::_model_projection` intentionally drops `contractVersion`; every reader recovering the handle (snapshot matching, elision-stub salvage, frontend panel recovery) must unwrap through `sparse_result_items` / the swarm panel's equivalent — gating on the v2 marker alone recovers zero agents and renders an empty panel over fully-persisted data.
+Every resume operation (`continue`, `checkpoint_resume`, `answer_guidance`) also inherits the settled projection's `modifiedFiles`/`modifiedFileList` as `checkpointModifiedFiles`/`checkpointModifiedFileList`, so the resumed attempt's commit merge unions pre-gap edits with its own instead of the settled card listing only resume-window files. When a restart settled the orphaned attempt before its live file-change stamps were folded (the durable projection has no list to carry), attempt dispatch derives the turn-scoped list from the conv-isolated modifications journal — entries at or after the turn's creation across the primary and extra workspace roots.
 
 ## Task carrier
 
@@ -91,51 +87,64 @@ field groups are:
 
 - identity: `id`, `convId`, `_turnId`, `_attemptId`, `_userId`;
 - configuration: `config`, `model`, feature/tool flags;
-- request-local orchestration: `_toolOrchestration`, `_ptc_local` (recomputed
-  before each wire request), plus bounded `_toolOrchestrationDecisions`;
-- cumulative projection: `content`, `thinking`, `segments`, `toolRounds`,
-  `programRuns`;
+- request-local orchestration: `_toolOrchestration`, `_ptc_local` (recomputed before each wire request), bounded `_toolOrchestrationDecisions`, and one shared efficiency-hint budget retaining at most four total `_programmaticAdoptionNudges` / `_toolRoundTripNudges` witnesses with a 24-completed-round cooldown;
+- cumulative projection: `content`, `thinking`, `segments`, `toolRounds`, `programRuns`; `modifiedFiles`/`modifiedFileList` are live-stamped from the modifications journal at record time (listener fold seeded from `_checkpointModifiedFileList`, terminal tasks refused) while settlement rebuilds the authoritative dedup;
 - lifecycle: `status`, `finishReason`, `error`, `aborted`;
 - accounting: `usage`, `apiRounds`, cost/fallback metadata;
-- event delivery: `events`, sequence/cursor locks;
+- event delivery: `events`, sequence/cursor locks, and the launch-derived `TaskRuntime` terminal-record/event-count/serialized-byte policy. Probe failure retains 64 records per kind, 1,024 events and a 2 MiB ordinary tail/4 MiB complete event per task; the 8 GiB reference uses 128/2,048/4/8 and distributed 512/4,096/8/16, with hard caps. Explicit constructors only lower those ceilings. Byte/count pressure drops the oldest contiguous suffix and reports a cursor reset; one valid event may occupy the window alone, while a larger/unencodable event advances the absolute cursor and resets only reconstructible memory replay. Terminal chat dictionaries use a separate launch-derived 600..1,800-second personal TTL (600 seconds on the 8 GiB/probe-failure profiles, 3,600 distributed, 60..86,400 explicit bounds); active tasks are never TTL-evicted. `retention_stats` and Prometheus expose occupancy and every ceiling;
 - cooperative controls: abort event, interaction requests, inbox injections.
 
-Private fields need explicit owners/lifecycles; `run_command` caps settled and live reconnect output at 100,000 characters (prefix, tail, count, marker).
-Completed rounds drop that buffer before durable projection; swarm cleanup is session-scoped, and durable behavior may not use unbounded globals.
+Successful rounds build Request Inspector snapshots from canonical request-body messages, avoiding a second full-history sanitizer; body-build failures retain a separately sanitized diagnostic snapshot and re-raise the original typed error.
+Private provider replay sidecars are excluded while the public event stays full in live memory. Its bounded storage-only v2 delta shares one message baseline per `(task, turn)` across request/state;
+server rebuild preserves frozen v1 rows and returns full payloads to consumers.
+Private fields need explicit owners/lifecycles. Provider-attempt `_wire_*` graphs remain only on the raw usage mapping through FloorRetry/cache accounting and in cache tracking's one previous-round baseline; retained `apiRounds` and `round_usage` events remove them plus the separately recorded nested billing carrier, preserving only a bounded static-prefix experiment join. When authoritative wire capture is unavailable, cache tracking builds one per-field fallback baseline through the larger prior/current immutable boundary, using slices for same-range comparison and next-round state instead of aggregate-plus-field rescans. Each message row is a fixed seven-slot tuple containing only process-local integer fingerprints/absence markers, so retained fallback state grows with message count rather than payload bytes. Stable tool catalogs reuse prior aggregate/per-tool source hashes when the validated final provider-bound tools-region digest matches; first use, digest change, or missing/malformed evidence reserializes schemas. The tool-result reuse FIFO is launch-probed at 64..256 personal entries (128 on the 8 GiB reference), falls back to 64, uses 512 distributed and a 1,024 hard ceiling; eviction safely re-executes, while terminal settlement releases the entire cache with `messages` and `_flow_turns` before the remaining hot TaskRuntime TTL. Tool settlement bodies are invocation-local; the separately bounded call-ID ledger stores only signature/name/status, never replay content, and both it and any live legacy settlement map join terminal heavy-field release. A running conversation attempt retains one last-applied public Turn projection/revision under a task-local lock so structural events send patches without repeated full reads; stale bases rebase once, and coalesced progress keeps a lightweight attempt fence. Once its terminal Turn and result metadata settle, the carrier releases that baseline with reconstructible `toolRounds`, `segments`, `programRuns`, and `_checkpointToolRounds`; inline/headless tasks retain their only structural copy. Commit admission snapshots its one tool-round-derived opaque-writer bit before release, and post-done preference CAS merges provenance only, so neither observer retains nor refolds the structural graph. Owner-scoped cold chat detail/replay reads `task_results` plus durable event bounds after hot eviction; sparse stored `seq` values remain authoritative, intermediate pages use a compact task-result projection, and cumulative content/thinking crosses the Sidecar boundary only on the caught-up terminal page. `run_command` caps settled and live reconnect output at 100,000 characters (prefix, tail, count, marker).
+Completed rounds drop that buffer before durable projection; swarm cleanup is session-scoped, and durable behavior may not use unbounded globals. A swarm transcript directory is created only when its first real stream chunk arrives. After rehydration, one cancellable startup worker inspects at most `clamp(sessionCapacity*1024, 512, 16384)` immediate entries and atomically removes only empty directories; files, nested content, symlinks, and concurrent writers are preserved, and shutdown bounded-joins the worker. Startup recovery default-denies legacy swarm sessions without a positive owner and durably quarantines them without deleting child evidence, so their checkpoints are not repeatedly decoded or retried on later boots.
 
-Incremental translation follows that rule explicitly: active accumulators and
-each accumulator's preview-operation buffer use probed finite budgets. Preview
-segments are bounded/coalescible; terminal finalize, stamp, and cancel handoffs
-reserve capacity and are never discarded.
+Incremental-translation accumulators and preview buffers use probed finite budgets: personal mode starts at 32 preview calls/Turn and 30-second deadlines (distributed 256/60 seconds), skips narration previews below 256 characters, and spends at most one upstream 429 response before yielding every later reconstructible preview in that Turn. The three-field task-local admission state survives five-minute idle accumulator/thread retirement without retaining the full task; admission skips worker recreation after the count/circuit closes. Finalize/stamp clears that state while preserving terminal reasoning with the ordinary translation retry budget and evicting reconstructible previews; cancel clears all previews, and final delivery stays outside every preview allowance.
+
+Optional whole-output background translation and attended send-input translation enter one process-wide resource-probed lane: finite pending work is owner-round-robin, workers are lazy/idle-retiring, and durable tasks remain `pending` until entry. Send-input work may advance only within its own owner's queue; its request thread emits heartbeat status while waiting, queued timeout removes admission, and running timeout propagates cancellation into provider dispatch. Queue saturation sends the original input with typed `server_busy`; durable queued cancel and admission/thread failure remain typed/retryable. The same worker value caps actual MT/LLM calls from synchronous/incremental carriers, while the queue value caps provider waiters; waiting is cancellable, saturation never locally redispatches, and optional provider calls carry finite actual-429 attempts while attended Agent dispatch retains its default.
+Background swarm sessions retain bounded dependency schedulers, agent results, and retries, while every actual SubAgent run crosses one process-wide owner-round-robin gate. Launch-probed ceilings independently bound live sessions, per-session threads, agents per wave/session, and retries; a new session may retire terminal memory backed by durable truth but never evicts productive work. One `await_agents` call waits at most 60 seconds. A repeated logically identical all/any wait that previously timed out and has observed no new terminal agent returns its no-progress receipt immediately; any completion delta rearms one real wait.
+No-ID waits are consumptive: a result returned by await/get-result, injected from the background inbox, or restored with durable `delivered` evidence enters a session-local ledger bounded by completed result IDs and cannot satisfy later `mode=any` calls again. Explicit IDs and `get_agent_result` remain replayable for deliberate rereads.
+
+Swarm-panel tool timelines share one presentation budget: the newest 30 rows, 2,000 characters per detail, and 32 KiB of conservative JSON per agent. New durable snapshots apply it at write time.
+Push-owned live Turns do not issue fallback status reads. Detached/reloaded
+active rounds reconcile only while visible and back off unchanged status from
+20 to 120 seconds; ambiguous recovery observations keep the fast honesty gate,
+and terminal state remains bounded by the 120-second ceiling.
+The generated browser's v3 reference view applies the same budget request-locally to historical terminal Turns, inspecting only the retained tail; row/detail omissions remain explicit.
+Durable Swarm snapshots, child transcripts, full agent results, active Turns, independent `full` responses, and recovery/provider evidence are never rewritten or discarded by this read projection.
 
 ## Persistence discipline
 
-`append_event` persists before visibility and may carry the exact task event in the same Sidecar transaction. An oversized carried frame retries once with
-cumulative text and opens a 30-second full-projection probe circuit, preventing a deterministic retry storm while raw-event durability remains exact.
-Writes without that carrier fail closed; a later full probe or terminal settlement converges the Turn document.
+Outside an active provider dispatch, `append_event` persists before visibility and may carry the exact task event plus a revision patch in the same Sidecar transaction; the event envelope never repeats the cumulative projection. An oversized carried frame — the Sidecar payload cap or the 64 MiB wire frame — retries once with cumulative text and opens a 30-second full-projection probe circuit, keeping raw-event durability exact.
+Writes without that carrier fail closed; a later full probe or terminal settlement converges the Turn document. Terminal events may also settle slim, and a toolRounds lane crossing its frame budget (`TOFU_TOOL_ROUNDS_FRAME_BUDGET_BYTES`, default 16 MiB) elides the oldest settled rounds' free-text payloads with replay identity intact. Projection normalization copies an explicit L1/frame placeholder into only its uniquely identity-compatible segment mirror, so a stale render copy cannot restore old bytes; ambiguity leaves evidence untouched. A `spawn_agents` round without a durable snapshot first donates its handle to a minimal roster snapshot (status `unknown`, version 0), so the reloaded swarm panel still expands to an honest roster instead of a dead header.
+If even the text-only frame is rejected the worker is cooperatively aborted (`storage_frame_overflow`) instead of burning tokens on unpersistable events. A non-retryable `database_integrity` rejection at the same conversation-authority boundary likewise raises to the caller and stamps `storage_authority_integrity`, stopping provider/tool work at the next existing abort gate; it is never retried as if transient storage pressure could repair corrupt durable state.
 
 Pure text progress may be coalesced. Structural events, interaction requests,
 and terminal events persist immediately. The next structural/terminal write
 carries cumulative text, so coalescing changes cadence, not final state.
 
-Provider text ingress emits its first chunk immediately, then merges at most
-100 ms or 256 characters before assigning the next event sequence. Retry,
-diagnostic, tool-ready, error, and provider-return boundaries synchronously
-flush the tail, preserving durable-before-visible ordering. Each active model
-stream owns at most one daemon coalescer worker; it exits when that provider
-call returns or raises, and the buffer never exceeds the character ceiling.
-Production replay samples (4-character median chunks) project 55.5–64.4%
-fewer text-event transactions at this window. The executable resource budget
-is pinned by `tests/test_stream_delta_coalescing.py`.
+Executor diagnostics use `tofu.task-results.checkpoint.guard/v1`: task birth retains the legacy parent/record preflights and caches the returned version only after an exact Sidecar echo; confirmed checkpoints become one command instead of two queries plus one command, while an old peer retains that safe three-RPC path.
+Warm rounds stage at most two positive integer cache facts; an independent cache-settings-v1 echo folds them into that command, while an old peer retains the serialized per-fact settings fallback.
+The guarded transaction takes the conversation delete/purge lock then the task-result key lock and enforces parent/task ownership, terminal regression, abort tombstones, and CAS. `False` is reserved for a proven fence; admission or CAS pressure raises instead of suppressing later durable work.
+Reconstructible running checkpoints get one 500 ms maintenance-lane admission; task birth and terminal diagnostics retain user priority and five bounded attempts. Turn settlement remains render authority and commits before terminal diagnostics, so shedding running recovery state cannot lose a settled answer. A turn-native task therefore keeps content/thinking diagnostics in `task_results` but does not rewrite its growing segments/tool-result timeline there; the atomic Turn projection plus replay log already own it, while inline/headless tasks retain their only structural copy. Durable turn-source maintenance uses one exact read-pool expiry/list probe and enters the queue-repair writer only when a lease is actually expired; startup force recovery and old Sidecars retain the repair command.
 
-Terminal processing has one direction:
+Provider text ingress emits immediately and merges at most 100 ms or 256
+characters per sequenced event; structural boundaries flush the memory replay.
+While dispatch is active, Sidecar, push/webhooks, presence and DB abort probes
+cannot run synchronously on upstream ingress. Task-memory SSE remains live;
+the first post-provider event restores cumulative durable-before-visible state
+and settles one sampled checkpoint. Its content-free `observerIsolation`
+receipt exposes bounded counts. A process/host crash can lose this memory-only
+window; provider return/failure or explicit abort converges normally. One
+bounded coalescer worker exits at the provider boundary; resource tests live in
+`test_stream_delta_coalescing.py` and `test_provider_ingress_isolation.py`.
 
-1. stamp the task terminal once;
-2. emit the typed terminal event;
-3. commit turn settlement;
-4. persist bounded executor diagnostics;
-5. release heavy in-memory fields;
-6. notify projections and dispatch any durable queued successor.
+Terminal processing has one direction: stamp the task terminal once; emit the typed terminal event; commit turn settlement; persist bounded executor diagnostics; release heavy in-memory fields; then notify projections and dispatch any durable queued successor.
+
+The normal root-chat path uses the same immutable terminal stamp as Flow/error/queued-abort paths. A configured model fallback and its pool rescue each use a finite actual-429 budget (default 3, hard ceiling 16); after all recovery fails, every exception shape returns a normal loop break carrying typed `task.error` plus `autoRetryExhausted`, so finalization emits `done(error)` and does not reset the bound through whole-turn replay. `finished_at` is the TTL clock and cannot be
+omitted or rewritten; cleanup never measures a successful long task from its
+creation time after it finishes.
 
 Task manager code must never append/replace conversation messages. Queue
 dispatch, autopilot, timers, proactive work, and swarm continuation all create
@@ -149,36 +158,11 @@ runtime ledgers at projection time; mutable latches and non-empty prose cannot
 upgrade an offered lane into an adopted one. Legacy v1 decision rows remain a
 read-only compact projection without retrofitted adoption claims.
 
-## Autonomous drivers
+## Autonomous and collaboration drivers
 
-Flow-backed chat stores visible role messages as explicit related turns.
-Autopilot creates an atomic virtual-user/input plus assistant/output pair and
-then claims the successor attempt. Swarm and scheduler continuation use the
-shared scheduled-turn dispatch service with explicit owner identity and stable
-command ids.
-
-Every unattended loop needs:
-
-- a durable command id;
-- an owner-scoped lane-busy decision;
-- a finite chain/budget policy;
-- honest visible attribution;
-- a terminal error when executor startup fails.
-
-## Plan collaboration mode
-
-`planMode: true` is one attended, read-only model/tool loop. Config-resolution
-and runtime normalization enable `ask_human` automatically and disable
-autopilot, direct image generation, and selected orchestration flows. This
-allows multiple clarification exchanges inside the same turn without asking
-the user to discover a second toggle.
-
-The model proposes rather than executes. Only the successful Plan-task terminal
-boundary may mint a complete tagged plan into the typed turn sidecar owned by
-`lib/plan_contract.py`; arbitrary assistant text is never upgraded into
-execution authority. Leaving Plan mode manually does not synthesize an
-execution prompt; execution starts only through the v3 exact-plan command
-described in `CONVERSATION_SYNC_V3.md`.
+Goal/Autopilot and Plan mode have distinct durable, model-routing, authority,
+and terminal contracts. Their detailed lifecycle is specified in
+[`../TASK_EXECUTION_MODES.md`](../TASK_EXECUTION_MODES.md).
 
 ## Failure rules
 
@@ -192,7 +176,7 @@ If it is the last terminal tool act, finalization emits a typed task error:
 keeps status `skipped`, summary `blocked`/`unavailable`, and kind as `reasonCode`.
 
 - Never infer success from non-empty content.
-- Never turn a provider/tool error into `done/stop`.
+- Never turn a provider/tool error into `done/stop`; an exhausted model fallback settles as `done/error` so browser, replay, and persistence consume the same terminal event.
 - Never infer terminal retry policy from legacy text; only the typed result
   contract feeds the terminal tool-failure breaker.
 - Recovery crosses the stream-handler API as `RecoveryDecision`; the root loop
@@ -200,19 +184,19 @@ keeps status `skipped`, summary `blocked`/`unavailable`, and kind as `reasonCode
 - `TurnVerdict` derives durable completion fail-closed; missing evidence fails.
 - Never push a frame whose authoritative write failed.
 - Never retry a CAS conflict by rewriting a conversation-sized snapshot.
-- Never bind an executor after it has already started.
+- Never bind after execution starts or report bound/queued work as running before physical worker entry.
 - Fence stale attempts cooperatively; never let them emit indefinitely.
 - A safety-cap stop is incomplete, never verified completion.
 
 ## How to change it
 
-Start with pure policy, event shape, command service, Sidecar contract, then
-browser projection. Source scans ratchet ownership; behavior needs execution.
+Start with pure policy, event shape, command service, Sidecar contract, then browser projection. Source scans ratchet ownership; behavior needs execution.
 
 Relevant gates include:
 
 - Turn/event settlement: `tests/test_turn_event_carried_task_event.py`,
-  `tests/test_tool_settle_all_lanes.py`, `tests/test_orchestration_chat_completion.py`.
+  `tests/test_turn_trace.py`, `tests/test_tool_settle_all_lanes.py`,
+  `tests/test_orchestration_chat_completion.py`.
 - Drivers/failures: `tests/test_finalize_persist_before_autopilot.py`,
   `tests/test_swarm_async.py`, `tests/test_agent_terminal_failure_breaker.py`,
   `tests/test_release_heavy_task_state.py`.

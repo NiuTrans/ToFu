@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+import gc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -220,6 +221,18 @@ def test_get_or_compute_propagates_exception():
     _ok('get_or_compute propagates exception, does NOT cache')
 
 
+def test_get_or_compute_does_not_retain_historical_key_locks():
+    """A cache-disabled LRU must not become an unbounded lock registry."""
+    from lib.ttl_cache import TTLCache
+    c = TTLCache(ttl=60, max_size=0)
+    for index in range(100):
+        assert c.get_or_compute(index, lambda: index) == index
+    gc.collect()
+    assert len(c) == 0
+    assert len(c._key_locks) == 0
+    _ok('get_or_compute reclaims inactive per-key locks')
+
+
 def test_thread_safe_concurrent_set():
     from lib.ttl_cache import TTLCache
     c = TTLCache(ttl=60)
@@ -304,6 +317,7 @@ def main():
         test_get_or_compute_caches_result,
         test_get_or_compute_serialises_concurrent_missers,
         test_get_or_compute_propagates_exception,
+        test_get_or_compute_does_not_retain_historical_key_locks,
         test_thread_safe_concurrent_set,
         test_stats,
         test_complex_value_types,

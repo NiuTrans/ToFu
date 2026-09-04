@@ -46,45 +46,6 @@ function _autopilotRunConcluded(c, turnId) {
   return !!(rec && typeof rec === 'object' && (rec.status === 'concluded' || rec.content));
 }
 
-/** CAS-update one authoritative turn projection by stable identity. */
-async function _patchTurnProjectionOnServer(
-  convId, turnId, patch, /** @type {any} */ opts = {},
-) {
-  if (!convId || !turnId || !patch || Object.keys(patch).length === 0) return null;
-  const conv = (typeof conversations !== 'undefined')
-    ? conversations.find(item => item.id === convId) : null;
-  if (!conv
-      || typeof runtimeScope.ConversationTurnStore === 'undefined') {
-    const error = new Error('Authoritative turn identity is unavailable');
-    if (typeof opts.onError === 'function') opts.onError(error, 0);
-    return null;
-  }
-  const store = runtimeScope.ConversationTurnStore.ensureRuntimeStore(convId);
-  const turn = store?.getState?.().turnsById?.[turnId];
-  if (!turn?.projection) {
-    const error = new Error('Authoritative turn projection is unavailable');
-    if (typeof opts.onError === 'function') opts.onError(error, 0);
-    return null;
-  }
-  const projection = { ...turn.projection };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) delete projection[key];
-    else projection[key] = value;
-  }
-  try {
-    const result = await runtimeScope.ConversationTurnStore.updateConversationTurn(
-      conv, turnId, projection);
-    return { ok: true, msg: result?.turn?.projection || projection };
-  } catch (error) {
-    console.warn('[patchMsg] conv=%s turn=%s failed: %s',
-      convId, turnId, error?.message || error);
-    if (typeof opts.onError === 'function') {
-      opts.onError(error?.body || error, error?.status || 0);
-    }
-    return null;
-  }
-}
-
 function formatConvTime(ts) {
   const labels = conversationTimestampLabels(
     ts, Date.now(), document.documentElement.lang,
@@ -787,7 +748,7 @@ function renderConversationList() {
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}|${(c.projectSummary && c.projectSummary.text) ? "S" : ""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);
-      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.errored?1:0}${f.incomplete?1:0}${f.unconfirmed?1:0}`;
+      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.waiting?1:0}${f.errored?1:0}${f.incomplete?1:0}${f.unconfirmed?1:0}`;
     }).join(",");
     const _fullHash = `${_structHash}|||${_statusHash}`;
     if (_fullHash === _lastConvListHash) return;
@@ -949,21 +910,6 @@ const _CONV_CP_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none
 const _CONV_DUP_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="14" height="14" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`;
 const _CONV_FOLDER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
 const _CONV_RENAME_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>`;
-/* "summarized" glyph — a document with text lines (SVG only, no emoji per
- * §3.4). Shown in a conv row's title when an AI summary is cached
- * (settings.projectSummary.text); click reveals the cached text. */
-const _CONV_SUMMARY_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="14" y2="17"/></svg>`;
-
-/* Click handler for the sidebar summarized-conversation glyph. Reads the
- * cached summary text off the badge's data-summary attribute and surfaces it
- * via the shared toast. stopPropagation so it doesn't open/activate the row. */
-function showConvSummary(badgeEl, ev) {
-  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
-  const text = (badgeEl && badgeEl.dataset && badgeEl.dataset.summary) || '';
-  if (!text) return;
-  const title = (typeof t === 'function') ? t('sidebar.summaryTitle') : 'Summary';
-  if (typeof showToast === 'function') showToast('', title, text, 8000);
-}
 
 /**
  * Compute the four mutually-relevant status flags for a conversation row.
@@ -971,7 +917,7 @@ function showConvSummary(badgeEl, ev) {
  * all three agree on exactly when a dot / tag should show.
  *
  * @param {Object} c — conversation object
- * @returns {{streaming:boolean, translating:boolean, memoryPrefetching:boolean, awaitingHuman:boolean, errored:boolean, incomplete:boolean}}
+ * @returns {{streaming:boolean, translating:boolean, memoryPrefetching:boolean, awaitingHuman:boolean, waiting:boolean, errored:boolean, incomplete:boolean}}
  */
 /**
  * Single busy predicate shared by the sidebar and composer. The answer is
@@ -1018,9 +964,11 @@ function _convStatusFlags(c) {
   // Only the latest assistant/planner Turn defines the settled sidebar state.
   let errored = false;
   let incomplete = false;
+  let waiting = false;
   if (!streaming && latestAssistant) {
     const projection = latestAssistant.projection || {};
     const finishReason = projection.finishReason;
+    waiting = Boolean(projection.waitingOn) && !Boolean(latestAssistant.settlement?.error) && !Boolean(projection.error);
     const hardError = latestAssistant.status === 'failed'
       || Boolean(latestAssistant.settlement?.error) || Boolean(projection.error)
       || _FINISH_ERR.has(finishReason);
@@ -1059,7 +1007,8 @@ function _convStatusFlags(c) {
   const healthState = c._conversationSyncHealth?.state;
   const unconfirmed = Boolean(streaming
     && ['recovering', 'degraded', 'offline'].includes(healthState));
-  return { streaming, translating, memoryPrefetching, awaitingHuman, errored, incomplete, unconfirmed, rateLimited };
+  if (waiting) incomplete = false;
+  return { streaming, translating, memoryPrefetching, awaitingHuman, waiting, errored, incomplete, unconfirmed, rateLimited };
 }
 
 /**
@@ -1083,6 +1032,8 @@ function _convStatusHtml(f) {
         : '<div class="conv-streaming-dot"></div>';
   } else if (f.errored) {
     dotHtml = `<div class="conv-error-dot" title="${t('sidebar.errorState')}"></div>`;
+  } else if (f.waiting) {
+    dotHtml = `<div class="conv-waiting-dot" title="${t('sidebar.waitingState')}"></div>`;
   } else if (f.incomplete) {
     dotHtml = `<div class="conv-incomplete-dot" title="${t('sidebar.incompleteState')}"></div>`;
   }
@@ -1099,6 +1050,8 @@ function _convStatusHtml(f) {
         : `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
   } else if (f.errored) {
     statusTag = `<span class="conv-status-tag conv-status-error" title="${t('sidebar.errorState')}">${t('sidebar.errorTag')}</span>`;
+  } else if (f.waiting) {
+    statusTag = `<span class="conv-status-tag conv-status-waiting" title="${t('sidebar.waitingState')}">${t('sidebar.waitingTag')}</span>`;
   } else if (f.incomplete) {
     statusTag = `<span class="conv-status-tag conv-status-incomplete" title="${t('sidebar.incompleteState')}">${t('sidebar.incompleteTag')}</span>`;
   }
@@ -1118,7 +1071,7 @@ function _applyConvItemStatus(row, c) {
 
   /* Leading dot: it's the first child of .conv-item when present (before
    * .conv-text). Reconcile by comparing the current dot markup. */
-  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot, :scope > .conv-error-dot, :scope > .conv-incomplete-dot');
+  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot, :scope > .conv-error-dot, :scope > .conv-waiting-dot, :scope > .conv-incomplete-dot');
   const curDotHtml = curDot ? curDot.outerHTML : '';
   if (curDotHtml !== dotHtml) {
     if (curDot) curDot.remove();
@@ -1143,15 +1096,14 @@ function _buildConvItemHTML(c, titleHtml, snippetHtml) {
   const eid = escapeHtml(c.id);
   const isActive = c.id === activeConvId ? " active" : "";
   const feishuBadge = c.source === 'feishu' ? `<span class="conv-feishu-badge" title="${t('sidebar.feishuConv')}">Feishu</span>` : '';
-  // Sidebar conversation-summary badge is PAUSED: the feature is unstable
-  // (render location + timing issues) and backend generation is disabled, so
-  // there is nothing to surface. Keep _CONV_SUMMARY_SVG + showConvSummary for
-  // the future revival — do not render the badge for now.
+  const copyBadge = c.clonedFrom ? `<span class="conv-copy-badge" title="${t('sidebar.copyBadgeTip')}">${t('sidebar.copyBadge')}</span>` : '';
+  // Sidebar conversation summaries are paused: backend generation is disabled,
+  // so the row intentionally has no dormant presentation/action surface.
   const summaryBadge = '';
   const _isDebug = typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode;
   const copyIdBtn = _isDebug ? `<button class="conv-action-btn conv-copy-id" data-conv-id="${eid}" title="${t('sidebar.copyConvId')}">${_CONV_CP_SVG}</button>` : '';
   const folderClass = c.folderId ? ' in-folder' : '';
-  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}" draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${summaryBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-rename" data-conv-id="${eid}" title="${t('sidebar.renameConv')}">${_CONV_RENAME_SVG}</button><button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="${t('sidebar.refConv')}">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="${t('sidebar.moveToFolder')}">${_CONV_FOLDER_SVG}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="${t('sidebar.duplicate')}">${_CONV_DUP_SVG}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="${t('sidebar.deleteConv')}">${_CONV_DEL_SVG}</button></div></div>`;
+  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}" draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${summaryBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${copyBadge}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-rename" data-conv-id="${eid}" title="${t('sidebar.renameConv')}">${_CONV_RENAME_SVG}</button><button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="${t('sidebar.refConv')}">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="${t('sidebar.moveToFolder')}">${_CONV_FOLDER_SVG}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="${t('sidebar.duplicate')}">${_CONV_DUP_SVG}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="${t('sidebar.deleteConv')}">${_CONV_DEL_SVG}</button></div></div>`;
 }
 
 function highlightMatch(text, query) {

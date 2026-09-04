@@ -225,6 +225,35 @@ def _json_type_of(value: Any) -> str:
     return 'unknown'
 
 
+def _omit_get_conversation_zero_cursor(
+    tool_name: str,
+    args: dict[str, Any],
+) -> bool:
+    """Remove the common first-page ``before=0`` sentinel, if present.
+
+    ``get_conversation.before`` is an optional, exclusive, 1-based cursor.
+    Models repeatedly emit zero to mean "no cursor / latest page" even though
+    the contract says to omit it. That intent is unique and read-only, so it
+    can be recovered before contract validation. Booleans, negative values,
+    fractions and every other tool/argument remain untouched and fail closed.
+    """
+    if tool_name != 'get_conversation' or 'before' not in args:
+        return False
+    value = args['before']
+    if isinstance(value, bool):
+        return False
+    is_zero = isinstance(value, (int, float)) and value == 0
+    if isinstance(value, str):
+        try:
+            is_zero = int(value.strip()) == 0
+        except (TypeError, ValueError):
+            is_zero = False
+    if not is_zero:
+        return False
+    del args['before']
+    return True
+
+
 # ══════════════════════════════════════════
 #  Public orchestrator
 # ══════════════════════════════════════════
@@ -250,13 +279,14 @@ def validate_then_repair(
     if not isinstance(fn_args, dict):
         return fn_args if isinstance(fn_args, dict) else {}, []
 
-    expected = _expected_types(tool_name)
-    if not expected:
-        return fn_args, []
-
-    required = _required_keys(tool_name)
     repaired: dict[str, Any] = dict(fn_args)
     log: RepairLog = []
+
+    # ── Name-keyed passes: run even with NO indexed schema ──
+    # Structural transforms and the zero-cursor sentinel anchor only on the
+    # tool NAME + payload shape. Gating them on index coverage would let a
+    # missing schema-owner registration (the conv mtdqz4bkuyitzj gap)
+    # silently disable a transform explicitly registered for that name.
 
     # ── Structural transform (right tool, wrong-harness whole-payload shape) ──
     # Runs FIRST: reshapes a foreign payload structure (Claude Code MultiEdit /
@@ -266,10 +296,24 @@ def validate_then_repair(
     if _shape_changed:
         log.append((tool_name, 'structural_transform'))
 
-    # ── Parameter-KEY alias rename (right tool, wrong-harness arg names) ──
-    # Must run BEFORE the type-walk so a renamed key is then type-checked too.
-    repaired, _alias_log = _apply_param_aliases(tool_name, repaired, expected)
-    log.extend(_alias_log)
+    # Value constraints are normally the final ToolContract owner's job. This
+    # one read-only sentinel has a unique non-destructive meaning and was
+    # measured repeatedly in live model calls, so repair it before the new
+    # schema's minimum=1 check. The repair log is audited and shown in the UI.
+    if _omit_get_conversation_zero_cursor(tool_name, repaired):
+        log.append(('before', 'zero_cursor_omission'))
+
+    # ── Index-anchored passes: param aliases + per-key type walk ──
+    # Both anchor on declared properties, so they no-op without an index
+    # entry; contract validation downstream stays fail-closed for those.
+    expected = _expected_types(tool_name)
+    if expected:
+        required = _required_keys(tool_name)
+
+        # ── Parameter-KEY alias rename (wrong-harness arg names) ──
+        # Must run BEFORE the type-walk so a renamed key is type-checked too.
+        repaired, _alias_log = _apply_param_aliases(tool_name, repaired, expected)
+        log.extend(_alias_log)
 
     for key, exp_type in expected.items():
         if key not in repaired:

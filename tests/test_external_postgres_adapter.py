@@ -37,6 +37,11 @@ class _Cursor:
     def execute(self, statement, params=()):
         self.connection.events.append(('execute', statement, params))
 
+    def executemany(self, statement, params):
+        rows = tuple(params)
+        self.connection.events.append(('executemany', statement, rows))
+        self.rowcount = len(rows)
+
     def fetchone(self):
         return self.connection.fetchone_result
 
@@ -68,6 +73,13 @@ class _Pool:
         self.size = size
         self.name = name
         self.closed = False
+
+    def acquire(self, deadline_at):
+        del deadline_at
+        return _Connection(None)
+
+    def release(self, connection, *, broken=False):
+        del connection, broken
 
     def metrics(self):
         return {'pool_available': self.size, 'pool_size': self.size}
@@ -218,6 +230,57 @@ def test_transaction_timeouts_use_parameterizable_set_config(tmp_path):
     assert pool.releases == [(connection, False)]
 
 
+def test_operation_transaction_timeout_override_is_bounded_and_explicit(tmp_path):
+    connection = _Connection(None)
+    backend = postgres.PostgresBackend(
+        _config(tmp_path, allow_schema_migration=False))
+    pool = _TransactionPool(connection)
+
+    assert backend._transaction(
+        pool,
+        lambda _session: 'ok',
+        time.monotonic() + 40,
+        readonly=False,
+        retries=0,
+        transaction_timeout_s=30.0,
+    ) == 'ok'
+
+    set_config = [
+        event for event in connection.events
+        if isinstance(event, tuple)
+        and event[0] == 'execute'
+        and "statement_timeout" in event[1]
+    ]
+    assert 29_000 <= int(set_config[0][2][0]) <= 30_000
+    with pytest.raises(StorageError) as raised:
+        backend._transaction(
+            pool,
+            lambda _session: pytest.fail('invalid budget reached operation'),
+            time.monotonic() + 40,
+            readonly=False,
+            retries=0,
+            transaction_timeout_s=301.0,
+        )
+    assert raised.value.code == 'database_protocol_error'
+
+
+def test_postgres_session_batches_exact_mutations_with_translated_parameters():
+    connection = _Connection(None)
+    session = postgres.PostgresSession(connection)
+
+    affected = session.execute_many_exact(
+        "UPDATE records SET value=? WHERE id=? AND note LIKE '50%'",
+        (("a", "one"), ("b", "two")),
+    )
+
+    assert affected == 2
+    assert connection.events == [(
+        'executemany',
+        "UPDATE records SET value=%s WHERE id=%s AND note LIKE '50%%'",
+        (("a", "one"), ("b", "two")),
+    )]
+
+
 def test_transaction_failure_rolls_back_and_releases_pool_slot(tmp_path):
     connection = _Connection(None)
     backend = postgres.PostgresBackend(
@@ -236,6 +299,85 @@ def test_transaction_failure_rolls_back_and_releases_pool_slot(tmp_path):
     assert raised.value.code == 'database_internal'
     assert 'rollback' in connection.events
     assert pool.releases == [(connection, False)]
+
+
+def test_postgres_command_uses_compact_receipt_and_replays_before_mutation(
+    tmp_path, monkeypatch,
+):
+    from lib.storage_sidecar.receipt_codec import (
+        COMMAND_RECEIPT_LOOKUP_SQL,
+        command_receipt_identity_v2,
+        encode_receipt_response,
+    )
+
+    class ReceiptSession:
+        def __init__(self):
+            self.lookup_rows = []
+            self.lookups = []
+            self.inserts = []
+
+        def fetch_one(self, sql, params=()):
+            assert 'pg_advisory_xact_lock' in sql
+            assert params == ('postgres-receipt-command',)
+            return {'locked': None}
+
+        def fetch_all(self, sql, params=()):
+            self.lookups.append((sql, params))
+            return list(self.lookup_rows)
+
+        def execute(self, sql, params=()):
+            self.inserts.append((sql, params))
+            return 1
+
+    backend = postgres.PostgresBackend(
+        _config(tmp_path, allow_schema_migration=False)
+    )
+    backend._write_pool = object()
+    session = ReceiptSession()
+    monkeypatch.setattr(
+        backend, '_transaction',
+        lambda _pool, operation, _deadline, **_kwargs: operation(session),
+    )
+    operation = 'record.put'
+    digest = 'ab' * 32
+    response = {'ok': True, 'version': 1}
+
+    first = backend.command(
+        operation, digest, 'postgres-receipt-command', 'user',
+        lambda _session: response, time.monotonic() + 1,
+        receipt_required=True,
+    )
+
+    command_key, digest_bytes = command_receipt_identity_v2(
+        'postgres-receipt-command', operation, digest
+    )
+    assert first == response
+    assert session.lookups == [(
+        COMMAND_RECEIPT_LOOKUP_SQL,
+        (
+            operation, digest, 'postgres-receipt-command',
+            operation, digest_bytes, command_key,
+        ),
+    )]
+    assert len(session.inserts) == 1
+    insert_sql, insert_params = session.inserts[0]
+    assert 'INSERT INTO storage_command_receipts_v2' in insert_sql
+    assert insert_params[:3] == (command_key, operation, digest_bytes)
+    assert insert_params[3] == encode_receipt_response(response)
+
+    session.lookup_rows = [{
+        'receipt_format': 'v2',
+        'request_matches': 1,
+        'response_json': encode_receipt_response(response),
+    }]
+    replay = backend.command(
+        operation, digest, 'postgres-receipt-command', 'user',
+        lambda _session: pytest.fail('receipt replay repeated the mutation'),
+        time.monotonic() + 1,
+        receipt_required=True,
+    )
+    assert replay == response
+    assert len(session.inserts) == 1
 
 
 def test_one_shot_migration_takes_lock_commits_then_validates(monkeypatch):

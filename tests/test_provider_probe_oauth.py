@@ -57,23 +57,30 @@ def test_oauth_cell_resolves_live_token_and_uses_x_api_key(monkeypatch):
     captured = {}
     calls = {}
 
-    def _resolve(oauth, body, extra_headers):
+    def _resolve(oauth, body, extra_headers, user_id=''):
         calls['oauth'] = oauth
+        calls['refresh_user_id'] = user_id
         # resolve_oauth_request returns (token, hdrs, body)
         return 'LIVE-TOKEN-123', {'anthropic-beta': 'claude-code-20250219'}, body
 
     monkeypatch.setattr('lib.oauth.outbound.resolve_oauth_request', _resolve)
     monkeypatch.setattr('lib.oauth.outbound.claude_oauth_url', lambda u: u + '?beta=true')
-    monkeypatch.setattr('lib.desktop.egress.route_request',
-                        lambda url, user_id='': 'direct')
+    def _route_request(_url, *, user_id=''):
+        calls['user_id'] = user_id
+        return 'direct'
+
+    monkeypatch.setattr(
+        'lib.desktop.egress.route_request', _route_request)
     _patch_http(monkeypatch, captured, _FakeResp(
         200, '{"content":[{"type":"text","text":"OK"}]}'))
 
     status, detail = pp.probe_one_cell(
         'https://api.anthropic.com/v1', 'oauth-managed', 'claude-opus-4-1',
-        {}, 5, protocol='anthropic', oauth='claude')
+        {}, 5, protocol='anthropic', oauth='claude', owner_user_id=41)
 
     assert calls.get('oauth') == 'claude', 'resolve_oauth_request must be called'
+    assert calls.get('user_id') == '41'
+    assert calls.get('refresh_user_id') == '41'
     assert 'beta=true' in captured['url'], 'claude_oauth_url must add ?beta=true'
     hdrs = captured['headers']
     assert hdrs.get('x-api-key') == 'LIVE-TOKEN-123', 'token must ride x-api-key'
@@ -84,7 +91,7 @@ def test_oauth_cell_resolves_live_token_and_uses_x_api_key(monkeypatch):
 
 def test_oauth_no_token_maps_to_not_logged_in_never_disable(monkeypatch):
     """No live token → neutral 'not_logged_in', recommend_disable False."""
-    def _resolve(oauth, body, extra_headers):
+    def _resolve(oauth, body, extra_headers, user_id=''):
         raise RuntimeError('Claude subscription not logged in')
 
     monkeypatch.setattr('lib.oauth.outbound.resolve_oauth_request', _resolve)
@@ -106,7 +113,7 @@ def test_codex_probe_no_token_is_not_logged_in_never_disable(monkeypatch):
     'not_logged_in' — never recommend-disable. (Hermetic: token resolution
     is mocked empty so no real network happens.)"""
     monkeypatch.setattr('lib.oauth.codex.codex_get_valid_token',
-                        lambda: None)
+                        lambda **_kwargs: None)
     status, detail = pp.probe_one_cell(
         'https://chatgpt.com/backend-api/codex', 'oauth-managed', 'gpt-5-codex',
         {}, 5, protocol='openai', oauth='codex')
@@ -118,7 +125,7 @@ def test_normal_provider_not_routed_through_oauth(monkeypatch):
     """COMPLEMENT: a key-based provider must NOT call resolve_oauth_request."""
     called = {'n': 0}
 
-    def _resolve(oauth, body, extra_headers):
+    def _resolve(oauth, body, extra_headers, user_id=''):
         called['n'] += 1
         raise AssertionError('normal provider must not touch oauth resolution')
 

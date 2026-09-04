@@ -8,6 +8,7 @@ import os
 from collections.abc import Mapping
 from typing import Any, Coroutine
 
+from lib.agent_core.worker_executor import RecoverableAgentExecutor
 from lib.observability import InstrumentedThreadPoolExecutor
 from runtime_guards import deployment_resource_default
 
@@ -54,6 +55,48 @@ def _cleanup_interval(
         return 60
 
 
+def _agent_queue_capacity(
+    workers: int,
+    environ: Mapping[str, str],
+    logger: logging.Logger,
+) -> int:
+    """Resolve a finite local wait queue from the probed worker budget."""
+    default = max(8, min(512, int(workers) * 8))
+    try:
+        configured = int(
+            environ.get('TOFU_AGENT_QUEUE_CAPACITY', '') or default)
+    except (ValueError, TypeError, OverflowError) as exc:
+        logger.debug(
+            '[Server] bad TOFU_AGENT_QUEUE_CAPACITY, using %d: %s',
+            default, exc,
+        )
+        configured = default
+    if configured <= 0:
+        configured = default
+    return max(1, min(4096, configured))
+
+
+def _agent_stuck_replacements(
+    workers: int,
+    environ: Mapping[str, str],
+    logger: logging.Logger,
+) -> int:
+    """Bound physical threads retained while proven-wedged calls unwind."""
+    default = max(1, min(4, (int(workers) + 3) // 4))
+    try:
+        configured = int(
+            environ.get('TOFU_AGENT_STUCK_REPLACEMENTS', '') or default)
+    except (ValueError, TypeError, OverflowError) as exc:
+        logger.debug(
+            '[Server] bad TOFU_AGENT_STUCK_REPLACEMENTS, using %d: %s',
+            default, exc,
+        )
+        configured = default
+    if configured <= 0:
+        configured = default
+    return max(1, min(16, int(workers), configured))
+
+
 def _executor_idle_seconds(
     environ: Mapping[str, str],
     logger: logging.Logger,
@@ -97,7 +140,7 @@ class ServingLoopRuntime:
         self.environ = os.environ if environ is None else environ
         self.logger = logger or logging.getLogger(__name__)
         self.sync_executor: InstrumentedThreadPoolExecutor | None = None
-        self.agent_executor: InstrumentedThreadPoolExecutor | None = None
+        self.agent_executor: RecoverableAgentExecutor | None = None
         self.reaper_task: asyncio.Task[None] | None = None
         self.executor_reaper_task: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -128,8 +171,14 @@ class ServingLoopRuntime:
 
             agent_workers = _worker_count(
                 'TOFU_AGENT_WORKERS', self.environ, self.logger)
-            self.agent_executor = InstrumentedThreadPoolExecutor(
+            agent_queue_capacity = _agent_queue_capacity(
+                agent_workers, self.environ, self.logger)
+            agent_stuck_replacements = _agent_stuck_replacements(
+                agent_workers, self.environ, self.logger)
+            self.agent_executor = RecoverableAgentExecutor(
                 max_workers=agent_workers,
+                queue_capacity=agent_queue_capacity,
+                max_abandoned_workers=agent_stuck_replacements,
                 thread_name_prefix='tofu-agent',
                 metric_pool='agent',
                 idle_retain_threads=0,
@@ -138,8 +187,10 @@ class ServingLoopRuntime:
             set_agent_executor(self.agent_executor)
             set_serving_loop(self.loop)
             self.logger.info(
-                '[Server] Agent-worker executor sized to %d threads',
-                agent_workers)
+                '[Server] Agent-worker executor capacity=%d queue=%d '
+                'stuck_replacements=%d',
+                agent_workers, agent_queue_capacity,
+                agent_stuck_replacements)
 
             from lib.agent_core.push import hub as push_hub
             push_hub.set_loop(self.loop)
@@ -287,8 +338,10 @@ class ServingLoopRuntime:
         if old_agent is not None:
             agent_state = old_agent.idle_retirement_snapshot(idle_seconds)
             if agent_state['due']:
-                replacement_agent = InstrumentedThreadPoolExecutor(
+                replacement_agent = RecoverableAgentExecutor(
                     max_workers=old_agent._max_workers,
+                    queue_capacity=old_agent.queue_capacity,
+                    max_abandoned_workers=old_agent.max_abandoned_workers,
                     thread_name_prefix='tofu-agent',
                     metric_pool='agent',
                     idle_retain_threads=0,
@@ -373,4 +426,9 @@ class ServingLoopRuntime:
             executor.shutdown(wait=False, cancel_futures=True)
 
 
-__all__ = ['ServingLoopRuntime', '_executor_idle_seconds']
+__all__ = [
+    'ServingLoopRuntime',
+    '_agent_queue_capacity',
+    '_agent_stuck_replacements',
+    '_executor_idle_seconds',
+]

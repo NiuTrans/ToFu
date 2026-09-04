@@ -13,16 +13,48 @@ from datetime import datetime, timezone
 
 from lib.json_store import write_text_atomic
 from lib.log import get_logger
+from lib.memory.contracts import (
+    MEMORY_FRONTMATTER_READ_MAX_CHARS,
+    MEMORY_GENERATED_ID_MAX_BYTES,
+    truncate_utf8,
+)
+from lib.memory.resource_policy import memory_metadata_cache_budget
 
 from ._dirs import _ensure_dir
 from ._frontmatter import (
     _build_frontmatter,
+    _copy_metadata_value,
     _coerce_str_list,
     _extract_package_metadata,
     _parse_frontmatter,
 )
+from ._metadata_cache import MemoryFileFingerprint, MemoryMetadataCache
 
 logger = get_logger(__name__)
+
+_metadata_cache_entries, _metadata_cache_bytes = memory_metadata_cache_budget()
+_metadata_cache = MemoryMetadataCache(
+    max_entries=_metadata_cache_entries,
+    max_bytes=_metadata_cache_bytes,
+)
+
+_MEMORY_RECORD_VIEWS = frozenset({'complete', 'retrieval'})
+_MEMORY_RETRIEVAL_RECORD_KEYS = (
+    'id',
+    'name',
+    'description',
+    'enabled',
+    'tags',
+    'scope',
+    'filepath',
+    'is_package',
+    'package_dir',
+    'eligible',
+)
+
+
+class _MemoryEnvelopeLimitError(ValueError):
+    """A frontmatter envelope exceeded its bounded metadata read budget."""
 
 
 # ═══════════════════════════════════════════════════════
@@ -86,8 +118,107 @@ def _check_memory_eligible(mem, owner_user_id=None):
 #  Memory File I/O
 # ═══════════════════════════════════════════════════════
 
+def _read_memory_source(
+    filepath,
+    *,
+    include_body=True,
+    body_char_limit=None,
+):
+    """Read a memory document or only its closed frontmatter envelope.
+
+    Metadata-only list callers do not need the Markdown body.  Stop after the
+    closing ``---`` instead of materializing the remainder; a document without
+    valid opening/closing delimiters has the same empty metadata it would have
+    after a full parse. ``body_char_limit`` reads one bounded body prefix after
+    a bounded frontmatter envelope; omitted limits preserve full detail and
+    mutation behavior for existing durable files.
+    """
+    if body_char_limit is not None:
+        if (isinstance(body_char_limit, bool)
+                or not isinstance(body_char_limit, int)
+                or body_char_limit < 0):
+            raise ValueError('body_char_limit must be a non-negative integer')
+    with open(filepath, encoding='utf-8') as source:
+        if include_body and body_char_limit is None:
+            return source.read()
+
+        first_line_budget = MEMORY_FRONTMATTER_READ_MAX_CHARS
+        if include_body:
+            first_line_budget = min(
+                first_line_budget, max(4, body_char_limit))
+        first_line = source.readline(first_line_budget + 1)
+        if len(first_line) > first_line_budget:
+            if include_body:
+                return first_line[:body_char_limit]
+            if first_line.startswith('---'):
+                raise _MemoryEnvelopeLimitError(
+                    'memory frontmatter exceeds the '
+                    f'{MEMORY_FRONTMATTER_READ_MAX_CHARS:,}-character limit')
+            return ''
+        if first_line.strip() != '---':
+            if not include_body:
+                return ''
+            remaining = max(0, body_char_limit - len(first_line))
+            return (first_line + source.read(remaining))[:body_char_limit]
+
+        frontmatter_lines = [first_line]
+        retained_chars = len(first_line)
+        while retained_chars <= MEMORY_FRONTMATTER_READ_MAX_CHARS:
+            remaining = MEMORY_FRONTMATTER_READ_MAX_CHARS - retained_chars
+            line = source.readline(remaining + 1)
+            if not line:
+                return ''
+            if len(line) > remaining:
+                raise _MemoryEnvelopeLimitError(
+                    'memory frontmatter exceeds the '
+                    f'{MEMORY_FRONTMATTER_READ_MAX_CHARS:,}-character limit')
+            frontmatter_lines.append(line)
+            retained_chars += len(line)
+            if line.strip() == '---':
+                envelope = ''.join(frontmatter_lines)
+                if not include_body:
+                    return envelope
+                return envelope + source.read(body_char_limit)
+        return ''
+
+
+def _memory_file_fingerprint_from_stat(stat) -> MemoryFileFingerprint:
+    """Normalize one stat result into the metadata-cache revision tuple."""
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _memory_file_fingerprint(filepath: str) -> MemoryFileFingerprint:
+    return _memory_file_fingerprint_from_stat(os.stat(filepath))
+
+
+def _validate_memory_record_view(record_view, *, include_body):
+    if record_view not in _MEMORY_RECORD_VIEWS:
+        raise ValueError(
+            "record_view must be 'complete' or 'retrieval'")
+    if record_view == 'retrieval' and include_body:
+        raise ValueError(
+            "record_view='retrieval' requires include_body=False")
+
+
+def _project_memory_record(memory, record_view):
+    if record_view == 'complete':
+        return memory
+    return {
+        key: memory[key]
+        for key in _MEMORY_RETRIEVAL_RECORD_KEYS
+    }
+
+
 def _memory_from_file(filepath, scope='global', package_dir=None,
-                       memory_id_override=None, owner_user_id=None):
+                       memory_id_override=None, owner_user_id=None,
+                       include_body=True, body_char_limit=None,
+                       fingerprint_hint=None, record_view='complete'):
     """Read a single memory file and return a memory dict.
 
     Args:
@@ -100,15 +231,49 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
         memory_id_override: Force a specific id (used for package skills
             where the directory name is the id, not the filename).
         owner_user_id: Optional owner for package credential eligibility.
+        include_body: Read and return the Markdown body.  Summary-list callers
+            set this false so file I/O stops at closed frontmatter.
+        body_char_limit: Optional body-prefix bound for derived ranking or
+            context views. Full durable reads remain the default.
+        fingerprint_hint: Optional stat fingerprint captured from the same
+            directory snapshot. Metadata lists use it to avoid repeating the
+            pre-read stat; a cold read still verifies the post-read revision.
+        record_view: ``complete`` preserves the durable/API record. The
+            metadata-only ``retrieval`` view retains only ranking, eligibility,
+            provenance, and exact-hydration fields.
     """
+    _validate_memory_record_view(record_view, include_body=include_body)
     try:
-        with open(filepath, encoding='utf-8') as f:
-            text = f.read()
-    except OSError:
+        if include_body:
+            if body_char_limit is None:
+                text = _read_memory_source(filepath, include_body=True)
+            else:
+                text = _read_memory_source(
+                    filepath,
+                    include_body=True,
+                    body_char_limit=body_char_limit,
+                )
+            meta, body = _parse_frontmatter(text)
+        else:
+            identity = os.path.abspath(filepath)
+            fingerprint_before = (
+                fingerprint_hint
+                if fingerprint_hint is not None
+                else _memory_file_fingerprint(filepath)
+            )
+            cached, meta = _metadata_cache.lookup_readonly(
+                identity, fingerprint_before)
+            body = ''
+            if not cached:
+                text = _read_memory_source(filepath, include_body=False)
+                meta, _ignored_body = _parse_frontmatter(text)
+                fingerprint_after = _memory_file_fingerprint(filepath)
+                if fingerprint_after == fingerprint_before:
+                    _metadata_cache.store(
+                        identity, fingerprint_after, meta)
+    except (OSError, UnicodeError, _MemoryEnvelopeLimitError):
         logger.debug('Failed to read memory file %s', filepath, exc_info=True)
         return None
-
-    meta, body = _parse_frontmatter(text)
     if memory_id_override:
         memory_id = memory_id_override
     else:
@@ -154,10 +319,12 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
 
     mem = {
         'id': memory_id,
-        'name': meta.get('name', memory_id.replace('_', ' ').replace('-', ' ').title()),
-        'description': meta.get('description', ''),
-        'enabled': meta.get('enabled', True),
-        'tags': meta.get('tags', []),
+        'name': str(_copy_metadata_value(meta.get('name')) or
+                    memory_id.replace('_', ' ').replace('-', ' ').title()),
+        'description': str(_copy_metadata_value(
+            meta.get('description')) or ''),
+        'enabled': _copy_metadata_value(meta.get('enabled', True)),
+        'tags': _coerce_str_list(meta.get('tags')),
         'requires_bins': legacy_bins or pkg_meta['requires_bins'],
         'requires_any_bins': pkg_meta['requires_any_bins'],
         'requires_env': legacy_env or pkg_meta['requires_env'],
@@ -166,8 +333,8 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
         'homepage': pkg_meta['homepage'],
         'primary_env': pkg_meta['primary_env'],
         'install_specs': pkg_meta['install_specs'],
-        'created': meta.get('created', ''),
-        'updated': meta.get('updated', ''),
+        'created': _copy_metadata_value(meta.get('created', '')),
+        'updated': _copy_metadata_value(meta.get('updated', '')),
         'scope': scope,
         'body': body.strip(),
         'filepath': filepath,
@@ -184,7 +351,7 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
         mem, owner_user_id=owner_user_id)
     mem['eligible'] = eligible
     mem['ineligible_reasons'] = reasons
-    return mem
+    return _project_memory_record(mem, record_view)
 
 
 def _write_memory_file(filepath, mem):
@@ -216,7 +383,54 @@ def _write_memory_file(filepath, mem):
 #  List / Load Memories
 # ═══════════════════════════════════════════════════════
 
-def _list_skill_packages_in_dir(dirpath, scope='global'):
+def _sorted_visible_dir_entries(dirpath):
+    """Return one closed, name-sorted DirEntry snapshot; fail soft on I/O."""
+    try:
+        with os.scandir(dirpath) as iterator:
+            return sorted(
+                (entry for entry in iterator
+                 if not entry.name.startswith('.')),
+                key=lambda entry: entry.name,
+            )
+    except OSError:
+        logger.debug('Failed to enumerate memory directory %s', dirpath,
+                     exc_info=True)
+        return []
+
+
+def _memory_package_from_entry(
+    entry,
+    scope,
+    include_body,
+    record_view='complete',
+):
+    """Load one package DirEntry while preserving package/listing gates."""
+    try:
+        if not entry.is_dir(follow_symlinks=False):
+            return None
+    except OSError:
+        return None
+    if scope == 'project' and entry.name == 'global':
+        return None
+    package_dir = entry.path
+    skill_md = os.path.join(package_dir, 'SKILL.md')
+    if not (os.path.isfile(skill_md) and not os.path.islink(skill_md)):
+        return None
+    return _memory_from_file(
+        skill_md,
+        scope=scope,
+        package_dir=package_dir,
+        memory_id_override=entry.name,
+        include_body=include_body,
+        record_view=record_view,
+    )
+
+def _list_skill_packages_in_dir(
+    dirpath,
+    scope='global',
+    include_body=True,
+    record_view='complete',
+):
     """Enumerate skill packages (``<dirpath>/<id>/SKILL.md``) in a directory.
 
     This is the skills-channel view: ONLY package directories are returned,
@@ -228,33 +442,20 @@ def _list_skill_packages_in_dir(dirpath, scope='global'):
     it is enumerated separately as scope='global'.
     """
     packages = []
-    if not os.path.isdir(dirpath):
-        return packages
-
-    for entry in sorted(os.listdir(dirpath)):
-        if entry.startswith('.'):
-            continue
-        full = os.path.join(dirpath, entry)
-
-        # Skip the 'global' sub-directory when listing project scope —
-        # global entries are listed via their own enumeration.
-        if scope == 'project' and entry == 'global' and os.path.isdir(full):
-            continue
-
-        if os.path.isdir(full):
-            skill_md = os.path.join(full, 'SKILL.md')
-            if os.path.isfile(skill_md):
-                mem = _memory_from_file(
-                    skill_md, scope=scope,
-                    package_dir=full,
-                    memory_id_override=entry,
-                )
-                if mem:
-                    packages.append(mem)
+    for entry in _sorted_visible_dir_entries(dirpath):
+        memory = _memory_package_from_entry(
+            entry, scope, include_body, record_view)
+        if memory is not None:
+            packages.append(memory)
     return packages
 
 
-def _list_memories_in_dir(dirpath, scope='global'):
+def _list_memories_in_dir(
+    dirpath,
+    scope='global',
+    include_body=True,
+    record_view='complete',
+):
     """List memories in a directory.
 
     Discovers two physical layouts:
@@ -265,34 +466,81 @@ def _list_memories_in_dir(dirpath, scope='global'):
     The ``global`` sub-directory is excluded when scanning the project
     root — it is enumerated separately as scope='global'.
     """
-    memories = []
-    if not os.path.isdir(dirpath):
-        return memories
+    flat_memories = []
+    package_entries = []
+    for entry in _sorted_visible_dir_entries(dirpath):
+        try:
+            if (entry.name.endswith('.md')
+                    and entry.is_file(follow_symlinks=False)):
+                fingerprint_hint = None
+                if not include_body:
+                    fingerprint_hint = _memory_file_fingerprint_from_stat(
+                        entry.stat(follow_symlinks=False))
+                memory = _memory_from_file(
+                    entry.path,
+                    scope=scope,
+                    include_body=include_body,
+                    fingerprint_hint=fingerprint_hint,
+                    record_view=record_view,
+                )
+                if memory is not None:
+                    flat_memories.append(memory)
+                continue
+            package_entries.append(entry)
+        except OSError:
+            logger.debug('Memory entry disappeared during scan: %s',
+                         entry.path, exc_info=True)
 
-    for entry in sorted(os.listdir(dirpath)):
-        if entry.startswith('.'):
-            continue
-        full = os.path.join(dirpath, entry)
+    packages = []
+    for entry in package_entries:
+        memory = _memory_package_from_entry(
+            entry, scope, include_body, record_view)
+        if memory is not None:
+            packages.append(memory)
+    return flat_memories + packages
 
-        # Skip the 'global' sub-directory when listing project scope —
-        # global memories are listed via their own enumeration.
-        if scope == 'project' and entry == 'global' and os.path.isdir(full):
-            continue
 
-        if os.path.isfile(full) and entry.endswith('.md'):
-            mem = _memory_from_file(full, scope=scope)
-            if mem:
-                memories.append(mem)
-            continue
+def _memory_summary_from_id_in_dir(dirpath, memory_id, scope='global'):
+    """Read one exact flat/package summary without enumerating ``dirpath``.
 
-    memories.extend(_list_skill_packages_in_dir(dirpath, scope=scope))
-    return memories
+    Flat memories precede same-ID packages exactly as
+    :func:`_list_memories_in_dir` does. Hidden entries and symlinks retain the
+    listing contract, and a failed/unreadable flat record does not shadow a
+    readable package with the same ID.
+    """
+    if memory_id.startswith('.'):
+        return None
+
+    flat_path = os.path.join(dirpath, f'{memory_id}.md')
+    if os.path.isfile(flat_path) and not os.path.islink(flat_path):
+        memory = _memory_from_file(
+            flat_path, scope=scope, include_body=False)
+        if memory is not None:
+            return memory
+
+    # Project ``global/`` is a legacy store root, not a package ID; the package
+    # enumerator applies this same exclusion while still allowing global.md.
+    if scope == 'project' and memory_id == 'global':
+        return None
+    package_dir = os.path.join(dirpath, memory_id)
+    if os.path.isdir(package_dir) and not os.path.islink(package_dir):
+        skill_path = os.path.join(package_dir, 'SKILL.md')
+        if os.path.isfile(skill_path) and not os.path.islink(skill_path):
+            return _memory_from_file(
+                skill_path,
+                scope=scope,
+                package_dir=package_dir,
+                memory_id_override=memory_id,
+                include_body=False,
+            )
+    return None
 
 
 def _make_memory_id(name):
-    """Generate a filesystem-safe ID from a memory name."""
+    """Generate a filesystem-safe ID with room for suffixes and ``.md``."""
     safe = re.sub(r'[^\w\s-]', '', name.lower())
     safe = re.sub(r'[\s]+', '_', safe).strip('_')
+    safe = truncate_utf8(safe, MEMORY_GENERATED_ID_MAX_BYTES).rstrip('_-')
     if not safe:
         safe = uuid.uuid4().hex[:8]
     return safe

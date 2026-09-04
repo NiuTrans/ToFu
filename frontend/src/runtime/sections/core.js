@@ -9,7 +9,14 @@ const BASE_PATH = (() => {
 })();
 // Ambient lazy chunks (runtime/scene/*) resolve the prefix from here.
 runtimeScope.BASE_PATH = BASE_PATH;
+/* Idempotent by contract: resolver chains (safeAttachmentUrl → openVideoUrl,
+ * the renderer's resolveMediaUrl port, …) legitimately hand an already-
+ * prefixed URL through apiUrl again. A second concat produced
+ * "/proxy/<port>/proxy/<port>/api/…", which the origin server 404s. */
 function apiUrl(path) {
+  if (BASE_PATH && (path === BASE_PATH || path.startsWith(BASE_PATH + "/"))) {
+    return path;
+  }
   return BASE_PATH + path;
 }
 
@@ -126,6 +133,14 @@ Object.defineProperties(runtimeScope, {
     get: () => conversations,
   },
 });
+// The retained composer restores these four scalars before the image feature
+// is ever requested. Keep the tiny state seam resident while the expensive
+// image presenters and the owner-scoped image Offering list remain demand-loaded.
+let _igSelectedModel = 'gemini-3.1-flash-image-preview';
+let _igSelectedProviderId = '';
+let _igSelectedAspect = '1:1';
+let _igSelectedResolution = '1K';
+let _igSelectedCount = 1;
 let thinkingEnabled = true,
   fetchEnabled = true,
   codeExecEnabled = false,
@@ -172,25 +187,38 @@ let config = _safeJsonParse(
     temperature: 1,
     maxTokens: 128000,
     thinkingBudget: 64000,
-    thinkingEffort: "medium",
+    /* NOTE: no thinkingEffort here — it is a LEGACY preset key read only by
+     * the cost.js migration. Shipping it in the defaults made every fresh
+     * profile "migrate" to a hardcoded model id nobody chose. */
     imageMaxWidth: 0,           // 0 = follow server upload-shrink policy (recommended)
     systemPrompt: "",
-    model: serverModel,
+    model: "",               // "" = 未存储任何选择；占位展示由 cost.js 播种并标记 provisional
   },
 );
+
+/* Whole-config persists must never launder a PROVISIONAL display model into
+ * a stored choice. config.model can hold a placeholder the user never picked
+ * (the hardcoded boot placeholder or the server default, painted by
+ * _applyModelUI with _modelIsProvisional=true); storing it made the next boot
+ * validate a "selection" nobody made — the "aws.claude-opus-4.8 I never
+ * chose" loop. Every localStorage write of claude_client_config goes through
+ * here so a provisional model persists as "" and the next boot flows from
+ * the server default again. */
+function _configForPersist() {
+  if (!config || !config._modelIsProvisional) return config;
+  return Object.assign({}, config, {
+    model: '', modelRef: null, preferredProviderId: '', routing: {},
+  });
+}
+
+/* Lazy bundles (settings-presenters save flow) persist through the same scrub
+ * — expose it on the feature registry so the generated prelude can bind it. */
+runtimeScope._configForPersist = _configForPersist;
 
 /* ── (cost.js, debug_panel.js extracted here) ── */
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-}
-
-/* Shared HH:MM clock formatter for message-bubble timestamps. Accepts an
- * epoch-ms timestamp (or falsy → now) and returns a locale HH:MM string.
- * Extracted from 5 copy-pasted `new Date(...).toLocaleTimeString([], {...})`
- * sites (streaming bubbles / translating bubble / SSE reconnect). */
-function formatClockTime(ts) {
-  return new Date(ts || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 /* Client-side stable message id (Step 1 of unified chatInner rendering).
@@ -203,23 +231,15 @@ function formatClockTime(ts) {
  *
  * `_newClientMsgId()` mints a `tmp_<...>` id distinct from server UUIDs;
  * once the server persists the message and a Phase-2 reload arrives, the
- * server-assigned UUID overrides the temporary id (last-write-wins).
- *
- * `_ensureMsgId(msg)` is idempotent — safe to call repeatedly. */
+ * server-assigned UUID overrides the temporary id (last-write-wins). */
 function _newClientMsgId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return 'tmp_' + crypto.randomUUID();
   }
   return 'tmp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
 }
-function _ensureMsgId(msg) {
-  if (msg && typeof msg === 'object' && !msg._msgId) {
-    msg._msgId = _newClientMsgId();
-  }
-  return msg;
-}
 
-/* ── (escape_html.js, error_envelope.js extracted here) ── */
+/* ── (HTML safety and error presentation now have typed owners) ── */
 
 /* Look up a conversation object by id. Tolerates the `conversations`
  * global not being ready yet (very early init) and returns null when the
@@ -230,6 +250,9 @@ function getConvById(id) {
   if (!id || typeof conversations === "undefined" || !Array.isArray(conversations)) return null;
   return conversations.find((c) => c && c.id === id) || null;
 }
+// Stable read service for lazy domains. The function reads the live retained
+// array on every call; publishing a captured conversation snapshot would drift.
+runtimeScope.getConvById = getConvById;
 function getActiveConv() {
   return getConvById(activeConvId);
 }
@@ -325,9 +348,9 @@ function scrollToBottom(force) {
     return;
   }
   /* PERF: Coalesce scroll updates and use single rAF (not double).
-   * During streaming, updateStreamingUI already runs inside a rAF callback
-   * from twUpdate, so the DOM is already updated.  A single rAF is sufficient
-   * to scroll after layout.  Double-rAF added 33ms of lag per frame. */
+   * During streaming, the authoritative projection has already updated the
+   * DOM. A single rAF is sufficient to scroll after layout; double-rAF added
+   * 33ms of lag per frame. */
   if (_scrollRafId) return; // already scheduled
   _scrollRafId = requestAnimationFrame(() => {
     _scrollRafId = null;

@@ -2,7 +2,7 @@
 """Wire-parity + shipped-source guards for the routes/api_v1/memory.py
 envelope migration (docs/API_CONTRACT.md §7 workflow, exemplar batch).
 
-Two layers, mirroring tests/test_api_response_route_conversions.py:
+Two layers apply the repository's response-envelope contract:
 
 1. PARITY — for each of the 11 converted sites the post-conversion
    ``api_ok``/``api_created``/``api_not_found`` call reproduces the legacy

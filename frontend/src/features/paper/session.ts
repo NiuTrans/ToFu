@@ -1,5 +1,8 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
+
+import { scheduleAnimationFrame } from '../../conversation/ui/animation-frame-scheduler';
 type LooseObject = Record<string, any>;
 type PaperSessionWindow = Window & Record<string, any>;
 
@@ -16,15 +19,6 @@ const PAPER_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" 
 function translate(key: I18nKey, fallback: string): string {
   const value = globals().t?.(key);
   return typeof value === 'string' && value && value !== key ? value : fallback;
-}
-
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (typeof helper === 'function') return String(helper(value));
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
 }
 
 function setModeChrome(active: boolean): void {
@@ -293,7 +287,7 @@ export function setPaperMobileView(view: string): void {
     button.classList.toggle('active', button.dataset.view === selected);
   });
   if (selected === 'pdf' && state._paperPdfDoc && typeof state.paperFitWidth === 'function') {
-    window.requestAnimationFrame(() => {
+    scheduleAnimationFrame(window, () => {
       try { state.paperFitWidth(); }
       catch (error: unknown) { console.warn('[Paper] mobile fit-width failed:', error); }
     });

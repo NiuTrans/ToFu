@@ -134,6 +134,28 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
     return False
 
 
+def find_git_root(path_str):
+    """Nearest ancestor of ``path_str`` (inclusive) containing a ``.git``
+    marker, or ``None`` when no enclosing git work tree exists.
+
+    ``.git`` may be a directory (normal clone) or a file (linked worktree /
+    submodule gitdir pointer) — ``os.path.exists`` covers both.  The first
+    hit walking up wins, so a repo nested inside another repo reports its
+    own root.  Returns ``None`` for non-directories instead of raising so
+    callers can probe optimistically.
+    """
+    current = os.path.abspath(os.path.expanduser(path_str))
+    if not os.path.isdir(current):
+        return None
+    while True:
+        if os.path.exists(os.path.join(current, '.git')):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
 def set_project(path_str, readonly_paths=None):
     """Validate path and register it as the active project.
 
@@ -239,6 +261,33 @@ def set_project_paths(paths, readonly_paths=None):
 
     primary = abs_paths[0]
     extras  = abs_paths[1:]
+
+    # Exact UI reconciliation is a read, not a new project-selection event.
+    # Page boot has two independent freshness owners (conversation hydration
+    # and the status probe), so an identical request may race or retry. Avoid
+    # rotating the undo session, clearing scan counters, checking cross-DC, or
+    # warming the same index when primary, complete root set, and access policy
+    # already match. Any stale/extra/missing root or RO drift falls through to
+    # the existing prune-and-register path below.
+    desired_access = {
+        path: ('ro' if path in _ro_set else 'rw') for path in abs_paths
+    }
+    with _lock:
+        current_access = {
+            state['path']: state.get('access', 'rw')
+            for state in _roots.values()
+        }
+        exact_reconciliation = (
+            _state.get('path') == primary
+            and len(_roots) == len(abs_paths)
+            and current_access == desired_access
+        )
+    if exact_reconciliation:
+        logger.debug(
+            '[Project] set_project_paths: exact reconciliation no-op roots=%d',
+            len(abs_paths),
+        )
+        return get_state()
 
     # 1) Set (or re-set) the primary project.
     #    NOTE: set_project() preserves existing extra roots when the primary

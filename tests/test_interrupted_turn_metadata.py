@@ -70,6 +70,10 @@ class TestTerminalStateLogSummary:
 
 @pytest.mark.unit
 class TestPersistFailureAlwaysLogs:
+    # Saturation-bound: red 3/3 in the full -n 4 unit lane (terminal-metadata
+    # persist path contends with the whole-lane storage sidecar), always
+    # green solo/small-lane; see test_server_async.py for the shared note.
+    @pytest.mark.serial
     def test_persist_failure_logs_terminal_metadata(self, monkeypatch, caplog):
         """When the task_results write throws (pool exhausted), the terminal
         metadata is emitted at ERROR level with persisted=False."""

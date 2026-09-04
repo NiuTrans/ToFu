@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtmlText as escape } from '../../html-safety';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
 import type { I18nKey } from '../../i18n';
 
@@ -82,15 +83,6 @@ function translate(
   values?: Record<string, unknown>,
 ): string {
   return globals().t?.(key, values) || fallback;
-}
-
-function escape(value: unknown): string {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
 }
 
 export function authSourceDomId(domain: string): string {

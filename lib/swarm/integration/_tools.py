@@ -3,7 +3,7 @@
 Routes the swarm-control tools the master LLM may call:
 
   * ``spawn_agents``      — fire-and-forget; returns a handle dict
-  * ``await_agents``      — blocking wait (capped at 120 s)
+  * ``await_agents``      — blocking wait (capped at 60 s)
   * ``get_agent_result``  — pull one agent's full final answer
   * artifact tools        — proxied to the live session's ArtifactStore
 
@@ -24,6 +24,7 @@ from lib import agent_inbox
 from lib.log import get_logger
 from lib.swarm.integration._config import (
     AWAIT_AGENTS_HARD_CAP_SEC,
+    MAX_SESSIONS,
     _persist_config,
     swarm_key_for,
 )
@@ -37,10 +38,18 @@ from lib.swarm.integration._state import (
     _remove_session,
     _sessions_lock,
     _set_session,
+    SwarmSessionCapacityExceeded,
     add_session_alias,
 )
 from lib.swarm.master import MasterOrchestrator
 from lib.swarm.protocol import SubTaskSpec
+from lib.swarm.resource_policy import (
+    swarm_max_agents_per_session,
+    swarm_max_agents_per_wave,
+    swarm_max_parallel,
+    swarm_max_retries,
+)
+from lib.swarm.scheduler import SwarmAgentCapacityExceeded
 from lib.tasks_pkg.manager import task_user_id
 
 logger = get_logger(__name__)
@@ -133,6 +142,41 @@ def _handle_spawn_agents(fn_args: dict, *,
     agents_data = fn_args.get('agents') or []
     if not agents_data:
         return json.dumps({'error': 'no agents specified', 'status': 'error'})
+    if not isinstance(agents_data, list):
+        return json.dumps({
+            'status': 'error',
+            'error': 'invalid_agents',
+            'message': 'agents must be an array.',
+        })
+    wave_limit = swarm_max_agents_per_wave()
+    if len(agents_data) > wave_limit:
+        return json.dumps({
+            'status': 'error',
+            'error': 'swarm_wave_capacity',
+            'limit': wave_limit,
+            'requested': len(agents_data),
+            'message': (
+                f'This deployment allows at most {wave_limit} agents in one '
+                'wave. Combine or prioritize workstreams and retry once.'),
+        })
+
+    parallel_ceiling = swarm_max_parallel()
+    retry_ceiling = swarm_max_retries()
+    try:
+        configured_parallel = int(
+            cfg.get('max_parallel') or parallel_ceiling)
+    except (TypeError, ValueError, OverflowError):
+        configured_parallel = parallel_ceiling
+    try:
+        configured_retries = int(
+            cfg.get('max_retries') if cfg.get('max_retries') is not None
+            else retry_ceiling)
+    except (TypeError, ValueError, OverflowError):
+        configured_retries = retry_ceiling
+    cfg['max_parallel'] = max(
+        1, min(configured_parallel, parallel_ceiling))
+    cfg['max_retries'] = max(
+        0, min(configured_retries, retry_ceiling))
 
     orchestration = task.get('_toolOrchestration')
     orchestration = orchestration if isinstance(orchestration, dict) else {}
@@ -140,7 +184,10 @@ def _handle_spawn_agents(fn_args: dict, *,
         str(orchestration.get('multiAgent') or '').lower() == 'read_only')
     try:
         max_orchestrated_agents = max(1, min(
-            int(orchestration.get('maxConcurrentAgents') or 3), 8))
+            int(orchestration.get('maxConcurrentAgents') or 3),
+            8,
+            wave_limit,
+        ))
     except (TypeError, ValueError):
         max_orchestrated_agents = 3
     if (read_only_orchestration
@@ -158,15 +205,24 @@ def _handle_spawn_agents(fn_args: dict, *,
     if read_only_orchestration:
         from lib.swarm.routing import read_only_swarm_tools
         all_tools = read_only_swarm_tools(task, all_tools)
-        try:
-            configured_parallel = int(cfg.get('max_parallel') or 8)
-        except (TypeError, ValueError):
-            configured_parallel = 8
         cfg['max_parallel'] = max(
             1, min(configured_parallel, max_orchestrated_agents))
 
     specs: list[SubTaskSpec] = []
     for agent_def in agents_data:
+        if not isinstance(agent_def, dict):
+            return json.dumps({
+                'status': 'error',
+                'error': 'invalid_agent',
+                'message': 'Every agents entry must be an object.',
+            })
+        try:
+            requested_retries = int(
+                agent_def.get('max_retries')
+                if agent_def.get('max_retries') is not None
+                else cfg['max_retries'])
+        except (TypeError, ValueError, OverflowError):
+            requested_retries = cfg['max_retries']
         spec = SubTaskSpec(
             role=agent_def.get('role', 'general'),
             objective=agent_def.get('objective', ''),
@@ -181,7 +237,7 @@ def _handle_spawn_agents(fn_args: dict, *,
             # produced a result — the "no result" card, from a second root
             # cause independent of the parallel-tool one.
             id=agent_def.get('id') or str(uuid.uuid4())[:8],
-            max_retries=agent_def.get('max_retries', 1),
+            max_retries=max(0, min(requested_retries, retry_ceiling)),
             model_override=(agent_def.get('model_override')
                             or agent_def.get('model') or ''),
         )
@@ -214,6 +270,19 @@ def _handle_spawn_agents(fn_args: dict, *,
         _remove_session(swarm_key)
         session = None
     if session is not None:
+        session_limit = swarm_max_agents_per_session()
+        retained_agents = len(session.specs)
+        if retained_agents + len(specs) > session_limit:
+            return json.dumps({
+                'status': 'error',
+                'error': 'swarm_session_capacity',
+                'limit': session_limit,
+                'retained': retained_agents,
+                'requested': len(specs),
+                'message': (
+                    f'This live swarm can retain at most {session_limit} '
+                    'agents. Wait for it to settle, then start a new wave.'),
+            })
         existing_contract = ((session._parent_task_proxy.get('config') or {})
                              .get('_toolOrchestration'))
         existing_contract = (existing_contract
@@ -240,7 +309,10 @@ def _handle_spawn_agents(fn_args: dict, *,
             orchestration = existing_contract
             try:
                 max_orchestrated_agents = max(1, min(
-                    int(orchestration.get('maxConcurrentAgents') or 3), 8))
+                    int(orchestration.get('maxConcurrentAgents') or 3),
+                    8,
+                    wave_limit,
+                ))
             except (TypeError, ValueError):
                 max_orchestrated_agents = 3
             if len(agents_data) > max_orchestrated_agents:
@@ -324,6 +396,8 @@ def _handle_spawn_agents(fn_args: dict, *,
         _pin = task.get('_pinned_provider_id')
         if _pin:
             parent_cfg['_pinned_provider_id'] = _pin
+        if task.get('_tenant_id') is not None:
+            parent_cfg['_tenant_id'] = task.get('_tenant_id')
         if read_only_orchestration:
             # Serializable worker contract.  Master copies this into its
             # isolated parent proxy and persistence snapshot; workers then
@@ -342,14 +416,23 @@ def _handle_spawn_agents(fn_args: dict, *,
             on_progress=_emit,
             abort_check=abort_check,
             all_tools=all_tools,
-            max_parallel=cfg.get('max_parallel', 8),
-            max_retries=cfg.get('max_retries', 1),
+            max_parallel=cfg['max_parallel'],
+            max_retries=cfg['max_retries'],
             output_dir=output_dir,
             parent_config=parent_cfg,
             inbox_key=swarm_key,
             on_settled=_on_settled,
         )
-        _set_session(swarm_key, session, task_id=task_id)
+        try:
+            _set_session(swarm_key, session, task_id=task_id)
+        except SwarmSessionCapacityExceeded as exc:
+            session.abort()
+            return json.dumps({
+                'status': 'error',
+                'error': 'swarm_server_busy',
+                'limit': MAX_SESSIONS,
+                'message': str(exc),
+            })
 
         # Persist the session so a server restart can rehydrate + resume it.
         # ``config`` carries everything ``_rehydrate_one`` needs to rebuild the
@@ -370,6 +453,13 @@ def _handle_spawn_agents(fn_args: dict, *,
 
         try:
             session.run_in_background()
+        except SwarmAgentCapacityExceeded as e:
+            _remove_session(swarm_key)
+            return json.dumps({
+                'status': 'error',
+                'error': 'swarm_session_capacity',
+                'message': str(e),
+            })
         except ValueError as e:
             # Cycle detection raised by add_specs
             logger.warning('[Swarm:%s] spawn_agents rejected: %s',
@@ -391,6 +481,12 @@ def _handle_spawn_agents(fn_args: dict, *,
         add_session_alias(task_id, swarm_key)
         try:
             accepted_specs = session._scheduler.add_specs(specs)  # type: ignore[union-attr]
+        except SwarmAgentCapacityExceeded as e:
+            return json.dumps({
+                'status': 'error',
+                'error': 'swarm_session_capacity',
+                'message': str(e),
+            })
         except ValueError as e:
             logger.warning('[Swarm:%s] follow-up spawn rejected: %s',
                            swarm_key, e)

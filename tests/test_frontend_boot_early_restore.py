@@ -22,9 +22,8 @@ source-assertion convention for boot wiring the e2e harness can't exercise):
      pagehide). This is what makes a genuine COLD open restore the SPECIFIC
      last conversation, matching ChatGPT.
 
-  3. main_init_tasks.js — `_ensureNewest()` must NOT repaint over an in-flight
-     first-open skeleton (`_initialSwitchLoad` + `_turnSnapshotRequired` + empty messages),
-     which would flash the generic "Loading conversation…" welcome over it.
+  Typed startup convergence is behavior-tested separately; this file owns only
+  the retained early cache/restore wiring that still lives in main.js.
 """
 import re
 from pathlib import Path
@@ -38,7 +37,6 @@ pytestmark = pytest.mark.unit
 
 REPO = Path(__file__).resolve().parent.parent
 MAIN_JS = Path(runtime_section_path('main.js'))
-INIT_JS = Path(runtime_section_path('main/main_init_tasks.js'))
 
 
 def _strip_js_comments(src: str) -> str:
@@ -123,25 +121,9 @@ def test_last_active_conv_mirrored_to_localstorage_on_leave():
     assert "'pagehide'" in src, "must persist on pagehide (desktop tab close)"
 
 
-def test_ensure_newest_delegates_to_authoritative_surface():
-    """Startup convergence may request a paint but cannot select a renderer.
-
-    The authoritative bridge itself refuses an unhydrated empty TurnStore, so
-    the old message-array skeleton guard no longer belongs in this function.
-    """
-    src = INIT_JS.read_text()
-    m = re.search(r"function _ensureNewest\s*\(\)\s*\{([\s\S]*?)\n\}", src)
-    assert m, "_ensureNewest not found"
-    body = m.group(1)
-    assert 'runtimeScope.requestAuthoritativeConversationRender(c.id)' in body
-    assert 'ConvView' not in body
-    assert 'renderChat' not in body
-
-
 if __name__ == "__main__":
     test_boot_opens_specific_last_conv_when_known_and_cached(); print("PASS specific")
     test_cold_open_falls_back_to_most_recent_cached_conv(); print("PASS cold-open")
     test_restore_id_has_durable_localstorage_fallback(); print("PASS durable-id")
     test_last_active_conv_mirrored_to_localstorage_on_leave(); print("PASS mirror")
-    test_ensure_newest_delegates_to_authoritative_surface(); print("PASS surface-owner")
     print("ALL GREEN")

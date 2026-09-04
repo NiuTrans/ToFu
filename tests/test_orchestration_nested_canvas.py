@@ -12,6 +12,7 @@ from lib.orchestration._execution_projection import render_role_brief
 from lib.orchestration._role_axes import resolve_scope
 from lib.orchestration._subflow_expansion import expand_subflows
 from lib.orchestration._validate import validate_definition
+from tests._runtime_sections import runtime_section
 
 
 pytestmark = pytest.mark.unit
@@ -178,6 +179,6 @@ def test_typed_navigation_and_graph_owners_are_in_the_vite_graph():
     graph = (ROOT / 'frontend/src/features/orchestration/graph.ts').read_text(
         encoding='utf-8')
     assert 'createOrchestrationGraphTools' in graph
-    runtime = (ROOT / 'frontend/src/runtime/app-runtime.js').read_text(encoding='utf-8')
-    assert 'function createOrchestrationNavigationController' in runtime
+    navigation = runtime_section('orchestration-navigation.js', scope_prelude=False)
+    assert 'function createOrchestrationNavigationController' in navigation
     assert not (ROOT / 'lib/js_bundler.py').exists()

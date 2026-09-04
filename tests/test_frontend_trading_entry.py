@@ -22,6 +22,7 @@ Run:  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_frontend_trading_entry.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -72,34 +73,33 @@ def test_trading_entry_starts_hidden():
 
 
 def test_trading_visibility_is_flag_driven_and_applied_at_boot():
-    html = _index()
-    assert '_applyTradingVisibility' in html
+    mcp = _read('frontend', 'src', 'runtime', 'sections', 'settings', 'mcp.js')
     fn = re.search(
-        r'window\._applyTradingVisibility\s*=\s*function\s*\(\)\s*\{(.*?)\n\};',
-        html, re.S)
+        r'function _applyTradingVisibility\(\)\s*\{(.*?)\n\}',
+        mcp, re.S)
     assert fn, '_applyTradingVisibility helper not found'
     body = fn.group(1)
     assert 'trading_enabled' in body, 'visibility must read the trading_enabled flag'
     assert 'tradingModeBtn' in body, 'visibility must target the entry button'
-    # Applied on the boot flag-load path, or the button stays hidden until a
+    # Applied on the boot flag-commit path, or the button stays hidden until a
     # settings save happens to run.
-    loader = re.search(r'async function loadFeatureFlags\(\).*?\}\)\(\);', html, re.S)
-    assert loader and '_applyTradingVisibility' in loader.group(0), (
-        'loadFeatureFlags must apply trading visibility so the entry appears '
-        'on a normal page load'
+    epilogue = _read('frontend', 'src', 'runtime', 'sections', '_epilogue.js')
+    assert 'runtimeScope._applyTradingVisibility?.();' in epilogue, (
+        'the feature-flag commit must apply trading visibility so the entry '
+        'appears on a normal page load'
     )
 
 
 def test_toggling_trading_applies_without_a_reload():
     """The settings save path must re-apply visibility, like the debug toggle."""
-    js = _read('static', 'js', 'settings', 'save_export.js')
+    js = _read('frontend', 'src', 'runtime', 'sections', 'settings', 'save_export.js')
     block = re.search(r'trading_enabled.*?\n\s*\}\n\s*\}', js, re.S)
     assert block, 'trading toggle save block not found'
     # Assert the CALL, not a mention: the surrounding comment names the helper
     # too, so a substring check passed even with the call removed (verified by
     # neutering it).
-    assert re.search(r'window\._applyTradingVisibility\s*\(\s*\)', block.group(0)), (
-        'saving the trading toggle must CALL window._applyTradingVisibility(), '
+    assert re.search(r'_applyTradingVisibility\s*\(\s*\)', block.group(0)), (
+        'saving the trading toggle must CALL _applyTradingVisibility(), '
         'otherwise the change only appears after a manual reload'
     )
 
@@ -114,9 +114,10 @@ def test_no_restart_hint_remains_for_the_trading_toggle():
     for content, where in (
         (_index(), 'index.html'),
         (_general_panel(), 'settings_panels/general.html'),
-        (_read('static', 'js', 'settings', 'core_panel.js'), 'core_panel.js'),
-        (_read('static', 'js', 'settings', 'save_export.js'), 'save_export.js'),
-        (_read('static', 'js', 'i18n.js'), 'i18n.js'),
+        (_read('frontend', 'src', 'runtime', 'sections', 'settings', 'core_panel.js'), 'core_panel.js'),
+        (_read('frontend', 'src', 'runtime', 'sections', 'settings', 'save_export.js'), 'save_export.js'),
+        (_read('frontend', 'src', 'i18n', 'locales', 'zh.json'), 'i18n/zh.json'),
+        (_read('frontend', 'src', 'i18n', 'locales', 'en.json'), 'i18n/en.json'),
     ):
         assert 'tradingRestartHint' not in content, (
             f'{where} still references the removed restart hint')
@@ -148,7 +149,7 @@ def test_topbar_update_button_is_no_longer_visible_chrome():
 
 def test_update_pill_has_one_source_of_truth():
     """Availability is computed once in update.js and mirrored, not re-derived."""
-    upd = _read('static', 'js', 'update.js')
+    upd = _read('frontend', 'src', 'runtime', 'sections', 'update.js')
     assert 'function _renderSettingsUpdatePill' in upd, (
         'update.js should own the settings pill rendering')
     badge = re.search(r'function _renderUpdateBadge\(\)\s*\{(.*?)\n\}', upd, re.S)
@@ -156,7 +157,7 @@ def test_update_pill_has_one_source_of_truth():
         'the topbar badge renderer must also refresh the settings pill, so the '
         'two surfaces cannot disagree about whether an update exists')
 
-    core = _read('static', 'js', 'settings', 'core_panel.js')
+    core = _read('frontend', 'src', 'runtime', 'sections', 'settings', 'core_panel.js')
     assert 'classList.contains(\'has-update\')' not in core, (
         'core_panel.js must not re-derive update availability from the DOM; '
         'call _renderSettingsUpdatePill instead')
@@ -173,14 +174,10 @@ def test_update_card_is_styled():
 
 
 def test_update_i18n_keys_cover_both_languages():
-    i18n = _read('static', 'js', 'i18n.js')
+    zh = json.loads(_read('frontend', 'src', 'i18n', 'locales', 'zh.json'))
+    en = json.loads(_read('frontend', 'src', 'i18n', 'locales', 'en.json'))
     for key in ('settings.aboutUpdate', 'settings.updateTitle',
                 'settings.updateDesc', 'settings.updateCheck',
                 'settings.updateCurrent', 'topbar.trading'):
-        # Match to end-of-line rather than to the first '}': an interpolated
-        # value like '当前版本 v{version}' contains a brace of its own.
-        entry = re.search(re.escape(f"'{key}'") + r':\s*\{(.*)$', i18n, re.M)
-        assert entry, f'missing i18n key: {key}'
-        body = entry.group(1)
-        assert 'zh:' in body and 'en:' in body, (
-            f'{key} must define both zh and en')
+        assert zh.get(key), f'missing/empty zh i18n key: {key}'
+        assert en.get(key), f'missing/empty en i18n key: {key}'

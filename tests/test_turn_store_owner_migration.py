@@ -9,15 +9,65 @@ UI services, but it must never regain its own Turn implementation.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section, runtime_section_names
+from tests._runtime_sections import (
+    native_module_path,
+    runtime_section,
+    runtime_section_names,
+)
 
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
+ROLE_AVATAR_BUNDLE = native_module_path(
+    '.native/role-avatar-icons.js',
+    ROOT / 'frontend/src/core/role-avatar-icons.ts',
+)
+
+
+def test_role_avatar_owner_builds_base_aware_immutable_assets():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node not installed')
+    script = r"""
+const fs = require('fs');
+(0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
+const icons = createRoleAvatarIcons('/tofu');
+console.log(JSON.stringify({ icons, frozen: Object.isFrozen(icons) }));
+"""
+    result = subprocess.run(
+        [node, '-e', script, ROLE_AVATAR_BUNDLE],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload['frozen'] is True
+    expected = {
+        'plannerHtml': ('tofu-planner.svg', 'alt="Planner"'),
+        'criticHtml': ('tofu-critic.svg', 'alt="Critic"'),
+        'workerHtml': ('tofu-worker.svg', 'alt="Worker"'),
+        'userHtml': ('onigiri.svg', 'alt="You"'),
+    }
+    for key, (filename, alt) in expected.items():
+        markup = payload['icons'][key]
+        assert f'/tofu/static/icons/{filename}?v=20260402b' in markup
+        assert alt in markup
+
+
+def test_retained_turn_adapter_uses_only_the_typed_role_asset_port():
+    adapter = runtime_section('main/conversation_turn_store.js')
+    assert 'createRoleAvatarIcons(' in adapter
+    for retired in (
+        '_TOFU_PLANNER_SVG', '_TOFU_CRITIC_SVG',
+        '_TOFU_WORKER_SVG', '_USER_AVATAR_SVG',
+    ):
+        assert retired not in adapter
 
 
 def test_typed_runtime_composes_every_turn_domain_owner():
@@ -78,10 +128,11 @@ def test_loaded_turn_store_intercepts_every_retained_conversation_repaint():
     assert 'renderChat(' not in adapter
 
 
-def test_renderer_identity_is_turn_id_not_message_index():
+def test_renderer_identity_is_projection_id_not_message_index():
     renderer = (ROOT / 'frontend/src/conversation/ui/conversation-surface.ts').read_text(
         encoding='utf-8')
-    assert "directKeyedChildren(turnsContainer, 'turnId')" in renderer
+    assert "directKeyedChildren(turnsContainer, 'presentationId')" in renderer
+    assert 'turnNode.dataset.presentationId = presentationId' in renderer
     assert 'turnNode.dataset.turnId = turn.turnId' in renderer
     assert "directKeyedChildren(containerNode, 'blockId')" in renderer
     assert 'node.dataset.blockId = block.blockId' in renderer
@@ -153,25 +204,3 @@ def test_turn_continue_affordance_reads_only_server_resume_options():
         'finishReason', '_trimmedToolRoundCount',
     ):
         assert retired_inference not in gate
-
-
-def test_autopilot_vu_stream_is_a_transient_turn_not_a_message_writer():
-    source = runtime_section('ui/streaming_render.js')
-
-    assert 'createAutopilotVuTransientTurn({' in source
-    assert 'reduceAutopilotVuTransientTurn(' in source
-    assert 'settleAutopilotVuTransientTurn(' in source
-    assert 'ConversationTransientTurns?.remove?.' in source
-    assert 'ConversationTurnStore' in source
-    assert 'hydrateConversation(conv)' in source
-    for forbidden in (
-        'conv.messages.push(',
-        'conv.messages.splice(',
-        'conv.messages.pop(',
-        'insertAdjacentHTML(',
-        'getElementById("streaming-msg")',
-        'ConvCache.put(conv)',
-        'saveConversations(convId)',
-    ):
-        assert forbidden not in source[:source.index(
-            'function _applyAutopilotRunConcluded')]

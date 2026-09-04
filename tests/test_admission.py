@@ -41,6 +41,17 @@ def test_zero_inflight_config_cannot_disable_production_admission(monkeypatch):
     assert admission._default_max_inflight() == 4
 
 
+def test_personal_override_is_clamped_by_worker_rss_budget(monkeypatch):
+    monkeypatch.setenv('TOFU_MAX_INFLIGHT_TASKS', '99')
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '3072')
+    monkeypatch.setenv('TOFU_TASK_RSS_RESERVE_MB', '1024')
+    monkeypatch.delenv('TOFU_DEPLOYMENT_MODE', raising=False)
+    monkeypatch.setattr(
+        admission, 'deployment_resource_default', lambda *_args: 4)
+
+    assert admission._default_max_inflight() == 2
+
+
 def test_memory_pressure_gate_fails_closed_and_is_disableable(monkeypatch):
     import lib.cgroup_guard as cg
 
@@ -67,6 +78,24 @@ def test_controller_refuses_before_allocating_slot_under_pressure(monkeypatch):
     assert ctrl.try_acquire() is False
     assert ctrl.in_flight == 0
     assert ctrl.stats()['last_refusal_reason'] == 'memory_pressure'
+
+
+def test_process_rss_gate_refuses_even_when_shared_cgroup_is_roomy(monkeypatch):
+    import lib.cgroup_guard as cg
+
+    monkeypatch.setenv('TOFU_ADMISSION_PROCESS_RSS', '1')
+    monkeypatch.setenv('TOFU_ADMISSION_CGROUP_PCT', '99')
+    monkeypatch.setattr(cg, 'process_rss_admission_snapshot', lambda: {
+        'allowed': False,
+        'rss_bytes': 5 * (1 << 30),
+        'reserve_bytes': 1 << 30,
+        'hard_limit_bytes': 6 * (1 << 30),
+        'headroom_bytes': 1 << 30,
+    })
+    monkeypatch.setattr(cg, 'pressure', lambda: {
+        'pct': 10.0, 'usage': 10, 'limit': 100, 'swap': 0})
+
+    assert admission._memory_pressure_allows_admission() is False
 
 
 class AdmissionControllerTest(unittest.TestCase):

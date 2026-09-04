@@ -10,6 +10,9 @@ the consumer usually wants a flat, well-known shape. This module turns
 * ``"anthropic"``       — Claude-style ``{messages: [{role, content: [...]}]}``
 * ``"tofu-native"``     — full event log (no transformation), for callers
                           that want every phase / delta / tool boundary
+* ``"atif"``            — ATIF v1.3 (Agent Trajectory Interchange Format,
+                          harbor RFC 0001); the shape harbor/terminal-bench
+                          trajectory viewers and RL pipelines consume
 
 The ``"tofu-native"`` shape is the most lossless — use it when the
 downstream system understands the rich event vocabulary. The other
@@ -33,7 +36,8 @@ logger = get_logger(__name__)
 __all__ = ['flatten', 'AVAILABLE_FORMATS']
 
 
-AVAILABLE_FORMATS = ('sharegpt', 'openai-finetune', 'anthropic', 'tofu-native')
+AVAILABLE_FORMATS = ('sharegpt', 'openai-finetune', 'anthropic', 'tofu-native',
+                     'atif')
 
 
 def _coerce_text(content: Any) -> str:
@@ -210,6 +214,97 @@ def _to_tofu_native(task: dict) -> dict:
     }
 
 
+def _to_atif(task: dict) -> dict:
+    """ATIF v1.3 — Agent Trajectory Interchange Format (harbor RFC 0001).
+
+    Steps: input messages become ``system`` / ``user`` steps; each tool
+    round becomes an ``agent`` step carrying its ``tool_calls`` and the
+    ``observation`` they produced; the terminal assistant message closes
+    the trajectory. Token usage lands in ``final_metrics`` (tofu tracks
+    usage per task, not per round, so per-step ``metrics`` stay absent).
+    """
+    import json as _json
+
+    steps: list[dict] = []
+    _sid = 0
+
+    def _next_id() -> int:
+        nonlocal _sid
+        _sid += 1
+        return _sid
+
+    for m in _input_messages(task):
+        role = m.get('role', 'user')
+        steps.append({
+            'step_id': _next_id(),
+            'source': 'system' if role == 'system' else 'user',
+            'message': _coerce_text(m.get('content')),
+        })
+
+    for rnd in (task.get('toolRounds') or []):
+        if not isinstance(rnd, dict):
+            continue
+        step: dict = {'step_id': _next_id(), 'source': 'agent', 'message': ''}
+        calls = []
+        for tc in (rnd.get('tool_calls') or []):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get('function') or {}
+            try:
+                args = _json.loads(fn.get('arguments') or '{}')
+            except (ValueError, TypeError):
+                args = {}
+            calls.append({
+                'tool_call_id': tc.get('id') or '',
+                'function_name': fn.get('name') or '',
+                'arguments': args if isinstance(args, dict) else {'_raw': args},
+            })
+        if calls:
+            step['tool_calls'] = calls
+        results = []
+        for r in (rnd.get('results') or []):
+            if not isinstance(r, dict):
+                continue
+            results.append({
+                'source_call_id': r.get('tool_call_id') or r.get('id') or '',
+                'content': _coerce_text(r.get('result') or r.get('content') or ''),
+            })
+        if results:
+            step['observation'] = {'results': results}
+        steps.append(step)
+
+    final_step: dict = {
+        'step_id': _next_id(),
+        'source': 'agent',
+        'message': task.get('content') or '',
+    }
+    if task.get('thinking'):
+        final_step['reasoning_content'] = task['thinking']
+    steps.append(final_step)
+
+    try:
+        from lib.version import __version__ as _ver
+    except ImportError:
+        _ver = 'unknown'
+    agent: dict = {'name': 'tofu-agent', 'version': _ver}
+    if task.get('model'):
+        agent['model_name'] = task['model']
+
+    usage = task.get('usage') or {}
+    final_metrics: dict = {'total_steps': len(steps)}
+    if usage.get('input_tokens') is not None:
+        final_metrics['total_prompt_tokens'] = usage['input_tokens']
+    if usage.get('output_tokens') is not None:
+        final_metrics['total_completion_tokens'] = usage['output_tokens']
+
+    return {
+        'schema_version': 'ATIF-v1.3',
+        'session_id': str(task.get('id') or ''),
+        'agent': agent,
+        'steps': steps,
+        'final_metrics': final_metrics,
+    }
+
 def flatten(task: dict, fmt: str) -> dict:
     """Convert a finished (or in-flight) task into ``fmt``.
 
@@ -231,6 +326,8 @@ def flatten(task: dict, fmt: str) -> dict:
         body = _to_anthropic(task)
     elif fmt == 'tofu-native':
         body = _to_tofu_native(task)
+    elif fmt == 'atif':
+        body = _to_atif(task)
     else:
         raise ValueError(
             f'unknown trajectory format: {fmt!r}; '

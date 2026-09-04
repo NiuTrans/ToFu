@@ -11,6 +11,7 @@ let readRuntime: RuntimeReader = (name) => {
   return (window as unknown as Record<string, unknown>)[name];
 };
 let writeRuntime: RuntimeWriter = () => undefined;
+let runtimeConnected = false;
 
 /** Inject the retained runtime port from the main entry without making every
  * independently testable feature owner import the whole application shell. */
@@ -20,6 +21,7 @@ export function connectFeatureRuntime(
 ): void {
   readRuntime = reader;
   writeRuntime = writer;
+  runtimeConnected = true;
   // A test harness or an alternate entry may connect after feature modules
   // have evaluated. Replay their already-registered owners into the injected
   // service table so connection order never changes the resulting graph.
@@ -52,4 +54,24 @@ export const featureRegistry = new Proxy(overrides, {
 
 export function getFeatureBinding(name: string): unknown {
   return featureRegistry[name];
+}
+
+/** Read mutable retained state without letting a registered feature owner
+ * shadow its live accessor. Use this only for state whose retained section is
+ * still authoritative; feature commands continue to resolve via registry. */
+export function readLiveRuntimeBinding(name: string): unknown {
+  return readRuntime(name);
+}
+
+/** Update mutable retained state through its injected writer. Isolated owner
+ * harnesses connect later (or not at all), so their window remains the safe
+ * pre-connection state port without publishing feature owners there. */
+export function writeLiveRuntimeBinding(name: string, value: unknown): void {
+  if (runtimeConnected) {
+    writeRuntime(name, value);
+    return;
+  }
+  if (typeof window !== 'undefined') {
+    (window as unknown as Record<string, unknown>)[name] = value;
+  }
 }

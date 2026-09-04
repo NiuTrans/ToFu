@@ -588,6 +588,10 @@ def test_narrate_loose_pads_short_audio(monkeypatch, tmp_path):
     e = res['scenes'][0]
     assert e['target_duration'] == pytest.approx(3.0)  # stays at srt span
     assert e['audio_duration'] == pytest.approx(1.0)
+    assert res['manifest_version'] == 2
+    assert res['request']['alignment'] == 'loose'
+    assert len(e['text_sha256']) == len(e['wav_sha256']) == 64
+    assert e['wav_bytes'] == os.path.getsize(e['wav'])
     # WAV is silence-padded to the target duration.
     with open(e['wav'], 'rb') as f:
         assert _tts_mod.wav_duration(f.read()) == pytest.approx(3.0, abs=0.02)
@@ -630,6 +634,170 @@ def test_narrate_abort_between_chunks(monkeypatch, tmp_path):
     with pytest.raises(mv.NarrationAborted):
         mv.synthesize_scene_narrations([_scene('s', 0, 3, '一二三四五六七八')],
                                        str(tmp_path), abort_event=abort)
+
+
+def test_narrate_scenes_overlap_with_bounded_ordered_results(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv('TOFU_PRODUCTION_TTS_FANOUT', '2')
+    monkeypatch.setattr('lib.tts.tts_available', lambda: True)
+    monkeypatch.setattr('lib.tts.max_input_chars', lambda: 4000)
+    lock = threading.Lock()
+    first_pair = threading.Barrier(2)
+    state = {'issued': 0, 'active': 0, 'peak': 0}
+    progress = []
+
+    def synthesize(text, *, voice=None, fmt=None, speed=None):
+        with lock:
+            index = state['issued']
+            state['issued'] += 1
+            state['active'] += 1
+            state['peak'] = max(state['peak'], state['active'])
+        try:
+            if index < 2:
+                first_pair.wait(timeout=2)
+            return _tts_mod.SynthesizeResult(
+                audio_bytes=_tts_mod.silence_wav_bytes(1.0),
+                mime='audio/wav', model='fake-tts', provider_id='fake',
+                voice=voice or 'fake')
+        finally:
+            with lock:
+                state['active'] -= 1
+
+    monkeypatch.setattr('lib.tts.synthesize', synthesize)
+    scenes = [_scene(f'scene-{index:03d}', index * 3, (index + 1) * 3,
+                     f'第{index}幕。') for index in range(3)]
+    result = mv.synthesize_scene_narrations(
+        scenes, str(tmp_path),
+        on_scene_done=lambda done, total, scene_id: progress.append(
+            (done, total, scene_id)))
+
+    assert result['ok'] and state['peak'] == 2
+    assert [row['scene_id'] for row in result['scenes']] == [
+        'scene-000', 'scene-001', 'scene-002']
+    assert [item[0] for item in progress] == [1, 2, 3]
+
+
+def test_narrate_failure_stops_serial_scene_admission(monkeypatch, tmp_path):
+    monkeypatch.setattr('lib.tts.tts_available', lambda: True)
+    monkeypatch.setattr('lib.tts.max_input_chars', lambda: 4000)
+    calls = []
+
+    def fail(_chunk, **kwargs):
+        calls.append('attempt')
+        raise RuntimeError('tts failed')
+
+    monkeypatch.setattr(maudio, '_synth_chunk_with_retry', fail)
+    scenes = [_scene(f'scene-{index}', index * 3, (index + 1) * 3, '旁白。')
+              for index in range(3)]
+    with pytest.raises(RuntimeError, match='tts failed'):
+        mv.synthesize_scene_narrations(
+            scenes, str(tmp_path), max_workers=1)
+    assert calls == ['attempt']
+
+
+def test_narrate_failure_removes_completed_scene_wavs(monkeypatch, tmp_path):
+    monkeypatch.setattr('lib.tts.tts_available', lambda: True)
+    monkeypatch.setattr('lib.tts.max_input_chars', lambda: 4000)
+    calls = []
+
+    def synthesize(_chunk, **kwargs):
+        calls.append('attempt')
+        if len(calls) == 2:
+            raise RuntimeError('second scene failed')
+        return _tts_mod.silence_wav_bytes(1.0)
+
+    monkeypatch.setattr(maudio, '_synth_chunk_with_retry', synthesize)
+    scenes = [_scene('scene-a', 0, 3, '甲。'),
+              _scene('scene-b', 3, 6, '乙。')]
+    with pytest.raises(RuntimeError, match='second scene failed'):
+        mv.synthesize_scene_narrations(
+            scenes, str(tmp_path), max_workers=2)
+    assert calls == ['attempt', 'attempt']
+    assert list(tmp_path.glob('*.wav')) == []
+
+
+def test_narrate_abort_prevents_chunk_retry(monkeypatch):
+    abort = threading.Event()
+    calls = []
+
+    def interrupted(*args, **kwargs):
+        calls.append('attempt')
+        abort.set()
+        raise RuntimeError('interrupted')
+
+    monkeypatch.setattr('lib.tts.synthesize', interrupted)
+    with pytest.raises(mv.NarrationAborted):
+        maudio._synth_chunk_with_retry(
+            '旁白', voice=None, fmt='wav', speed=None, abort_event=abort)
+    assert calls == ['attempt']
+
+
+def test_narrate_rejects_mismatched_provider_wav_parameters(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr('lib.tts.tts_available', lambda: True)
+    monkeypatch.setattr('lib.tts.max_input_chars', lambda: 4000)
+
+    def synthesize(text, *, voice=None, fmt=None, speed=None):
+        rate = 8000 if '甲' in text else 16000
+        return _tts_mod.SynthesizeResult(
+            audio_bytes=_tts_mod.silence_wav_bytes(1.0, framerate=rate),
+            mime='audio/wav', model='fake-tts', provider_id='fake',
+            voice=voice or 'fake')
+
+    monkeypatch.setattr('lib.tts.synthesize', synthesize)
+    result = mv.synthesize_scene_narrations(
+        [_scene('a', 0, 3, '甲。'), _scene('b', 3, 6, '乙。')],
+        str(tmp_path), max_workers=2)
+
+    assert result['ok'] is False and result['degraded'] is True
+    assert 'parameter mismatch' in result['detail']
+    assert list(tmp_path.glob('*.wav')) == []
+
+
+def test_narrate_scene_count_is_bounded_before_tts(monkeypatch, tmp_path):
+    monkeypatch.setattr('lib.tts.tts_available', lambda: True)
+    scenes = [_scene(str(index), index, index + 1, '旁白。')
+              for index in range(17)]
+    result = mv.synthesize_scene_narrations(scenes, str(tmp_path))
+    assert result['ok'] is False and '16-scene limit' in result['detail']
+
+
+def test_narrate_rejects_unsafe_or_duplicate_ids_before_tts(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr('lib.tts.tts_available', lambda: True)
+    monkeypatch.setattr('lib.tts.max_input_chars', lambda: 4000)
+    calls = []
+    monkeypatch.setattr(
+        'lib.tts.synthesize', lambda *args, **kwargs: calls.append(args))
+
+    unsafe = mv.synthesize_scene_narrations(
+        [_scene('../escape', 0, 1, '旁白。')], str(tmp_path))
+    duplicate = mv.synthesize_scene_narrations(
+        [_scene('same', 0, 1, '甲。'), _scene('same', 1, 2, '乙。')],
+        str(tmp_path))
+
+    assert unsafe['ok'] is False and 'unsafe' in unsafe['detail']
+    assert duplicate['ok'] is False and 'duplicate' in duplicate['detail']
+    assert calls == []
+
+
+def test_narrate_aggregate_budget_cleans_written_wavs(monkeypatch, tmp_path):
+    _fake_tts(monkeypatch, chunk_seconds=1.0)
+    monkeypatch.setattr(maudio, '_MAX_NARRATION_DISK_BYTES', 120_000)
+    result = mv.synthesize_scene_narrations(
+        [_scene('a', 0, 3, '甲。'), _scene('b', 3, 6, '乙。')],
+        str(tmp_path), max_workers=1)
+
+    assert result['ok'] is False and result['degraded'] is True
+    assert 'retain' in result['detail']
+    assert list(tmp_path.glob('*.wav')) == []
+
+
+def test_narrate_rejects_nonpositive_worker_limit(monkeypatch, tmp_path):
+    _fake_tts(monkeypatch)
+    with pytest.raises(ValueError, match='positive integer'):
+        mv.synthesize_scene_narrations(
+            [_scene('scene', 0, 1, '旁白。')], str(tmp_path), max_workers=0)
 
 
 def test_narrate_neuter_padding_proves_loadbearing(monkeypatch, tmp_path):

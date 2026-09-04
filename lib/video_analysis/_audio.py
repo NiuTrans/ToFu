@@ -65,7 +65,9 @@ def _extract_audio(video_path: str, scratch_dir: str, duration_s: float) -> tupl
     return None
 
 
-def transcribe_track(video_path: str, scratch_dir: str, duration_s: float) -> dict:
+def transcribe_track(video_path: str, scratch_dir: str, duration_s: float, *,
+                     owner_user_id: int | None = None,
+                     tenant_id: str | None = None) -> dict:
     """Extract + transcribe the audio track.
 
     Returns ``{text, status, model}`` — see the module docstring for statuses.
@@ -73,7 +75,13 @@ def transcribe_track(video_path: str, scratch_dir: str, duration_s: float) -> di
     """
     from lib import transcription as stt
 
-    if not stt.transcription_available():
+    available = (
+        stt.transcription_available()
+        if owner_user_id is None
+        else stt.transcription_available(
+            owner_user_id=owner_user_id, tenant_id=tenant_id)
+    )
+    if not available:
         logger.info('[VideoAudio] no transcription slot configured — skipping')
         return {'text': '', 'status': 'unavailable', 'model': ''}
 
@@ -83,11 +91,24 @@ def transcribe_track(video_path: str, scratch_dir: str, duration_s: float) -> di
     audio_bytes, ext = extracted
 
     try:
-        result = stt.transcribe(audio_bytes, f'track.{ext}', None)
+        if owner_user_id is None:
+            result = stt.transcribe(audio_bytes, f'track.{ext}', None)
+        else:
+            result = stt.transcribe(
+                audio_bytes,
+                f'track.{ext}',
+                None,
+                owner_user_id=owner_user_id,
+                tenant_id=tenant_id,
+            )
     except stt.TranscriptionError as e:
         logger.warning('[VideoAudio] transcription failed: %s (status=%s)',
                        e.detail, e.status)
-        return {'text': '', 'status': 'failed', 'model': ''}
+        return {
+            'text': '',
+            'status': 'unavailable' if e.status == 503 else 'failed',
+            'model': '',
+        }
     except Exception as e:
         logger.error('[VideoAudio] transcription unexpected error: %s', e, exc_info=True)
         return {'text': '', 'status': 'failed', 'model': ''}

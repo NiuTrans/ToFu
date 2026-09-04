@@ -9,6 +9,7 @@ import time
 from lib.agent_core.events import EventType, build_event
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
+from lib.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 
 from lib.tasks_pkg.manager.runtime import (
     chat_task_runtime,
@@ -84,7 +85,7 @@ def cleanup_old_tasks():
     now = time.time()
     finished_ids: set = set()
     for task in chat_task_runtime.snapshot():
-        if task['status'] in ('done', 'error', 'aborted'):
+        if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
             finished_at = task.get('finished_at')
             # Fall back to created_at for records completed by an external
             # terminal policy that predates ``finished_at``.
@@ -109,6 +110,19 @@ def cleanup_old_tasks():
         reap_stuck_running_tasks()
     except Exception as e:
         logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e, exc_info=True)
+    # Cross-surface execution deadline audit. It only raises the canonical
+    # cancellation flag; the owning provider/task path remains responsible for
+    # unwinding and exactly-once resource settlement.
+    try:
+        from lib.agent_core.execution_session import (
+            reconcile_overdue_execution_sessions,
+        )
+        reconcile_overdue_execution_sessions()
+    except Exception as e:
+        logger.warning(
+            '[Manager] execution deadline reconciliation failed: %s', e,
+            exc_info=True,
+        )
     # Queue-lease reaper (rides the same tick, ): reclaim leases
     #   orphaned by a crash/exception mid-dispatch and re-dispatch them, so a
     #   queued human message is retried automatically instead of silently lost.
@@ -180,8 +194,8 @@ def shed_memory_under_pressure() -> dict:
     When the cgroup nears its limit AND our own RSS is a meaningful share of
     it, this is called to shed memory BEFORE the kernel OOM-killer fires:
 
-      1. Evict EVERY terminal (done/error/aborted) chat task immediately
-         (``cleanup_stale(max_age=0)``) — bypassing the ttl=3600s retention.
+      1. Evict every terminal chat task immediately
+         (``cleanup_stale(max_age=0)``), bypassing its normal hot-retention TTL.
          The durable result already lives in the DB; a late poller rebuilds
          from ``task_results``. This drops the released-``messages`` tasks and
          everything else finished, right now.
@@ -201,7 +215,7 @@ def shed_memory_under_pressure() -> dict:
         finished_ids = {
             str(task.get('id') or '')
             for task in chat_task_runtime.snapshot()
-            if task.get('status') in ('done', 'error', 'aborted')
+            if task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
         }
         evicted = chat_task_runtime.cleanup_stale(max_age=0)
         if finished_ids:
@@ -405,6 +419,31 @@ def reap_stuck_running_tasks() -> int:
                        t['id'][:8], (t.get('convId') or '')[:8],
                        now - t.get('created_at', now), t.get('_reap_had_output'))
         _finalize_reaped_stuck_task(t)
+        try:
+            from lib.tasks_pkg.spawn import (
+                abandon_running_task,
+                agent_scheduling_snapshot,
+            )
+
+            recovered = abandon_running_task(str(t.get('id') or ''))
+            if recovered:
+                logger.warning(
+                    '[Task %s] quarantined wedged worker; bounded replacement '
+                    'restored one agent execution slot',
+                    str(t.get('id') or '')[:8],
+                )
+            elif agent_scheduling_snapshot(
+                    str(t.get('id') or '')).get('taskState') == 'running':
+                logger.error(
+                    '[Task %s] wedged worker was finalized but no replacement '
+                    'slot was available; inspect executor abandonment metrics',
+                    str(t.get('id') or '')[:8],
+                )
+        except Exception as error:
+            logger.error(
+                '[Task %s] executor capacity recovery failed: %s',
+                str(t.get('id') or '')[:8], error, exc_info=True,
+            )
     if stuck:
         logger.warning('[Manager] reap_stuck_running_tasks force-failed %d wedged task(s)',
                        len(stuck))

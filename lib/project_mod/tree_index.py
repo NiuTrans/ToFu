@@ -24,10 +24,11 @@ Freshness model
   synchronously via :func:`note_write` (hooked from the write-freshness
   choke point), so agent-authored changes are visible immediately.
 * Anything else (git checkout, external editors) is picked up by a
-  stale-while-revalidate refresh: entries older than ``STALE_AFTER_S`` are
-  served instantly while a background rebuild is kicked; entries older than
-  ``MAX_AGE_S`` are no longer trusted and the caller falls back to the live
-  subprocess walk (rg/fd), exactly as before this module existed.
+  stale-while-revalidate refresh. A changed candidate snapshot refreshes again
+  after ``STALE_AFTER_S``; byte-identical path+size snapshots back off to a
+  bounded stable interval. Reads past the base interval carry explicit age
+  evidence. Entries older than ``MAX_AGE_S`` are no longer trusted and the
+  caller falls back to the live subprocess walk.
 * A ``.gitignore`` write invalidates the index outright (ignore rules are
   baked into the candidate list).
 
@@ -95,6 +96,25 @@ def _stale_after_s():
 # Entries older than this are NOT served; caller falls back to the live walk.
 def _max_age_s():
     return _env_float('TOFU_TREE_INDEX_MAX_AGE_S', 900.0)
+
+
+def _stable_refresh_max_s():
+    """Maximum refresh interval after unchanged path+size snapshots.
+
+    Keep at least one refresh opportunity before MAX_AGE whenever the operator
+    has configured a coherent max age. The 180-second default is deliberately
+    conservative: it removes 45-second rebuild loops without turning this
+    eventually-consistent accelerator into a long-lived authority.
+    """
+    base = _stale_after_s()
+    configured = _env_float(
+        'TOFU_TREE_INDEX_STABLE_REFRESH_MAX_S',
+        180.0,
+        minimum=1.0,
+        maximum=900.0,
+    )
+    freshness_ceiling = max(base, _max_age_s() * 0.8)
+    return max(base, min(configured, freshness_ceiling))
 
 
 def _max_entries():
@@ -313,19 +333,23 @@ def _whitelisted(rel, contexts):
 # ═══════════════════════════════════════════════════════
 
 class TreeIndex:
-    """Immutable snapshot of one project's file list.
+    """Columnar snapshot of one project's file list.
 
     ``paths`` is a SORTED list of project-relative '/'-joined file paths;
     ``sizes`` / ``mtimes`` are parallel ``array('q')`` columns.  Kept as
     columnar arrays so a 500k-file index loads from disk in ~0.1s and stays
-    compact in RAM.
+    compact in RAM. Synchronized writes mutate those columns under ``_lock``;
+    the revision pair prevents an older asynchronous persist from committing
+    after such a mutation.
     """
 
     __slots__ = ('root', 'paths', 'sizes', 'mtimes', 'built_at', 'complete',
-                 'root_rules')
+                 'root_rules', 'refresh_after_s', 'unchanged_refreshes',
+                 'mutation_revision', 'persisted_revision')
 
     def __init__(self, root, paths, sizes, mtimes, built_at, complete,
-                 root_rules=None):
+                 root_rules=None, *, refresh_after_s=None,
+                 unchanged_refreshes=0, persisted_revision=-1):
         self.root = root
         self.paths = paths
         self.sizes = sizes
@@ -335,6 +359,11 @@ class TreeIndex:
         # Root-scope ignore rules (4-regex tuple) — retained so the write
         # hook can refuse to admit files that the index policy excludes.
         self.root_rules = root_rules or (None, None, None, None)
+        self.refresh_after_s = float(
+            _stale_after_s() if refresh_after_s is None else refresh_after_s)
+        self.unchanged_refreshes = max(0, int(unchanged_refreshes))
+        self.mutation_revision = 0
+        self.persisted_revision = int(persisted_revision)
 
     def age(self):
         return time.time() - self.built_at
@@ -385,6 +414,13 @@ def background_builder_snapshot():
             'retainedEntries': sum(len(entry.paths) for entry in _mem.values()),
             'rootCapacity': _mem_roots(),
             'entryCapacity': _max_entries(),
+            'stableRefreshMaxSeconds': _stable_refresh_max_s(),
+            'maxScheduledRefreshSeconds': max(
+                (entry.refresh_after_s for entry in _mem.values()),
+                default=0.0,
+            ),
+            'unchangedRefreshes': sum(
+                entry.unchanged_refreshes for entry in _mem.values()),
         }
 
 
@@ -523,15 +559,40 @@ def _build_sync(root, *, scan_executor=None):
         paths = [r[0] for r in rows]
         sizes = array.array('q', (r[1] for r in rows))
         mtimes = array.array('q', (r[2] for r in rows))
-        entry = TreeIndex(root, paths, sizes, mtimes, time.time(), True,
-                          _compile_gitignore(root))
+        root_rules = _compile_gitignore(root)
         with _lock:
+            previous = _mem.get(root)
+            unchanged = bool(
+                previous is not None
+                and previous.complete
+                and previous.paths == paths
+                and previous.sizes == sizes
+            )
+            if unchanged:
+                unchanged_refreshes = previous.unchanged_refreshes + 1
+                refresh_after_s = min(
+                    _stable_refresh_max_s(),
+                    max(_stale_after_s(), previous.refresh_after_s * 2),
+                )
+            else:
+                unchanged_refreshes = 0
+                refresh_after_s = _stale_after_s()
+            entry = TreeIndex(
+                root, paths, sizes, mtimes, time.time(), True,
+                root_rules,
+                refresh_after_s=refresh_after_s,
+                unchanged_refreshes=unchanged_refreshes,
+            )
             _mem[root] = entry
             _mem_move_to_end(root)
             _evict_mem_over_cap()
         _persist(entry)
         elapsed = time.perf_counter() - t0
-        logger.info('[TreeIndex] built %s: %d files in %.1fs', root, len(paths), elapsed)
+        logger.info(
+            '[TreeIndex] built %s: %d files in %.1fs '
+            '(unchanged=%d refresh_after=%.0fs)',
+            root, len(paths), elapsed, unchanged_refreshes, refresh_after_s,
+        )
     except Exception as e:
         logger.warning('[TreeIndex] build failed for %s: %s', root, e, exc_info=True)
     finally:
@@ -561,9 +622,52 @@ def _finish_builder_job(root, builder, scanner):
         builder_to_shutdown.shutdown(wait=False, cancel_futures=False)
 
 
+def _restore_disk_candidate_before_build(root):
+    """Restore an evicted local snapshot inside the background worker.
+
+    Direct ``warm`` callers do not pass through :func:`acquire`, so an LRU
+    miss previously scheduled a full project walk even when a fresh local
+    blob existed.  A stale-but-still-trusted blob is installed for immediate
+    stale-while-revalidate service, but only a base-fresh blob suppresses the
+    walk.  Disk I/O therefore stays off the request thread.
+    """
+    with _lock:
+        current = _mem.get(root)
+        if current is not None:
+            return bool(
+                current.complete
+                and current.age() <= current.refresh_after_s
+            )
+    restored = _load_disk(root)
+    if (restored is None or not restored.complete
+            or restored.age() > _max_age_s()):
+        return False
+    with _lock:
+        current = _mem.get(root)
+        if current is None:
+            _mem[root] = restored
+            _mem_move_to_end(root)
+            _evict_mem_over_cap()
+            current = _mem.get(root)
+        else:
+            _mem_move_to_end(root)
+        fresh = bool(
+            current is not None
+            and current.complete
+            and current.age() <= current.refresh_after_s
+        )
+    if fresh:
+        logger.debug(
+            '[TreeIndex] restored fresh disk index without project walk for %s',
+            root,
+        )
+    return fresh
+
+
 def _run_builder_job(root, builder, scanner):
     try:
-        _build_sync(root, scan_executor=scanner)
+        if not _restore_disk_candidate_before_build(root):
+            _build_sync(root, scan_executor=scanner)
     finally:
         # _build_sync also clears the root lease. Keep this idempotent wrapper
         # as the lifecycle authority so injected/test builders cannot strand
@@ -585,6 +689,8 @@ def _evict_mem_over_cap():
     while (_mem and (
             len(_mem) > root_capacity or retained_entries > entry_capacity)):
         victim = next(iter(_mem))
+        entry = _mem.get(victim)
+        _checkpoint_dirty_eviction(entry, entry_capacity)
         entry = _mem.pop(victim, None)
         retained_entries -= len(entry.paths) if entry is not None else 0
         logger.debug(
@@ -593,6 +699,35 @@ def _evict_mem_over_cap():
             victim, len(_mem), root_capacity,
             retained_entries, entry_capacity,
         )
+
+
+def _checkpoint_dirty_eviction(entry, entry_capacity):
+    """Persist a write-fresh entry before LRU eviction when its blob is stale.
+
+    ``note_write`` normally removes the superseded blob, which makes a later
+    memory miss honest but would otherwise force the read tool and background
+    builder back onto the project filesystem. The revision comparison also
+    detects a stale blob left by an unlink failure. Checkpointing while
+    ``_lock`` is held snapshots the current parallel columns consistently.
+    Clean entries already have a blob and incur no write; a failed checkpoint
+    preserves the established rebuild fallback.
+    """
+    if (not isinstance(entry, TreeIndex) or not entry.complete
+            or len(entry.paths) > entry_capacity):
+        return False
+    if entry.persisted_revision == entry.mutation_revision:
+        try:
+            if os.path.isfile(_disk_path(entry.root)):
+                return False
+        except OSError:
+            pass
+    if not _persist(entry):
+        return False
+    logger.debug(
+        '[TreeIndex] checkpointed write-fresh index before LRU eviction for %s',
+        entry.root,
+    )
+    return True
 
 
 def warm(root):
@@ -614,7 +749,8 @@ def warm(root):
             if root in _building:
                 return
             entry = _mem.get(root)
-            if entry is not None and entry.complete and entry.age() <= _stale_after_s():
+            if (entry is not None and entry.complete
+                    and entry.age() <= entry.refresh_after_s):
                 return  # fresh enough — nothing to do
             _building.add(root)
         try:
@@ -679,23 +815,52 @@ def _disk_path(root):
 
 
 def _persist(entry):
-    """Write the index atomically.  Little-endian columnar blob:
+    """Write the index atomically and report success. Little-endian blob:
 
     magic(8) built_at(d) count(I) root_len(H) root sizes(count×8) mtimes(count×8) paths
     """
+    tmp = None
     try:
-        paths_blob = '\n'.join(entry.paths).encode('utf-8', 'surrogateescape')
-        root_b = entry.root.encode('utf-8', 'surrogateescape')
-        header = struct.pack('<8sdIH', _DISK_MAGIC, entry.built_at, len(entry.paths), len(root_b))
-        blob = (header + root_b + entry.sizes.tobytes() + entry.mtimes.tobytes()
+        with _lock:
+            if _mem.get(entry.root) is not entry:
+                return False
+            root = entry.root
+            built_at = entry.built_at
+            mutation_revision = entry.mutation_revision
+            paths = tuple(entry.paths)
+            sizes_blob = entry.sizes.tobytes()
+            mtimes_blob = entry.mtimes.tobytes()
+        paths_blob = '\n'.join(paths).encode('utf-8', 'surrogateescape')
+        root_b = root.encode('utf-8', 'surrogateescape')
+        header = struct.pack(
+            '<8sdIH', _DISK_MAGIC, built_at, len(paths), len(root_b))
+        blob = (header + root_b + sizes_blob + mtimes_blob
                 + struct.pack('<I', len(paths_blob)) + paths_blob)
-        final = _disk_path(entry.root)
-        tmp = final + f'.tmp.{os.getpid()}'
+        final = _disk_path(root)
+        tmp = (final + f'.tmp.{os.getpid()}.{threading.get_ident()}.'
+               f'{time.monotonic_ns()}')
         with open(tmp, 'wb') as f:
             f.write(blob)
-        os.replace(tmp, final)
+        with _lock:
+            if (_mem.get(root) is not entry
+                    or entry.mutation_revision != mutation_revision):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                return False
+            os.replace(tmp, final)
+            tmp = None
+            entry.persisted_revision = mutation_revision
+        return True
     except Exception as e:
         logger.debug('[TreeIndex] persist failed for %s: %s', entry.root, e)
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return False
 
 
 def _load_disk(root):
@@ -733,8 +898,10 @@ def _load_disk(root):
         paths = blob[off:off + paths_len].decode('utf-8', 'surrogateescape').split('\n')
         if count and (not paths or paths[0] == '' and count > 1):
             return None
-        return TreeIndex(root, paths, sizes, mtimes, built_at, True,
-                         _compile_gitignore(root))
+        return TreeIndex(
+            root, paths, sizes, mtimes, built_at, True,
+            _compile_gitignore(root), persisted_revision=0,
+        )
     except FileNotFoundError:
         return None
     except Exception as e:
@@ -777,12 +944,32 @@ def acquire(root):
         if age > _max_age_s():
             warm(root)
             return None
-        if age > _stale_after_s():
+        if age > entry.refresh_after_s:
             warm(root)  # stale-while-revalidate: serve now, refresh behind us
         return entry
     except Exception as e:
         logger.debug('[TreeIndex] acquire(%s) failed: %s', root, e)
         return None
+
+
+def freshness_evidence(entry):
+    """Return visible age evidence once adaptive retention exceeds the base.
+
+    Existing file contents are still read live by rg. The evidence concerns
+    only externally changed candidate paths and display-grade size metadata;
+    Tofu-owned writes update the in-memory candidate list synchronously.
+    """
+    if entry is None:
+        return None
+    age = max(0.0, entry.age())
+    base = _stale_after_s()
+    if age <= base:
+        return None
+    return {
+        'ageSeconds': age,
+        'baseRefreshSeconds': base,
+        'scheduledRefreshSeconds': entry.refresh_after_s,
+    }
 
 
 # ═══════════════════════════════════════════════════════
@@ -878,6 +1065,7 @@ def note_write(abs_path):
                 entry.mtimes.insert(idx, mtime)
                 persisted_snapshot_is_stale = True
             if persisted_snapshot_is_stale:
+                entry.mutation_revision += 1
                 # The local blob predates this mutation. Remove it while the
                 # memory authority is still locked, before cap enforcement can
                 # evict this root and make a stale disk load eligible again.

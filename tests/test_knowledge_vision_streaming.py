@@ -52,3 +52,39 @@ def test_describe_falls_back_to_accumulated_stream_chunks(monkeypatch):
     description, _ = enrichment._describe(b'x', 'image/png', {})
 
     assert description == 'part one part two'
+
+
+def test_owner_description_uses_bounded_pinned_v2_route(monkeypatch):
+    from types import SimpleNamespace
+
+    from lib.knowledge import enrichment
+    import lib.llm_dispatch as dispatch
+    import lib.model_routing as routing
+    from lib.llm_dispatch.provider_pin import get_pinned_provider
+
+    group = SimpleNamespace(pin_id='knowledge-owner-vision')
+    observed = {'pins': [], 'disposed': [], 'mint': []}
+
+    def _mint(*_args, **kwargs):
+        observed['mint'].append(kwargs)
+        return 'vision-model', group
+
+    def _stream(_messages, *, on_content=None, **_kwargs):
+        observed['pins'].append(get_pinned_provider())
+        return ({'role': 'assistant', 'content': 'owner description'},
+                'stop', {})
+
+    monkeypatch.setattr(routing, 'mint_capability_slot_group', _mint)
+    monkeypatch.setattr(
+        routing, 'dispose_routed_slot_group', observed['disposed'].append)
+    monkeypatch.setattr(dispatch, 'dispatch_stream', _stream)
+    monkeypatch.setattr(
+        enrichment, 'model_ready_image', lambda raw, mime: (raw, 'image/png'))
+
+    description, _model = enrichment._describe(
+        b'png', 'image/png', {}, owner_user_id=73)
+
+    assert description == 'owner description'
+    assert observed['pins'] == ['knowledge-owner-vision']
+    assert observed['disposed'] == [group]
+    assert observed['mint'][0]['max_candidates'] == 8

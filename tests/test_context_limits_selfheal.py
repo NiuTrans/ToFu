@@ -67,6 +67,40 @@ def test_stale_strike_does_not_count_as_consecutive(monkeypatch):
     assert cl.lookup_learned_context_limit(P, M) is None
 
 
+def test_pending_strike_preserves_existing_learned_provenance(monkeypatch):
+    k = cl._key(P, M)
+    learned_ts = time.time() - 60
+    cl._LEARNED[k] = PRESET
+    cl._META[k] = {
+        'ts': learned_ts, 'source': 'expand', 'strikes': 0}
+    persists = []
+    monkeypatch.setattr(cl, '_persist', lambda: persists.append(True))
+
+    assert cl.learn_shrink_from_error(
+        P, M, reported_tokens=210819, preset_limit=PRESET) is None
+    assert cl._META[k]['source'] == 'expand'
+    assert cl._META[k]['ts'] == learned_ts
+    assert cl._META[k]['strikes'] == 1
+    assert cl._META[k]['pending'] == int(210819 * 0.95)
+    assert 'pending_ts' in cl._META[k]
+
+    # A later non-shrinking overflow invalidates the strike and persists that
+    # removal, but must not erase the learned entry's expand provenance.
+    assert cl.learn_shrink_from_error(
+        P, M, reported_tokens=1_100_000, preset_limit=PRESET) is None
+    assert cl._META[k] == {
+        'ts': learned_ts, 'source': 'expand', 'strikes': 0}
+    assert len(persists) == 2
+
+
+def test_oversized_identity_is_not_learned():
+    assert cl.learn_expand_from_success(
+        'p' * 257, M, 1_200_000, preset_limit=PRESET) is None
+    assert cl.learn_expand_from_success(
+        P, 'm' * 257, 1_200_000, preset_limit=PRESET) is None
+    assert cl._LEARNED == {}
+
+
 # ── authoritative stated max ────────────────────────────────────────────
 
 def test_authoritative_below_preset_persists_immediately():

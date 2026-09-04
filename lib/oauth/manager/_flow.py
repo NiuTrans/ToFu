@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 
 from lib.log import get_logger
 
@@ -55,7 +56,8 @@ def _loopback_callback_ok() -> bool:
     return bool(getattr(sys, 'frozen', False))
 
 
-def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
+def start_oauth_flow(provider: str, *, owner_user_id: int,
+                     prefer_console: bool = False) -> dict:
     """Start an OAuth login flow.
 
     Generates PKCE codes and auth URL, starts relay server on
@@ -64,6 +66,9 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
 
     Args:
         provider: 'claude' or 'codex'.
+        owner_user_id: Authenticated repository owner that started the flow.
+            It is captured once so a later callback cannot invent an egress
+            scope or complete another owner's in-memory flow.
         prefer_console: Force Claude onto the console callback (manual code
             paste) even when the loopback callback would be available. This
             is the USER'S escape hatch, not a debug flag: whether Anthropic
@@ -82,6 +87,11 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
         instructions are a LIE during a loopback flow, because the provider
         redirects to localhost instead of rendering a code.
     """
+    from lib.identity import require_user_id
+    owner_user_id = require_user_id(
+        owner_user_id, context='OAuth flow owner')
+    flow_id = uuid.uuid4().hex
+
     # A pending device flow for this provider must not outlive the new
     # loopback flow — they share _active_flows[provider].
     from lib.oauth.manager._device import stop_device_flow
@@ -148,6 +158,7 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
     # Store flow state
     with _flows_lock:
         _active_flows[provider] = {
+            'flow_id': flow_id,
             'status': 'started',
             'auth_url': flow['auth_url'],
             'state': flow['state'],
@@ -155,6 +166,7 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
             'started_at': time.time(),
             'error': None,
             'email': None,
+            'owner_user_id': owner_user_id,
             # The redirect actually advertised — the exchange MUST echo this
             # exact string or the token endpoint answers invalid_grant.
             'redirect_uri': flow.get('redirect_uri', ''),
@@ -174,7 +186,7 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
         thread = threading.Thread(
             target=_run_relay_server,
             args=(provider, flow['callback_port'], flow['state']),
-            kwargs={'server': relay_server},
+            kwargs={'server': relay_server, 'flow_id': flow_id},
             daemon=True,
             name=f'oauth-relay-{provider}',
         )
@@ -196,7 +208,9 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
     }
 
 
-def get_oauth_status(provider: str) -> dict:
+def get_oauth_status(
+    provider: str, *, owner_user_id: int | None = None,
+) -> dict:
     """Get current OAuth status for a provider."""
     from lib.oauth.token_store import load_token
 
@@ -218,7 +232,8 @@ def get_oauth_status(provider: str) -> dict:
     stored = load_token(provider)
     authenticated = bool(stored and stored.get('access_token'))
     from lib.oauth.outbound import managed_oauth_provider_status
-    provider_status = managed_oauth_provider_status(provider)
+    provider_status = managed_oauth_provider_status(
+        provider, owner_user_id=owner_user_id)
 
     return {
         'provider': provider,
@@ -251,9 +266,9 @@ def get_oauth_status(provider: str) -> dict:
     }
 
 
-def get_all_oauth_status() -> dict:
+def get_all_oauth_status(*, owner_user_id: int | None = None) -> dict:
     """Get OAuth status for all supported providers."""
     return {
-        'claude': get_oauth_status('claude'),
-        'codex': get_oauth_status('codex'),
+        'claude': get_oauth_status('claude', owner_user_id=owner_user_id),
+        'codex': get_oauth_status('codex', owner_user_id=owner_user_id),
     }

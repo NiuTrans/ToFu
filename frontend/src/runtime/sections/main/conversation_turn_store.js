@@ -1,4 +1,14 @@
 /* ===== migrated source: main/conversation_turn_store.js ===== */
+let _roleAvatarIcons = null;
+function _resolveRoleAvatarIcons() {
+  if (!_roleAvatarIcons && typeof createRoleAvatarIcons === 'function') {
+    _roleAvatarIcons = createRoleAvatarIcons(
+      typeof BASE_PATH === 'string' ? BASE_PATH : '',
+    );
+  }
+  return _roleAvatarIcons;
+}
+
 function _throttledTurnCachePut(conv) {
   try {
     if (typeof ConvCache === 'undefined' || !conv) return;
@@ -29,31 +39,88 @@ function _nextGeneratedNativeTurn(state, inputTurn) {
   return null;
 }
 
-async function _operateNativeTurn(conv, turnId, operation) {
+function _nativeRegenerateInputOptions(resolved, inputEdit) {
+  const inputTurn = resolved.state.turnsById?.[resolved.turn.parentTurnId];
+  if (!inputTurn) return {};
+  let inputProjection = inputTurn.projection || {};
+  let shouldUpdateInput = false;
+  if (inputEdit) {
+    if (inputEdit.images?.length) {
+      inputProjection = {
+        ...inputProjection,
+        images: [...(inputProjection.images || []), ...inputEdit.images],
+      };
+    }
+    inputProjection = _nativeTurnEditProjection(
+      inputProjection, String(inputEdit.content ?? ''),
+    );
+    shouldUpdateInput = true;
+  }
+  if (typeof runtimeScope.buildTurnCtxSnapshot === 'function'
+      && typeof rebindTurnInputContext === 'function') {
+    inputProjection = rebindTurnInputContext(
+      inputProjection, runtimeScope.buildTurnCtxSnapshot(),
+    );
+    shouldUpdateInput = true;
+  }
+  return shouldUpdateInput ? {
+    inputUpdate: inputProjection,
+    expectedInputProjectionRevision: inputTurn.projectionRevision,
+  } : {};
+}
+
+async function _operateNativeTurn(conv, turnId, operation, inputEdit) {
   const resolved = _nativeTurnState(conv, turnId);
-  if (!resolved || typeof runtimeScope.ConversationTurnStore === 'undefined') return;
+  if (!resolved || typeof runtimeScope.ConversationTurnStore === 'undefined') return false;
   if (Object.values(resolved.state.turnsById || {}).some(turn =>
     turn && (turn.status === 'pending' || turn.status === 'running'))) {
     if (typeof showToast === 'function') {
       showToast('Stop the current attempt before starting another operation.', 'info');
     }
-    return;
+    return false;
   }
   try {
+    const operationOptions = {
+      commandId: `${operation}:${turnId}:${resolved.turn.projectionRevision || 0}`,
+      ...(operation === 'regenerate'
+        ? _nativeRegenerateInputOptions(resolved, inputEdit) : {}),
+    };
     const cfg = await _buildConvConfig(conv);
     await runtimeScope.ConversationTurnStore.operateConversation(
-      conv, turnId, operation, cfg, {
-        commandId: `${operation}:${turnId}:${resolved.turn.projectionRevision || 0}`,
-      },
+      conv, turnId, operation, cfg, operationOptions,
     );
+    return true;
   } catch (error) {
     try { await runtimeScope.ConversationTurnStore.hydrateConversation(conv); }
     catch (_ignored) { /* authoritative recovery is best effort */ }
     if (typeof showToast === 'function') {
       showToast(error?.body?.message || error?.message || `${operation} failed`, 'error');
     }
+    return false;
   }
 }
+
+/* Late ask_human answer: the settled turn's settlement still offers
+ * answer_guidance, so the answer completes the interrupted question round
+ * inside a fresh attempt instead of reviving the dead process-local request. */
+async function _answerHumanGuidanceLate(conv, turnId, responseText) {
+  const resolved = _nativeTurnState(conv, turnId);
+  if (!resolved || typeof runtimeScope.ConversationTurnStore === 'undefined') {
+    throw new Error('Unknown turn; refresh the authoritative snapshot.');
+  }
+  if (Object.values(resolved.state.turnsById || {}).some(turn =>
+    turn && (turn.status === 'pending' || turn.status === 'running'))) {
+    throw new Error('Stop the current attempt before answering.');
+  }
+  const cfg = await _buildConvConfig(conv);
+  await runtimeScope.ConversationTurnStore.operateConversation(
+    conv, turnId, 'answer_guidance', cfg, {
+      commandId: `answer_guidance:${turnId}:${resolved.turn.projectionRevision || 0}`,
+      humanResponse: responseText,
+    },
+  );
+}
+runtimeScope.answerHumanGuidanceLate = _answerHumanGuidanceLate;
 
 async function _regenerateNativeInput(conv, inputTurnId) {
   const resolved = _nativeTurnState(conv, inputTurnId);
@@ -64,7 +131,7 @@ async function _regenerateNativeInput(conv, inputTurnId) {
     }
     return;
   }
-  await _operateNativeTurn(conv, target.turnId, 'regenerate');
+  return _operateNativeTurn(conv, target.turnId, 'regenerate');
 }
 
 function _nativeTurnEditProjection(projection, content) {
@@ -99,6 +166,43 @@ function _findRenderedNativeTurnNode(turnId) {
   return root.querySelector(`[data-turn-id="${safeId}"]`);
 }
 
+/* Transient copy chrome: swap the copy glyph for a check on clipboard
+ * success.  Kept out of the view model on purpose — the surface only
+ * re-renders the action bar when the action list changes, so a DOM-level
+ * flash survives unrelated commits and harmlessly vanishes on a real one. */
+function _flashTurnCopyFeedback(turnId) {
+  const turnNode = _findRenderedNativeTurnNode(turnId);
+  const button = turnNode?.querySelector?.(
+    'button[data-conversation-action="copy"]',
+  );
+  const icon = button?.querySelector?.('svg.msg-action-icon');
+  if (!button || !icon) return;
+  if (!button._tofuCopyFlash) {
+    const checkIcon = icon.cloneNode(false);
+    const checkPath = icon.ownerDocument.createElementNS(
+      'http://www.w3.org/2000/svg', 'path',
+    );
+    checkPath.setAttribute('d', 'M20 6 9 17l-5-5');
+    checkPath.setAttribute('stroke', 'currentColor');
+    checkPath.setAttribute('stroke-width', '2');
+    checkPath.setAttribute('stroke-linecap', 'round');
+    checkPath.setAttribute('stroke-linejoin', 'round');
+    checkIcon.appendChild(checkPath);
+    button._tofuCopyFlash = { originalIcon: icon, checkIcon, timer: 0 };
+    icon.replaceWith(checkIcon);
+    button.classList.add('msg-action-btn--copied');
+  }
+  clearTimeout(button._tofuCopyFlash.timer);
+  button._tofuCopyFlash.timer = setTimeout(() => {
+    const flash = button._tofuCopyFlash;
+    button._tofuCopyFlash = null;
+    if (flash?.checkIcon.parentNode === button) {
+      flash.checkIcon.replaceWith(flash.originalIcon);
+    }
+    button.classList.remove('msg-action-btn--copied');
+  }, 1500);
+}
+
 async function _editNativeTurn(conv, turnId) {
   const resolved = _nativeTurnState(conv, turnId);
   if (!resolved) return;
@@ -108,7 +212,7 @@ async function _editNativeTurn(conv, turnId) {
     : (projection.content || '');
   const hasAttachments = Boolean(
     projection.images?.length || projection.videos?.length
-      || projection.pdfTexts?.length,
+      || projection.pdfTexts?.length || projection.attachments?.length,
   );
   if (typeof openTurnInlineEditor === 'function') {
     const session = openTurnInlineEditor({
@@ -120,20 +224,46 @@ async function _editNativeTurn(conv, turnId) {
         && Boolean(_nextGeneratedNativeTurn(resolved.state, resolved.turn)),
       findTurnNode: _findRenderedNativeTurnNode,
       translate: (key) => (typeof t === 'function' ? t(key) : key),
-      async onSubmit({ text, resend }) {
-        if (!await _commitNativeTurnEdit(conv, turnId, projection, text)) {
-          return false;
+      /* Paste-to-attach inside the edit session: reuse the composer's shared
+       * compress + upload core so the entry shape matches a send-draft image
+       * exactly ({base64, mediaType, preview, sizeKB, url?}). The composer
+       * pendingImages draft is NOT touched — this attaches to the turn. */
+      onImageAttach: typeof processImageFile === 'function'
+        ? async (file) => {
+          try {
+            const d = await processImageFile(file);
+            return { payload: d, preview: d.preview || d.url || '' };
+          } catch (_error) {
+            if (typeof showToast === 'function') {
+              showToast(
+                typeof t === 'function' ? t('upload.imageSkipped') : 'Image skipped',
+                'warning',
+              );
+            }
+            return null;
+          }
         }
+        : undefined,
+      async onSubmit({ text, resend, images }) {
         if (resend) {
           const fresh = _nativeTurnState(conv, turnId);
           const target = fresh
             && _nextGeneratedNativeTurn(fresh.state, fresh.turn);
-          if (target) await _operateNativeTurn(conv, target.turnId, 'regenerate');
-          else if (typeof showToast === 'function') {
+          if (target) {
+            return _operateNativeTurn(conv, target.turnId, 'regenerate', {
+              content: text,
+              images,
+            });
+          }
+          if (typeof showToast === 'function') {
             showToast('No generated turn follows this input.', 'error');
           }
+          return false;
         }
-        return true;
+        const nextProjection = images?.length
+          ? { ...projection, images: [...(projection.images || []), ...images] }
+          : projection;
+        return _commitNativeTurnEdit(conv, turnId, nextProjection, text);
       },
     });
     if (session) return;
@@ -170,6 +300,82 @@ async function _deleteNativeTurn(conv, turnId) {
     catch (_ignored) { /* authoritative recovery is best effort */ }
     if (typeof showToast === 'function') {
       showToast(error?.body?.message || error?.message || 'Delete failed', 'error');
+    }
+  }
+}
+
+/** Human-only promotion of an assistant conclusion into executable Charter.
+ * The conclusion is prefilled from the authoritative Turn projection, and a
+ * registered immutable Checker version is mandatory. */
+async function _promoteNativeDecision(conv, turnId, projection) {
+  const projectPath = String(conv?.projectPath || '').trim();
+  const api = typeof Api !== 'undefined' ? Api.project : null;
+  if (!projectPath || !api?.brainCheckers || !api?.promoteDecision) {
+    if (typeof showToast === 'function') {
+      showToast('Attach a project before promoting a decision.', 'warning');
+    }
+    return;
+  }
+  try {
+    const sourceText = String(
+      projection?.originalContent || projection?.content || '',
+    ).trim();
+    const catalog = await api.brainCheckers(projectPath);
+    const checkers = Array.isArray(catalog?.items)
+      ? catalog.items.filter(item => item?.enabled) : [];
+    if (!checkers.length) {
+      const saveForTriage = typeof showConfirm !== 'function' || await showConfirm(
+        'No checker is registered. Save this conclusion to Attention for later triage? You can also export the answer to docs.',
+      );
+      if (saveForTriage && api.brainAttentionAdd && sourceText) {
+        await api.brainAttentionAdd(projectPath, sourceText.slice(0, 4000));
+        if (typeof showToast === 'function') {
+          showToast('Saved to Attention; it will not enter the model prompt.', 'success');
+        }
+      }
+      if (typeof runtimeScope.openProjectBrain === 'function') {
+        runtimeScope.openProjectBrain({ tab: 'charter', path: projectPath });
+      }
+      return;
+    }
+    if (typeof showPrompt !== 'function') return;
+    const decisionText = await showPrompt('Promote as executable decision', {
+      defaultValue: sourceText.slice(0, 4000),
+    });
+    if (!String(decisionText || '').trim()) return;
+    const choices = checkers.map(item =>
+      `${item.checkerId}@${item.version} — ${item.label || item.checkerId}`,
+    );
+    const selected = await showPrompt(
+      `Select checker version:\n${choices.join('\n')}`,
+      { defaultValue: `${checkers[0].checkerId}@${checkers[0].version}` },
+    );
+    if (!String(selected || '').trim()) return;
+    const match = /^(.+)@(\d+)$/.exec(String(selected).trim());
+    const checker = match && checkers.find(item =>
+      String(item.checkerId) === match[1]
+        && Number(item.version) === Number(match[2]),
+    );
+    if (!checker) {
+      if (typeof showToast === 'function') {
+        showToast('Choose an exact registered checker ID and version.', 'error');
+      }
+      return;
+    }
+    const identity = `decision:${conv.id}:${turnId}`.slice(0, 128);
+    await api.promoteDecision(projectPath, {
+      decisionId: identity,
+      text: String(decisionText).trim(),
+      checkerRef: { id: checker.checkerId, version: checker.version },
+      sourceConversationId: conv.id,
+      sourceTurnId: turnId,
+    });
+    if (typeof showToast === 'function') {
+      showToast('Decision promoted with its checker.', 'success');
+    }
+  } catch (error) {
+    if (typeof showToast === 'function') {
+      showToast(error?.body?.message || error?.message || 'Decision promotion failed', 'error');
     }
   }
 }
@@ -216,26 +422,6 @@ async function _createNativeBranchFromSelection(
 }
 
 const _nativeBranchComposer = createBranchComposerSession();
-const _humanGuidancePresentation = createHumanGuidancePresentationStore();
-
-runtimeScope.HumanGuidancePresentation = Object.freeze({
-  read(conversationId, guidanceId) {
-    return _humanGuidancePresentation.read(conversationId, guidanceId);
-  },
-  patch(conversationId, guidanceId, patch) {
-    const next = _humanGuidancePresentation.patch(conversationId, guidanceId, patch || {});
-    runtimeScope.requestAuthoritativeConversationRender?.(
-      conversationId, { forceScroll: false },
-    );
-    return next;
-  },
-  decorate(conversationId, round) {
-    return _humanGuidancePresentation.decorate(conversationId, round);
-  },
-  clearConversation(conversationId) {
-    _humanGuidancePresentation.clearConversation(conversationId);
-  },
-});
 
 function _nativeBranchDescriptor(conv, parentTurnId, laneId) {
   const state = runtimeScope.ConversationTurnStore
@@ -414,12 +600,31 @@ function _stopNativeBranch(conv, laneId) {
 }
 
 async function _removeNativeQueueItem(conv, queueId) {
-  if (!conv || !queueId || typeof Api === 'undefined' || !Api.chat?.queueRemove) return;
+  const service = runtimeScope.ConversationTurnStore;
+  if (!conv || !queueId || !service?.cancelQueuedTurn) return;
   try {
-    const response = await Api.chat.queueRemove(conv.id, queueId);
-    if (!response?.ok) throw new Error('Queue removal was rejected');
-    await runtimeScope.ConversationTurnStore.hydrateConversation(conv);
-    if (typeof renderPendingQueueUI === 'function') renderPendingQueueUI(conv.id);
+    const response = await service.cancelQueuedTurn(conv, queueId);
+    if (!response?.cancelled) throw new Error('Queue removal was rejected');
+    const projection = response.inputTurn?.projection || {};
+    const attachments = Array.isArray(projection.attachments)
+      ? projection.attachments : [];
+    if (typeof _restoreCapturedComposerDraft === 'function') {
+      _restoreCapturedComposerDraft({
+        inputValue: projection.originalContent || projection.content || '',
+        images: Array.isArray(projection.images) ? projection.images : [],
+        pdfTexts: [
+          ...(Array.isArray(projection.pdfTexts) ? projection.pdfTexts : []),
+          ...attachments.filter((item) => item?.kind === 'document'),
+        ],
+        videos: [
+          ...(Array.isArray(projection.videos) ? projection.videos : []),
+          ...attachments.filter((item) => item?.kind === 'video'),
+        ],
+        replyQuotes: Array.isArray(projection.replyQuotes)
+          ? projection.replyQuotes : [],
+        convRefs: Array.isArray(projection.convRefs) ? projection.convRefs : [],
+      });
+    }
     if (typeof updateSendButton === 'function') updateSendButton();
   } catch (error) {
     if (typeof showToast === 'function') showToast('Queue removal failed', 'error');
@@ -472,8 +677,10 @@ async function _mutateNativeTurnFiles(conv, turnId, operation) {
 }
 
 const _nativeTurnRenderers = createClassicConversationRenderers({
-  renderSafeMarkdownHtml(markdown) {
-    return typeof renderMarkdown === 'function' ? renderMarkdown(markdown) : escapeHtml(markdown);
+  renderSafeMarkdownHtml(markdown, options) {
+    return typeof renderMarkdown === 'function'
+      ? renderMarkdown(markdown, options)
+      : escapeHtml(markdown);
   },
   renderTurnAvatarHtml(turn) {
     const initiator = turn?.metadata?.origin?.initiator;
@@ -485,15 +692,15 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
         + 'd="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
     }
     if (turn.actor === 'planner') {
-      return typeof _TOFU_PLANNER_SVG !== 'undefined' ? _TOFU_PLANNER_SVG : '';
+      return _resolveRoleAvatarIcons()?.plannerHtml || '';
     }
     if (turn.actor === 'critic' || turn.actor === 'virtual_user') {
-      return typeof _TOFU_CRITIC_SVG !== 'undefined' ? _TOFU_CRITIC_SVG : '';
+      return _resolveRoleAvatarIcons()?.criticHtml || '';
     }
     if (turn.actor === 'human' && (!initiator || initiator === 'human')) {
-      return typeof _USER_AVATAR_SVG !== 'undefined' ? _USER_AVATAR_SVG : '';
+      return _resolveRoleAvatarIcons()?.userHtml || '';
     }
-    return typeof _TOFU_WORKER_SVG !== 'undefined' ? _TOFU_WORKER_SVG : '';
+    return _resolveRoleAvatarIcons()?.workerHtml || '';
   },
   renderTurnContextParts(block) {
     const rendered = runtimeScope.renderTurnCtxNote?.(block?.value?.snapshot);
@@ -503,6 +710,8 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
   },
   renderToolBlockHtml(block, turn) {
     const sourceRound = block.round || {
+      attemptId: block.source?.attemptId,
+      taskId: block.source?.taskId,
       roundNum: block.source?.llmRound == null ? undefined : Number(block.source.llmRound) + 1,
       llmRound: block.source?.llmRound,
       toolCallId: block.toolCallId,
@@ -519,14 +728,41 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
      * forever). The renderer downgrades those leftovers to an expired,
      * non-interactive card off this flag. */
     const turnSettled = !(turn.status === 'pending' || turn.status === 'running');
-    const decorateRound = (round) => ({
-      ...runtimeScope.HumanGuidancePresentation.decorate(
-        turn.source.conversationId, round,
-      ),
-      _turnId: turn.turnId,
-      _turnSettled: turnSettled,
-      ...(turn.taskId ? { _taskId: turn.taskId } : {}),
-    });
+    /* A settled turn that died inside ask_human keeps the persisted question
+     * round at awaiting_human forever. When its settlement offers the
+     * answer_guidance resume option for THIS question, the expired card
+     * stays answerable: the late answer becomes the round's tool result in
+     * a new attempt and generation continues from the answered call. */
+    const resumeOptions = turn.source?.settlement?.resumeOptions;
+    const answerGuidanceOfferedFor = (round) => {
+      const guidanceId = typeof round?.guidanceId === 'string'
+        ? round.guidanceId : '';
+      return turnSettled && Boolean(guidanceId)
+        && Array.isArray(resumeOptions)
+        && resumeOptions.some((option) => (
+          option?.operation === 'answer_guidance'
+          && option?.anchor?.guidanceId === guidanceId
+        ));
+    };
+    const decorateRound = (round) => {
+      /* A resumed Turn contains rounds from several attempts. Prefer the
+       * round-owned task; using the Turn's latest task made every historical
+       * R-link open the resumed executor and erased the only presentation
+       * boundary between repeated llmRound counters. */
+      const ownedTaskId = round?.taskId || round?._taskId || '';
+      const compatibleLatestTask = !round?.attemptId
+        || round.attemptId === turn.attemptId;
+      const taskId = ownedTaskId || (compatibleLatestTask ? turn.taskId : '');
+      return {
+        ...humanGuidancePresentation.decorate(
+          turn.source.conversationId, round,
+        ),
+        _turnId: turn.turnId,
+        _turnSettled: turnSettled,
+        ...(answerGuidanceOfferedFor(round) ? { _hgAnswerGuidance: true } : {}),
+        ...(taskId ? { _taskId: taskId } : {}),
+      };
+    };
     const round = decorateRound(sourceRound);
     const allRounds = Array.isArray(turn.source.projection.toolRounds)
       ? turn.source.projection.toolRounds.map(decorateRound) : [round];
@@ -544,7 +780,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
     if (!field || typeof _rehydrateInjectRows !== 'function') return '';
     const projection = { [field]: block.items };
     const rounds = _rehydrateInjectRows(projection, []).map((round) => ({
-      ...runtimeScope.HumanGuidancePresentation.decorate(
+      ...humanGuidancePresentation.decorate(
         turn.source.conversationId, round,
       ),
       _turnId: turn.turnId,
@@ -568,10 +804,17 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
      * projection snapshot. */
     const finishProjection = {
       ...turn.source.projection,
+      _conversationId: turn.source.conversationId,
       ...(turn.taskId ? { _taskId: turn.taskId } : {}),
       _turnStatus: turn.status,
       _turnSettlement: turn.source.settlement || {},
+      /* Lifecycle clock from the authoritative TurnRecord (epoch ms): the
+       * finish bar renders the task's completion time and wall-clock
+       * duration; the projection itself carries no timing. */
+      _turnCreatedAt: Number(turn.source.createdAt) || 0,
+      _turnUpdatedAt: Number(turn.source.updatedAt) || 0,
       _commandPending: turn.commandPending || null,
+      waitingOn: turn.source.projection.waitingOn,
     };
     if (turn.metadata.fallbackInTimeline) {
       delete finishProjection.fallbackModel;
@@ -588,20 +831,9 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
   },
   renderProvenanceBlockHtml(block) {
     const value = block.value || {};
-    const message = {
-      _memoryPrefetch: value.memoryPrefetch,
-      _mcpLoginHint: value.mcpLoginHint,
-      _preferencesApplied: value.preferencesApplied,
-      _preferencesLearned: value.preferencesLearned,
-      _relatedConversations: value.relatedConversations,
-    };
-    const login = typeof renderMcpLoginHintHtml === 'function'
-      ? renderMcpLoginHintHtml(message._mcpLoginHint) : '';
-    const strip = typeof renderTurnProvenanceHtml === 'function'
-      ? renderTurnProvenanceHtml(message) : '';
-    const pending = typeof renderPreferenceLearnedHtml === 'function'
-      ? renderPreferenceLearnedHtml(message._preferencesLearned) : '';
-    return login + strip + pending;
+    return renderMcpLoginHintHtml(value.mcpLoginHint)
+      + renderTurnProvenanceHtml(value)
+      + renderPreferenceLearnedHtml(value.preferencesLearned);
   },
   resolveMediaUrl(url) {
     return typeof apiUrl === 'function' && String(url || '').startsWith('/')
@@ -642,25 +874,31 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
       virtual_user: 'Autopilot',
     }[turn.actor] || turn.actor;
   },
-  actionLabel(action, turn) {
+  actionLabel(action, turn, actionView) {
     const keys = {
       copy: 'msgAction.copy', inspect: 'msgAction.inspect',
       edit: 'msgAction.edit', regenerate: 'msgAction.regen',
       resume: 'msgAction.continue', translate: 'msgAction.translate',
-      export: 'msgAction.export', branch: 'branch.add', delete: 'msgAction.delete',
+      export: 'msgAction.export', 'promote-decision': 'msgAction.promoteDecision',
+      branch: 'branch.add', delete: 'msgAction.delete',
     };
     const fallbacks = {
       copy: 'Copy', inspect: 'Inspect', edit: 'Edit', regenerate: 'Regen',
       resume: 'Continue',
-      translate: 'Translate', export: 'Export', branch: 'Branch', delete: 'Delete',
+      translate: 'Translate', export: 'Export',
+      'promote-decision': 'Promote as decision', branch: 'Branch', delete: 'Delete',
     };
-    const key = action === 'translate'
+    /* A failed turn whose settlement offers no resumable checkpoint still
+     * renders the generic 'resume' action; label it for what it does. */
+    const labelAction = action === 'resume'
+        && actionView?.operation === 'regenerate' ? 'regenerate' : action;
+    const key = labelAction === 'translate'
         && turn?.metadata?.translation?.available
         && turn.metadata.translation.displayMode === 'translated'
-      ? 'msgAction.original' : (keys[action] || action);
+      ? 'msgAction.original' : (keys[labelAction] || labelAction);
     const translated = typeof t === 'function' ? t(key) : '';
-    const fallback = action === 'translate' && key === 'msgAction.original'
-      ? 'Original' : (fallbacks[action] || action);
+    const fallback = labelAction === 'translate' && key === 'msgAction.original'
+      ? 'Original' : (fallbacks[labelAction] || labelAction);
     return translated && translated !== key ? translated : fallback;
   },
   formatTimestamp(timestamp) {
@@ -766,6 +1004,36 @@ const _conversationSurfaceController = createConversationSurfaceController({
       typeof _featureFlags !== 'undefined' && _featureFlags?.debug_mode,
     );
   },
+  /* Settled turns whose projection predates the server-side cost fold have
+   * no authoritative msg.cost; renderFinishInfo falls back to calcCostCny,
+   * whose micro-batch lands AFTER the render commit. The batch then requests
+   * an authoritative re-render, but nothing in the Turn changed, so the
+   * surface footer compare would skip the re-render and the ¥ tag never
+   * appears. The signature makes the fill visible to that compare. Cache
+   * misses return null and simply rejoin the already-queued batch — no extra
+   * requests. */
+  costSignatureSnapshot(state) {
+    const signatures = new Map();
+    if (typeof calcCostCny !== 'function') return signatures;
+    const turnsById = state?.turnsById || {};
+    for (const turnId of Object.keys(turnsById)) {
+      const turn = turnsById[turnId];
+      if (!turn || turn.actor !== 'assistant') continue;
+      if (!['completed', 'interrupted', 'truncated', 'failed']
+          .includes(turn.status)) continue;
+      const projection = turn.projection || {};
+      if (projection.cost || !projection.usage) continue;
+      const cost = calcCostCny(
+        projection.usage,
+        projection.model || '',
+        projection.providerId || projection.provider_id || '',
+      );
+      if (cost && cost.costCny > 0) {
+        signatures.set(turnId, String(cost.costCny));
+      }
+    }
+    return signatures;
+  },
   getScrollViewport() {
     return document.getElementById('chatContainer');
   },
@@ -783,6 +1051,19 @@ const _conversationSurfaceController = createConversationSurfaceController({
   onIntent(intent) {
     const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
     if (!conv || conv.id !== intent.conversationId) return;
+    if (intent.type === 'load-earlier-turns' && intent.laneId) {
+      void runtimeScope.ConversationTurnStore?.loadConversationTurnPage?.(
+        conv,
+        intent.laneId,
+        intent.beforeOrdinal,
+        intent.limit,
+      ).catch((error) => {
+        if (typeof showToast === 'function') {
+          showToast(error?.message || 'Unable to load earlier turns', 'error');
+        }
+      });
+      return;
+    }
     if (intent.type === 'remove-queue' && intent.queueId) {
       void _removeNativeQueueItem(conv, intent.queueId);
       return;
@@ -804,7 +1085,7 @@ const _conversationSurfaceController = createConversationSurfaceController({
       return;
     }
     if (intent.type === 'cancel-image-generation') {
-      if (typeof _igCancelGeneration === 'function') _igCancelGeneration();
+      runtimeScope._igCancelGeneration?.();
       return;
     }
     if (intent.type === 'open-artifact' && intent.operation) {
@@ -829,7 +1110,14 @@ const _conversationSurfaceController = createConversationSurfaceController({
     const attachmentIndex = Number.parseInt(intent.operation || '', 10);
     const safeAttachmentUrl = (value, allowImageData) => {
       const raw = typeof value === 'string' ? value.trim() : '';
-      if (/^(?:https?:|blob:)/i.test(raw) || /^(?:\/|\.\.?\/)/.test(raw)) return raw;
+      if (/^(?:https?:|blob:)/i.test(raw)) return raw;
+      // Root-relative API URLs must carry the deployment BASE_PATH (same as
+      // the renderer's resolveMediaUrl port), or the modal requests them
+      // from the server root and 404s when the app is served under a subpath.
+      if (raw.startsWith('/')) {
+        return typeof apiUrl === 'function' ? apiUrl(raw) : raw;
+      }
+      if (/^\.\.?\//.test(raw)) return raw;
       return allowImageData && /^data:image\/(?:avif|gif|jpe?g|png|webp);base64,/i.test(raw)
         ? raw : '';
     };
@@ -861,9 +1149,15 @@ const _conversationSurfaceController = createConversationSurfaceController({
       if (source && typeof openImagePreview === 'function') openImagePreview(source);
     }
     else if (intent.type === 'retry-image-generation'
-        && Number.isInteger(attachmentIndex)
-        && typeof _igRetryGenerationTurn === 'function') {
-      void _igRetryGenerationTurn(conv, intent.turnId, attachmentIndex);
+        && Number.isInteger(attachmentIndex)) {
+      runtimeScope._igRetryGenerationTurn?.(conv, intent.turnId, attachmentIndex);
+    }
+    else if (intent.type === 'open-media' && intent.operation) {
+      const mediaAttachment = projection.attachments?.find(
+        (item) => item?.attachmentId === intent.operation,
+      );
+      const source = safeAttachmentUrl(mediaAttachment?.sourceUrl, false);
+      if (source && typeof openVideoUrl === 'function') openVideoUrl(source);
     }
     else if (intent.type === 'open-video' && Number.isInteger(attachmentIndex)) {
       const source = safeAttachmentUrl(
@@ -889,11 +1183,13 @@ const _conversationSurfaceController = createConversationSurfaceController({
         ? (projection.translatedContent || translatedSegments.join('\n\n')
           || projection.content || '')
         : (projection.originalContent || projection.content || '');
-      _safeClipboardWrite(copyText).catch(() => {});
+      _safeClipboardWrite(copyText)
+        .then(() => _flashTurnCopyFeedback(intent.turnId))
+        .catch(() => {});
     }
     else if (intent.type === 'inspect' && intent.operation
-        && typeof openRequestInspectorForTask === 'function') {
-      void openRequestInspectorForTask(intent.operation);
+        && typeof runtimeScope.openRequestInspectorForTask === 'function') {
+      void runtimeScope.openRequestInspectorForTask(intent.operation);
     }
     else if (intent.type === 'edit') {
       void _editNativeTurn(conv, intent.turnId);
@@ -913,6 +1209,9 @@ const _conversationSurfaceController = createConversationSurfaceController({
       if (typeof ExportImages !== 'undefined') {
         ExportImages.exportMessageWithPreview(intent.turnId);
       }
+    }
+    else if (intent.type === 'promote-decision') {
+      void _promoteNativeDecision(conv, intent.turnId, projection);
     }
     else if (intent.type === 'branch') void _createNativeBranch(conv, intent.turnId);
     else if (intent.type === 'delete') void _deleteNativeTurn(conv, intent.turnId);
@@ -984,9 +1283,13 @@ runtimeScope.ConversationTurnRead = Object.freeze({
 });
 
 function _renderConversationSurfaceState(conv, state, repaint) {
+  const transientState = _conversationTransientTurnOverlay.compose(state);
+  const presentationState = runtimeScope.ConversationSwarmPresentation?.compose?.(
+    conv, state, transientState,
+  ) || transientState;
   return _conversationSurfaceController.render(
     conv,
-    _conversationTransientTurnOverlay.compose(state),
+    presentationState,
     repaint || {},
   );
 }
@@ -1085,6 +1388,13 @@ runtimeScope.requestAuthoritativeConversationRender = function (
     applySettings(conv, settings) {
       if (typeof _applySettingsToConv === 'function') _applySettingsToConv(conv, settings);
     },
+    applySnapshotMetadata(conv, snapshot) {
+      void runtimeScope.Artifacts?.hydrateConversation?.(
+        conv,
+        typeof snapshot?.hasArtifacts === 'boolean'
+          ? snapshot.hasArtifacts : undefined,
+      );
+    },
     renderState(conv, state, repaint) {
       return _renderConversationSurfaceState(conv, state, repaint);
     },
@@ -1093,7 +1403,7 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       if (typeof clearFinishInfoPresentation === 'function') {
         clearFinishInfoPresentation(Object.keys(state?.turnsById || {}));
       }
-      runtimeScope.HumanGuidancePresentation?.clearConversation?.(conversationId);
+      humanGuidancePresentation.clearConversation(conversationId);
       _conversationSurfaceController.disposeConversation(conversationId);
       _conversationTransientTurnOverlay.clear(conversationId);
     },
@@ -1122,8 +1432,10 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       const conv = conversations.find(item => item?.id === conversationId);
       if (conv) conv._conversationSyncHealth = health;
       if (typeof renderConversationList === 'function') renderConversationList();
-      if (conversationId === activeConvId && typeof twUpdate === 'function') {
-        twUpdate(conversationId);
+      if (conversationId === activeConvId) {
+        runtimeScope.requestAuthoritativeConversationRender?.(
+          conversationId, { force: false, forceScroll: false },
+        );
       }
     },
   });

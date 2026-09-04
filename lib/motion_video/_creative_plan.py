@@ -46,6 +46,17 @@ NARRATIVE_ROLES = (
 BLUEPRINTS = SHOT_RECIPES
 _NUMBER_RE = re.compile(r'(?:\d[\d,.]*\s*%|\d+(?:\.\d+)?)')
 
+_RENDERER_CANDIDATES = {
+    'generated-still': ('hyperframes',),
+    'stock-video': ('hyperframes', 'remotion'),
+    'stock-gif': ('hyperframes', 'remotion'),
+    'web-capture': ('hyperframes', 'remotion'),
+    'native-data': ('hyperframes', 'motion-canvas', 'manim'),
+    'native-diagram': ('hyperframes', 'motion-canvas', 'manim'),
+    'kinetic-type': ('hyperframes', 'motion-canvas'),
+    'hybrid': ('hyperframes', 'remotion', 'motion-canvas'),
+}
+
 
 def _text(scene: dict) -> str:
     return ' '.join(str(scene.get(k) or '')
@@ -120,6 +131,15 @@ def normalise_scene_plan(scene: dict, index: int, total: int, *,
     scene['transition_in'] = transition
     scene['signature_move'] = str(scene.get('signature_move') or '').strip() \
         or (BLUEPRINTS.get(blueprint) or {}).get('rule', '')
+    modality = str(scene.get('visual_modality') or '').strip().lower()
+    if modality not in _RENDERER_CANDIDATES:
+        modality = 'kinetic-type' if role == 'credits' else 'generated-still'
+    scene['visual_modality'] = modality
+    scene['renderer_candidates'] = list(_RENDERER_CANDIDATES[modality])
+    # HyperFrames remains the installed renderer. The ordered candidates are
+    # a durable adapter seam for Remotion/Motion Canvas/Manim lanes without
+    # making a resumed job depend on whichever optional runtime is installed.
+    scene['preferred_renderer'] = scene['renderer_candidates'][0]
     return scene
 
 
@@ -154,6 +174,10 @@ def frame_packet(scene: dict, *, include_reference: bool = True) -> str:
         f'- why this frame exists: {scene.get("narrative_why") or ""}',
         f'- shot recipe: {blueprint or "credits-card / no animation recipe"}',
         f'- motion family: {scene.get("motion_family") or "unspecified"}',
+        f'- visual modality: {scene.get("visual_modality") or "generated-still"}',
+        f'- renderer candidates: '
+        f'{" / ".join(scene.get("renderer_candidates") or ["hyperframes"])}; '
+        f'current adapter: {scene.get("preferred_renderer") or "hyperframes"}',
         f'- planned energy: {scene.get("shot_energy") or 1}/5',
         f'- recipe duration range: {duration_text}; actual duration still wins',
         f'- phases: {scene.get("recipe_phases") or 1}',
@@ -181,6 +205,16 @@ def frame_packet(scene: dict, *, include_reference: bool = True) -> str:
     if constraints:
         lines += ['- recipe acceptance constraints:']
         lines += [f'  - {item}' for item in constraints]
+    media_queries = [item for item in (scene.get('media_queries') or [])
+                     if isinstance(item, dict)]
+    if media_queries:
+        lines += ['- real-media retrieval intents (never replace with a '
+                  'semantically unrelated decorative image):']
+        lines += [
+            f'  - {item.get("kind")}: {item.get("query")} — must show '
+            f'{item.get("semantic_target")}'
+            for item in media_queries[:4]
+        ]
     if include_reference and blueprint:
         try:
             from lib.motion_video._craft import craft_reference

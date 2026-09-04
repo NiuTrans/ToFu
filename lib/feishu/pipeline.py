@@ -17,6 +17,7 @@ from lib.feishu.conversation import (
     persist_exchange,
     resolve_owner_user_id,
 )
+from lib.feishu.user_state import MAX_FEISHU_HISTORY_MESSAGE_CHARS
 
 from lib.log import get_logger
 
@@ -38,7 +39,7 @@ def exec_project_tool(user_id: str, fn_name: str, fn_args: dict) -> str:
         logger.warning(
             '[FeishuBot] project tool %s execution failed: %s',
             fn_name, e, exc_info=True)
-        return f'❌ Tool error: {e}'
+        return '❌ 工具执行失败，请稍后重试'
 
 
 def run_task_pipeline(user_id: str, text: str,
@@ -60,6 +61,14 @@ def run_task_pipeline(user_id: str, text: str,
         consumer can post intermediate progress while the task runs. Wired
         through to ``run_task_sync(progress_fn=...)``.
     """
+    if not isinstance(text, str) or not text.strip():
+        return '❌ 消息内容为空'
+    if len(text) > MAX_FEISHU_HISTORY_MESSAGE_CHARS:
+        return (
+            '❌ 消息过长，请缩短到 '
+            f'{MAX_FEISHU_HISTORY_MESSAGE_CHARS} 个字符以内。'
+        )
+
     owner_user_id = resolve_owner_user_id(user_id)
     if owner_user_id is None:
         logger.error(

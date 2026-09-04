@@ -147,7 +147,7 @@ def _handle_get_cookies(fn_args, runtime):
     The extension's internal ``get_cookies`` command remains available to the
     verified login-capture owner, but the model-facing handler never serializes
     values. Authenticated HTTP/file work stays in Chrome through ``fetch_url``
-    or ``download_url_to_server``.
+    or ``browser_download_url_to_server``.
     """
     params = {}
     if fn_args.get('url'): params['url'] = fn_args['url']
@@ -179,7 +179,7 @@ def _handle_get_cookies(fn_args, runtime):
             '',
             'Cookie values stay in the browser and cannot be replayed by shell commands.',
             'For an authenticated server file, call '
-            'download_url_to_server({"url":"<exact file URL>"}); it selects '
+            'browser_download_url_to_server({"url":"<exact file URL>"}); it selects '
             'server HTTP or the logged-in browser automatically.',
         ])
         return '\n'.join(lines)

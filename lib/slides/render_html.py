@@ -139,6 +139,8 @@ def _text_div(el: dict, deck: Deck, theme: dict) -> str:
     fam = st.get('fontFamily') or 'MiSans'
     if isinstance(fam, dict):
         fam = fam.get('ea') or fam.get('latin') or 'MiSans'
+    from lib.design_sys.fonts import canonical_font_family
+    fam = canonical_font_family(fam, fallback='MiSans')
     if not _SAFE_FONT_RE.match(str(fam)):
         fam = 'MiSans'
     style = [
@@ -370,6 +372,7 @@ def _line_div(el: dict, deck: Deck, theme: dict, idx: int) -> str:
         style.append(f'transform:rotate({float(el["rotation"])}deg)')
     return (f'<div class="el line" style="{";".join(style)}">'
             f'<svg width="{w}" height="{h}" viewBox="0 0 {vb[0]} {vb[1]}" '
+            f'style="overflow:visible" '
             f'preserveAspectRatio="none">{markers}'
             f'<path d="{_html.escape(d, quote=True)}" fill="none" '
             f'stroke="{color}" stroke-width="{width}" {dash} '
@@ -603,7 +606,7 @@ def _table_div(el: dict, deck: Deck, theme: dict) -> str:
             f'<colgroup>{colgroup}</colgroup>{"".join(html_rows)}</table></div>')
 
 
-# ── Chart (parametric SVG, v1 subset) ─────────────────────
+# ── Chart (parametric SVG preview; native/editable in PPTX) ───────────
 
 def _chart_palette(theme: dict) -> list:
     from lib.slides.pptd import resolve_color as _rc
@@ -646,7 +649,7 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
                 f'<text x="{lx + 17:.1f}" y="18" font-size="{fs_cat:.0f}" '
                 f'fill="{muted}">{name}</text>')
             lx -= 18
-    if ctype == 'pie':
+    if ctype in ('pie', 'doughnut'):
         import math
         vals = [float(v) for v in (series[0].get('values') or [])]
         total = sum(vals) or 1.0
@@ -666,6 +669,10 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
                 f'A{r:.1f},{r:.1f} 0 {large} 1 {x1:.1f},{y1:.1f} Z" '
                 f'fill="{col}"/>')
             a0 = a1
+        if ctype == 'doughnut':
+            svg.append(
+                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r * 0.52:.1f}" '
+                f'fill="{_css_color("$bg", theme, "#FFFFFF")}"/>')
         ly = top_pad + 6
         for i, c in enumerate(cats):
             col = pal[i % len(pal)]
@@ -688,7 +695,43 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
         slot = w / n
         svg.append(f'<line x1="0" y1="{plot_bot:.1f}" x2="{w}" '
                    f'y2="{plot_bot:.1f}" stroke="{hair}" stroke-width="1"/>')
-        if ctype == 'line':
+        if ctype == 'radar':
+            import math
+            cx = w / 2
+            cy = top_pad + plot_h / 2
+            radius = max(10.0, min(w * 0.36, plot_h * 0.44))
+            for ring in (1 / 3, 2 / 3, 1.0):
+                points = []
+                for i in range(n):
+                    angle = -math.pi / 2 + i * 2 * math.pi / n
+                    points.append(
+                        f'{cx + radius * ring * math.cos(angle):.1f},'
+                        f'{cy + radius * ring * math.sin(angle):.1f}')
+                svg.append(
+                    f'<polygon points="{" ".join(points)}" fill="none" '
+                    f'stroke="{hair}" stroke-width="1"/>')
+            for i, category in enumerate(cats):
+                angle = -math.pi / 2 + i * 2 * math.pi / n
+                label_radius = radius + fs_cat * 1.2
+                svg.append(
+                    f'<text x="{cx + label_radius * math.cos(angle):.1f}" '
+                    f'y="{cy + label_radius * math.sin(angle):.1f}" '
+                    f'font-size="{fs_cat:.0f}" fill="{muted}" '
+                    f'text-anchor="middle">{_html.escape(category)}</text>')
+            for series_index, item in enumerate(series):
+                values = [float(v) for v in (item.get('values') or [])]
+                points = []
+                for i, value in enumerate(values):
+                    angle = -math.pi / 2 + i * 2 * math.pi / n
+                    rr = radius * max(0.0, value) / vmax
+                    points.append(
+                        f'{cx + rr * math.cos(angle):.1f},'
+                        f'{cy + rr * math.sin(angle):.1f}')
+                svg.append(
+                    f'<polygon points="{" ".join(points)}" '
+                    f'fill="{colors[series_index]}33" '
+                    f'stroke="{colors[series_index]}" stroke-width="2.5"/>')
+        elif ctype in ('line', 'area'):
             for si, s in enumerate(series):
                 vals = [float(v) for v in (s.get('values') or [])]
                 pts = []
@@ -697,6 +740,12 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
                     py = plot_bot - (v / vmax) * plot_h
                     pts.append((px, py))
                 d = 'M' + ' L'.join(f'{px:.1f},{py:.1f}' for px, py in pts)
+                if ctype == 'area' and pts:
+                    area_d = (d + f' L{pts[-1][0]:.1f},{plot_bot:.1f} '
+                              f'L{pts[0][0]:.1f},{plot_bot:.1f} Z')
+                    svg.append(
+                        f'<path d="{area_d}" fill="{colors[si]}33" '
+                        f'stroke="none"/>')
                 svg.append(f'<path d="{d}" fill="none" stroke="{colors[si]}" '
                            f'stroke-width="2.5"/>')
                 for i, (px, py) in enumerate(pts):
@@ -779,7 +828,8 @@ def collect_families(deck: Deck) -> set:
         if isinstance(v, dict):
             v = v.get('ea') or v.get('latin')
         if isinstance(v, str) and v and _SAFE_FONT_RE.match(v):
-            fams.add(v)
+            from lib.design_sys.fonts import canonical_font_family
+            fams.add(canonical_font_family(v, fallback='MiSans'))
     for cfg in ((deck.theme or {}).get('textStyles') or {}).values():
         if isinstance(cfg, dict):
             _add(cfg.get('fontFamily'))
@@ -806,13 +856,9 @@ def _font_face_css(families: set) -> str:
     pass sees the result either way, and the renderer never blocks on a font.
     """
     import lib.design_sys.fonts as _fonts
-    by_family = {}
-    for f in _fonts.FONT_REGISTRY:
-        by_family[f.family] = f
-        by_family[f.id] = f
     rules = []
     for fam in sorted(families):
-        face = by_family.get(fam)
+        face = _fonts.resolve_font(fam)
         if face is None:
             continue
         for src in face.sources:

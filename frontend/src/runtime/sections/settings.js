@@ -1,6 +1,6 @@
 /* ===== migrated source: settings.js ===== */
 // ══════════════════════════════════════════════════════
-//  settings.js — Multi-provider settings with nested models
+//  settings.js — owner-scoped model-routing v2 settings state
 //  Brand SVG paths from LobeHub Icons (MIT License)
 //  https://github.com/lobehub/lobe-icons
 // ══════════════════════════════════════════════════════
@@ -20,59 +20,26 @@ var _modelPriceDisplayPolicy = {
   source: 'unavailable',
 };
 
-function _modelPricePresentationService() {
-  // The typed settings owner registers this service through the private
-  // runtime port before any settings action is invoked. Never recreate the
-  // deleted classic-script global as a fallback.
-  var service = runtimeScope.modelPricePresentation;
-  return service && typeof service.displayCurrency === 'function'
-    ? service : null;
-}
+/* The Settings editor stages exactly one owner-scoped v2 aggregate. Secret
+ * plaintext is held only until the dedicated secret operation succeeds. */
+let _stgModelRouting = null;
+let _stgModelRoutingRevision = 0;
+let _stgModelRoutingLoadError = '';
+let _stgPendingCredentialSecrets = {};
+let _stgPresets = {};
 
-function _modelPriceUsdRates() {
-  var rates = _modelPriceDisplayPolicy && _modelPriceDisplayPolicy.usd_rates;
-  return rates && typeof rates === 'object' ? rates : { USD: 1 };
-}
-
-function _modelPriceUiLanguage() {
-  return typeof _i18nLang !== 'undefined' ? _i18nLang : 'en';
-}
-
-function _modelPriceDisplayCurrency(authorityCurrency) {
-  var source = String(authorityCurrency || 'USD').toUpperCase();
-  if (!/^[A-Z]{3}$/.test(source)) source = 'USD';
-  var service = _modelPricePresentationService();
-  return service
-    ? service.displayCurrency(
-        _modelPriceUiLanguage(), source, _modelPriceUsdRates())
-    : source;
-}
-
-function _modelPriceInputForUi(value, sourceCurrency) {
-  var service = _modelPricePresentationService();
-  if (!service) return value == null ? '' : String(value);
-  return service.inputValue(
-    value, sourceCurrency || 'USD', _modelPriceUiLanguage(),
-    _modelPriceUsdRates());
-}
-
-function _modelPriceAuthorityFromUi(value, displayCurrency, authorityCurrency) {
-  var service = _modelPricePresentationService();
-  if (!service) {
-    var number = Number(value);
-    return isFinite(number) && number >= 0 ? number : null;
-  }
-  return service.authorityValue(
-    value, displayCurrency, authorityCurrency, _modelPriceUsdRates());
-}
-
-/** Cached today's per-key success/failure stats: { day, providers: {pid: {key_name: {...}}} } */
-var _keyStatsCache = {
-  day: '', providers: {},
-  min_attempts: 5, min_success_rate: 0.5,
-};
-var _keyStatsLoading = false;
-
+Object.defineProperties(runtimeScope, {
+  _stgModelRouting: {
+    configurable: true,
+    get: function () { return _stgModelRouting; },
+    set: function (value) { _stgModelRouting = value; },
+  },
+  _stgModelRoutingRevision: {
+    configurable: true,
+    get: function () { return _stgModelRoutingRevision; },
+    set: function (value) { _stgModelRoutingRevision = Number(value || 0); },
+  },
+});
 
 /* ═══════════════════════════════════════════════════════════════════
    The body of this file (openSettings, saveSettings, _renderProvidersTab,

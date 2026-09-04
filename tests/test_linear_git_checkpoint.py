@@ -412,9 +412,7 @@ def test_tool_pipeline_executes_write_even_if_checkpoint_module_is_broken(
     tool_contents = [message['content'] for message in messages
                      if message.get('role') == 'tool']
     assert len(tool_contents) == 1
-    tool_payload = json.loads(tool_contents[0])
-    assert tool_payload['status'] == 'ok'
-    assert tool_payload['summary'] == 'written'
+    assert tool_contents[0] == 'written'
 
 
 def test_first_settlement_anchors_current_head_not_older_stable(

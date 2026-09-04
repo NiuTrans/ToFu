@@ -4,8 +4,8 @@ Contains the static configuration tables that seed the slot pool before
 benchmark data is loaded.  These are **reference tables** — they describe
 known model capabilities / RPM / cost metadata so that *any* configured
 model benefits from pre-seeded data.  They do NOT control which models
-are "active" — that is driven entirely by the Settings UI providers
-(server_config.json) or legacy env-var config.
+are "active" — that is driven entirely by owner-scoped model-routing v2
+ProviderAccess and Deployment resources.
 
 This package is a facade split across cohesive sub-modules::
 

@@ -66,7 +66,8 @@ def _render_bounded_partial_output(state):
     return prefix[:prefix_size] + marker + tail
 
 
-def _make_run_command_progress_cb(task, rn, round_entry, command):
+def _make_run_command_progress_cb(
+        task, rn, round_entry, command, runtime_context=None):
     """Build an ``on_chunk(stream, text)`` callback for tool_run_command.
 
     Each call appends the chunk to ``round_entry['_partialOutput']`` for
@@ -78,6 +79,48 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
     single SSE event.  This avoids flooding the event queue when a command
     produces tight-loop output (e.g. ``yes``, build logs).
     """
+    if runtime_context is not None:
+        from lib.tasks_pkg.tool_runtime import bind_tool_progress_sink
+
+        sink = bind_tool_progress_sink(runtime_context)
+        writer = runtime_context.open_output_writer()
+        scanner = _LiveQrScanner() if _LiveQrScanner is not None else None
+
+        def _publish(stream, text):
+            if not text:
+                return
+            writer.write(text)
+            sink.publish(stream, text)
+
+        def _flush():
+            sink.flush()
+            if scanner is None:
+                return
+            try:
+                fresh = scanner.scan(sink.snapshot)
+            except Exception as exc:
+                logger.warning(
+                    '[code_exec] live QR scan failed (non-fatal): %s', exc)
+                return
+            if not fresh:
+                return
+            acc = list(round_entry.get('qrImages') or [])
+            acc.extend(fresh)
+            round_entry['qrImages'] = acc
+            sink.publish('stdout', '', qrImages=acc)
+            sink.flush()
+
+        def _finalize(*, complete=True):
+            _flush()
+            sink.close('completed' if complete else 'cancelled')
+            return writer.finalize(complete=complete)
+
+        _publish.flush = _flush
+        _publish.close = sink.close
+        _publish.finalize_output = _finalize
+        _publish.output_writer = writer
+        return _publish
+
     state = {
         'buf': [],            # list[(stream, text)]
         'bytes': 0,
@@ -357,6 +400,52 @@ def _make_stdin_callback(task, rn, round_entry, command):
 
 
 # code_exec is registered as a special handler (matched via round_entry, not fn_name)
+def _project_output_artifact(tool_content, artifact):
+    """Use the writer preview while preserving command terminal markers."""
+    if artifact is None or not artifact.spilled:
+        return tool_content
+
+    prefix_match = re.match(r'^(\$ .*?\n)', tool_content)
+    prefix = prefix_match.group(1) if prefix_match else ''
+    terminal_match = re.search(
+        r'(\n\[Command (?:timed out|aborted by user|interrupted by [^\]]+)\])?'
+        r'(\n\[exit code: -?\d+\])\s*$',
+        tool_content,
+    )
+    terminal = terminal_match.group(0).rstrip() if terminal_match else ''
+    preview = artifact.text
+
+    if artifact.artifact_ref:
+        state = 'complete' if artifact.complete else 'cancellation-partial'
+        notice = (
+            f'\n[Output overflow: {artifact.size_bytes:,} bytes; {state}; '
+            f'artifact_ref={artifact.artifact_ref}]')
+    else:
+        reason = artifact.degraded_reason or 'storage'
+        notice = (
+            f'\n[Output overflow was not retained ({reason}); '
+            f'{artifact.size_bytes:,} bytes observed]')
+    suffix = notice + (f'\n{terminal}' if terminal else '')
+    return prefix + preview + suffix
+
+
+def _register_output_artifact_origin(task, round_entry, artifact, *,
+                                     tool_name, display, tool_call_id):
+    """Register owner-local provenance for continuation-tool presentation."""
+    if artifact is None or not artifact.artifact_ref:
+        return
+    from lib.tool_result_artifacts import register_artifact_provenance
+
+    register_artifact_provenance(
+        task,
+        artifact.artifact_ref,
+        tool_name=tool_name,
+        display=display,
+        llm_round=round_entry.get('llmRound'),
+        tool_call_id=tool_call_id,
+    )
+
+
 @tool_registry.special('__code_exec__', category='code',
                        description='Execute a shell command in the project sandbox')
 def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
@@ -389,7 +478,11 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     # stdin-waiting implementation and can strand a worker indefinitely.
     cb = (None if task.get('_unattended')
           else _make_stdin_callback(task, rn, round_entry, cmd))
-    progress_cb = _make_run_command_progress_cb(task, rn, round_entry, cmd)
+    from lib.tasks_pkg.tool_runtime import active_context_for_call
+    runtime_context = active_context_for_call(
+        task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry)
+    progress_cb = _make_run_command_progress_cb(
+        task, rn, round_entry, cmd, runtime_context=runtime_context)
     spawn_cb = _make_run_command_spawn_cb(task, rn, round_entry)
     grep_intercept_cb = _make_grep_intercept_cb(task, rn, round_entry)
     try:
@@ -403,6 +496,8 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
                                                   on_chunk=progress_cb,
                                                   on_spawn=spawn_cb,
                                                   on_grep_intercept=grep_intercept_cb,
+
+                                                  runtime_context=runtime_context,
                                                   task=task)
     finally:
         # Flush any buffered tail that didn't reach the coalescing threshold.
@@ -410,6 +505,26 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             progress_cb.flush()
         except Exception as e:
             logger.debug('[code_exec] progress flush failed: %s', e)
+    artifact = None
+    finalize_output = getattr(progress_cb, 'finalize_output', None)
+    if callable(finalize_output):
+        incomplete = (
+            runtime_context is not None and runtime_context.cancellation_requested
+        ) or '[Command timed out]' in tool_content or (
+            '[Command interrupted by' in tool_content)
+        artifact = finalize_output(complete=not incomplete)
+        tool_content = _project_output_artifact(tool_content, artifact)
+        _register_output_artifact_origin(
+            task, round_entry, artifact,
+            tool_name='run_command', display=cmd, tool_call_id=tc_id)
+        if artifact.spilled:
+            round_entry['outputArtifact'] = {
+                'artifactRef': artifact.artifact_ref,
+                'sizeBytes': artifact.size_bytes,
+                'complete': artifact.complete,
+                'degraded': artifact.degraded,
+                'degradedReason': artifact.degraded_reason,
+            }
     # Must anchor to END — command output may itself contain [exit code: N]
     m_exit = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m_exit.group(1) if m_exit else '?'

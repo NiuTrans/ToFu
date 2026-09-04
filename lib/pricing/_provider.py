@@ -114,6 +114,66 @@ def _choose_context_tier(tiers, prompt_tokens):
     return dict(tiers[-1])
 
 
+def first_pricing_increase_boundary(model_id, provider_id=None):
+    """Return the first prompt boundary followed by a dearer pricing tier.
+
+    The comparison uses effective billable rates (uncached input, output,
+    cache write, and cache read), rather than model names or a vendor-specific
+    threshold.  A flat-emulation tier whose following tier has identical or
+    cheaper effective rates is therefore ignored.  ``None`` means the active
+    provider/model rate card has no proven price cliff.
+
+    The returned boundary is the inclusive ``maxPromptTokens`` of the cheaper
+    tier.  Callers should leave their own safety margin below it because the
+    rendered provider prompt can grow after an early local estimate.
+    """
+    pricing = lookup_pricing(
+        model_id, provider_id, prompt_tokens=0)
+    tiers = (pricing or {}).get('contextTiers') or ()
+    if len(tiers) < 2:
+        return None
+
+    def effective_rates(tier):
+        input_rate = max(0.0, float(tier.get('input') or 0.0))
+        output_rate = max(0.0, float(tier.get('output') or 0.0))
+        return (
+            input_rate,
+            output_rate,
+            input_rate * max(
+                0.0, float(tier.get('cacheWriteMul', 1.25))),
+            input_rate * max(
+                0.0, float(tier.get('cacheReadMul', 0.10))),
+        )
+
+    previous = tiers[0]
+    for current in tiers[1:]:
+        previous_currency = str(
+            previous.get('currency') or pricing.get('currency') or 'USD'
+        ).upper()
+        current_currency = str(
+            current.get('currency') or pricing.get('currency') or 'USD'
+        ).upper()
+        # Cross-currency tier rows have no safe local comparison. They are an
+        # invalid/ambiguous rate-card shape for this policy, so fail open.
+        if previous_currency != current_currency:
+            return None
+        before = effective_rates(previous)
+        after = effective_rates(current)
+        if any(new > old + 1e-12 for old, new in zip(before, after)):
+            return {
+                'maxPromptTokens': int(previous['maxPromptTokens']),
+                'tierId': str(previous.get('id') or ''),
+                'nextTierId': str(current.get('id') or ''),
+                'currency': previous_currency,
+                'beforeRates': before,
+                'afterRates': after,
+                'pricingSource': str(
+                    pricing.get('_pricingSource') or 'resolved_price'),
+            }
+        previous = current
+    return None
+
+
 def build_rate_card():
     """Export the read-only rate card from the actual resolver tables."""
     models = {}

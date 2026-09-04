@@ -53,7 +53,11 @@ function handleKeyDown(e) {
   }
   // Escape exits image gen mode or branch mode
   if (e.key === "Escape") {
-    if (imageGenMode) { e.preventDefault(); exitImageGenMode(); return; }
+    if (imageGenMode) {
+      e.preventDefault();
+      runtimeScope.exitImageGenMode?.();
+      return;
+    }
     if (typeof isBranchModeActive === "function" && isBranchModeActive()) {
       e.preventDefault();
       closeBranchPanel();
@@ -181,4 +185,3 @@ function closeSidebarSearch() {
   if (toggle) toggle.classList.remove("active");
   renderConversationList();
 }
-

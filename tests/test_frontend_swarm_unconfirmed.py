@@ -54,7 +54,9 @@ const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[3];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
+const dom = new JSDOM('<!DOCTYPE html><body></body>', {
+  url: 'http://localhost/', pretendToBeVisual: true,
+});
 const win = dom.window;
 global.window = win;
 global.document = win.document;
@@ -75,10 +77,12 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 for (const fn of ['_buildSwarmPanelHTML', '_settleStuckSwarmRound',
-                  '_reconcileStuckSwarmPanels', '_swarmRoundTaskId']) {
+                  '_swarmRoundTaskId']) {
   if (typeof eval(fn) !== 'function') { console.log('FAIL functions_exposed ' + fn + ' missing'); process.exit(0); }
 }
 check('functions_exposed', true);
+const reconcileSwarmPanels = () =>
+  SwarmReconciliationTestPort.reconcileNow();
 
 const NOW = Date.now();
 const OLD = NOW - 300000;   // 5 min ago — comfortably past the 60s unknown-settle age
@@ -110,7 +114,6 @@ let answer = { active: null, known: false };
 win.Api = global.Api = { swarm: { status: async (id) => { probeIds.push(id); return answer; } } };
 win.activeStreams = global.activeStreams = new Set();
 win.activeConvId = 'convA';
-win.saveConversations = global.saveConversations = () => {};
 
 /* The reconciler consumes Turn-native presentation ownership. Keep the old
    message fixtures only as convenient input builders; this adapter snapshots
@@ -164,16 +167,16 @@ const roundA = convA._testProjections[0].toolRounds[0];
 
 (async () => {
   // 3a. ambiguous answer → probe used the conv-scoped key; NO settle, NO latch
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   check('probe_uses_conv_key', probeIds[probeIds.length - 1] === 'convA');
   check('ambiguous_not_settled', !currentRound(convA)._swarmEndTime);
   check('ambiguous_durable_unchanged', !roundA._swarmEndTime);
   check('ambiguous_counted', probeIds.filter(id => id === 'convA').length === 1);
 
   // 3b. second ambiguous → still open; third (age > 60s) → honestly-unknown settle
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   check('second_ambiguous_still_open', !currentRound(convA)._swarmEndTime);
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   check('third_unknown_settles', !!currentRound(convA)._swarmEndTime);
   check('third_unknown_agent_honest', currentRound(convA)._swarmAgents[0].status === 'unknown');
 
@@ -185,7 +188,7 @@ const roundA = convA._testProjections[0].toolRounds[0];
   conversations.push(convB);
   answer = { active: false, known: true, terminated: true,
              agents: [{ id: 'f1', status: 'failed', error: 'provider 429 storm' }] };
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   const roundB = currentRound(convB);
   check('terminated_settles_first_answer', !!roundB._swarmEndTime);
   check('terminated_agent_failed', roundB._swarmAgents[0].status === 'failed'
@@ -199,11 +202,15 @@ const roundA = convA._testProjections[0].toolRounds[0];
       _swarmAgents: [{ id: 'r1', role: 'coder', objective: 'z', status: 'running' }] }] }] };
   conversations.push(convC);
   answer = { active: true, known: true };
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   const roundC = currentRound(convC);
   check('active_confirms_liveness', typeof roundC._swActiveConfirmedAt === 'number');
   check('active_uses_overlay', overlayTurns.has('convC'));
   check('active_not_settled', !roundC._swarmEndTime);
+  const convCProbeCount = probeIds.filter(id => id === 'convC').length;
+  await reconcileSwarmPanels();
+  check('active_probe_backoff_armed',
+    probeIds.filter(id => id === 'convC').length === convCProbeCount);
 
   // 3e. post-reload roster recovery: no _swarmAgents, only the persisted
   //     spawn handle → the reconciler recovers the roster, probes, settles
@@ -215,7 +222,7 @@ const roundA = convA._testProjections[0].toolRounds[0];
   conversations.push(convD);
   answer = { active: false, known: true, terminated: true,
              agents: [{ id: 'h1', status: 'completed' }] };
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   const roundD = currentRound(convD);
   check('reload_roster_recovered', (roundD._swarmAgents || []).some(a => a.id === 'h1'));
   check('reload_settled_with_truth', !!roundD._swarmEndTime
@@ -232,7 +239,7 @@ const roundA = convA._testProjections[0].toolRounds[0];
   answer = { active: true, known: true, created_at: (NOW - 35000) / 1000,
              agents: [{ id: 'g1', status: 'running' },
                       { id: 'g2', role: 'coder', objective: 'wave2', status: 'pending' }] };
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   const roundE = currentRound(convE);
   check('resurrect_active_flag', roundE._swarmActive === true);
   check('resurrect_not_settled', !roundE._swarmEndTime);
@@ -243,14 +250,17 @@ const roundA = convA._testProjections[0].toolRounds[0];
   check('resurrect_graft_spawn_more',
         (roundE._swarmAgents || []).some(a => a.id === 'g2' && a.status === 'pending'));
   check('resurrect_pill_running',
-        _buildSwarmPanelHTML(roundE, [roundE]).includes('sw-pill-running'));
+    _buildSwarmPanelHTML(roundE, [roundE]).includes('sw-pill-running'));
 
   // 3g. The resurrected panel stays a probe candidate and settles on the
   //     terminal answer through the normal path — with the failure reason.
   answer = { active: false, known: true, terminated: true,
              agents: [{ id: 'g1', status: 'completed' },
                       { id: 'g2', status: 'failed', error: 'boom' }] };
-  await _reconcileStuckSwarmPanels();
+  const realDateNow = Date.now;
+  Date.now = () => realDateNow() + 121000;
+  await reconcileSwarmPanels();
+  Date.now = realDateNow;
   const settledRoundE = currentRound(convE);
   check('resurrect_then_settles', !!settledRoundE._swarmEndTime);
   check('resurrect_settle_done',
@@ -288,7 +298,7 @@ const roundA = convA._testProjections[0].toolRounds[0];
   activeStreams.add('convG');
   answer = { active: false, known: true, terminated: true,
              agents: [{ id: 's1', status: 'completed' }] };
-  await _reconcileStuckSwarmPanels();
+  await reconcileSwarmPanels();
   const roundG1 = currentRound(convG, 0);
   const roundG2 = currentRound(convG, 1);
   check('streaming_flagless_round_probed', probeIds.includes('convG'));
@@ -327,7 +337,7 @@ def test_swarm_unconfirmed_reconcile_three_state():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm unconfirmed-reconcile failures:\n' + output
-    assert output.count('PASS') >= 32, f'expected >=32 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 33, f'expected >=33 PASS lines, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

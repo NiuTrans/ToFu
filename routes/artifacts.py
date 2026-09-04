@@ -331,7 +331,10 @@ def api_export_artifact(artifact_id):
     except PdfRenderError as e:
         logger.info('[Artifacts] PDF export failed for id=%s: %s',
                     artifact_id[:8], e)
-        return api_error('pdf_render_failed', status=503, detail=str(e))
+        # PdfRenderError can wrap Playwright launch paths and worker stderr.
+        # Keep the stable public code while retaining diagnostics only in the
+        # server log; 5xx bodies are not a trusted debugging channel.
+        return api_error('pdf_render_failed', status=503)
     except Exception as e:
         logger.error('[Artifacts] PDF export crashed for id=%s: %s',
                      artifact_id[:8], e, exc_info=True)

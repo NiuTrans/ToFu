@@ -55,9 +55,9 @@ the partial projection remains durable (and prefill-capable models expose it to
 
 `lib/turn_lifecycle.py::_settlement` derives the document from the terminal
 executor evidence through the pure `lib/turn_verdict.py` state matrix.
-`turn.event.record` commits projection, attempt event, turn
-status, settlement, conversation revision, and any carried task event in one
-Sidecar transaction.
+`turn.event.record` applies a revision-checked projection patch and commits the
+resulting projection, attempt event, turn status, settlement, conversation
+revision, and any carried task event in one Sidecar transaction.
 
 Every terminal exporter uses the same matrix. In-process results and the
 OpenAI/Anthropic compatibility surfaces call `derive_task_verdict`; a failed
@@ -77,8 +77,16 @@ Consequences:
 Recovery is explicit. Each entry has an `operation` and a durable `anchor`.
 
 - `continue`: lossless assistant prefill is available for a model that
-  supports it and a non-empty partial projection.
+  supports it and a non-empty partial projection. The executor config pairs
+  the prefill with the retained checkpoint tool rounds — the same pre-gap
+  retention a `checkpoint_resume` anchor computes — so the resumed model
+  keeps every tool fact it produced before the interruption instead of
+  continuing blind to the history the user still sees. Replay inside the
+  executor still uses the causal prefix.
 - `checkpoint_resume`: completed tool rounds provide a stable checkpoint.
+  The anchor retains every pre-gap round, display/progress carriers
+  included, and amputates the result-less in-flight tail; only explicitly
+  superseded provider-attempt artifacts are filtered.
 - `regenerate`: restart from turn input; always available for a non-successful
   terminal turn.
  The retry supersedes the whole lane tail: every turn
@@ -91,7 +99,8 @@ Recovery is explicit. Each entry has an `operation` and a durable `anchor`.
 The command service validates the selected operation against the stored
 options and expected projection revision. The frontend displays exactly these
 operations through `frontend/src/core/turn-presentation.ts`; it does not label
-regeneration as continuation.
+regeneration as continuation, and the rendered action label reflects the
+granted operation, so a regenerate-only settlement reads as regeneration.
 
 ## Attempt startup failure
 

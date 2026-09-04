@@ -841,11 +841,15 @@ def test_completed_browser_file_stops_legacy_text_fallback_before_second_get(
 
     def legacy_text_pipeline(source_url, **_kwargs):
         # This mirrors tofu-search's legacy provider contract: ordinary
-        # Exceptions are swallowed and followed by another network transport.
+        # Exceptions are followed by another network transport.  A completed
+        # browser handoff must escape that contract; surface a regression
+        # explicitly instead of laundering the subject call in this test.
         try:
             provider.fetch_url(source_url)
-        except Exception:
-            pass
+        except Exception as error:
+            pytest.fail(
+                'completed browser handoff was caught as an ordinary '
+                f'exception: {error!r}')
         follow_up_gets.append(source_url)
         return None
 

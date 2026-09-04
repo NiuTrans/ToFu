@@ -13,16 +13,15 @@ no ``results``). ``_renderUnifiedToolLine`` interpolates ``q`` (built from
 such round rendered blank.
 
 FIX (epic pt_9409bf7133c049cb ①): ``_recoveryRoundFallbackTitle`` — when
-``round.query`` is absent, fall back to the tool label (the same
-``_getToolDisplay`` table live rounds use) plus a short first-string-arg
+``round.query`` is absent, fall back to the typed tool label (the same
+``_getToolDisplay`` adapter live rounds use) plus a short first-string-arg
 summary.
 
-HARNESS: drives the REAL ``_renderUnifiedToolLine`` + ``_getToolDisplay`` +
-``_recoveryRoundFallbackTitle`` extracted from static/js/ui/tool_rounds.js
-(the file prefix through ``_getToolDisplay`` carries every const/predicate
-they close over) in a plain node eval — the generic path only builds a
-string, no DOM needed. Every other branch renderer is stubbed to "" so the
-probe order still runs and the generic line is reached.
+HARNESS: drives the real ``_renderUnifiedToolLine`` + ``_getToolDisplay`` +
+``_recoveryRoundFallbackTitle`` from the retained test view. That view loads
+the typed presentation owner first, matching the Vite prelude; the generic
+path only builds a string, so no DOM is needed. Every other branch renderer is
+stubbed to "" so the probe order still runs and the generic line is reached.
 
 NEUTER: rewire the fallback call to '' (the pre-fix world) → the title span
 comes out empty again, proving the fallback is load-bearing.
@@ -112,24 +111,12 @@ def _extract_function(src: str, name: str) -> str:
 
 def _build_driver(neuter: bool, round_json: str) -> str:
     src = open(SRC, encoding='utf-8').read()
-    # File prefix through the end of _getToolDisplay: carries _isRoundFetch /
-    # _isRoundSearch / _isRoundProject / _isRoundBrowser / _isRoundSwarm /
-    # _CONV_META_TOOLS / _isRoundConvMeta / _TD_SVG / _TOOL_DISPLAY /
-    # _getToolDisplay — everything the two extracted functions close over.
-    prefix_end = src.find('function _getToolDisplay')
+    # The materialized prefix includes the typed presentation owner plus the
+    # retained display-label adapter, matching the production ESM prelude.
+    display_adapter = 'const _getToolDisplay = toolRoundDisplay;'
+    prefix_end = src.find(display_adapter)
     assert prefix_end > 0
-    depth = 0
-    i = src.find('{', prefix_end)
-    j = i
-    while True:
-        if src[j] == '{':
-            depth += 1
-        elif src[j] == '}':
-            depth -= 1
-            if depth == 0:
-                break
-        j += 1
-    prefix = src[:j + 1]
+    prefix = src[:prefix_end + len(display_adapter)]
 
     fallback_fn = _extract_function(src, '_recoveryRoundFallbackTitle')
     render_fn = _extract_function(src, '_renderUnifiedToolLine')
@@ -137,6 +124,9 @@ def _build_driver(neuter: bool, round_json: str) -> str:
         render_fn = render_fn.replace('_recoveryRoundFallbackTitle(round, td)', "''")
         assert "_recoveryRoundFallbackTitle(round, td)" not in render_fn
 
+    bootstrap = """
+function Icon(name) { return '<svg data-icon="' + name + '"></svg>'; }
+"""
     stubs = """
 function _getToolSvg() { return 'SVG'; }
 function _linkifyMcpLabels(s) { return s; }
@@ -148,6 +138,13 @@ function t(k, d) { return d || k; }
 const _EMPTY = () => '';
 const _FALSE = () => false;
 function _rowModelViewBtn() { return 'BTN'; }
+// Command interaction state is lifecycle-owned (Sets keyed by toolCallId). The
+// generic-line render only READS `_cmdBodyExpanded.has(...)`/
+// `_cmdOutputExpanded.has(...)`, which the auto-stub regex (`_name(`) cannot
+// see, so declare the real empty Sets here (same initial state as the shipped
+// tool_rounds.js) and let `_cmdInteractionKey` fall through to its auto-stub.
+const _cmdBodyExpanded = new Set();
+const _cmdOutputExpanded = new Set();
 """
     # ── Auto-derived collaborator stubs ────────────────────────────────
     # The list of `_renderX(...)` helpers this driver must stub used to be
@@ -160,8 +157,12 @@ function _rowModelViewBtn() { return 'BTN'; }
     # automatically.
     _extracted = fallback_fn + '\n' + render_fn
     _called = set(re.findall(r'\b(_[A-Za-z_]\w*)\s*\(', _extracted))
-    _already = set(re.findall(r'\bfunction\s+(_[A-Za-z_]\w*)\s*\(', prefix + stubs))
-    _already |= set(re.findall(r'\b(?:const|let|var)\s+(_[A-Za-z_]\w*)\s*=', prefix + stubs))
+    _already = set(re.findall(
+        r'\bfunction\s+(_[A-Za-z_]\w*)\s*\(', bootstrap + prefix + stubs))
+    _already |= set(re.findall(
+        r'\b(?:const|let|var)\s+(_[A-Za-z_]\w*)\s*=',
+        bootstrap + prefix + stubs,
+    ))
     # The two functions under test are real, never stubbed.
     _already |= {'_recoveryRoundFallbackTitle', '_renderUnifiedToolLine'}
     _missing = sorted(_called - _already)
@@ -169,7 +170,8 @@ function _rowModelViewBtn() { return 'BTN'; }
         stubs += ('var ' + ' = _EMPTY, '.join(_missing) + ' = _EMPTY;\n')
 
     call = f"\nconst ROUND = {round_json};\nconsole.log(_renderUnifiedToolLine(ROUND, false));\n"
-    return prefix + '\n' + fallback_fn + '\n' + render_fn + '\n' + stubs + call
+    return (bootstrap + prefix + '\n' + fallback_fn + '\n' + render_fn
+            + '\n' + stubs + call)
 
 
 def _render(round_obj: dict, neuter: bool = False) -> str:

@@ -542,7 +542,7 @@ def _accept_browser_server_download(target_url: str, receipt: dict) -> dict:
             retryable=True,
             next_action=(
                 'Open and finish login for this site in the selected browser, '
-                'then retry download_url_to_server with the same URL.'),
+                'then retry browser_download_url_to_server with the same URL.'),
         )
 
     size_bytes = int(receipt.get('sizeBytes') or 0)
@@ -576,7 +576,7 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
     if scheme not in {'http', 'https'}:
         return _download_failure(
             'server_download_invalid_url',
-            'download_url_to_server requires an http:// or https:// URL.',
+            'browser_download_url_to_server requires an http:// or https:// URL.',
             retryable=False,
             next_action='Use read_files for a local path; otherwise provide the exact remote URL.',
         )
@@ -587,6 +587,10 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
     except Exception as exc:
         direct = None
         direct_error = text_for_log(exc)
+        logger.debug(
+            '[Download] direct server transport failed for %s: %s',
+            url_for_log(target_url), direct_error,
+        )
     if direct:
         raw, content_type = direct
         if not _looks_like_html_download(content_type, raw[:1024]):
@@ -636,7 +640,7 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
             }
             next_action = (
                 'Connect/reload the served browser extension 5.4 or newer and '
-                'retry download_url_to_server with the same URL.'
+                'retry browser_download_url_to_server with the same URL.'
                 if code in {
                     'browser_file_transfer_offline',
                     'browser_file_transfer_unbound',

@@ -5,9 +5,9 @@ Extracted from ``routes/conversations.py``. Registers on the same
 ``routes/__init__.py``.
 
 Storage: the Sidecar owns the search scan (``conversation.search`` op) —
-backend-portable LIKE matching over the head-capped ``search_text`` with
-snippets projected inside the Sidecar, so GiB-scale blobs never cross the
-RPC frame.
+backend-portable LIKE matching over head-capped
+``storage_search_turns.search_text`` projection rows, with snippets projected
+inside the Sidecar so GiB-scale transcript/header blobs never cross the RPC.
 """
 
 import time

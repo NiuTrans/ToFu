@@ -92,6 +92,20 @@ class ConvConfigRouteTest(unittest.TestCase):
         for k in ('model', 'searchMode', 'memoryEnabled'):
             self.assertIn(k, body, f'missing key: {k}')
 
+    def test_config_resolve_can_include_distinct_persistence_settings(self):
+        r = self._post('/api/v1/conversations/config/resolve', {
+            'conv_settings': {'model': 'stored-config'},
+            'settings_conv_settings': {'model': 'max'},
+            'overrides': {'model': 'qwen'},
+            'is_active': True,
+            'include_settings': True,
+        })
+        self.assertEqual(r.status_code, 200)
+        body = _new_loop_run(r.get_json())
+        self.assertEqual(body['model'], 'qwen3.6-plus')
+        self.assertEqual(body['settings']['model'], 'aws.claude-opus-4.7')
+        self.assertEqual(body['settings']['thinkingDepth'], 'max')
+
     # ── /settings/resolve ──────────────────────────────────────────
 
     def test_settings_resolve_basic(self):

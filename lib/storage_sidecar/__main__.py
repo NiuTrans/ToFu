@@ -179,12 +179,18 @@ def main() -> int:
         backend = create_backend(
             config, startup_progress=startup_progress)
         backend.start()
+        # Publish only a credential-free authority locator. Offline debugging
+        # cannot use the private Sidecar socket/token, but it must not guess
+        # between a fastpath write front and a stale configured SQLite path.
+        lease.publish_storage_locator(backend.diagnostic_locator())
         logical_outbox = LogicalOutboxPipeline.from_config(config, backend)
         logical_outbox.start()
         server = create_server(
             backend,
             config.token,
             rpc_capacity=config.rpc_capacity,
+            rpc_inflight_bytes=(
+                config.rpc_inflight_max_mib * 1024 * 1024),
             read_only_preview=config.distributed_preview_read_only,
             logical_outbox=logical_outbox,
             idle_trim_rss_bytes=config.idle_trim_rss_mib * 1024 * 1024,

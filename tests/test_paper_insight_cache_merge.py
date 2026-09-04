@@ -67,7 +67,7 @@ _INSIGHT_BODY = ('## 💡 Insight & Ideas\n\n### The Bet\n\n> Key takeaway: Remo
 _TEST_OWNER_USER_ID = 1
 
 
-def _install_stub_repository(rows):
+def _install_stub_repository(rows, calls=None):
     """Serve ``rows`` through the owner-scoped artifact repository seam.
 
     Imports routes.paper lazily and tolerates the known bare-import websocket
@@ -83,6 +83,8 @@ def _install_stub_repository(rows):
             assert owner_user_id == _TEST_OWNER_USER_ID
 
         def get_report(self, paper_hash, lang):
+            if calls is not None:
+                calls.append((paper_hash, lang))
             row = rows.get((paper_hash, lang))
             if row is None:
                 return None
@@ -179,6 +181,34 @@ def test_review_mode_never_merges():
     assert out == review_body, 'insight leaked into a Review Mode reopen'
     _ok('review mode → insight never merged (plain-report only)')
 
+    rebuttal_body = '# Author Rebuttal\n\nResponse…\n'
+    rebuttal = _run(rp._append_cached_insight(
+        rebuttal_body, phash, 'rebuttal:neurips:en',
+        user_id=_TEST_OWNER_USER_ID))
+    assert rebuttal == rebuttal_body, 'insight leaked into a rebuttal reopen'
+
+
+def test_canonical_reopen_projects_insight_with_one_repository_read():
+    rp = _import_routes_paper()
+    phash = 'single-read'
+    from lib.paper.insight_engine._config import insight_lang_key
+    calls = []
+    _install_stub_repository({
+        (phash, insight_lang_key('en')): {
+            'report': _INSIGHT_BODY,
+            'meta': {
+                'items': {'anchor-1': {'summary': 'grounded'}},
+                'baseline': {'count': 1},
+            },
+        },
+    }, calls)
+    body, payload = _run(rp._enrich_cached_insight(
+        _REPORT_BODY, phash, 'en', user_id=_TEST_OWNER_USER_ID))
+    assert body == _REPORT_BODY
+    assert payload['items']['anchor-1']['summary'] == 'grounded'
+    assert calls == [(phash, insight_lang_key('en'))]
+    _ok('canonical reopen reads one insight row for body/payload projection')
+
 
 def test_neuter_break_join_section_absent():
     """NEUTER: replace the merge with a pass-through → reopened body lacks the
@@ -220,6 +250,7 @@ def main():
         test_no_insight_row_is_noop,
         test_idempotent_when_body_already_has_section,
         test_review_mode_never_merges,
+        test_canonical_reopen_projects_insight_with_one_repository_read,
         test_neuter_break_join_section_absent,
     ]
     for fn in tests:

@@ -33,6 +33,7 @@ from lib.llm_errors import (
     StreamOnlyError,
     _RETRYABLE,
     _classify_http_error,
+    _has_outbound_credential,
     decode_error_body,
 )
 from lib.cost import canonicalize_usage_cache_keys
@@ -53,7 +54,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          timeout=None, log_prefix='', api_key=None, base_url=None,
          extra_headers=None, max_retries=None, _limit_retry=False,
          thinking_format='', provider_id='', api_protocol='openai', oauth='',
-         adapter=None, responses_feature_profile=''):
+         adapter=None, responses_feature_profile='', owner_user_id=None):
     """Non-streaming chat completion.
 
     Args:
@@ -74,6 +75,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         RetryableAPIError, PromptTooLongError, Exception
     """
     model = model or _lib.LLM_MODEL
+    from lib.llm._transport import transport_owner_scope
+    _owner_scope = transport_owner_scope(owner_user_id)
     _anthropic = (api_protocol == 'anthropic')
     _responses = (api_protocol == 'responses')
     if _responses:
@@ -94,7 +97,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         from lib.oauth.outbound import resolve_oauth_request
         _oauth_body_seed = {'messages': messages}
         api_key, extra_headers, _oauth_body_seed = resolve_oauth_request(
-            oauth, _oauth_body_seed, extra_headers)
+            oauth, _oauth_body_seed, extra_headers, user_id=_owner_scope)
         messages = _oauth_body_seed['messages']
 
     body = build_body(
@@ -111,6 +114,13 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     if _responses:
         body['_responses_feature_profile'] = (
             responses_feature_profile or 'compatible')
+
+    # The sync transport must share the exact final tool-schema preflight used
+    # by sync/async streaming. Otherwise background probes, compaction, and
+    # other non-stream callers can still send a Kimi-invalid catalog even when
+    # ordinary turns are repaired.
+    from lib.tools.gateway import preflight_wire_tool_body
+    preflight_wire_tool_body(body, log_prefix=log_prefix)
 
     # Cache breakpoints + extended-TTL beta header
     _task_id_for_latch = body.get('_task_id', '')
@@ -163,7 +173,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     if not _adapter:
         from lib.desktop import egress as _eg
         try:
-            _egress_route = _eg.route_request(url, user_id='')
+            _egress_route = _eg.route_request(url, user_id=_owner_scope)
         except _eg.EgressUnavailable as e:
             raise EndpointUnreachableError(str(e), base_url=url) from e
 
@@ -211,7 +221,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             int(_adapter.get('port') or 0),
                             _relay_path, method='POST', headers=hdrs,
                             body=json.dumps(body).encode(),
-                            timeout=min(timeout or 60, 60), user_id='')
+                            timeout=min(timeout or 60, 60),
+                            user_id=_owner_scope)
                     except _EU as e:
                         raise EndpointUnreachableError(
                             str(e), base_url=url) from e
@@ -220,7 +231,9 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                         resp = _eg.egress_http(
                             url, method='POST', headers=hdrs,
                             body=json.dumps(body).encode(),
-                            timeout=min(timeout or 60, 60), user_id='')
+                            timeout=min(timeout or 60, 60),
+                            user_id=_owner_scope,
+                            agent_id=_egress_route)
                     except _eg.EgressUnavailable as e:
                         raise EndpointUnreachableError(
                             str(e), base_url=url) from e
@@ -261,7 +274,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             provider_id=provider_id, api_protocol=api_protocol,
                             oauth=oauth, adapter=adapter,
                             responses_feature_profile=(
-                                responses_feature_profile or 'compatible'))
+                                responses_feature_profile or 'compatible'),
+                            owner_user_id=owner_user_id)
                         usage_r['_model_limit_learned'] = {
                             'model': model,
                             'old_limit': max_tokens,
@@ -269,7 +283,9 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                         }
                         return content_r, usage_r
                 _classify_http_error(resp.status_code, err_msg, model,
-                                     log_prefix, max_tokens=max_tokens)
+                                     log_prefix, max_tokens=max_tokens,
+                                     credential_present=(
+                                         _has_outbound_credential(hdrs)))
             break
         except (RateLimitError, PermissionError_, ContentFilterError, PromptTooLongError, StreamOnlyError, InvalidImageError, EndpointUnreachableError):
             raise
@@ -292,15 +308,13 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             f'API returned invalid JSON (HTTP {resp.status_code}): '
             f'{decode_error_body(resp)[:_ERR_BODY_LIMIT]}'
         ) from e
+    if not isinstance(data, dict):
+        raise Exception(
+            'API returned invalid response shape: top-level JSON must be an object')
     if _responses:
         from lib.llm.responses_outbound import responses_response_to_openai
         data = responses_response_to_openai(
             data, tool_name_reverse=_resp_reverse)
-        if 'error' in data:
-            # status:'failed' — classify through the same HTTP-error ladder
-            # (500 → RetryableAPIError) instead of manufacturing an empty turn.
-            _classify_http_error(500, data['error'].get('message', ''),
-                                 model, log_prefix, max_tokens=max_tokens)
     elif _anthropic:
         from lib.llm.anthropic_outbound import anthropic_response_to_openai
         data = anthropic_response_to_openai(data)
@@ -309,20 +323,61 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             for _ch in data.get('choices') or []:
                 restore_claude_tool_names(
                     (_ch.get('message') or {}).get('tool_calls'), _cloak_reverse)
-    choices = data.get('choices') or []
+    if 'error' in data:
+        # Protocol converters use the same error envelope as HTTP failures.
+        # Do not manufacture an empty assistant turn from malformed provider
+        # JSON, and do not assume the provider's error field is well shaped.
+        converted_error = data.get('error')
+        error_message = (converted_error.get('message', '')
+                         if isinstance(converted_error, dict) else '')
+        if not isinstance(error_message, str) or not error_message:
+            error_message = 'provider returned an invalid response'
+        _classify_http_error(500, error_message, model, log_prefix,
+                             max_tokens=max_tokens)
+    choices = data.get('choices')
+    if choices is None:
+        choices = []
+    if not isinstance(choices, list):
+        raise Exception(
+            'API returned invalid response shape: choices must be an array')
     if not choices:
         raise Exception(
             f'API returned no choices: {json.dumps(data)[:500]}'
         )
-    msg = choices[0].get('message') or {}
-    content = msg.get('content', '')
-    usage = data.get('usage', {})
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise Exception(
+            'API returned invalid response shape: choices[0] must be an object')
+    raw_message = first_choice.get('message')
+    if raw_message is None:
+        msg = {}
+    elif isinstance(raw_message, dict):
+        msg = raw_message
+    else:
+        raise Exception(
+            'API returned invalid response shape: choices[0].message must be an object')
+    raw_content = msg.get('content', '')
+    if raw_content is None:
+        content = ''
+    elif isinstance(raw_content, str):
+        content = raw_content
+    else:
+        raise Exception(
+            'API returned invalid response shape: assistant content must be text or null')
+    raw_usage = data.get('usage', {})
+    if isinstance(raw_usage, dict):
+        usage = raw_usage
+    else:
+        logger.warning('[chat] Ignoring malformed non-object usage payload')
+        usage = {}
     # Stamp canonical cache keys from vendor spellings (see _sse_core note).
     canonicalize_usage_cache_keys(usage)
 
-    _finish_reason = choices[0].get('finish_reason', '')
-    if _finish_reason:
+    _finish_reason = first_choice.get('finish_reason', '')
+    if isinstance(_finish_reason, str) and _finish_reason:
         usage['finish_reason'] = _finish_reason
+    elif _finish_reason not in ('', None):
+        logger.warning('[chat] Ignoring malformed non-string finish_reason')
 
     # Strip MiniMax-style <think>...</think> tags
     if content and '<think>' in content:
@@ -335,8 +390,14 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                         '(%d → %d chars)', raw_len, len(content))
 
     _tool_calls = msg.get('tool_calls')
-    if _tool_calls:
-        usage['_tool_calls'] = _tool_calls
+    if _tool_calls is not None:
+        if isinstance(_tool_calls, dict):
+            _tool_calls = [_tool_calls]
+        elif not isinstance(_tool_calls, list):
+            raise Exception(
+                'API returned invalid response shape: tool_calls must be an array')
+        if _tool_calls:
+            usage['_tool_calls'] = _tool_calls
     # DeepSeek V4 thinking-mode tool calls require the complete reasoning
     # content to be echoed on the assistant message in every later request.
     # The streaming path already preserves this field; expose it to callers
@@ -345,9 +406,14 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                           or msg.get('thinking')
                           or msg.get('reasoning'))
     if not _reasoning_content and isinstance(msg.get('reasoning_details'), list):
-        _reasoning_content = ''.join(
-            (part.get('thinking') or part.get('text') or '')
-            for part in msg['reasoning_details'] if isinstance(part, dict))
+        _reasoning_parts = []
+        for part in msg['reasoning_details']:
+            if not isinstance(part, dict):
+                continue
+            _reasoning_part = part.get('thinking') or part.get('text')
+            if isinstance(_reasoning_part, str):
+                _reasoning_parts.append(_reasoning_part)
+        _reasoning_content = ''.join(_reasoning_parts)
     if isinstance(_reasoning_content, str) and _reasoning_content:
         usage['_reasoning_content'] = _reasoning_content
 

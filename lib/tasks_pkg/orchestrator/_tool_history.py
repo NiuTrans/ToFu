@@ -9,12 +9,19 @@ turn that has not yet settled into ordinary history.
 from __future__ import annotations
 
 from lib.log import get_logger
-from lib.tasks_pkg.message_builder import inject_tool_history
+from lib.tasks_pkg.message_builder import inject_tool_history, prepare_tool_history
 
 logger = get_logger(__name__)
 
 
-def inject_continue_tool_history(*, task, rs, messages, cfg, model, tid) -> int:
+def prepare_continue_tool_history(*, task, cfg, model):
+    """Validate and detach Continue history before expensive task startup."""
+    return prepare_tool_history(cfg, task, model)
+
+
+def inject_continue_tool_history(
+    *, task, rs, messages, cfg, model, tid, prepared_history=None,
+) -> int:
     """Continue-toolHistory injection + memory-prefetch eligibility drift guard.
 
     Extracted 2026-08-01 ( slice 36) from ``run_task`` (between
@@ -25,28 +32,37 @@ def inject_continue_tool_history(*, task, rs, messages, cfg, model, tid) -> int:
     2. On a non-zero count: ``rs.tool_call_happened = True`` AND
        ``rs.tool_round_num = <count>`` — the offset keeps new roundNums
        from conflicting with the restored ones.
-    3. Drift guard: the EARLY memory-prefetch spawn used
-       ``len(cfg['toolHistory'])`` as its eligibility input (available
-       before this call); if the actual injected count disagrees, WARN —
-       inject_tool_history no longer derives its count from that key
-       alone, so the spawn's skip decision may silently flip.
+    3. The normal orchestrator passes a prepared history and uses its exact
+       call count for memory-prefetch eligibility. The legacy direct-call path
+       retains a drift warning for callers that still estimate from raw cfg.
 
     Returns:
         The injected tool-call count (0 when nothing was restored).
     """
-    _injected_tool_calls = inject_tool_history(messages, cfg, task, model)
+    if prepared_history is None:
+        _injected_tool_calls = inject_tool_history(
+            messages, cfg, task, model)
+    else:
+        _injected_tool_calls = inject_tool_history(
+            messages, cfg, task, model,
+            prepared_history=prepared_history,
+        )
     if _injected_tool_calls:
         rs.tool_call_happened = True
         rs.tool_round_num = _injected_tool_calls  # offset so new roundNums don't conflict
 
-    if bool(_injected_tool_calls) != bool(cfg.get('toolHistory') or []):
+    if (prepared_history is None
+            and bool(_injected_tool_calls) != bool(cfg.get('toolHistory') or [])):
         logger.warning(
             '[%s] memory-prefetch eligibility drift: injected=%s but '
-            'cfg[toolHistory]=%s — the early spawn used the latter; '
-            'inject_tool_history no longer derives its count from that '
-            'key alone', tid, _injected_tool_calls,
+            'cfg[toolHistory]=%s — this legacy caller may have used the '
+            'unvalidated envelope instead of the prepared call count',
+            tid, _injected_tool_calls,
             len(cfg.get('toolHistory') or []))
     return _injected_tool_calls
 
 
-__all__ = ['inject_continue_tool_history']
+__all__ = [
+    'inject_continue_tool_history',
+    'prepare_continue_tool_history',
+]

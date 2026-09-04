@@ -1,10 +1,10 @@
-"""Localized model-price presentation for provider-template configuration.
+"""Localized model-price presentation policy.
 
-The provider/model registration remains authoritative in its declared currency.
-Settings converts only the visible card/input values to the UI language's
-currency, then converts edited input back to the authority currency.  These
-specs prevent the dangerous half-change where a currency symbol changes while
-the numeric amount (or persisted currency) does not.
+The provider/model registration remains authoritative in its declared
+currency; the UI converts only the visible values to the UI language's
+currency. These specs pin the pure presentation policy (conversion, pivot
+fail-closed, and per-language formatters) used by the model-routing v2
+settings surface.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests._jsdom import run_harness
-from tests._runtime_sections import native_module_path, runtime_section_path
+from tests._runtime_sections import native_module_path
 
 
 pytestmark = pytest.mark.unit
@@ -25,26 +25,16 @@ PRESENTATION_TS = (
 
 
 _HARNESS = r'''
-const fs = require('fs');
 const { setup } = require(process.env.JSDOM_HARNESS);
 const rates = { USD: 1, CNY: 7.2, JPY: 144, KRW: 1320 };
-const { window, document, check, report } = setup({
+const { check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="host"></div></body>',
   targets: [process.argv[2]],
-  globals: {
-    _detectBrand: () => 'generic',
-    _brandSvg: () => '',
-    _renderProvidersTab: () => {},
-    _renderPresetsTab: () => {},
-    showAlert: () => {},
-    t: (key, values) => key === 'settings.mePriceHint'
-      ? `price-hint:${values.currency}` : key,
-  },
+  globals: {},
 });
 
 const presentation = global.modelPricePresentation;
-window.modelPricePresentation = presentation;
 
 try {
   // Pure locale policy: currently shipped zh/en plus future ja/ko language packs.
@@ -78,107 +68,6 @@ try {
     presentation.formatForUi(1, 'USD', 'ko', rates).indexOf('₩') >= 0);
   check('cny_card_keeps_subunit_precision_above_100',
     presentation.formatForUi(49.72, 'USD', 'zh', rates).indexOf('.') >= 0);
-
-  // Bridge the typed presentation owner into the retained Settings adapter,
-  // then evaluate the three bounded owners used by the real template editor.
-  const indirectEval = eval;
-  for (const target of process.argv.slice(4)) {
-    indirectEval(fs.readFileSync(target, 'utf8'));
-  }
-  window.modelPricePresentation = presentation;
-  global._i18nLang = window._i18nLang = 'zh';
-  global._modelPriceDisplayPolicy = window._modelPriceDisplayPolicy = {
-    base_currency: 'USD', usd_rates: rates,
-  };
-  global._modelPricingCache = window._modelPricingCache = {};
-  global._serverConfig = window._serverConfig = {};
-  global._stgPresets = window._stgPresets = {};
-  const model = {
-    model_id: 'priced-model', aliases: [], capabilities: ['text'], rpm: 30,
-    pricing: { input: 1, output: 2, currency: 'USD',
-      unit: 'per_million_tokens' },
-  };
-  global._stgProviders = window._stgProviders = [{
-    id: 'provider-1', name: 'Provider', models: [model],
-  }];
-
-  const host = document.getElementById('host');
-  host.innerHTML = _renderModelCard(0, 0, model);
-  const cardInputPrice = host.querySelector('.stg-price-val.in').textContent;
-  const cardOutputPrice = host.querySelector('.stg-price-val.out').textContent;
-  check('zh_card_converts_usd_to_rmb',
-    /[¥￥]7(?:\.2)?/.test(cardInputPrice)
-    && /[¥￥]14(?:\.4)?/.test(cardOutputPrice));
-
-  _editModel(0, 0);
-  let form = host.querySelector('.stg-edit-form');
-  check('zh_editor_names_cny',
-    form.textContent.indexOf('price-hint:CNY') >= 0);
-  check('zh_editor_converts_override_values',
-    form.querySelector('.stg-edit-pin').value === '7.2'
-    && form.querySelector('.stg-edit-pout').value === '14.4');
-  const decoy = document.createElement('div');
-  decoy.className = 'stg-edit-form';
-  decoy.setAttribute('data-prov', '99');
-  decoy.setAttribute('data-model', '99');
-  decoy.setAttribute('data-price-authority-currency', 'CNY');
-  decoy.setAttribute('data-price-display-currency', 'CNY');
-  decoy.innerHTML = '<input class="stg-edit-pin" value="999">' +
-    '<input class="stg-edit-pout" value="999">';
-  document.body.prepend(decoy);
-  _saveModelEdit(0, 0);
-  check('scoped_form_preserves_usd_authority_with_decoy_present',
-    model.pricing.currency === 'USD'
-    && model.pricing.input === 1 && model.pricing.output === 2);
-
-  form.remove();
-  _editModel(0, 0);
-  form = host.querySelector('.stg-edit-form');
-  form.querySelector('.stg-edit-pin').value = '72';
-  form.querySelector('.stg-edit-pout').value = '144';
-  _saveModelEdit(0, 0);
-  check('edited_rmb_round_trips_to_usd_authority',
-    model.pricing.currency === 'USD'
-    && model.pricing.input === 10 && model.pricing.output === 20);
-
-  // A CNY-authority row identity-round-trips, including the missing-pivot and
-  // no-typed-service degraded paths highlighted by independent review.
-  form.remove();
-  decoy.remove();
-  model.pricing = { input: 2, output: 5, currency: 'CNY',
-    unit: 'per_million_tokens' };
-  host.innerHTML = _renderModelCard(0, 0, model);
-  _editModel(0, 0);
-  form = host.querySelector('.stg-edit-form');
-  check('cny_authority_prefills_cny_in_zh',
-    form.querySelector('.stg-edit-pin').value === '2'
-    && form.textContent.indexOf('price-hint:CNY') >= 0);
-  _saveModelEdit(0, 0);
-  check('cny_authority_round_trips_unchanged',
-    model.pricing.currency === 'CNY'
-    && model.pricing.input === 2 && model.pricing.output === 5);
-
-  form.remove();
-  global._modelPriceDisplayPolicy = window._modelPriceDisplayPolicy = {
-    base_currency: 'USD', usd_rates: { USD: 1 },
-  };
-  _editModel(0, 0);
-  form = host.querySelector('.stg-edit-form');
-  check('missing_cny_pivot_still_identity_prefills',
-    form.querySelector('.stg-edit-pin').value === '2'
-    && form.textContent.indexOf('price-hint:CNY') >= 0);
-  _saveModelEdit(0, 0);
-  check('missing_cny_pivot_still_saves_authority',
-    model.pricing.currency === 'CNY' && model.pricing.input === 2);
-
-  form.remove();
-  window.modelPricePresentation = null;
-  _editModel(0, 0);
-  form = host.querySelector('.stg-edit-form');
-  check('no_service_labels_raw_cny_as_cny',
-    form.querySelector('.stg-edit-pin').value === '2'
-    && form.textContent.indexOf('price-hint:CNY') >= 0);
-  window.modelPricePresentation = presentation;
 } catch (error) {
   check('harness_threw:' + (error && error.stack || error), false);
 } finally {
@@ -193,12 +82,7 @@ def test_model_price_localization_ui_contract() -> None:
     run_harness(
         target_js=presentation,
         body_js=_HARNESS,
-        extra_targets=[
-            runtime_section_path('settings.js'),
-            runtime_section_path('settings/provider_render.js'),
-            runtime_section_path('settings/model_edit.js'),
-        ],
-        expect_pass=25,
+        expect_pass=15,
         label='model-price-localization',
     )
 

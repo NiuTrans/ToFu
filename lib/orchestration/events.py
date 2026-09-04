@@ -46,6 +46,17 @@ _EVENT_SPECS: dict[str, dict] = {
     'zero_deliverable_guard': {
         'durable': True, 'reduce': False, 'timeline': True,
     },
+    'goal_completion_evidence_missing': {
+        # Durable audit evidence for GoalRun classification. It does not
+        # mutate generic Studio graph state or require a presentation string.
+        'durable': True, 'reduce': False, 'timeline': False,
+    },
+    'goal_stop_rejected': {
+        # A model-requested stop is only a proposal. Preserve why the runtime
+        # continued, but keep this GoalRun audit fact out of generic Studio
+        # reduction and the end-user timeline.
+        'durable': True, 'reduce': False, 'timeline': False,
+    },
     'stuck_detected': {
         'durable': True, 'reduce': False, 'timeline': True,
     },
@@ -82,6 +93,12 @@ _EVENT_SPECS: dict[str, dict] = {
         'durable': False, 'reduce': True, 'timeline': False,
     },
     'step_delta': {
+        'durable': False, 'reduce': True, 'timeline': False,
+    },
+    'step_tool_event': {
+        # Live leaf-tool frames are projected onto the current chat turn.
+        # Persisting them here would duplicate the bounded, self-contained
+        # tool log carried by step_trace/step_complete during replay.
         'durable': False, 'reduce': True, 'timeline': False,
     },
     'step_trace': {

@@ -188,8 +188,8 @@ def _normalise_base_url(url: str) -> str:
         raise ValueError('base_url is empty')
     if not (url.startswith('http://') or url.startswith('https://')):
         raise ValueError('base_url must start with http:// or https://')
-    # Use-time SSRF egress guard. Every BYO completion (native chat,
-    # agent/run, OpenAI/Anthropic compat, inline-provider blocks) mints a
+    # Use-time SSRF egress guard. Every routed completion (native chat,
+    # agent/run, and OpenAI/Anthropic compatibility) mints a
     # slot through here before any request, so this single check covers
     # the whole proxy surface — and runs at USE time, defeating a DNS
     # rebind that passed the registration-time check in byo_providers.
@@ -222,6 +222,13 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
                         extra_headers: Optional[dict] = None,
                         thinking_format: str = '',
                         capabilities: Optional[set] = None,
+                        wire_model_id: str = '',
+                        protocol: str = '',
+                        responses_profile: str = '',
+                        oauth: str = '',
+                        adapter: Optional[dict] = None,
+                        routing_owner_user_id: int = 0,
+                        provider_pin_id: str = '',
                         ) -> EphemeralSlotHandle:
     """Inject a request-scoped Slot into the dispatcher.
 
@@ -241,6 +248,10 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
         capabilities: Override capability set. Defaults to whatever
             :data:`DEFAULT_SLOT_CONFIGS` says for ``model_id``, falling
             back to ``{'text'}``.
+        adapter: Owner-authorized desktop loopback relay marker from a v2
+            Connection. Empty means the endpoint is reached normally.
+        routing_owner_user_id: Explicit v2 owner used only to namespace
+            credential-health state; zero retains legacy transient behavior.
 
     Returns:
         :class:`EphemeralSlotHandle` — pass to
@@ -255,6 +266,9 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
     if not isinstance(model_id, str) or not model_id.strip():
         raise ValueError('model_id is required')
     model_id = model_id.strip()
+    wire_model_id = str(wire_model_id or model_id).strip()
+    if not wire_model_id:
+        raise ValueError('wire_model_id is required')
     api_key = (api_key or '').strip()
 
     with _lock:
@@ -311,18 +325,24 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
     slot = Slot(
         key_name=key_name,
         api_key=api_key,
-        model=model_id,
+        model=wire_model_id,
+        logical_model=model_id,
         capabilities=caps,
         base_url=base_url,
-        # Unique per handle (NOT per owner): the provider_id is what the
-        #   thread-scoped hard pin (lib/llm_dispatch/provider_pin.py) matches
-        #   on, so two concurrent inline-provider requests from the SAME API
-        #   key must still pin to their own distinct slots. ``owner`` stays in
-        #   the tag for audit/debug readability, but handle_id guarantees
-        #   uniqueness.
-        provider_id=f'ephemeral:{owner}:{handle_id}' if owner else f'ephemeral:{handle_id}',
+        # The dispatcher provider_id is what the thread-scoped hard pin
+        #   matches. Model-routing v2 supplies one unique group ID for all
+        #   candidates in a request; legacy one-slot callers fall back to the
+        #   handle ID. ``owner`` is an audit/debug tag, never identity.
+        provider_id=(provider_pin_id or (
+            f'ephemeral:{owner}:{handle_id}' if owner
+            else f'ephemeral:{handle_id}')),
+        routing_owner_user_id=int(routing_owner_user_id or 0),
         extra_headers=dict(extra_headers or {}),
         thinking_format=thinking_format or '',
+        protocol=('responses' if protocol == 'openai_responses' else protocol),
+        responses_profile=responses_profile or '',
+        oauth=oauth or '',
+        adapter=dict(adapter or {}),
         rpm_limit=rpm,
         latency_ema=latency,
         cost_per_1k_tokens=cost,
@@ -345,9 +365,9 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
     # identifiers already provide the correlation needed for diagnostics.
     api_key_hint = '<configured>' if api_key else '<empty>'
     audit_log('ephemeral_slot_mint', handle=handle_id, owner=str(owner or ''),
-              model=model_id, base_url=base_url, api_key_hint=api_key_hint)
+              model=wire_model_id, base_url=base_url, api_key_hint=api_key_hint)
     logger.info('[Ephemeral] mint handle=%s owner=%s model=%s url=%s key=%s caps=%s',
-                handle_id, owner or '?', model_id, base_url, api_key_hint,
+                handle_id, owner or '?', wire_model_id, base_url, api_key_hint,
                 ','.join(sorted(caps)))
     return handle
 

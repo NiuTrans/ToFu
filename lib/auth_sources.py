@@ -75,6 +75,8 @@ from urllib.parse import urlparse
 from lib.config_dir import config_path
 from lib.json_store import read_json, update_json_atomic
 from lib.log import audit_log, get_logger
+from lib.ttl_cache import TTLCache
+from runtime_guards import resolve_resource_budget
 
 logger = get_logger(__name__)
 
@@ -689,8 +691,23 @@ def set_enabled(domain: str, enabled: bool) -> bool:
 #: Live-session probe cache — asking the bridge costs a command round-trip,
 #: and the Settings panel re-renders on every toggle.
 _LIVE_SESSION_TTL_S = 20.0
-_live_session_cache: dict = {}
-_live_session_lock = threading.Lock()
+
+
+def _live_session_cache_capacity() -> int:
+    device_capacity = resolve_resource_budget(
+        'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY',
+        minimum=16,
+        maximum=8192,
+    )
+    return max(64, min(8192, device_capacity * 4))
+
+
+_LIVE_SESSION_CACHE_CAPACITY = _live_session_cache_capacity()
+_live_session_cache = TTLCache(
+    ttl=_LIVE_SESSION_TTL_S,
+    max_size=_LIVE_SESSION_CACHE_CAPACITY,
+    name='auth_live_session',
+)
 
 
 def live_session_status(
@@ -731,11 +748,11 @@ def live_session_status(
                 ).get('client_id') or '')
         except Exception as exc:
             logger.debug('[AuthSrc] browser selection failed: %s', exc)
-    now = time.time()
-    with _live_session_lock:
-        hit = _live_session_cache.get((owner_user_id, client_id, dom))
-        if hit and not refresh and now - hit[0] < _LIVE_SESSION_TTL_S:
-            return dict(hit[1])
+    cache_key = (owner_user_id, client_id, dom)
+    if not refresh:
+        hit = _live_session_cache.get(cache_key)
+        if hit is not None:
+            return dict(hit)
     out = {'extension': False, 'live_session': False,
            'matched': [], 'missing_required': []}
     try:
@@ -772,9 +789,7 @@ def live_session_status(
             out['live_session'] = bool(matched) if wanted else bool(names)
     except Exception as e:
         logger.debug('[AuthSrc] live-session probe crashed for %s: %s', dom, e)
-    with _live_session_lock:
-        _live_session_cache[(owner_user_id, client_id, dom)] = (
-            now, dict(out))
+    _live_session_cache.set(cache_key, dict(out))
     return out
 
 

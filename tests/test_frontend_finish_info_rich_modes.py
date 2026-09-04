@@ -46,6 +46,7 @@ global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 global.t = (k, o) => {
   o = o || {};
+  if (k === 'finishInfo.inputSplit') return `TOTAL ${o.total} UN ${o.uncached} CACHE ${o.cache} OUT ${o.output}`;
   if (k === 'finishInfo.cbState.upstream') return 'UPSTREAM-BADGE';
   if (k === 'finishInfo.cacheBreakLabel') return 'MISS: ' + (o.reason || '');
   if (k && k.indexOf('{') === -1 && o && Object.keys(o).length) {
@@ -116,6 +117,8 @@ try { bar = renderFinishInfo(MSG, 'turn-1'); } catch (e) { threwA = e; }
 check('A_never_throws', !threwA);
 if (threwA) out.push('  A error: ' + (threwA && threwA.stack || threwA));
 check('A_bar_has_cost_tag', bar.indexOf('cost-tag-detail') !== -1);
+check('A_bar_exposes_input_cache_split',
+  bar.indexOf('TOTAL 100 UN 100 CACHE 40000 OUT 10') !== -1);
 check('A_placeholder_empty',
   /<span class="cost-popover-data" hidden><\/span>/.test(bar));
 check('A_no_prebuilt_popover', bar.indexOf('cp-rounds') === -1

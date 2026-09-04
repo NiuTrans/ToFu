@@ -1,36 +1,23 @@
+/** Typed transport for Model-owned Artificial Analysis enrichment. */
+
 import { request } from '../../api/transport';
-import type {
-  ModelCatalogEnvelope,
-  ModelCatalogPayload,
-  ModelCatalogPutPayload,
-} from './types';
+import type { AaBlock } from './types';
 
-export const MODEL_CATALOG_PATH = '/api/v1/model-catalog';
+const AA_PATH = '/api/v1/model-intelligence/aa';
 
-/** Pure CAS payload builder kept exported so the contract is testable. */
-export function buildPutPayload(
-  expectedRevision: number,
-  catalog: ModelCatalogPayload,
-): ModelCatalogPutPayload {
-  return { expected_revision: expectedRevision, catalog };
+export function fetchAaScores(): Promise<{ ok: boolean; aa?: AaBlock }> {
+  return request<{ ok: boolean; aa?: AaBlock }>(AA_PATH);
 }
 
-export function fetchModelCatalog(): Promise<ModelCatalogEnvelope> {
-  return request<ModelCatalogEnvelope>(MODEL_CATALOG_PATH);
-}
-
-export function putModelCatalog(
-  expectedRevision: number,
-  catalog: ModelCatalogPayload,
-): Promise<ModelCatalogEnvelope> {
-  return request<ModelCatalogEnvelope>(MODEL_CATALOG_PATH, {
-    method: 'PUT',
-    json: buildPutPayload(expectedRevision, catalog),
+export function refreshAaScores(): Promise<{ ok: boolean; aa?: AaBlock }> {
+  return request<{ ok: boolean; aa?: AaBlock }>(`${AA_PATH}/refresh`, {
+    method: 'POST',
   });
 }
 
-/** A 409 means the caller's revision lost the compare-and-swap race. */
-export function isModelCatalogConflict(error: unknown): boolean {
-  const candidate = error as { status?: unknown } | null;
-  return candidate?.status === 409;
+export function saveAaKey(apiKey: string): Promise<{ ok: boolean; aa?: AaBlock }> {
+  return request<{ ok: boolean; aa?: AaBlock }>(`${AA_PATH}/key`, {
+    method: 'PUT',
+    json: { api_key: apiKey },
+  });
 }

@@ -26,7 +26,7 @@ Tofu 是一套完整的 Agent 运行时，包含模型路由、流式输出、�
 | 远程 Python/TypeScript 服务 | `tofu-sdk` / `@rangehow/tofu-sdk` | Tofu URL / Token | 由服务端决定 |
 | 完整 AI 工作空间 | 安装器或源码部署 | 在设置或环境变量中配置 Provider | SQLite/PostgreSQL + 前端 |
 
-前三种方式都不启动 ChatUI 应用前端、不要求数据库，但执行的仍是完整应用使用的
+前三种方式都不启动完整 Tofu 应用前端、不要求数据库，但执行的仍是完整应用使用的
 同一套 `lib.tasks_pkg` Agent 内核，并不是另写的精简 Agent。Sidecar 只额外携带一个
 很小的 `/setup` 静态控制面板，用来无代码配置默认模型。
 
@@ -127,7 +127,7 @@ docker run --rm --name tofu-agent \
 
 打开 `/setup` 并输入 Sidecar Token 即可完成模型配置。命名卷保存加密配置和它的
 密钥，因此容器替换后仍能恢复。Agent 镜像只含 wheel、Agent 依赖和小型设置页，
-不含源码 checkout、ChatUI 应用前端、应用数据、SQLAlchemy 或数据库驱动。
+不含源码 checkout、完整 Tofu 应用前端、应用数据、SQLAlchemy 或数据库驱动。
 
 ## 让 Tofu 完全托管模型
 
@@ -246,16 +246,31 @@ handle；`agents.stream` 只提交一次，网络断开后从最后一个绝对�
 | 平台 | 启动方式 |
 |---|---|
 | Windows | 从[最新 Release](https://github.com/rangehow/ToFu/releases/latest)下载 `Tofu-Setup-*-win64.exe`。 |
-| Linux / macOS | `curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \| bash` |
+| macOS | 从[最新 Release](https://github.com/rangehow/ToFu/releases/latest)下载 `Tofu-<ver>-macos-arm64.dmg` 或 `Tofu-<ver>-macos-x86_64.dmg`，或使用 `install.sh`。 |
+| Linux | `curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \| bash` |
+| Android | 从 [Android Releases](https://github.com/rangehow/tofu-android/releases/latest/download/tofu-android.apk) 安装 `tofu-android.apk`。 |
 | 源码 / 完整 Docker | `git clone https://github.com/rangehow/ToFu.git && cd ToFu && docker compose up -d` |
 
 打开 <http://localhost:15000>，在**设置 → 服务商**中添加模型；无人值守部署也可用
 原有的 `LLM_BASE_URL`、`LLM_API_KEYS` 和 `LLM_MODEL`。SQLite 是个人部署默认值，
-PostgreSQL 是同一存储契约后的显式分布式选项。
+PostgreSQL 是同一存储契约后的显式分布式选项。首次登录后请安装下方的
+浏览器插件——所有依赖浏览器的能力都由它提供。
 
 ## 浏览器插件
 
-完整工作空间的同一份未打包插件同时支持 Chrome 和 Edge。请从
+首次登录后安装一次配套浏览器插件。它是让 Agent 进入你真实浏览器的桥梁，
+而不是一个空白、未登录的抓取器；以下能力只有装了插件才能用：
+
+- **浏览器控制**：Agent 租用你浏览器里的真实标签页，完成导航、阅读、滚动、
+  点击和填表。
+- **需要登录和验证的页面**：任务在你已登录的会话里执行，拦截服务端抓取的
+  页面——登录墙、验证码或反爬检查、付费墙、仅内网可达的页面——仍然可用。
+- **Web 调试证据**：DevTools Bridge、console 读取、网络抓包和截图，让 Agent
+  直接拿到被测页面的证据，提高调试能力的边界。
+- **依赖 Cookie 的文件传输**：需要浏览器 Cookie 才能访问的 URL，由插件流式
+  写入服务器的有界暂存区。
+
+同一份未打包插件同时支持 Chrome 和 Edge。请从
 **设置 → 本机控制**进入统一的安装或升级流程；当 Tofu 与浏览器在
 同一台机器上时，界面会识别可用浏览器并打开它自己的扩展管理页。
 

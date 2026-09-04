@@ -12,6 +12,7 @@ Public exceptions
 - :class:`AbortedError` — user-requested abort
 - :class:`ModelLimitError` — HTTP 400 detecting auto-correctable token limit
 - :class:`PromptTooLongError` — HTTP 400/413 indicating context overflow
+- :class:`ContextCompactionError` — local automatic compaction failure
 - :class:`InvalidImageError` — HTTP 400 from image content rejection
 - :class:`StreamOnlyError` — HTTP 400 from non-streaming on stream-only models
 
@@ -80,10 +81,17 @@ class RateLimitError(Exception):
             subscription-quota signal is detected, so raise sites outside
             this module (e.g. the SSE error classifier) get the timed
             cooldown for free whenever the raw body is in the message.
+        is_credential_delivery_anomaly: True when the request transport
+            constructed a non-empty credential header but a 401/403 response
+            claims that no API key / authorization header was supplied. That
+            contradiction is gateway or route evidence, not proof that the
+            credential itself is invalid. Dispatch rotates it through a
+            separate small attempt budget and never feeds permission health.
     """
     def __init__(self, msg='', *, is_quota=False, is_gateway=False, reason='',
                  status_code=0, is_shared_contention=False, is_saturation=False,
-                 is_subscription_quota=False, retry_after_s=None):
+                 is_subscription_quota=False, retry_after_s=None,
+                 is_credential_delivery_anomaly=False):
         super().__init__(msg)
         self.is_quota = bool(is_quota)
         self.is_saturation = bool(is_saturation)
@@ -105,13 +113,14 @@ class RateLimitError(Exception):
         # retry loop uses this to bound the outage instead of spinning forever
         # (see lib/llm_dispatch/api.py::_StreamRetryState gateway-outage cap).
         self.is_gateway = bool(is_gateway)
-        # True when the body names a PROJECT-LEVEL limit shared with OTHER
-        # tenants of the gateway account (2026-07-28: Moonshot "request
-        # reached project (kimi-k3) TPM rate limit, current: 50.02M, limit:
-        # 50M" — local traffic measured ~2M/min ≈ 4% of the pipe). This is
-        # EXTERNAL contention, not key health: it must not feed the model
-        # success-rate column nor the consecutive-429 auto-exhaust streak
-        # (see Slot.record_error is_shared_contention branch).
+        self.is_credential_delivery_anomaly = bool(
+            is_credential_delivery_anomaly)
+        # True when the body names a PROJECT/APP-level model limit shared with
+        # OTHER tenants or keys of the gateway account (Moonshot project TPM,
+        # or the sankuai gateway's app/model RPM envelope). This is EXTERNAL
+        # contention, not key health: it must not feed the model success-rate
+        # column nor the consecutive-429 auto-exhaust streak (see
+        # Slot.record_error is_shared_contention branch).
         self.is_shared_contention = bool(is_shared_contention)
         self.reason = (reason or (str(msg) if msg else ''))[:200]
         # The real HTTP status that triggered this (429/402/502/…, or the
@@ -123,7 +132,9 @@ class RateLimitError(Exception):
 
 class PermissionError_(Exception):
     """HTTP 401/403 — should NOT retry on the same key; bubble up to dispatch layer to switch keys."""
-    pass
+    def __init__(self, msg='', status_code=0):
+        super().__init__(msg)
+        self.status_code = int(status_code or 0)
 
 
 class ContentFilterError(Exception):
@@ -133,7 +144,9 @@ class ContentFilterError(Exception):
 
 class AbortedError(Exception):
     """User requested abort — stop all retries immediately."""
-    pass
+    def __init__(self, message, url=''):
+        super().__init__(message)
+        self.url = str(url or '')
 
 
 class ModelLimitError(Exception):
@@ -153,6 +166,16 @@ class PromptTooLongError(Exception):
 
     Triggers reactive compaction in the orchestrator — the conversation is
     compressed and the LLM call is retried automatically.
+    """
+    pass
+
+
+class ContextCompactionError(Exception):
+    """The local final-admission compaction pipeline failed to execute.
+
+    This is an orchestrator defect or local extraction failure, not evidence
+    that the provider rejected an oversized prompt. The main provider has not
+    been dispatched when this exception is raised.
     """
     pass
 
@@ -211,6 +234,22 @@ class BadRequestError(Exception):
     pass
 
 
+class ModelRouteMissingError(BadRequestError):
+    """HTTP 400 whose body says the gateway has NO route for the model.
+
+    A ``BadRequestError`` subclass so the payload-rejection bookkeeping
+    (first-400-wins, turn-level fallback, any ``except BadRequestError``)
+    still applies, but the dispatch layer catches it FIRST and excludes the
+    whole MODEL for the rest of the dispatch: every remaining key would
+    reject identically, so pair-exclusion would just burn attempts and let
+    this 400 mask the actionable one. Not slot health — the catalog sync
+    owns the durable removal of unserved models.
+    """
+    def __init__(self, message, model=''):
+        super().__init__(message)
+        self.model = model
+
+
 class EndpointUnreachableError(Exception):
     """The model endpoint could not be reached at the connect phase.
 
@@ -232,23 +271,24 @@ class EndpointUnreachableError(Exception):
         self.base_url = base_url or ''
 
 
-def _is_connect_phase_error(exc: Exception) -> bool:
-    """True if *exc* is a ``requests`` connect-phase failure (host unreachable).
-
-    ``requests.exceptions.ConnectionError`` (and its ``ConnectTimeout``
-    subclass) is raised when the socket can't be established at all — a
-    distinct signal from a mid-stream reset (``ChunkedEncodingError``,
-    raised later during body iteration) or a ``ReadTimeout`` (server
-    accepted but is slow). Only the connect-phase case means "this
-    endpoint is down; fail over".
-    """
-    from requests.exceptions import ConnectionError as _ReqConnError
-    return isinstance(exc, _ReqConnError)
-
-
 # ══════════════════════════════════════════════════════════
 #  Pattern tables
 # ══════════════════════════════════════════════════════════
+
+# Body markers that mean "this gateway has NO route for the model" — as
+# opposed to "route exists but the payload was rejected". The Meituan AIGC
+# gateway answers a missing route with HTTP 400 stage=validation and a
+# CHINESE message ("不支持的模型类型(model=…)"); reading it as a generic
+# deterministic 400 burns every remaining key of the dead model and lets
+# that 400 mask the actionable one (2026-08-04 opus-5 probe incident;
+# 2026-08-31 mtgrjqtuhzi4i9 — nano's route-missing 400 masked kimi-k3's
+# invalid-tool-schema 400). provider_probe shares this one authority.
+ROUTE_MISSING_MARKERS = (
+    'model_not_found', 'does not exist', 'no such model',
+    'unsupported model', 'unsupported_model', 'model not supported',
+    'invalid model name',
+    '不支持的模型类型',
+)
 
 # Patterns in HTTP 400 that indicate an image content error (not retryable)
 _IMAGE_ERROR_PATTERNS = [
@@ -683,28 +723,34 @@ def parse_subscription_retry_after(err_msg: str, *, now: float = None):
     return None
 
 
-# Phrases naming a PROJECT-LEVEL limit shared with other tenants of the
-# gateway account. BOTH must appear (narrow on purpose — owner 2026-07-28):
-# a per-key/per-account throttle must NEVER match, or a genuinely sick key
-# would be laundered into "external contention" and stop feeding the
-# dead-key safety nets. Observed canonical body (Moonshot via sankuai):
-#   "request reached project (kimi-k3) TPM rate limit, current: 50019215,
-#    limit: 50000000"
-_SHARED_PROJECT_LIMIT_PATTERNS = ('reached project', 'tpm rate limit')
+# Phrase groups naming a PROJECT/APP-level model limit shared with other
+# tenants or keys of the gateway account. Every phrase in ONE group must
+# appear (narrow on purpose): a per-key/per-account throttle must NEVER match,
+# or a genuinely sick key would be laundered into "external contention" and
+# stop feeding the dead-key safety nets. Observed canonical bodies (sankuai):
+#   Moonshot: "request reached project (kimi-k3) TPM rate limit"
+#   Gateway:  "App:**62518在模型:kimi-k3每分钟请求次数超过限制"
+_SHARED_PROJECT_LIMIT_PATTERN_GROUPS = (
+    ('reached project', 'tpm rate limit'),
+    ('app:', '在模型:', '每分钟请求次数超过限制'),
+)
 
 
 def _is_shared_project_limit(err_msg: str) -> bool:
-    """True if a 429 body names a shared PROJECT-level (TPM) limit.
+    """True if a 429 body names a shared project/app model limit.
 
     Such 429s are EXTERNAL contention — the pipe is saturated by other
-    tenants of the gateway account, so rotating our own keys is futile
-    (they all terminate at the same upstream project) and the error says
+    tenants or keys of the gateway account, so rotating our own keys is futile
+    (they all terminate at the same upstream project/app) and the error says
     nothing about key health.
     """
     if not err_msg:
         return False
     lower = err_msg.lower()
-    return all(p in lower for p in _SHARED_PROJECT_LIMIT_PATTERNS)
+    return any(
+        all(phrase in lower for phrase in pattern_group)
+        for pattern_group in _SHARED_PROJECT_LIMIT_PATTERN_GROUPS
+    )
 
 
 def _is_wrapped_overload(error_text: str) -> bool:
@@ -735,12 +781,89 @@ def _is_stream_only_error(error_text: str) -> bool:
             or "'stream' must be set to true" in _lower)
 
 
+_CREDENTIAL_HEADER_NAMES = frozenset({
+    'authorization',
+    'api-key',
+    'x-api-key',
+    'x-goog-api-key',
+})
+
+_MISSING_CREDENTIAL_PHRASES = (
+    'missing api key',
+    'api key is missing',
+    'api key missing',
+    'api key is required',
+    'api key required',
+    'no api key provided',
+    'api key not provided',
+    'missing authorization header',
+    'authorization header is missing',
+    'authorization header required',
+    'no authorization header provided',
+    '缺少 api key',
+    '未提供 api key',
+)
+
+
+def _is_route_missing_error(err_msg: str) -> bool:
+    """True if an error body says the gateway has no route for the model."""
+    if not err_msg:
+        return False
+    lower = str(err_msg).lower()
+    return any(marker in lower for marker in ROUTE_MISSING_MARKERS)
+
+
+def _has_outbound_credential(headers) -> bool:
+    """Return whether the final wire headers contain a non-empty credential.
+
+    Only this boolean crosses into error classification; header values are
+    never logged or attached to an exception. Run this after provider and
+    caller overrides so the evidence describes the actual request.
+    """
+    if not isinstance(headers, dict):
+        return False
+    # HTTP header names are case-insensitive. Collapse in insertion order so
+    # a caller override such as ``authorization: ''`` wins over the default
+    # ``Authorization`` entry exactly as it will at the client boundary.
+    final_headers = {
+        str(name).strip().lower(): value
+        for name, value in headers.items()
+    }
+    for name, value in final_headers.items():
+        if name not in _CREDENTIAL_HEADER_NAMES:
+            continue
+        raw_value = '' if value is None else str(value).strip()
+        if not raw_value:
+            continue
+        if name == 'authorization':
+            scheme, separator, payload = raw_value.partition(' ')
+            if (scheme.lower() in {'bearer', 'basic', 'token'}
+                    and (not separator or not payload.strip())):
+                continue
+        return True
+    return False
+
+
+def _claims_credential_missing(error_text: str) -> bool:
+    """Detect a narrow 401/403 claim that no credential was supplied.
+
+    Hyphens and underscores are normalized solely for phrase matching.
+    Invalid, expired, unauthorized, or scope-denied keys do not match.
+    """
+    if not error_text:
+        return False
+    normalized = re.sub(r'[_-]+', ' ', str(error_text).lower())
+    normalized = re.sub(r'\s+', ' ', normalized)
+    return any(phrase in normalized for phrase in _MISSING_CREDENTIAL_PHRASES)
+
+
 # ══════════════════════════════════════════════════════════
 #  Central HTTP error classifier
 # ══════════════════════════════════════════════════════════
 
 def _classify_http_error(status_code: int, err_msg: str, model: str,
-                         log_prefix: str, *, max_tokens: int = 0) -> None:
+                         log_prefix: str, *, max_tokens: int = 0,
+                         credential_present: bool = False) -> None:
     """Classify an HTTP error and raise the appropriate exception.
 
     Centralizes the error-classification chain shared by ``chat()`` and
@@ -749,8 +872,8 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
     Raises:
         RateLimitError, ContentFilterError, PermissionError_,
         PromptTooLongError, ModelLimitError, InvalidImageError,
-        StreamOnlyError, BadRequestError, RetryableAPIError,
-        or generic Exception.
+        StreamOnlyError, ModelRouteMissingError, BadRequestError,
+        RetryableAPIError, or generic Exception.
     """
     # Lazy import to avoid a top-level cycle: lib.model_info is its own
     # module but lives in the same import graph and importing it here
@@ -793,8 +916,11 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             # Project-LEVEL contention (shared gateway account saturated by
             # other tenants) — transient, NOT key health. Distinct from a
             # plain 429 only in how the dispatch layer ACCOUNTS for it.
-            logger.info('%s Shared-project contention (HTTP 429, external): %s',
-                        log_prefix, err_msg[:_ERR_BODY_LIMIT])
+            # Dispatch owns the bounded first/escalation/heartbeat record.
+            # Logging every rejected wire attempt here produced 6,849 INFO
+            # lines in one recent 200k-line window without adding new facts.
+            logger.debug('%s Shared-project contention (HTTP 429, external): %s',
+                         log_prefix, err_msg[:_ERR_BODY_LIMIT])
             raise RateLimitError(display_msg, status_code=429,
                                  is_shared_contention=True,
                                  reason=display_msg[:200])
@@ -811,6 +937,25 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
         logger.warning('%s Content filter triggered (HTTP 450)', log_prefix)
         raise ContentFilterError(display_msg)
     if status_code in _PERMISSION_STATUS_CODES:
+        # The final outbound header set is known to contain a credential, yet
+        # the upstream says none was supplied. This is not evidence that the
+        # key is invalid: a proxy/gateway route dropped or failed to recognize
+        # the header. Keep it out of permission exclusions and key health, but
+        # mark it separately so dispatch can stop after a small bounded number
+        # of rotations instead of inheriting the ordinary infinite-429 wait.
+        if credential_present and _claims_credential_missing(err_msg):
+            logger.warning(
+                '%s Credential-delivery contradiction in HTTP %d '
+                '(outbound credential header present; upstream claims it is '
+                'missing) — treating as bounded gateway anomaly',
+                log_prefix, status_code)
+            raise RateLimitError(
+                display_msg,
+                is_gateway=True,
+                is_credential_delivery_anomaly=True,
+                reason='credential_delivery_anomaly',
+                status_code=status_code,
+            )
         # A 401/403 whose body is an upstream-vendor TRANSIENT is NOT an
         #   auth failure (toio UPSTREAM_VENDOR wrap, 2026-07-26: the
         #   claude-opus-5 vendor outage returned HTTP 403 "请求失败,请稍后再
@@ -825,13 +970,25 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             raise RateLimitError(display_msg, is_gateway=True,
                                  reason=f'HTTP {status_code}: {display_msg[:180]}',
                                  status_code=status_code)
-        logger.warning('%s Permission error (HTTP %d)', log_prefix, status_code)
-        raise PermissionError_(display_msg)
+        # Keep the bounded, human-readable upstream reason in diagnostics.
+        # The old status-only line made a model-entitlement 403 impossible to
+        # distinguish from a revoked key after a later fallback masked it.
+        logger.warning('%s Permission error (HTTP %d): %s',
+                       log_prefix, status_code,
+                       display_msg[:_ERR_BODY_LIMIT])
+        raise PermissionError_(display_msg, status_code=status_code)
     if status_code == 413:
         logger.warning('%s Request entity too large (HTTP 413) — '
                        'treating as prompt-too-long: %s', log_prefix, err_msg[:_ERR_BODY_LIMIT])
         raise PromptTooLongError(display_msg)
     if status_code == 400:
+        if _is_route_missing_error(err_msg):
+            # The gateway's own words: no route for this model at all — the
+            #   most authoritative claim in any 400 body, checked first.
+            logger.warning('%s Model %s has no route on this gateway '
+                           '(HTTP 400): %s',
+                           log_prefix, model, err_msg[:_ERR_BODY_LIMIT])
+            raise ModelRouteMissingError(display_msg, model)
         _detected_limit = _parse_token_limit_from_error(err_msg, model)
         if _detected_limit:
             _learn_model_limit(model, _detected_limit)

@@ -58,8 +58,8 @@
                 </div>
                 <div class="settings-toggle-row">
                   <div>
-                    <span class="settings-toggle-label" data-i18n="settings.llmContentFilter">LLM 内容过滤</span>
-                    <div class="settings-toggle-desc" data-i18n="settings.llmContentFilterDesc">抓到网页后先让小模型删掉导航栏、广告等杂质，再把干净内容送给大模型。开启=更干净但更慢；关闭=更快更省 token，但会混入网页噪音</div>
+                    <span class="settings-toggle-label" data-i18n="settings.llmContentFilter">LLM 相关性门</span>
+                    <div class="settings-toggle-desc" data-i18n="settings.llmContentFilterDesc">抓取后用小模型判断网页是否与问题相关；相关页保留原始正文。开启=更精准但更慢且消耗 API；关闭=更快更省，依赖本地词法重排。</div>
                   </div>
                   <label class="stg-toggle">
                     <input type="checkbox" id="settingLlmContentFilter" checked>

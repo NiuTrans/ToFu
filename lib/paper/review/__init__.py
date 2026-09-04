@@ -17,7 +17,9 @@ Soundness/Excitement 1–5, CVPR's strong-reject→strong-accept band, …) — 
 Mode deliberately does NOT flatten every venue onto one template, because the
 authenticity of the scorecard is the whole point.
 
-The implementation is partitioned by responsibility:
+The implementation is partitioned by responsibility and resolved lazily so
+route registration does not initialize deterministic text processing or the
+shared language cascade:
 
   * ``_lang``     — venue registry + composite-key language helpers.
   * ``_textproc`` — deterministic text-cleaning pipeline (smart quotes,
@@ -26,40 +28,7 @@ The implementation is partitioned by responsibility:
   * ``_prompts``  — venue-aware prompt builders + their large string constants.
 """
 
-# ── Venue registry + composite-key language helpers ─────────────────────
-from lib.paper.review._lang import (
-    DEFAULT_VENUE,
-    REBUTTAL_LANG_PREFIX,
-    REVIEW_LANG_PREFIX,
-    REVIEW_VENUES,
-    is_rebuttal_lang,
-    is_review_family,
-    is_review_lang,
-    list_venues,
-    make_rebuttal_lang,
-    make_review_lang,
-    parse_report_lang,
-)
-
-# ── Deterministic text-cleaning pipeline ────────────────────────────────
-from lib.paper.review._textproc import (
-    finalize_rebuttal_body,
-    finalize_review_body,
-    parse_rebuttal_decision,
-    rebuttal_decision_marker,
-    scorecard_separator,
-    smarten_quotes,
-    strip_slop_dashes,
-)
-
-# ── Venue-aware prompt builders + their large string constants ──────────
-from lib.paper.review._prompts import (
-    REBUTTAL_DECISION_MARKER,
-    build_rebuttal_prompt,
-    build_rebuttal_tool_instruction,
-    build_review_prompt,
-    build_review_tool_instruction,
-)
+from importlib import import_module
 
 __all__ = [
     # lang / venue registry
@@ -89,3 +58,51 @@ __all__ = [
     'build_rebuttal_tool_instruction',
     'REBUTTAL_DECISION_MARKER',
 ]
+
+
+_EXPORT_MODULES = {
+    # Venue registry and composite language keys.
+    'REVIEW_LANG_PREFIX': 'lib.paper.review._lang',
+    'DEFAULT_VENUE': 'lib.paper.review._lang',
+    'REVIEW_VENUES': 'lib.paper.review._lang',
+    'is_review_lang': 'lib.paper.review._lang',
+    'is_rebuttal_lang': 'lib.paper.review._lang',
+    'is_review_family': 'lib.paper.review._lang',
+    'REBUTTAL_LANG_PREFIX': 'lib.paper.review._lang',
+    'parse_report_lang': 'lib.paper.review._lang',
+    'make_review_lang': 'lib.paper.review._lang',
+    'make_rebuttal_lang': 'lib.paper.review._lang',
+    'list_venues': 'lib.paper.review._lang',
+    # Deterministic text normalization.
+    'smarten_quotes': 'lib.paper.review._textproc',
+    'strip_slop_dashes': 'lib.paper.review._textproc',
+    'scorecard_separator': 'lib.paper.review._textproc',
+    'finalize_review_body': 'lib.paper.review._textproc',
+    'finalize_rebuttal_body': 'lib.paper.review._textproc',
+    'parse_rebuttal_decision': 'lib.paper.review._textproc',
+    'rebuttal_decision_marker': 'lib.paper.review._textproc',
+    # Prompt builders.
+    'build_review_prompt': 'lib.paper.review._prompts',
+    'build_review_tool_instruction': 'lib.paper.review._prompts',
+    'build_rebuttal_prompt': 'lib.paper.review._prompts',
+    'build_rebuttal_tool_instruction': 'lib.paper.review._prompts',
+    'REBUTTAL_DECISION_MARKER': 'lib.paper.review._prompts',
+}
+
+_CHILD_MODULES = {'_lang', '_prompts', '_textproc'}
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None and name in _CHILD_MODULES:
+        module_name = f'lib.paper.review.{name}'
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module = import_module(module_name)
+    value = module if name in _CHILD_MODULES else getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _CHILD_MODULES)

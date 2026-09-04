@@ -126,6 +126,32 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
         _steer_previews = [{
             'text': (_sit.get('value') or '')[:1200],
         } for _sit in _steer_inject]
+        # Conversation Sync v3 persists a pending block before the worker is
+        # woken. Reuse that exact block identity when model consumption is
+        # confirmed so the Surface updates in place instead of appending a
+        # second chip. Legacy inbox producers without an identity retain the
+        # older one-batch-per-round record.
+        _steer_lane = task.setdefault('_userSteerInjects', [])
+        _legacy_steer_previews = []
+        for _sit, _preview in zip(_steer_inject, _steer_previews):
+            _block_id = str(_sit.get('blockId') or '')
+            if not _block_id:
+                _legacy_steer_previews.append(_preview)
+                continue
+            _steer_lane.append({
+                'blockId': _block_id,
+                'commandId': str(_sit.get('injectionId') or ''),
+                'round': round_num + 1,
+                'count': 1,
+                'previews': [_preview],
+                'deliveryState': 'delivered',
+            })
+        if _legacy_steer_previews:
+            _steer_lane.append({
+                'round': round_num + 1,
+                'count': len(_legacy_steer_previews),
+                'previews': _legacy_steer_previews,
+            })
         try:
             append_event(task, build_event(
                 EventType.USER_STEER_INJECT,
@@ -136,12 +162,3 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
         except Exception as _sce:
             logger.warning('[Task %s] steer inject chip emit failed: %s',
                            tid, _sce)
-        # Display-only sidecar accumulation (shape mirrors the swarm/
-        # peer inject records the sync layer persists as underscore
-        # fields). Delivery is confirmed here, so it is safe to
-        # record for the committed message projection.
-        task.setdefault('_userSteerInjects', []).append({
-            'round': round_num + 1,
-            'count': len(_steer_inject),
-            'previews': _steer_previews,
-        })

@@ -49,9 +49,11 @@ def _patch_common(monkeypatch, reply):
 
 # ── (b) path / URL token — the reported bug ──────────────────────────────
 
-# The 98-char shape from task inc-translate-89dd9bf7.
-_ABS_PATH = ('/path/to/your/data'
-             'your-username/chatui/lib/translate/engine/_engine.py')
+# The ~100-char absolute-path shape from task inc-translate-89dd9bf7.
+# Purely lexical: the identity invariant never touches the filesystem, so
+# this placeholder needs no machine-specific path and runs on any host.
+_ABS_PATH = ('/mnt/data/ssd_pool/docker/user/example-org/INS/'
+             'example-user01/chatui/lib/translate/engine/_engine.py')
 
 
 def test_absolute_path_accepted_verbatim_zero_model_calls(monkeypatch):
@@ -92,7 +94,9 @@ def test_url_and_path_shapes_short_circuit(monkeypatch, token):
     '>>> --- +++ *** ///',
 ])
 def test_pure_symbols_accepted_verbatim(monkeypatch, symbols):
-    assert not _engine._HAS_LETTER_RE.search(symbols)
+    from lib.translate.skip_policy import _HAS_LETTER_RE
+
+    assert not _HAS_LETTER_RE.search(symbols)
     calls = _patch_common(monkeypatch, symbols)
     out, _u = engine._translate_one_chunk(
         symbols, system_prompt='translate', source='English', target='Chinese',
@@ -103,7 +107,9 @@ def test_pure_symbols_accepted_verbatim(monkeypatch, symbols):
 
 def test_numbers_and_punctuation_only(monkeypatch):
     content = '2026-07-14 18:01:58 (99.5%) [#42]'
-    assert not _engine._HAS_LETTER_RE.search(content)
+    from lib.translate.skip_policy import _HAS_LETTER_RE
+
+    assert not _HAS_LETTER_RE.search(content)
     calls = _patch_common(monkeypatch, content)
     out, _u = engine._translate_one_chunk(
         content, system_prompt='translate', source='English', target='Chinese',

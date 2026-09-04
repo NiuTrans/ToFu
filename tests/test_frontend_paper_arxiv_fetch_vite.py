@@ -48,22 +48,31 @@ global._saveActivePaperState = async () => { calls.saved++; };
 global._setActivePaperId = (id) => { _activePaperId = id; calls.active.push(id); };
 global._renderArxivFetchProgress = () => {};
 global.debugLog = (message, level) => { calls.debug.push([message, level]); };
+function streamBody(tag) {
+  let gate = Promise.resolve();
+  if (tag === 'A') gate = new Promise((resolve) => { releaseA = resolve; });
+  if (tag === 'C') gate = new Promise((resolve) => { releaseC = resolve; });
+  const bytes = new TextEncoder().encode(
+    'data: ' + JSON.stringify(done(tag)) + '\n\n',
+  );
+  let sent = false;
+  return { getReader: () => ({ read: async () => {
+    if (sent) return { done:true, value:undefined };
+    await gate;
+    sent = true;
+    return { done:false, value:bytes };
+  } }) };
+}
 global.Api = { paper: { fetchArxivStream: async (reference) => {
   if (reference === 'fail') return { ok:false, status:502, body:null,
     json:async () => ({ error:'upstream timeout' }) };
-  return { ok:true, status:200, body:{}, tag:reference };
+  return { ok:true, status:200, body:streamBody(reference) };
 }}};
 function done(tag) {
   return { stage:'done', arxiv_id:tag, title:'Title ' + tag,
     pdf_url:'/api/paper/pdf/' + tag + '.pdf', parsed_text:'text ' + tag,
     total_pages:3, paper_hash:'hash-' + tag, images:[{page:1}], text_length:6 };
 }
-global.readSSEStream = async (response, options) => {
-  if (response.tag === 'A') await new Promise((resolve) => { releaseA = resolve; });
-  if (response.tag === 'C') await new Promise((resolve) => { releaseC = resolve; });
-  options.onLine('data: ' + JSON.stringify(done(response.tag)));
-};
-
 (0, eval)(fs.readFileSync(BUILT, 'utf8'));
 
 (async () => {

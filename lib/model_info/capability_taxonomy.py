@@ -17,7 +17,8 @@ each constant's docstring for why):
     off the picker.
 
   * :data:`DISPATCHER_NON_CHAT_CAPS`   — the BACKEND-dispatcher set, applied
-    with ``slot.capabilities.issubset(this)``. Includes ``audio_chat`` because
+    to operational capabilities after pricing-only tags are removed. Includes
+    ``audio_chat`` because
     a slot whose caps are EXCLUSIVELY ``{audio_chat}`` (no ``text``) has no
     text-chat surface and should be excluded. Omni chat models normally carry
     ``{text, audio_chat, ...}`` so they are NOT a subset and remain
@@ -27,6 +28,10 @@ Public helper :func:`is_chat_model` implements the FRONTEND semantics: any
 non-empty intersection with :data:`CHAT_EXCLUDED_CAPS` → not-a-chat-model.
 The dispatcher continues to use its stricter ``issubset`` check because its
 job is different (never dispatch a caps-only-non-chat slot for a chat op).
+
+:data:`KNOWN_CAPABILITIES` is the ordered authority of every known
+capability tag; capability-toggle UIs render it instead of hardcoding
+their own list.
 
 See docs/adr/2026-07-24-capability-taxonomy.md (if present) for the full
 rationale; the short version is in :func:`is_chat_model`'s docstring.
@@ -63,8 +68,8 @@ CHAT_EXCLUDED_CAPS: frozenset[str] = frozenset({
 # ══════════════════════════════════════════════════════════════
 #  DISPATCHER_NON_CHAT_CAPS — backend dispatcher subset check
 # ══════════════════════════════════════════════════════════════
-# A slot is treated as NOT chat-compatible when its capabilities are a subset
-# of this set (see LLMDispatcher._is_chat_compatible). Includes 'audio_chat'
+# A slot is treated as NOT chat-compatible when its non-pricing capabilities
+# are a subset of this set (see LLMDispatcher._is_chat_compatible). Includes 'audio_chat'
 # on purpose: a slot carrying ONLY {audio_chat} (no text) has no text-chat
 # surface. Real omni chat slots carry {text, audio_chat, ...} — NOT a subset
 # — so they remain chat-eligible, which is what we want.
@@ -73,6 +78,37 @@ CHAT_EXCLUDED_CAPS: frozenset[str] = frozenset({
 # the difference is intentional and is explicitly encoded here so future
 # readers don't have to reconstruct "why two sets?".
 DISPATCHER_NON_CHAT_CAPS: frozenset[str] = CHAT_EXCLUDED_CAPS | {'audio_chat'}
+
+# ══════════════════════════════════════════════════════════════
+#  KNOWN_CAPABILITIES — canonical ORDERED list of every capability tag
+# ══════════════════════════════════════════════════════════════
+# The one authority for "which capability tags exist, and in what order a
+# capability-toggle UI renders them". Published via taxonomy_payload() as
+# ``known_capabilities``; the browser's typed owner projects it onto
+# runtimeScope and the settings toggle grids (model edit form, key×model
+# access-matrix cell editor) render it — before this list existed each grid
+# hardcoded its own copy of this array, so adding a cap meant editing N
+# frontend literals (and forgetting one left the new cap untoggleable).
+#
+# Order is presentation-stable: it is the order the settings UI has always
+# shown (chat-ish tags first, non-chat last). Reorder only intentionally —
+# every client re-renders in this order.
+#
+# Invariant (pinned by tests/test_capability_taxonomy_parity.py):
+# ``set(KNOWN_CAPABILITIES) == set(CAPABILITY_SEMANTICS)`` — a tag may not
+# exist in one without the other.
+KNOWN_CAPABILITIES: tuple[str, ...] = (
+    'text',
+    'vision',
+    'video',
+    'thinking',
+    'cheap',
+    'image_gen',
+    'embedding',
+    'transcription',
+    'tts',
+    'audio_chat',
+)
 
 # ══════════════════════════════════════════════════════════════
 #  Per-capability semantic descriptor (published to the API)
@@ -128,8 +164,9 @@ def is_chat_model(caps: Iterable[str] | None) -> bool:
     existing ``caps || ['text']`` default).
 
     This is NOT the same as the dispatcher's ``_is_chat_compatible`` check
-    (which uses ``issubset(DISPATCHER_NON_CHAT_CAPS)``). See module docstring
-    for why the two differ.
+    (which first removes pricing-only tags, then uses
+    ``issubset(DISPATCHER_NON_CHAT_CAPS)``). See the module docstring for why
+    the two differ.
     """
     if not caps:
         return True
@@ -147,10 +184,13 @@ def taxonomy_payload() -> dict:
     the exclusion set. Frontend :func:`window.isChatModel` reads this at
     boot and falls back to a hardcoded literal only when the endpoint is
     unreachable.
+ ``known_capabilities`` feeds the settings capability-toggle
+    grids via the typed owner's ``getKnownCapabilities()``.
     """
     return {
         'chat_excluded_caps': sorted(CHAT_EXCLUDED_CAPS),
         'dispatcher_non_chat_caps': sorted(DISPATCHER_NON_CHAT_CAPS),
+        'known_capabilities': list(KNOWN_CAPABILITIES),
         'capability_semantics': {
             cap: dict(desc) for cap, desc in CAPABILITY_SEMANTICS.items()
         },
@@ -160,6 +200,7 @@ def taxonomy_payload() -> dict:
 __all__ = [
     'CHAT_EXCLUDED_CAPS',
     'DISPATCHER_NON_CHAT_CAPS',
+    'KNOWN_CAPABILITIES',
     'CAPABILITY_SEMANTICS',
     'is_chat_model',
     'taxonomy_payload',

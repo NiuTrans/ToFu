@@ -122,14 +122,15 @@ HARNESS = textwrap.dedent("""
     global._modelShortName = (m) => m;
     global.selectModel = () => {{}};
     global.t = (k) => k;
-    // isChatModel (core/model_caps.js) + its console-warn helper are read by
-    // the shipped visibility filter. Neither is defined in this harness's
-    // eval scope, so BOTH must be stubbed: without isChatModel the filter
-    // takes its degraded branch, which then calls _warnModelCapsMissing and
-    // throws ReferenceError before a single item renders.
-    global.runtimeScope = {{ isChatModel: () => true }};
+    // Required composition ports. Their policy behavior is covered by the
+    // typed-owner tests; this layout fixture supplies deterministic adapters.
+    global.runtimeScope = {{
+      isChatModel: () => true,
+      modelGroupKey: (provider) => provider.brand || 'generic',
+      modelGroupLabel: (key, fallback) => fallback || key,
+    }};
     global._warnModelCapsMissing = () => {{}};
-    // Shared display-name comparator (settings/branding.js). This harness only
+    // Shared typed display-name comparator. This harness only
     // evals main_toolbar_ui.js, so the picker's sort is typeof-guarded on it —
     // stub it so the ORDERING path is exercised here too rather than silently
     // skipped. Ordering itself is asserted by

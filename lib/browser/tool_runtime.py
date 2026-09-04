@@ -10,7 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from lib.log import get_logger
+
 from .queue import send_browser_command
+
+logger = get_logger(__name__)
 
 
 BrowserCommandSender = Callable[..., tuple[object, object]]
@@ -42,13 +46,22 @@ class BrowserToolRuntime:
 
     def send(self, command, params=None, timeout=30):
         """Send one command with this runtime's immutable authority route."""
-        return self.sender(
+        result, error = self.sender(
             command,
             params,
             timeout=timeout,
             client_id=self.client_id,
             owner_user_id=self.owner_user_id,
         )
+        if command == 'list_tabs' and not error and isinstance(result, list):
+            # Feed the display-side title cache so later tool-round labels can
+            # name the page instead of the opaque tab id. Purely advisory.
+            try:
+                from .tab_titles import ingest_tab_list
+                ingest_tab_list(self.owner_user_id, self.client_id, result)
+            except Exception as e:
+                logger.debug('tab-title ingest failed: %s', e)
+        return result, error
 
 
 __all__ = ['BrowserCommandSender', 'BrowserToolRuntime']

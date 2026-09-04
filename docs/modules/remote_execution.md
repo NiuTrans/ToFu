@@ -18,7 +18,7 @@ capability boundary, not a trusted-network shortcut.
 | Agent permission policy | `lib/desktop_agent/_permissions.py` |
 | Remote project binding | `lib/desktop/remote.py`, `lib/conv_config/` |
 | Remote project execution | `lib/tasks_pkg/handlers/project.py`, agent `_project.py` |
-| Subscription egress routing | `lib/desktop/egress.py`, agent `_egress.py` |
+| Subscription egress routing | `lib/desktop/egress.py`, `egress_preferences.py`, Sidecar `desktop` domain, agent `_egress.py` |
 | Local subscription adapter | `lib/desktop/adapter.py`, agent `_adapter.py` |
 | Full-app/agent launchers | `desktop/launcher.py`, `desktop/agent_launcher.py` |
 | Build and artifact store | `lib/desktop_dist/`, `tofu-agent.spec`, release scripts |
@@ -94,14 +94,38 @@ declared adapter loopback port. The agent repeats the target check before
 opening a socket. Owner-scoped device candidates are ordered by explicit pin
 and recent health; failover is bounded and observable.
 
+The explicit pin is durable user state in the Storage Sidecar. The live device
+registry remains ephemeral transport and is filtered by owner, online state,
+and `egress` capability before either API display or pin acceptance. A retired
+per-installation JSON file is a read-once migration source only; an explicit
+Sidecar row, including an empty pin, prevents it from becoming a second
+authority.
+
+The authenticated owner is captured at each HTTP/task boundary and propagated
+through chat dispatch, streaming preflight, OAuth callback/device workers,
+token refresh, and provider probes. No transport layer guesses a personal
+owner: an ownerless request cannot address a desktop device. Adapter status,
+account, and ensure-task caches are bounded and keyed by `(owner, agent)`, so a
+cached response cannot bypass ownership after a device is re-paired. OAuth
+relay/device workers also carry an opaque flow generation, preventing a late
+callback from mutating or redeeming a replacement login.
+
 Direct/proxy reachability probes are hints for route selection. Network
 failure caches are short and invalidated when proxy topology changes. Secrets
-remain request headers and are redacted from logs and status documents.
+remain request headers and are redacted from logs and status documents. Steady
+healthy selections are DEBUG-only; first failure, recovery, and route-health
+transitions remain visible without one INFO pair per subscription request.
 
 The optional local subscription adapter runs on the device loopback interface.
 Server policy mints adapter credentials and relays management/model calls
-through the addressed device. Provider catalogue state is synchronized through
-the provider authority; stopping the adapter deprovisions its managed provider.
+through the addressed device. Adapter discovery replaces only its deterministic
+owner-scoped model-routing v2 ProviderAccess bundle through bounded CAS; the
+bundle contains explicit Connection adapter metadata and encrypted credential
+references, never a legacy provider row. Stopping the adapter deprovisions that
+managed v2 bundle only after the owning device confirms the stop. Bring-up reuses the
+launch-probed task concurrency budget with a hard two-worker ceiling and no
+pending queue; saturation returns a retryable `503` rather than creating
+another ten-minute download thread.
 
 ## Pairing and distribution
 
@@ -145,6 +169,7 @@ architecture, and attachment behavior remain explicit metadata.
 
 - Credentials and stable agent identity are mandatory on every poll.
 - Owner filtering happens before device selection and delivery.
+- Only an online, owner-matching, egress-capable device can be newly pinned.
 - Command claim and result/stream settlement bind to the same device.
 - No compatibility switch can disable addressing or receipt validation.
 - Local permissions and root validation remain authoritative on the device.

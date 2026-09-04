@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 
+# export.py is the maintainer's release tool; not shipped in opensource builds.
+export = pytest.importorskip('export', reason='export.py is not shipped in opensource builds')
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,8 +49,9 @@ print('OK')
 
 def test_authenticated_publish_refuses_missing_token(tmp_path, monkeypatch):
     import export
+    import export_pkg._publish as publish
 
-    monkeypatch.setattr(export, '_verify_publish_tree', lambda _dest: None)
+    monkeypatch.setattr(publish, '_verify_publish_tree', lambda _dest: None)
     monkeypatch.setitem(
         export._GIT_REPOS,
         'opensource',
@@ -62,7 +65,7 @@ def test_authenticated_publish_refuses_missing_token(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(
-        export,
+        publish,
         '_load_gh_token',
         lambda: (_ for _ in ()).throw(SystemExit('token unavailable')),
     )

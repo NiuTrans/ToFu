@@ -317,18 +317,18 @@ _PANELS_SRC = os.path.join(JS_DIR, 'mobile_panels.js')
 
 
 def test_flow_picker_aria_roles_present():
-    """The mobile flow picker is an accessible bottom-sheet listbox."""
+    """The mobile flow picker is an accessible bottom-sheet radio group."""
     with open(_PANELS_SRC, encoding='utf-8') as f:
         src = f.read()
-    assert 'id="mobileFlowSheetList" role="listbox"' in src, \
-        'flow-picker list must be role=listbox'
+    assert 'id="mobileFlowSheetList" role="radiogroup"' in src, \
+        'flow-picker list must be role=radiogroup'
     assert 'id="mobileFlowSheetStatus" role="status"' in src, \
-        'catalog availability must be announced outside the listbox'
+        'catalog availability must be announced outside the picker'
     assert src.index('id="mobileFlowSheetStatus"') < src.index('id="mobileFlowSheetList"'), \
-        'catalog status must not be nested among listbox options'
+        'catalog status must not be nested among picker options'
     assert 'aria-labelledby="mobileFlowSheetTitle"' in src, \
-        'flow-picker listbox must reference its title'
-    assert 'role="option"' in src, 'each flow item must be role=option'
+        'flow-picker radiogroup must reference its title'
+    assert 'role="radio"' in src, 'each flow item must be role=radio'
     assert '<button type="button" class="mobile-sheet-item' in src, \
         'flow options must be natively focusable controls'
     assert 'aria-selected="' in src, 'each flow item must carry aria-selected'

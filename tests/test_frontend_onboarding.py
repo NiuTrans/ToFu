@@ -16,8 +16,8 @@ Behavioural (drives the REAL static/js/onboarding.js in jsdom):
      selector tests/conftest.py::_dismiss_onboarding_modals strips on
      keyless test servers (the 12-failure e2e class lives behind this pin);
   2. the dismissal flag suppresses re-nags, and `force` (?setup=1) bypasses it;
-  3. API path: validation → probe → provider APPENDED to the live list via
-     the server-config partial merge → done step + dropdown refresh;
+  3. API path: validation → probe → owner-scoped ProviderAccess CAS create →
+     done step + dropdown refresh;
   4. API path failure surfaces the error and persists NOTHING;
   5. OAuth path: one click closes the wizard, marks it done, and hands off
      to Settings → 订阅登录 with the login auto-kicked;
@@ -32,7 +32,7 @@ Static ratchets:
   R3 onboarding.js is registered in lib/js_bundler.py:_BUNDLE_FILES and is
      absent from the raw page shell.
 
-NEUTER: cutting the server-config update turns pin 3 red; cutting the
+NEUTER: cutting the ProviderAccess create turns pin 3 red; cutting the
 oauth handoff delegation turns pin 5 red.
 """
 
@@ -91,7 +91,7 @@ HARNESS = textwrap.dedent("""
     global.Icon = () => '';
     global.debugLog = () => {{}};
     global._rec = {{
-      probeArgs: null, updatePayload: null, getCalls: 0,
+      probeArgs: null, createPayload: null, routingGets: 0,
       openSettings: 0, switchTab: null, oauthLogin: null, repopulate: 0,
     }};
     global.Api = {{
@@ -101,16 +101,18 @@ HARNESS = textwrap.dedent("""
           return Promise.resolve(global._probeResult);
         }},
       }},
-      serverConfig: {{
-        get: () => {{ global._rec.getCalls++;
-          return Promise.resolve({{ providers: [{{ id: 'existing', api_keys: ['k0'] }}] }}); }},
-        update: (payload) => {{ global._rec.updatePayload = payload;
-          return Promise.resolve({{ json: () => Promise.resolve({{ ok: true }}) }}); }},
+      modelRouting: {{
+        get: () => {{ global._rec.routingGets++;
+          return Promise.resolve({{ revision: 7, model_routing: {{}} }}); }},
+        createProvider: (bundle, revision) => {{
+          global._rec.createPayload = {{ bundle, revision }};
+          return Promise.resolve({{ ok: true, revision: 8 }});
+        }},
       }},
     }};
-    global.openSettings = () => {{ global._rec.openSettings++; }};
-    global.switchSettingsTab = (tab) => {{ global._rec.switchTab = tab; }};
-    global._oauthLogin = (p) => {{ global._rec.oauthLogin = p; }};
+    window.openSettings = () => {{ global._rec.openSettings++; }};
+    window.switchSettingsTab = (tab) => {{ global._rec.switchTab = tab; }};
+    window._oauthLogin = (p) => {{ global._rec.oauthLogin = p; }};
     global._loadServerConfigAndPopulate = () => {{ global._rec.repopulate++; }};
 
     {shipped}
@@ -138,7 +140,7 @@ HARNESS = textwrap.dedent("""
       out.forced = maybeShowOnboarding({{ force: true }}) === true
                 && !!document.getElementById('onboardingModal');
 
-      // (3) API path — validation, then probe → append → done.
+      // (3) API path — validation, then probe → v2 CAS create → done.
       document.getElementById('obCardApi').onclick();
       out.apiStepRendered = !!document.getElementById('obApiUrl')
                          && !!document.getElementById('obApiKey');
@@ -150,21 +152,28 @@ HARNESS = textwrap.dedent("""
       // filled submit
       document.getElementById('obApiUrl').value = 'api.deepseek.com';
       document.getElementById('obApiKey').value = 'sk-test';
-      global._probeResult = {{ ok: true, brand: 'deepseek', name: 'DeepSeek',
-        models: [{{ model_id: 'deepseek-chat' }}, {{ model_id: 'deepseek-reasoner' }}] }};
+      global._probeResult = {{
+        ok: true,
+        model_count: 2,
+        credential_id: 'deepseek-credential',
+        provider_bundle: {{
+          provider: {{ provider_id: 'deepseek', name: 'DeepSeek', scope: 'owner' }},
+          provider_access: {{ provider_access_id: 'deepseek-access', provider_id: 'deepseek' }},
+          connections: [{{ connection_id: 'deepseek-connection' }}],
+          credentials: [{{ credential_id: 'deepseek-credential' }}],
+          offerings: [{{ offering_id: 'chat' }}, {{ offering_id: 'reasoner' }}],
+          deployments: [], creators: [], models: [],
+        }},
+      }};
       await document.getElementById('obApiGo').onclick();
       await new Promise(r => setTimeout(r, 0));
       out.schemeNormalized = global._rec.probeArgs
         && global._rec.probeArgs.url === 'https://api.deepseek.com';
-      const upd = global._rec.updatePayload;
-      out.updateAppended = !!(upd && Array.isArray(upd.providers)
-        && upd.providers.length === 2
-        && upd.providers[0].id === 'existing'
-        && upd.providers[1].base_url === 'https://api.deepseek.com'
-        && upd.providers[1].api_keys[0] === 'sk-test'
-        && upd.providers[1].models.length === 2
-        && upd.providers[1].enabled === true);
-      out.updateIsPartialMerge = !!(upd && !('presets' in upd) && !('search' in upd));
+      const create = global._rec.createPayload;
+      out.v2Created = !!(create && create.revision === 7
+        && create.bundle.provider.provider_id === 'deepseek'
+        && create.bundle.credential_secrets['deepseek-credential'] === 'sk-test'
+        && create.bundle.offerings.length === 2);
       out.doneStep = !!document.getElementById('obStart');
       out.repopulated = global._rec.repopulate === 1;
       /* NEUTER tolerance: with the persist call cut, the done step never
@@ -188,12 +197,12 @@ HARNESS = textwrap.dedent("""
       document.getElementById('obApiUrl').value = 'https://bad.example.com';
       document.getElementById('obApiKey').value = 'sk-x';
       global._probeResult = {{ ok: false, error: 'unauthorized' }};
-      global._rec.updatePayload = null;
+      global._rec.createPayload = null;
       await document.getElementById('obApiGo').onclick();
       await new Promise(r => setTimeout(r, 0));
       out.failureShown = document.getElementById('obApiStatus')
         .textContent.includes('onboard.apiProbeFailed');
-      out.nothingPersisted = global._rec.updatePayload === null;
+      out.nothingPersisted = global._rec.createPayload === null;
       document.getElementById('obCloseX').onclick();
 
       // (5) OAuth path — one click = close + mark + handoff + auto-kick.
@@ -259,19 +268,16 @@ def test_dismissal_flag_suppresses_and_force_bypasses():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_api_path_probes_appends_and_finishes():
+def test_api_path_probes_creates_v2_access_and_finishes():
     out = _run()
     assert out["apiStepRendered"]
     assert out["emptyBlocked"], (
         "an empty submit reached the probe — validation must block first")
     assert out["schemeNormalized"], (
         "a scheme-less Base URL was not normalized to https://")
-    assert out["updateAppended"], (
-        "the new provider must be APPENDED to the live providers list "
-        "(existing entries preserved, probe fields carried over)")
-    assert out["updateIsPartialMerge"], (
-        "the wizard shipped more than {providers} — the partial merge must "
-        "not touch presets/search/… it knows nothing about")
+    assert out["v2Created"], (
+        "the probe draft and credential must cross the owner-scoped v2 "
+        "ProviderAccess CAS boundary")
     assert out["doneStep"], "the success step never rendered"
     assert out["repopulated"], (
         "the toolbar dropdown was not refreshed — the new models stay "
@@ -283,7 +289,7 @@ def test_api_path_failure_persists_nothing():
     out = _run()
     assert out["failureShown"], "a failed probe surfaced no error"
     assert out["nothingPersisted"], (
-        "a FAILED probe still wrote to the server config")
+        "a FAILED probe still created ProviderAccess state")
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
@@ -321,8 +327,6 @@ def test_R2_every_wizard_string_is_translated():
                for lang in ('zh', 'en')]
     keys = set(re.findall(r"onboard\.[A-Za-z]+",
                           ONBOARD_JS.read_text(encoding="utf-8")))
-    keys |= {"settings.egressGetAgent", "settings.egressGetAgentTitle",
-             "settings.egressUnavailSub"}
     assert len(keys) >= 20, f"suspiciously few keys found: {sorted(keys)}"
     for key in sorted(keys):
         assert all(key in locale for locale in locales), (
@@ -342,12 +346,12 @@ def test_R3_wizard_is_bundled_and_not_raw_in_the_shell():
 # ══════════════════════════════════════════════════════════════════
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_NEUTER_server_config_update_removed():
+def test_NEUTER_provider_access_create_removed():
     """Cut the persist call → the done step must collapse AND pin 3 goes red."""
     out = _run(lambda s: s.replace(
-        "    var r = await Api.serverConfig.update({ providers: providers.concat([newProv]) });\n",
-        "    var r = null; /* NEUTERED */\n"))
-    assert not out["updateAppended"], "NEUTER did not cut the persist"
+        "    var created = await Api.modelRouting.createProvider(bundle, revision);\n",
+        "    var created = null; /* NEUTERED */\n"))
+    assert not out["v2Created"], "NEUTER did not cut the persist"
     assert out["chooserCards"], "unrelated pins must stay green"
 
 
@@ -355,7 +359,7 @@ def test_NEUTER_server_config_update_removed():
 def test_NEUTER_oauth_handoff_delegation_removed():
     """Cut the tab switch + login kick → the handoff must go dead."""
     out = _run(lambda s: s.replace(
-        "  if (typeof switchSettingsTab === 'function') switchSettingsTab('oauth');\n",
+        "  if (typeof runtimeScope.switchSettingsTab === 'function') runtimeScope.switchSettingsTab('oauth');\n",
         "  /* NEUTERED */\n"))
     assert out["handoffTab"] != "oauth", "NEUTER did not cut the tab switch"
     assert out["handoffOpenedSettings"], "the Settings open must survive"

@@ -56,9 +56,11 @@ _FORBIDDEN_KEYS = frozenset({
 _ALLOW = {
     'lib/cost.py':
         'the SSOT itself — normalize_usage + canonicalize_usage_cache_keys',
-    'lib/llm/anthropic_outbound/_from_anthropic.py':
-        'Anthropic→OpenAI protocol translator — only Anthropic spellings '
-        'exist on that wire by construction',
+    'lib/llm_dispatch/cache_settle.py':
+        'cache write-visibility gate — probes the RAW provider wire for the '
+        'PRESENCE of the Anthropic metered-write key (explicit 0 vs absent), '
+        'a distinction normalize_usage collapses; it performs no token '
+        'accounting on the read value',
     'lib/llm/responses_outbound/_sse.py':
         'Responses→OpenAI protocol translator — input_tokens_details.'
         'cached_tokens is the Responses wire\'s OWN canonical spelling; this '

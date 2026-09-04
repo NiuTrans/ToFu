@@ -127,16 +127,17 @@ def test_conflict_recycler_remints_globally_unique_id(monkeypatch):
     ids = [m['tool_call_id'] for m in messages if m.get('tool_call_id')]
     assert len(ids) == len(set(ids)), (
         'the reminted id must be globally unique in the conversation')
+    assert '_settled_tool_results' not in task, (
+        'production dispatch must not retain settled result bodies on task')
+    assert all(
+        set(receipt) == {'signature', 'name', 'status'}
+        for receipt in task['_tool_call_id_receipts'].values()
+    ), 'call-id receipts must never retain result content'
 
 
-def test_aggregate_budget_applyback_only_touches_current_round(monkeypatch):
-    """The round-aggregate budget apply-back must not re-bind a PRIOR result.
-
-    This isolates the second half even when a duplicate id reaches the
-    pipeline through a path the remint lane did not intercept (no receipt, so
-    no conflict → no remint). Pre-fix the ``for msg in messages`` loop
-    overwrote the prior ``read_files_0`` content with the current round's.
-    """
+def test_history_index_remints_without_receipt_and_preserves_prior_result(
+        monkeypatch):
+    """Receipt pressure cannot re-open duplicate ids or prefix mutation."""
     task = _mk_task()
     _fake_executor_factory(monkeypatch, 'CURRENT RESULT')
 
@@ -149,5 +150,63 @@ def test_aggregate_budget_applyback_only_touches_current_round(monkeypatch):
     assert messages[0]['content'] == 'PRIOR RESULT', (
         'aggregate-budget apply-back rewrote a prior (cached) tool_result in '
         'place — this is exactly the prefix-mutation re-bill loop')
-    assert messages[-1]['tool_call_id'] == 'read_files_0'
+    assert messages[-1]['tool_call_id'] != 'read_files_0'
     assert messages[-1]['content'] == 'CURRENT RESULT'
+
+
+def test_current_carrier_and_round_are_not_mistaken_for_history(monkeypatch):
+    """The once-per-pipeline index excludes this response's two projections."""
+    task = _mk_task()
+    _fake_executor_factory(monkeypatch, 'CURRENT RESULT')
+    parsed = [_parsed_tc('brand_new_0', 'read_files', {'path': 'x'}, 1)]
+    task['toolRounds'].append(parsed[0][5])
+    messages = [{
+        'role': 'assistant',
+        'content': '',
+        'tool_calls': [parsed[0][0]],
+    }]
+
+    _run(task, parsed, messages)
+
+    assert parsed[0][0]['id'] == 'brand_new_0'
+    assert messages[-1]['tool_call_id'] == 'brand_new_0'
+    assert '_settled_tool_results' not in task
+
+
+def test_nested_current_round_still_sees_enclosing_unsettled_id(monkeypatch):
+    """Only child rows are excluded; an outer in-flight id is already owned."""
+    task = _mk_task()
+    task['toolRounds'].append({'toolCallId': 'shared_0', 'status': 'executing'})
+    _fake_executor_factory(monkeypatch, 'CHILD RESULT')
+    parsed = [_parsed_tc('shared_0', 'list_dir', {'path': '.'}, 2)]
+    task['toolRounds'].append(parsed[0][5])
+    messages = [{
+        'role': 'assistant', 'content': '', 'tool_calls': [parsed[0][0]]}]
+
+    _run(task, parsed, messages)
+
+    assert parsed[0][0]['id'] != 'shared_0'
+    assert messages[-1]['tool_call_id'] == parsed[0][0]['id']
+
+
+def test_duplicate_ids_inside_current_response_remint_only_later_call(
+        monkeypatch):
+    """Current rows are not history, but occurrence ownership remains unique."""
+    task = _mk_task()
+    _fake_executor_factory(monkeypatch, 'RESULT')
+    parsed = [
+        _parsed_tc('duplicate_0', 'read_files', {'path': 'a'}, 1),
+        _parsed_tc('duplicate_0', 'read_files', {'path': 'b'}, 2),
+    ]
+    task['toolRounds'].extend(item[5] for item in parsed)
+    messages = [{
+        'role': 'assistant', 'content': '',
+        'tool_calls': [item[0] for item in parsed],
+    }]
+
+    _run(task, parsed, messages)
+
+    result_ids = [message['tool_call_id'] for message in messages[1:]]
+    assert result_ids[0] == 'duplicate_0'
+    assert result_ids[1] != 'duplicate_0'
+    assert len(result_ids) == len(set(result_ids))

@@ -20,6 +20,7 @@ from lib.storage_sidecar.schema import (
 )
 from lib.storage_sidecar.operations_pkg._records import (
     _event_prune,
+    _legacy_index_event_prune,
     _recover_legacy_blank_event_page,
 )
 
@@ -134,7 +135,7 @@ def test_established_authority_reports_but_never_builds_missing_indexes(
     assert expected.isdisjoint(_stored_index_names(config.sqlite_path))
 
 
-def test_established_authority_uses_bounded_legacy_retention_index(
+def test_established_authority_defers_legacy_retention_to_offline_maintenance(
         tmp_path, monkeypatch):
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
     config = _config(tmp_path)
@@ -172,48 +173,9 @@ def test_established_authority_uses_bounded_legacy_retention_index(
                 ('project-feed', 1, 'project_feed', 'delta', '', '{}', cutoff - 5),
             ],
         )
-        discovery_plan = [
-            str(row[3])
-            for row in connection.execute(
-                'EXPLAIN QUERY PLAN SELECT event_type FROM storage_events '
-                'WHERE stream_kind = ? AND event_type > ? '
-                'ORDER BY event_type LIMIT 1',
-                ('task', ''),
-            )
-        ]
-        exact_type_plan = [
-            str(row[3])
-            for row in connection.execute(
-                'EXPLAIN QUERY PLAN SELECT task_id, sequence '
-                'FROM storage_events WHERE stream_kind = ? AND event_type = ? '
-                'AND created_at_ms < ? ORDER BY created_at_ms LIMIT ?',
-                ('task', 'delta', cutoff, 1),
-            )
-        ]
-        blank_recovery_plan = [
-            str(row[3])
-            for row in connection.execute(
-                'EXPLAIN QUERY PLAN SELECT task_id, sequence, '
-                'length(event_json) FROM storage_events '
-                'WHERE stream_kind = ? AND event_type = \'\' '
-                'AND event_kind <> ? AND created_at_ms < ? '
-                'ORDER BY created_at_ms LIMIT ?',
-                ('task', '__tofu_legacy_opaque__', cutoff, 1),
-            )
-        ]
         connection.commit()
     finally:
         connection.close()
-
-    assert all('TEMP B-TREE' not in detail for detail in discovery_plan)
-    assert all('TEMP B-TREE' not in detail for detail in exact_type_plan)
-    assert all('TEMP B-TREE' not in detail for detail in blank_recovery_plan)
-    assert any(LEGACY_TASK_EVENT_RETENTION_INDEX_NAME in detail
-               for detail in discovery_plan)
-    assert any(LEGACY_TASK_EVENT_RETENTION_INDEX_NAME in detail
-               for detail in exact_type_plan)
-    assert any(LEGACY_TASK_EVENT_RETENTION_INDEX_NAME in detail
-               for detail in blank_recovery_plan)
 
     backend = SQLiteBackend(config)
     try:
@@ -231,55 +193,22 @@ def test_established_authority_uses_bounded_legacy_retention_index(
                 receipt_required=False,
             )
 
-        for expected_task in ('stream-delta', 'stream-done', 'stream-future'):
-            result = prune('streaming')
-            assert result == {
-                'deleted': 1,
-                'has_more': True,
-                'index_mode': 'legacy_exact_type',
-            }
-            remaining = backend._writer._connection.execute(
-                'SELECT 1 FROM storage_events WHERE task_id = ?',
-                (expected_task,),
-            ).fetchone()
-            assert remaining is None
-
-        recovered = prune('streaming')
-        assert recovered['deleted'] == 1
-        assert recovered['classified'] == 1
-        assert recovered['has_more'] is True
-        assert recovered['index_mode'] == 'legacy_blank_type_recovery'
-        assert backend._writer._connection.execute(
-            "SELECT 1 FROM storage_events WHERE task_id = 'legacy-stream'"
-        ).fetchone() is None
-
-        reclassified = prune('streaming')
-        assert reclassified['deleted'] == 0
-        assert reclassified['classified'] == 1
-        assert reclassified['has_more'] is True
-        assert tuple(backend._writer._connection.execute(
-            "SELECT event_type, event_kind FROM storage_events "
-            "WHERE task_id = 'struct-blank'"
-        ).fetchone()) == ('round_start', 'state')
-
         assert prune('streaming') == {
             'deleted': 0,
-            'has_more': False,
-            'index_mode': 'legacy_exact_type',
+            'deferred': True,
+            'reason': 'legacy_index_offline_required',
+            'required_index': TASK_EVENT_RETENTION_SPECS['streaming'][0],
         }
-
-        for expected_task in ('struct-blank', 'struct-round'):
-            result = prune('structural')
-            assert result['deleted'] == 1
-            remaining = backend._writer._connection.execute(
-                'SELECT 1 FROM storage_events WHERE task_id = ?',
-                (expected_task,),
-            ).fetchone()
-            assert remaining is None
-        assert prune('structural')['deleted'] == 0
-        assert backend._writer._connection.execute(
-            "SELECT 1 FROM storage_events WHERE task_id = 'project-feed'"
-        ).fetchone() is not None
+        assert prune('structural') == {
+            'deleted': 0,
+            'deferred': True,
+            'reason': 'legacy_index_offline_required',
+            'required_index': TASK_EVENT_RETENTION_SPECS['structural'][0],
+        }
+        remaining = backend._writer._connection.execute(
+            'SELECT COUNT(*) FROM storage_events'
+        ).fetchone()[0]
+        assert remaining == 7
     finally:
         backend.close()
 
@@ -313,11 +242,14 @@ def test_legacy_retention_type_cardinality_fails_closed_at_hard_bound():
             return 0
 
     session = Session()
-    result = _event_prune(session, {
-        'created_before_ms': int(time.time() * 1000),
-        'limit': 25,
-        'retention_class': 'streaming',
-    })
+    result = _legacy_index_event_prune(
+        session,
+        cutoff=int(time.time() * 1000),
+        limit=25,
+        legacy_recovery_limit=100,
+        retention_class='streaming',
+        required_index=TASK_EVENT_RETENTION_SPECS['streaming'][0],
+    )
 
     assert result == {
         'deleted': 0,
@@ -356,11 +288,14 @@ def test_legacy_retention_stops_discovery_after_first_deletable_type():
             return int(event_type == 'event_b')
 
     session = Session()
-    result = _event_prune(session, {
-        'created_before_ms': int(time.time() * 1000),
-        'limit': 25,
-        'retention_class': 'streaming',
-    })
+    result = _legacy_index_event_prune(
+        session,
+        cutoff=int(time.time() * 1000),
+        limit=25,
+        legacy_recovery_limit=100,
+        retention_class='streaming',
+        required_index=TASK_EVENT_RETENTION_SPECS['streaming'][0],
+    )
 
     assert result == {
         'deleted': 1,
@@ -438,6 +373,150 @@ def test_legacy_blank_recovery_marks_opaque_payload_without_deleting():
     assert result['deleted'] == 0
     assert result['opaque'] == 1
     assert session.update == ('__tofu_legacy_opaque__', 'opaque', 1)
+
+
+def test_legacy_blank_recovery_never_materializes_oversized_stored_row():
+    payload_budget = 4 * 1024 * 1024
+
+    class Session:
+        backend = 'sqlite'
+
+        def __init__(self):
+            self.fetch_calls = 0
+            self.update = None
+
+        def fetch_all(self, sql, _params=()):
+            self.fetch_calls += 1
+            assert 'AS payload_bytes' in sql
+            return [{
+                'task_id': 'oversized',
+                'sequence': 1,
+                'payload_bytes': payload_budget + 1,
+            }]
+
+        def execute(self, sql, params=()):
+            assert sql.startswith('UPDATE storage_events SET event_kind')
+            self.update = params
+            return 1
+
+    session = Session()
+    result = _recover_legacy_blank_event_page(
+        session, cutoff=1234, limit=25)
+
+    assert result == {
+        'deleted': 0,
+        'classified': 1,
+        'recovered_types': 0,
+        'opaque': 1,
+        'payload_bytes': 0,
+        'oversize_opaque': 1,
+        'oversize_stored_bytes': payload_budget + 1,
+        'has_more': True,
+        'index_mode': 'legacy_blank_type_recovery',
+    }
+    assert session.fetch_calls == 1
+    assert session.update == ('__tofu_legacy_opaque__', 'oversized', 1)
+
+
+def test_legacy_blank_recovery_never_decodes_oversized_expansion(monkeypatch):
+    import lib.storage_sidecar.operations_pkg._records as records
+    from lib.storage_sidecar.task_event_codec import encode_task_event_payload
+
+    payload_budget = 4 * 1024 * 1024
+    raw = b'{"type":"delta","content":"' + b'x' * payload_budget + b'"}'
+    encoded = encode_task_event_payload(raw)
+    assert len(encoded) < payload_budget
+
+    class Session:
+        backend = 'sqlite'
+
+        def __init__(self):
+            self.update = None
+
+        def fetch_all(self, sql, _params=()):
+            if 'AS payload_bytes' in sql:
+                return [{
+                    'task_id': 'compressed',
+                    'sequence': 1,
+                    'payload_bytes': len(encoded),
+                }]
+            return [{
+                'task_id': 'compressed',
+                'sequence': 1,
+                'event_json': encoded,
+            }]
+
+        def execute(self, sql, params=()):
+            assert sql.startswith('UPDATE storage_events SET event_kind')
+            self.update = params
+            return 1
+
+    monkeypatch.setattr(
+        records,
+        'decode_task_event_payload',
+        lambda _value: pytest.fail('oversized expansion must not be decoded'),
+    )
+    session = Session()
+    result = _recover_legacy_blank_event_page(
+        session, cutoff=1234, limit=25)
+
+    assert result['classified'] == 1
+    assert result['deleted'] == 0
+    assert result['opaque'] == 1
+    assert result['payload_bytes'] == len(encoded)
+    assert result['oversize_opaque'] == 1
+    assert result['oversize_stored_bytes'] == len(encoded)
+    assert session.update == ('__tofu_legacy_opaque__', 'compressed', 1)
+
+
+def test_legacy_blank_recovery_limit_is_independent_of_delete_page(
+        monkeypatch):
+    import lib.storage_sidecar.operations_pkg._records as records
+
+    class Session:
+        def index_exists(self, index_name):
+            return index_name == LEGACY_TASK_EVENT_RETENTION_INDEX_NAME
+
+        def fetch_one(self, _sql, _params=()):
+            return None
+
+    recovered = {
+        'deleted': 0,
+        'classified': 100,
+        'has_more': True,
+        'index_mode': 'legacy_blank_type_recovery',
+    }
+    observed = {}
+
+    def recover(_session, *, cutoff, limit):
+        observed.update(cutoff=cutoff, limit=limit)
+        return recovered
+
+    monkeypatch.setattr(records, '_recover_legacy_blank_event_page', recover)
+    result = _legacy_index_event_prune(
+        Session(),
+        cutoff=1234,
+        limit=25,
+        legacy_recovery_limit=100,
+        retention_class='streaming',
+        required_index=TASK_EVENT_RETENTION_SPECS['streaming'][0],
+    )
+
+    assert result is recovered
+    assert observed == {'cutoff': 1234, 'limit': 100}
+
+    observed.clear()
+    result = _legacy_index_event_prune(
+        Session(),
+        cutoff=5678,
+        limit=1000,
+        legacy_recovery_limit=100,
+        retention_class='streaming',
+        required_index=TASK_EVENT_RETENTION_SPECS['streaming'][0],
+    )
+
+    assert result is recovered
+    assert observed == {'cutoff': 5678, 'limit': 100}
 
 
 def test_event_retention_indexes_are_tier_partial_without_temp_sort(

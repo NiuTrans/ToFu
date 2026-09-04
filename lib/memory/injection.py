@@ -60,9 +60,9 @@ Guidelines:
 - Don't duplicate — search first, then create/update/merge as needed.
 - Don't ask permission — manage memories quietly when relevant.
 
-**Description quality is critical** — both `search_memories` and the per-turn
-  prefetch rank with BM25 over name+description+body, and the description is shown
-  verbatim to the relevance filter and in the injected block. Write ONE dense, specific
+**Description quality is critical** — per-turn prefetch ranks metadata only;
+  `search_memories` also considers a bounded body prefix. The description is shown
+  verbatim in injected evidence. Write ONE dense, specific
   sentence (~120 chars) that front-loads the concrete trigger words someone would search
   for: the symptom, the symbol / file name, and the fix or rule. Vague summaries
   ("fixes a bug") are useless for retrieval. Don't pad to a fixed length — pack signal.
@@ -95,7 +95,12 @@ Use scope='project' or 'global'.
 
 
 
-def build_memory_context(project_path=None, extra_paths=None):
+def build_memory_context(
+    project_path=None,
+    extra_paths=None,
+    *,
+    known_available: bool | None = None,
+):
     """Build a minimal memory hint for injection.
 
     Since memories are now discovered via the `search_memories` tool,
@@ -106,11 +111,21 @@ def build_memory_context(project_path=None, extra_paths=None):
         project_path: Path to project for project-scoped memories.
         extra_paths: Additional workspace roots (multi-root session) whose
             memories are unioned in alongside the primary root's.
+        known_available: Reuse the current turn's completed prefetch evidence
+            when present. ``None`` performs the metadata lookup; a boolean
+            avoids rebuilding a corpus the caller already inspected.
 
     Returns None if no eligible memories exist, otherwise a short hint string.
     """
-    memories = get_eligible_memories(project_path, extra_paths=extra_paths)
-    if not memories:
+    available = known_available
+    if available is None:
+        available = bool(get_eligible_memories(
+            project_path,
+            extra_paths=extra_paths,
+            include_body=False,
+            record_view='retrieval',
+        ))
+    if not available:
         return None
 
     # CACHE-CRITICAL: this hint is appended to the system message (messages[0])

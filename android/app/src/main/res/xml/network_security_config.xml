@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext (http://) policy for the Tofu WebView shell.
+
+  The add/edit-server form accepts BOTH http:// and https:// URLs, and a
+  self-hosted server on a private LAN is commonly reached over bare http
+  (e.g. http://192.168.1.20:8080 or http://mynas.local). With the previous
+  `android:usesCleartextTraffic="false"` those URLs died in the WebView with
+  ERR_CLEARTEXT_NOT_PERMITTED, and the headless login (OkHttp) consults the
+  same NetworkSecurityPolicy and was blocked too.
+
+  Why we allow cleartext at the base level instead of scoping it:
+  Android's network-security-config matches domains by HOSTNAME only (exact,
+  or a single leading `*.example.com` wildcard). It has no notion of an IP
+  range / CIDR, so there is no way to write "cleartext only for RFC1918 / LAN
+  addresses" (a `10.*` domain entry is not valid — wildcards are subdomain
+  wildcards, not address octet wildcards). A raw IP literal could only be
+  listed one-at-a-time, which is impossible for a user-supplied URL.
+
+  This is safe in practice because the shell is NOT a general-purpose browser:
+  it has no address bar and its single navigation entry point is
+  `loadUrl(profile.baseUrl)` — the URL the user explicitly typed into the
+  profile form. It never browses arbitrary sites, so cleartext is effectively
+  limited to user-configured http:// profiles. See android/README.md
+  "Cleartext (http:// LAN servers)" for the full rationale.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

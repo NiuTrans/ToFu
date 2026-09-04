@@ -4,13 +4,11 @@ routes/api_v1/paper_folders.py envelope migration (api-contract epic
 pt_931e16c4, batch 19 — same-family twin batch).
 
 Each file has 3 ad-hoc sites. The list endpoint (``_read_folders()``)
-returns a bare top-level ARRAY in both; both api.js seams
-(``folders.list`` / ``paperFolders.list``) already return
-``(await get(...)) || []`` — list-UI semantics, so the unwrap contract is
-the batch-4 ``|| []`` form (an empty list on probe failure is correct UI
-degradation here, unlike the probe surfaces of batches 11/14). Coordinated:
-backend wraps {ok, items}; each seam unwraps with an Array.isArray
-fallback. create 201 → api_created; update → api_ok.
+returns a bare top-level ARRAY in both. Coordinated: the backend wraps
+``{ok, items}``; both api.js seams use the shared required-items decoder,
+which accepts the legacy bare array during rolling deploys but preserves
+transport/parse failure instead of turning it into authoritative empty data.
+create 201 → api_created; update → api_ok.
 
 Layers: PARITY + COORDINATION + SHIPPED-SOURCE.
 """
@@ -94,7 +92,7 @@ def test_envelope_parity():
 
 
 def test_bare_array_coordination():
-    """Both backends wrap; BOTH api.js seams unwrap with a fallback."""
+    """Both backends wrap; both seams use the failure-preserving decoder."""
     from lib.api_response import api_ok
     app = _make_app()
     rows = [{'id': 'f_1', 'name': 'n'}]
@@ -109,15 +107,26 @@ def test_bare_array_coordination():
 
     with open(_API_JS, encoding='utf-8') as f:
         src = f.read()
+    decoder = re.search(
+        r'function requiredItemsList\([^)]*\)\s*\{(?P<body>.*?)\n\s*\}',
+        src,
+        re.DOTALL,
+    )
+    assert decoder, 'shared required-items list decoder is missing'
+    decoder_body = decoder.group('body')
+    assert '.items' in decoder_body
+    assert re.search(r'Array\.isArray\(data\)', decoder_body)
+    assert 'throw new ApiError' in decoder_body
+
     for domain in ('folders', 'paperFolders'):
         m = re.search(r'const ' + domain + r'\s*=\s*\{(?P<body>.*?)\n\s*\};',
                       src, re.DOTALL)
         assert m, f'could not locate Api.{domain} in api.js'
         block = m.group('body')
-        assert '.items' in block, (
-            f'Api.{domain}.list must unwrap .items (backend wraps)')
-        assert re.search(r'Array\.isArray\(d\)', block), (
-            f'Api.{domain}.list must keep an Array.isArray(d) fallback')
+        assert 'requiredItemsList(data, path)' in block, (
+            f'Api.{domain}.list must use the shared required-items decoder')
+        assert "onError: 'throw'" in block, (
+            f'Api.{domain}.list must preserve request failure')
 
 
 def test_shipped_source_converted():

@@ -49,6 +49,9 @@ const win = dom.window;
 global.window = win;
 global.document = win.document;
 global.console = console;
+const summaryApplications = [];
+global.runtimeScope = win.runtimeScope = win;
+win.applyMcpToolSummary = function(summary) { summaryApplications.push(summary); };
 
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -67,7 +70,16 @@ global.Api = win.Api = {
     toolsListForServer: async () => ({ ok: true, json: async () => ({ tools: [] }) }),
     serverToolsSet: async (server, disabled) => {
       putCalls.push({ server, disabled });
-      return { ok: true };
+      const enabledCount = Math.max(0, 10 - disabled.length);
+      return {
+        ok: true,
+        json: async () => ({
+          mcp_tool_summary: {
+            servers: enabledCount ? [{ name: server, count: enabledCount }] : [],
+            total: enabledCount,
+          },
+        }),
+      };
     },
   },
 };
@@ -126,11 +138,16 @@ check('put_full_list', putCalls.length === 1 &&
   sameSet(putCalls[0].disabled, ['stop_job', 'submit_job']));
 check('catalog_entry_updated', sameSet(_mcpCatalog[0].disabled_tools,
   ['stop_job', 'submit_job']));
+check('rail_summary_applied_after_put', summaryApplications.length === 1 &&
+  summaryApplications[0].total === 8 &&
+  summaryApplications[0].servers[0].name === 'hope');
 
 // ── Case D: re-enabling removes the entry from the disabled list ──
 await _mcpToggleTool('hope', 'stop_job', true);
 check('reenable_put', putCalls.length === 2 &&
   sameSet(putCalls[1].disabled, ['submit_job']));
+check('rail_summary_replaced_after_reenable', summaryApplications.length === 2 &&
+  summaryApplications[1].total === 9);
 
 console.log(out.join('\n'));
 })();
@@ -162,7 +179,7 @@ def test_tool_toggle_panel_and_put_payload():
     output = _run(_MCP_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'MCP per-tool toggle failures:\n' + output
-    assert output.count('PASS') >= 10, f'expected >=10 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 12, f'expected >=12 PASS lines, got:\n{output}'
     print(output)
 
 

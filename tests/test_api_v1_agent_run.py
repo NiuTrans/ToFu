@@ -1,13 +1,12 @@
-"""tests/test_api_v1_agent_run.py — End-to-end tests for the BYO surface.
+"""End-to-end tests for the native agent runtime and model-routing v2.
 
 Covers:
-* POST /api/v1/providers — register, list, delete
-* POST /api/v1/agent/run with inline ``model={base_url, api_key, id}``
-  mints + disposes an ephemeral slot
-* POST /api/v1/agent/run with ``model="foo@prov_xxx"`` resolves against
-  the BYO store
+* CAS create/list/delete of one ProviderAccess aggregate
+* official and provider-scoped structured model selection
+* explicit rejection of removed inline/suffixed provider selectors
+* request-scoped route-slot disposal
 * trajectory='sharegpt' produces a flattened result
-* api_key is never echoed back in any response
+* credential secrets are never echoed back in any response
 """
 
 pytest_plugins = ('tests._credential_sidecar',)
@@ -16,6 +15,18 @@ import asyncio
 import os
 import sys
 import unittest
+
+import pytest
+
+from tests.support.model_routing import (
+    allow_native_test_endpoint,
+    native_test_model,
+    native_test_provider_bundle,
+    reset_native_test_model_route,
+)
+
+
+pytestmark = pytest.mark.unit
 
 
 def _new_loop_run(coro):
@@ -39,6 +50,8 @@ class AgentRunRouteTest(unittest.TestCase):
         # here; reachability has its own dedicated test in test_ephemeral_slot.
         cls._orig_preflight = os.environ.get('TOFU_EPHEMERAL_PREFLIGHT')
         os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
+        cls._endpoint_allowance = allow_native_test_endpoint()
+        cls._endpoint_allowance.__enter__()
 
         from quart import Quart
         cls.app = Quart(__name__, static_folder=None)
@@ -63,16 +76,17 @@ class AgentRunRouteTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls._endpoint_allowance.__exit__(None, None, None)
         if cls._orig_preflight is None:
             os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
         else:
             os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = cls._orig_preflight
 
     def setUp(self):
-        from lib.byo_providers import delete_provider, list_providers
         from lib.idempotency import _cache as _id_cache
-        for provider in list_providers(self.OWNER_USER_ID):
-            delete_provider(provider['id'], self.OWNER_USER_ID)
+        # Each method starts from the same owner-scoped CAS authority. The
+        # helper also reclaims encrypted secrets left by an interrupted test.
+        reset_native_test_model_route(owner_user_id=self.OWNER_USER_ID)
         _id_cache.clear()
 
         # The production `controller` counts in-flight slots in the SHARED
@@ -114,50 +128,53 @@ class AgentRunRouteTest(unittest.TestCase):
     def test_register_list_delete_provider(self):
         async def go():
             cli = self.app.test_client()
-            # Create
+            headers = {'Authorization': f'Bearer {self.token}'}
+            authority = await cli.get('/api/v1/model-routing', headers=headers)
+            revision = (await authority.get_json())['revision']
+
             r = await cli.post(
                 '/api/v1/providers',
-                headers={'Authorization': f'Bearer {self.token}'},
-                json={
-                    'name': 'cluster-A',
-                    'base_url': 'http://10.0.0.5:8080/v1',
-                    'api_key': 'sk-internal-secret',
-                    'models': [{'model_id': 'deepseek-v4-pro'}],
-                    'auto_discover': False,
-                })
+                headers=headers,
+                json=native_test_provider_bundle(
+                    expected_revision=revision,
+                    extra_headers={'X-Internal-Tag': 'agent-route-test'}))
             self.assertEqual(r.status_code, 201,
                               await r.get_data(as_text=True))
             body = await r.get_json()
             prov = body['provider']
-            self.assertTrue(prov['id'].startswith('prov_'))
-            # api_key is NOT echoed back in any form
+            self.assertEqual(prov['provider']['provider_id'], 'extra-provider')
+            # Credential material is never returned by any aggregate view.
             self.assertNotIn('api_key', prov)
-            self.assertIn('key_hint', prov)
+            self.assertTrue(prov['credentials'][0]['key_hint'])
             self.assertNotIn('sk-internal-secret', str(body))
 
-            prov_id = prov['id']
+            prov_id = prov['provider']['provider_id']
 
-            # List
-            r2 = await cli.get('/api/v1/providers',
-                                headers={'Authorization': f'Bearer {self.token}'})
+            r2 = await cli.get('/api/v1/providers', headers=headers)
             self.assertEqual(r2.status_code, 200)
             d2 = await r2.get_json()
-            self.assertEqual(len(d2['providers']), 1)
-            self.assertEqual(d2['providers'][0]['id'], prov_id)
+            listed_ids = {
+                item['provider']['provider_id'] for item in d2['providers']
+            }
+            self.assertIn(prov_id, listed_ids)
+            self.assertNotIn('sk-internal-secret', str(d2))
 
-            # Delete
-            r3 = await cli.delete(f'/api/v1/providers/{prov_id}',
-                                    headers={'Authorization': f'Bearer {self.token}'})
+            r3 = await cli.delete(
+                f'/api/v1/providers/{prov_id}',
+                headers=headers,
+                json={'expected_revision': body['revision']})
             self.assertEqual(r3.status_code, 200)
-            # Now list is empty
-            r4 = await cli.get('/api/v1/providers',
-                                headers={'Authorization': f'Bearer {self.token}'})
-            self.assertEqual(len((await r4.get_json())['providers']), 0)
+            r4 = await cli.get('/api/v1/providers', headers=headers)
+            remaining_ids = {
+                item['provider']['provider_id']
+                for item in (await r4.get_json())['providers']
+            }
+            self.assertNotIn(prov_id, remaining_ids)
         _new_loop_run(go())
 
-    # ── Agent/run with inline model ─────────────────────────────────
+    # ── Agent/run with model-routing v2 ──────────────────────────────
 
-    def test_inline_provider_mints_and_disposes_ephemeral(self):
+    def test_structured_model_mints_and_disposes_ephemeral(self):
         async def go():
             from lib.llm_dispatch.ephemeral import count_ephemeral_slots
             n_before = count_ephemeral_slots()
@@ -167,11 +184,7 @@ class AgentRunRouteTest(unittest.TestCase):
                 '/api/v1/agent/run',
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
-                    'model': 'deepseek-v4-pro',
-                    'provider': {
-                        'base_url': 'http://33.236.230.114:8080/v1',
-                        'api_key': 'sk-cluster-secret',
-                    },
+                    'model': native_test_model(),
                     'messages': [{'role': 'user', 'content': 'hi'}],
                     'config': {'thinking': 'high', 'memory': True},
                     'timeout_s': 5,
@@ -180,11 +193,8 @@ class AgentRunRouteTest(unittest.TestCase):
                               await r.get_data(as_text=True))
             body = await r.get_json()
             self.assertEqual(body['object'], 'agent.run')
-            self.assertEqual(body['model'], 'deepseek-v4-pro')
+            self.assertEqual(body['model'], 'stub-model')
             self.assertEqual(body['content'], 'hello from byo')
-            # Secret never round-tripped
-            text = await r.get_data(as_text=True)
-            self.assertNotIn('sk-cluster-secret', text)
 
             # Ephemeral slot disposal happens in a daemon thread —
             # give it a moment then verify the count is back to baseline.
@@ -197,21 +207,25 @@ class AgentRunRouteTest(unittest.TestCase):
 
         _new_loop_run(go())
 
-    def test_inline_provider_rejects_missing_url(self):
+    def test_removed_inline_provider_is_rejected_without_echoing_secret(self):
         async def go():
             cli = self.app.test_client()
             r = await cli.post(
                 '/api/v1/agent/run',
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
-                    'model': 'deepseek-v4-pro',
-                    'provider': {'api_key': 'x'},  # no base_url
+                    'model': native_test_model(),
+                    'provider': {'api_key': 'must-not-echo'},
                     'messages': [{'role': 'user', 'content': 'hi'}],
                 })
             self.assertEqual(r.status_code, 400)
+            body = await r.get_json()
+            self.assertEqual(
+                body['error_kind'], 'legacy_inline_provider_removed')
+            self.assertNotIn('must-not-echo', str(body))
         _new_loop_run(go())
 
-    def test_provider_block_with_suffix_is_ambiguous(self):
+    def test_legacy_model_suffix_is_rejected(self):
         async def go():
             cli = self.app.test_client()
             r = await cli.post(
@@ -219,75 +233,71 @@ class AgentRunRouteTest(unittest.TestCase):
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
                     'model': 'foo@prov_xxx',
-                    'provider': {'base_url': 'http://h:8/v1'},
                     'messages': [{'role': 'user', 'content': 'hi'}],
                 })
             self.assertEqual(r.status_code, 400)
             body = await r.get_json()
-            self.assertIn('cannot combine', str(body))
+            self.assertEqual(body['error_kind'], 'legacy_model_selector_removed')
         _new_loop_run(go())
 
-    def test_extra_headers_authorization_rejected(self):
+    def test_reserved_connection_header_is_rejected_before_persistence(self):
         async def go():
             cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.token}'}
+            authority = await cli.get('/api/v1/model-routing', headers=headers)
+            revision = (await authority.get_json())['revision']
+            provider = native_test_provider_bundle(
+                expected_revision=revision)
+            provider['connections'][0]['extra_headers'] = {
+                'Authorization': 'Bearer evil',
+            }
             r = await cli.post(
-                '/api/v1/agent/run',
-                headers={'Authorization': f'Bearer {self.token}'},
-                json={
-                    'model': 'm',
-                    'provider': {
-                        'base_url': 'http://h:8/v1',
-                        'api_key': '',
-                        'extra_headers': {'Authorization': 'Bearer evil'},
-                    },
-                    'messages': [{'role': 'user', 'content': 'hi'}],
-                })
+                '/api/v1/providers', headers=headers, json=provider)
             self.assertEqual(r.status_code, 400)
             body = await r.get_json()
             self.assertIn('reserved', str(body))
+            self.assertNotIn('Bearer evil', str(body))
         _new_loop_run(go())
 
-    def test_byo_suffix_resolves(self):
+    def test_provider_scoped_offering_resolves(self):
         async def go():
             cli = self.app.test_client()
-            # First create a provider
-            r1 = await cli.post(
-                '/api/v1/providers',
-                headers={'Authorization': f'Bearer {self.token}'},
-                json={'name': 'C', 'base_url': 'http://10.0.0.6:8080/v1',
-                      'api_key': '', 'auto_discover': False,
-                      'models': [{'model_id': 'qwen3.5-FP8'}]})
-            self.assertEqual(r1.status_code, 201)
-            prov_id = (await r1.get_json())['provider']['id']
-
-            # Use string suffix
             r2 = await cli.post(
                 '/api/v1/agent/run',
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
-                    'model': f'qwen3.5-FP8@{prov_id}',
+                    'model': {
+                        'provider_id': 'test-provider',
+                        'offering_id': 'test-offering',
+                    },
                     'messages': [{'role': 'user', 'content': 'hi'}],
                     'timeout_s': 5,
                 })
             self.assertEqual(r2.status_code, 200,
                               await r2.get_data(as_text=True))
             body = await r2.get_json()
-            # Provider ID is exposed in the response (it's not secret)
-            self.assertEqual(body.get('provider_id'), prov_id)
-            self.assertEqual(body['model'], 'qwen3.5-FP8')
+            self.assertEqual(body.get('provider_id'), 'test-provider')
+            # A confirmed provider-scoped offering projects its official
+            # model identity, rather than an empty pending-model placeholder.
+            self.assertEqual(body['model'], 'stub-model')
         _new_loop_run(go())
 
-    def test_byo_suffix_unknown_provider_404(self):
+    def test_unknown_provider_scoped_offering_is_typed_bad_request(self):
         async def go():
             cli = self.app.test_client()
             r = await cli.post(
                 '/api/v1/agent/run',
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
-                    'model': 'foo@prov_doesnotexist',
+                    'model': {
+                        'provider_id': 'provider-does-not-exist',
+                        'offering_id': 'offering-does-not-exist',
+                    },
                     'messages': [{'role': 'user', 'content': 'hi'}],
                 })
-            self.assertEqual(r.status_code, 404)
+            self.assertEqual(r.status_code, 400)
+            body = await r.get_json()
+            self.assertEqual(body['error_kind'], 'offering_not_found')
         _new_loop_run(go())
 
     def test_trajectory_sharegpt_returned(self):
@@ -297,7 +307,7 @@ class AgentRunRouteTest(unittest.TestCase):
                 '/api/v1/agent/run',
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
-                    'model': 'global-only-model',  # plain string, no provider
+                    'model': native_test_model(),
                     'messages': [{'role': 'user', 'content': 'hi'}],
                     'trajectory': 'sharegpt',
                     'timeout_s': 5,
@@ -358,7 +368,7 @@ class AgentRunRouteTest(unittest.TestCase):
                     '/api/v1/agent/run',
                     headers={'Authorization': f'Bearer {self.token}'},
                     json={
-                        'model': 'm',
+                        'model': native_test_model(),
                         'messages': [{'role': 'user', 'content': 'hi'}],
                         'config': {
                             # Alias
@@ -390,7 +400,7 @@ class AgentRunRouteTest(unittest.TestCase):
                 '/api/v1/agent/run',
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
-                    'model': 'm',
+                    'model': native_test_model(),
                     'messages': [{'role': 'user', 'content': 'hi'}],
                     # Old `capabilities` shape still works.
                     'capabilities': {'thinking': 'medium'},
@@ -430,7 +440,7 @@ class AgentRunRouteTest(unittest.TestCase):
                 r = await cli.post(
                     '/api/v1/agent/run',
                     headers={'Authorization': f'Bearer {self.token}'},
-                    json={'model': 'm',
+                    json={'model': native_test_model(),
                           'messages': [{'role': 'user', 'content': 'hi'}],
                           'timeout_s': 5})
                 elapsed = _time.time() - t0
@@ -452,7 +462,7 @@ class AgentRunRouteTest(unittest.TestCase):
             r = await cli.post(
                 '/api/v1/agent/run',
                 headers={'Authorization': f'Bearer {self.token}'},
-                json={'model': 'm',
+                json={'model': native_test_model(),
                       'messages': [{'role': 'user', 'content': 'hi'}],
                       'stream': True, 'timeout_s': 5})
             self.assertEqual(r.status_code, 200)
@@ -477,7 +487,7 @@ class AgentRunRouteTest(unittest.TestCase):
                 r = await cli.post(
                     '/api/v1/agent/run',
                     headers={'Authorization': f'Bearer {self.token}'},
-                    json={'model': 'm',
+                    json={'model': native_test_model(),
                           'messages': [{'role': 'user', 'content': 'hi'}]})
                 self.assertEqual(r.status_code, 503,
                                  await r.get_data(as_text=True))

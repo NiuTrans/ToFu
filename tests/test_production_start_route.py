@@ -143,6 +143,31 @@ def test_research_job_starts_over_http_without_the_llm_tool_path(monkeypatch):
     assert seen['kw'].get('n_ideas') == 4
 
 
+def test_start_route_projects_capability_validation_as_bad_request(monkeypatch):
+    """A bounded capability rejection is a caller error, never an opaque 500."""
+    import routes.api_v1.tasks as tasks_mod
+
+    def reject(direction, **kwargs):
+        raise ValueError('seed_arxiv_ids accepts at most 20 papers')
+
+    monkeypatch.setitem(
+        tasks_mod._STARTERS, 'research',
+        {'start': reject, 'input': 'direction',
+         'params': ('lang', 'n_ideas', 'seed_arxiv_ids')})
+    app = _client()
+
+    async def go():
+        response = await app.test_client().post(
+            '/api/v1/tasks/start',
+            json={'kind': 'research', 'direction': 'bounded',
+                  'seed_arxiv_ids': [f'2501.{i:05d}' for i in range(21)]})
+        return response.status_code, await response.get_json()
+
+    code, body = _run(go())
+    assert code == 400
+    assert 'at most 20' in str(body)
+
+
 def test_longform_starts_through_the_same_route(monkeypatch):
     """Same route, different capability, zero research-specific parameters.
 

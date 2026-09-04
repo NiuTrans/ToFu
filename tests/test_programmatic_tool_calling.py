@@ -140,7 +140,11 @@ def test_program_parent_is_persisted_before_children_and_settled(monkeypatch):
     assert parent['childCallIds'] == ['child-1', 'child-2']
     assert emitted[0]['type'] == 'program_start'
     run = task['programRuns'][0]
-    assert run['callId'] == 'prog-1'
+    assert run['callId'] != 'prog-1'
+    assert run['providerCallId'] == 'prog-1'
+    assert assistant['_responses_items'][0]['call_id'] == run['callId']
+    assert all(tc['caller']['caller_id'] == run['callId']
+               for tc in assistant['tool_calls'])
     assert run['source'] == 'openai_ptc'
     assert run['limits']['maxCalls'] == 16
     assert run['limits']['maxConcurrentCalls'] == 8
@@ -160,6 +164,160 @@ def test_program_parent_is_persisted_before_children_and_settled(monkeypatch):
     before = len(emitted)
     _programmatic.reconcile_programmatic_items(task, output, llm_round=3)
     assert len(emitted) == before
+
+
+def test_recycled_program_parent_id_creates_independent_runs(monkeypatch):
+    import lib.tasks_pkg.orchestrator._programmatic as _programmatic
+
+    monkeypatch.setattr(_programmatic, 'append_event', lambda *_args: None)
+    task = {'toolRounds': []}
+    first = {
+        '_responses_items': [{
+            'type': 'program', 'call_id': 'prog-1', 'code': 'return 1',
+        }],
+        'tool_calls': [{
+            'id': 'child-1', 'caller': _caller(),
+            'function': {'name': 'read_files', 'arguments': '{}'},
+        }],
+    }
+    _programmatic.reconcile_programmatic_items(task, first, llm_round=1)
+    _programmatic.reconcile_programmatic_items(task, {
+        '_responses_items': [{
+            'type': 'program_output', 'call_id': 'prog-1',
+            'status': 'completed', 'result': 'first',
+        }],
+    }, llm_round=2)
+
+    second = {
+        '_responses_items': [{
+            'type': 'program', 'call_id': 'prog-1', 'code': 'return 2',
+        }],
+        'tool_calls': [{
+            'id': 'child-2', 'caller': _caller(),
+            'function': {'name': 'read_files', 'arguments': '{}'},
+        }],
+    }
+    _programmatic.reconcile_programmatic_items(task, second, llm_round=3)
+
+    runs = task['programRuns']
+    assert len(runs) == 2
+    assert runs[0]['callId'] != 'prog-1'
+    assert runs[0]['providerCallId'] == 'prog-1'
+    assert runs[0]['status'] == 'completed'
+    assert runs[1]['callId'] != 'prog-1'
+    assert runs[1]['providerCallId'] == 'prog-1'
+    assert second['_responses_items'][0]['call_id'] == runs[1]['callId']
+    assert second['tool_calls'][0]['caller']['caller_id'] == runs[1]['callId']
+
+    second_output = {'_responses_items': [{
+        'type': 'program_output', 'call_id': 'prog-1',
+        'status': 'completed', 'result': 'second',
+    }]}
+    _programmatic.reconcile_programmatic_items(
+        task, second_output, llm_round=4)
+    assert second_output['_responses_items'][0]['call_id'] == runs[1]['callId']
+    assert runs[0]['result'] == 'first'
+    assert runs[1]['result'] == 'second'
+    assert len([row for row in task['toolRounds']
+                if row.get('_programSynthetic')]) == 2
+    assert _programmatic.admit_program_continuation(
+        task, second_output)[:2] == (True, 1)
+    assert runs[0]['continuationCount'] == 0
+    assert runs[1]['continuationCount'] == 1
+
+
+def test_ambiguous_duplicate_program_parent_rejects_child_caller(monkeypatch):
+    import lib.tasks_pkg.orchestrator._programmatic as _programmatic
+
+    monkeypatch.setattr(_programmatic, 'append_event', lambda *_args: None)
+    task = {'toolRounds': []}
+    assistant = {
+        '_responses_items': [
+            {'type': 'program', 'call_id': 'same', 'code': 'return 1'},
+            {'type': 'program', 'call_id': 'same', 'code': 'return 2'},
+        ],
+        'tool_calls': [{
+            'id': 'child', 'caller': {
+                'type': 'program', 'caller_id': 'same'},
+            'function': {'name': 'read_files', 'arguments': '{}'},
+        }],
+    }
+
+    assert _programmatic.reconcile_programmatic_items(
+        task, assistant, llm_round=1) == 2
+    assert len(task['programRuns']) == 2
+    assert assistant['tool_calls'][0]['caller']['caller_id'] == ''
+    rejected = _programmatic.reject_programmatic_call(
+        task, assistant['tool_calls'][0], 'read_files')
+    assert rejected and rejected[1]['kind'] == 'programmatic_invalid_caller'
+
+    ambiguous_output = {'_responses_items': [{
+        'type': 'program_output', 'call_id': 'same',
+        'status': 'completed', 'result': 'cannot know the owner',
+    }]}
+    assert _programmatic.reconcile_programmatic_items(
+        task, ambiguous_output, llm_round=2) == 0
+    assert ambiguous_output['_responses_items'][0]['call_id'] == ''
+    assert all(run['status'] == 'running' for run in task['programRuns'])
+
+
+def test_orphan_and_duplicate_program_outputs_cannot_create_phantom_runs(
+        monkeypatch):
+    import lib.tasks_pkg.orchestrator._programmatic as _programmatic
+
+    monkeypatch.setattr(_programmatic, 'append_event', lambda *_args: None)
+    task = {'toolRounds': []}
+    orphan = {'_responses_items': [{
+        'type': 'program_output', 'id': 'response-item-id',
+        'call_id': 'missing-parent', 'status': 'completed', 'result': 'orphan',
+    }]}
+    assert _programmatic.reconcile_programmatic_items(
+        task, orphan, llm_round=1) == 0
+    assert orphan['_responses_items'][0]['call_id'] == ''
+    assert task.get('programRuns') in (None, [])
+
+    start = {'_responses_items': [{
+        'type': 'program', 'call_id': 'provider-parent', 'code': 'return 1',
+    }]}
+    assert _programmatic.reconcile_programmatic_items(
+        task, start, llm_round=2) == 1
+    run = task['programRuns'][0]
+    outputs = {'_responses_items': [{
+        'type': 'program_output', 'id': 'output-item-1',
+        'call_id': 'provider-parent', 'status': 'completed', 'result': 'one',
+    }, {
+        'type': 'program_output', 'id': 'output-item-2',
+        'call_id': 'provider-parent', 'status': 'completed', 'result': 'two',
+    }]}
+    assert _programmatic.reconcile_programmatic_items(
+        task, outputs, llm_round=3) == 1
+    assert len(task['programRuns']) == 1
+    assert run['status'] == 'completed'
+    assert run['result'] == 'one'
+    assert outputs['_responses_items'][0]['call_id'] == run['callId']
+    assert outputs['_responses_items'][1]['call_id'] == ''
+
+
+def test_unbound_program_items_are_not_replayed_to_responses_provider():
+    from lib.llm.responses_outbound import openai_body_to_responses
+
+    body, _ = openai_body_to_responses({
+        'model': 'gpt-5.6-sol',
+        '_responses_feature_profile': 'openai',
+        '_programmatic_tool_calling': 'auto',
+        'messages': [{
+            'role': 'assistant',
+            'content': 'keep the valid assistant message',
+            '_responses_items': [{
+                'type': 'program_output', 'id': 'output-item',
+                'call_id': '', 'status': 'completed', 'result': 'orphan',
+            }],
+        }],
+    })
+
+    assert not any(item.get('type') == 'program_output'
+                   for item in body['input'])
+    assert any(item.get('type') == 'message' for item in body['input'])
 
 
 def test_cold_tool_round_reconstruction_preserves_program_caller():

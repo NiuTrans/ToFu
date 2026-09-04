@@ -47,7 +47,12 @@ class FakeWebSocket {
   }
 }
 global.WebSocket = FakeWebSocket;
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+eval(fs.readFileSync(process.argv[1], 'utf8') + `
+global.__pushHarness = {
+  connect: pushConnect,
+  send: (message) => _push.send(message),
+  isConnected: pushIsConnected,
+};`);
 
 function check(name, condition) {
   if (!condition) throw new Error(name);
@@ -56,23 +61,23 @@ function actionCount(socket, action) {
   return socket.sent.filter((frame) => frame.action === action).length;
 }
 
-pushConnect();
+__pushHarness.connect();
 const first = sockets[0];
-pushSend({action: 'abort-first'});
+__pushHarness.send({action: 'abort-first'});
 check('initial CONNECTING send is queued', actionCount(first, 'abort-first') === 0);
 first.open();
 check('initial queue flushes on open', actionCount(first, 'abort-first') === 1);
 
 first.readyState = FakeWebSocket.CLOSING;
-pushConnect();
+__pushHarness.connect();
 const second = sockets[1];
-pushSend({action: 'abort-second'});
+__pushHarness.send({action: 'abort-second'});
 check('replacement CONNECTING send is queued', actionCount(second, 'abort-second') === 0);
 
 first.readyState = FakeWebSocket.CLOSED;
 first.onclose({code: 1006});
 second.open();
-check('stale close does not clear replacement', pushIsConnected());
+check('stale close does not clear replacement', __pushHarness.isConnected());
 check('replacement queue flushes on open', actionCount(second, 'abort-second') === 1);
 console.log('ok');
 """

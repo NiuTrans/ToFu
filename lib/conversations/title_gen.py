@@ -307,36 +307,61 @@ def generate_conversation_title(messages: list, lang: str | None = None) -> str:
     title = ''
     last_content = ''
     started = time.time()
+    try:
+        from lib.production.llm_policy import optional_llm_dispatch_kwargs
+        optional_dispatch_kwargs = optional_llm_dispatch_kwargs()
+    except Exception as e:
+        logger.warning('[TitleGen] optional dispatch budget unavailable — '
+                       'falling back without transport: %s', e)
+        return _fallback_title(messages)
     for attempt in range(2):
+        attempt_dispatch_kwargs = dict(optional_dispatch_kwargs)
+        if attempt:
+            # The quality retry gets one real upstream 429 at most; it retains
+            # the same immediate-only contention policy as the first attempt.
+            attempt_dispatch_kwargs['max_429_attempts'] = 1
         try:
+            from lib.key_stats import strict_billing_stop_admission
             from lib.llm_dispatch import dispatch_chat
-            content, _usage = dispatch_chat(
-                prompt_messages,
-                # A title is at most TITLE_MAX_CHARS, but the budget must cover
-                # the model's reasoning trace too: the 'cheap' pool is full of
-                # thinking models (deepseek-v4, glm, qwen3-max, kimi-thinking),
-                # and for some of them (e.g. deepseek-reasoner) thinking is on
-                # by definition and its tokens count against max_tokens. 32
-                # tokens truncated good titles mid-word (e.g.
-                # "更新 GLM-5.2 …" → "更新 GL") and starved thinking models
-                # into empty output. dispatch_chat already defaults
-                # thinking_enabled=False (disabling thinking where the model
-                # honors the flag); the final string is collapsed to one line
-                # and hard-capped by _clean_title, so a generous ceiling only
-                # buys completeness, never a longer title.
-                max_tokens=512,
-                temperature=0.2,
-                capability='cheap',
-                # P1: base thinking-model exclusion; P3 augments with the
-                # first-attempt's actual model on retry (see below).
-                exclude_models=list(excluded_this_call),
-                log_prefix='[TitleGen]' if attempt == 0 else '[TitleGen:retry]',
-            )
+            with strict_billing_stop_admission():
+                content, _usage = dispatch_chat(
+                    prompt_messages,
+                    # A title is at most TITLE_MAX_CHARS, but the budget must cover
+                    # the model's reasoning trace too: the 'cheap' pool is full of
+                    # thinking models (deepseek-v4, glm, qwen3-max, kimi-thinking),
+                    # and for some of them (e.g. deepseek-reasoner) thinking is on
+                    # by definition and its tokens count against max_tokens. 32
+                    # tokens truncated good titles mid-word (e.g.
+                    # "更新 GLM-5.2 …" → "更新 GL") and starved thinking models
+                    # into empty output. dispatch_chat already defaults
+                    # thinking_enabled=False (disabling thinking where the model
+                    # honors the flag); the final string is collapsed to one line
+                    # and hard-capped by _clean_title, so a generous ceiling only
+                    # buys completeness, never a longer title.
+                    max_tokens=512,
+                    temperature=0.2,
+                    capability='cheap',
+                    # P1: base thinking-model exclusion; P3 augments with the
+                    # first-attempt's actual model on retry (see below).
+                    exclude_models=list(excluded_this_call),
+                    log_prefix=(
+                        '[TitleGen]'
+                        if attempt == 0 else '[TitleGen:retry]'),
+                    # A primary dispatch can return only before consuming its
+                    # full 429 allowance. Reserving one response for the
+                    # quality retry keeps the whole title operation within the
+                    # same profile budget instead of multiplying it by two.
+                    **attempt_dispatch_kwargs,
+                )
         except Exception as e:
             logger.warning(
                 '[TitleGen] dispatch_chat failed on attempt %d/%d '
                 'after %.1fs: %s',
                 attempt + 1, 2, time.time() - started, e)
+            if getattr(e, 'terminal_for_optional_work', False):
+                logger.warning('[TitleGen] terminal optional-work transport '
+                               'state — falling back without another dispatch')
+                return _fallback_title(messages)
             if attempt == 1:
                 logger.warning('[TitleGen] both attempts failed — '
                                'falling back to first-message heuristic')

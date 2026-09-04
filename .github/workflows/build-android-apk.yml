@@ -45,6 +45,31 @@ jobs:
         working-directory: android
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags so the versionCode / keystore guards below can
+          # diff against the previous android-v* tag's committed files.
+          fetch-depth: 0
+
+      # The release APK is signed with the COMMITTED android/app/debug.keystore.
+      # If that file ever changes, in-place release updates silently break
+      # (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Fail every build whose keystore
+      # sha256 differs from the previous android-v* tag's committed keystore.
+      # Skips gracefully when no previous tag exists yet (pre-first-release).
+      - name: "Guard: committed debug.keystore unchanged vs previous android-v* tag"
+        run: |
+          set -euo pipefail
+          prev_tag="$(git tag --list 'android-v*' --sort=-v:refname | grep -v -x "${GITHUB_REF_NAME}" | head -1 || true)"
+          if [ -z "$prev_tag" ]; then
+            echo "No previous android-v* tag — skipping keystore hash guard."
+            exit 0
+          fi
+          current_hash="$(sha256sum app/debug.keystore | awk '{print $1}')"
+          prev_hash="$(git show "${prev_tag}:android/app/debug.keystore" | sha256sum | awk '{print $1}')"
+          if [ "$current_hash" != "$prev_hash" ]; then
+            echo "::error::app/debug.keystore changed since ${prev_tag} (${prev_hash} -> ${current_hash}). In-place release updates would break (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Do not change the committed keystore; a rotation requires a one-time uninstall by all users."
+            exit 1
+          fi
+          echo "keystore sha256 unchanged vs ${prev_tag}: ${current_hash}"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -86,6 +111,33 @@ jobs:
             exit 1
           fi
 
+      # versionCode is bumped manually in app/build.gradle.kts. Android refuses
+      # a downgrade install, so on an android-v* tag build verify the current
+      # versionCode is STRICTLY GREATER than the previous android-v* tag's.
+      - name: "Guard: versionCode strictly greater than previous android-v* tag"
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        run: |
+          set -euo pipefail
+          current="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -1)"
+          if [ -z "$current" ]; then
+            echo "::error::Could not parse versionCode from app/build.gradle.kts"
+            exit 1
+          fi
+          prev_tag="$(git tag --list 'android-v*' --sort=-v:refname | grep -v -x "${GITHUB_REF_NAME}" | head -1 || true)"
+          if [ -z "$prev_tag" ]; then
+            echo "No previous android-v* tag — skipping versionCode guard (first release)."
+            exit 0
+          fi
+          previous="$(git show "${prev_tag}:android/app/build.gradle.kts" | sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' | head -1)"
+          if [ -z "$previous" ]; then
+            echo "::error::Could not parse versionCode from ${prev_tag}:android/app/build.gradle.kts"
+            exit 1
+          fi
+          if [ "$current" -le "$previous" ]; then
+            echo "::error::versionCode ${current} is not greater than ${prev_tag}'s versionCode ${previous}. Android refuses a downgrade install; bump versionCode in android/app/build.gradle.kts."
+            exit 1
+          fi
+          echo "versionCode ${current} > previous ${previous} (${prev_tag})"
       - name: Assemble release APK
         if: startsWith(github.ref, 'refs/tags/android-v')
         run: ./gradlew assembleRelease --stacktrace
@@ -100,9 +152,18 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/android-v')
         run: |
           set -euo pipefail
-          src="$(ls app/build/outputs/apk/release/*.apk | head -1)"
-          cp "$src" "app/build/outputs/apk/release/tofu-android.apk"
-          echo "Published asset will be: tofu-android.apk (from $src)"
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          shopt -u nullglob
+          if [ "${#apks[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE release APK, found ${#apks[@]}:"
+            if [ "${#apks[@]}" -gt 0 ]; then
+              printf '  - %s\n' "${apks[@]}"
+            fi
+            exit 1
+          fi
+          cp "${apks[0]}" "app/build/outputs/apk/release/tofu-android.apk"
+          echo "Published asset will be: tofu-android.apk (from ${apks[0]})"
 
       # The release APK is ALREADY signed: android/app/build.gradle.kts binds
       # the release buildType to a FIXED, committed debug keystore

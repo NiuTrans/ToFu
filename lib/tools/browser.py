@@ -246,7 +246,7 @@ BROWSER_TOOL_GET_COOKIES = {
             "Use this only to diagnose whether a site has cookies; never use it to copy "
             "authentication into curl/wget or server HTTP. To fetch a logged-in page, "
             "use fetch_url. To place a remote file on the Tofu server, call "
-            "download_url_to_server with the exact file URL; it automatically uses the "
+            "browser_download_url_to_server with the exact file URL; it automatically uses the "
             "selected browser session when required."
         ),
         "parameters": {
@@ -320,8 +320,9 @@ BROWSER_TOOL_NAVIGATE = {
         "name": "browser_navigate",
         "description": (
             "Navigate the working tab, or open a background tab with new_tab=true. "
-            "Waits for load and reports final URL/title. If unsure, use web_search; "
-            "never guess a URL from memory."
+            "Waits for load and reports final URL/title. The Tofu client tab is "
+            "never navigated; targeting it opens a new tab instead. If unsure, "
+            "use web_search; never guess a URL from memory."
         ),
         "parameters": {
             "type": "object",
@@ -449,41 +450,57 @@ BROWSER_TOOL_PREVIEW_PAGE = {
     "function": {
         "name": "browser_preview_page",
         "description": (
-            "Render a web page in a headless browser ON THE SERVER and return a real "
-            "screenshot you can SEE, plus console messages, uncaught JS errors and failed "
-            "requests. This is how you check what a page YOU wrote looks like when it runs.\n"
-            "Two modes:\n"
-            "1) path: a project-relative .html file — served to the browser from the project "
-            "root (relative assets and ES modules work; external network requests are blocked "
-            "and reported).\n"
-            "2) url: an http(s) URL, e.g. a dev server you or the user started.\n"
-            "Use after writing/editing front-end code to verify layout visually and catch "
-            "runtime JS errors. NOT for reading text content (use fetch_url / browser_read_page) "
-            "and NOT tied to the user's browser extension — it runs fully server-side."
+            "Render one page in a headless browser ON THE SERVER; return screenshot, "
+            "console, uncaught JS errors, and failed requests. Use after frontend edits "
+            "for layout/runtime. Give exactly one source: a "
+            "project-relative .html path, served from project root so relative assets/ES "
+            "modules work and external requests are blocked/reported; or an HTTP(S) url "
+            "such as a dev server. Not for text (use fetch_url/browser_read_page) or the "
+            "user's browser extension."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Project-relative HTML file to render (e.g. 'dist/index.html'). Mutually exclusive with url."
+                    "minLength": 1,
+                    "description": "Project-relative .html/.htm file."
                 },
                 "url": {
                     "type": "string",
-                    "description": "http(s) URL to render (e.g. 'http://127.0.0.1:8080/'). Mutually exclusive with path."
+                    "minLength": 1,
+                    "description": "HTTP(S) page URL."
                 },
-                "width": {"type": "integer", "description": "Viewport width px (default 1280)"},
-                "height": {"type": "integer", "description": "Viewport height px (default 800)"},
+                "width": {
+                    "type": "integer", "minimum": 320, "maximum": 3840,
+                    "description": "Viewport width px; default 1280."
+                },
+                "height": {
+                    "type": "integer", "minimum": 240, "maximum": 2160,
+                    "description": "Viewport height px; default 800."
+                },
                 "full_page": {
                     "type": "boolean",
-                    "description": "Capture the entire scrollable page instead of just the viewport (default false)"
+                    "description": "Capture the full scrollable page; default false."
                 },
                 "wait_ms": {
                     "type": "integer",
-                    "description": "Extra settle time in ms after the DOM loads before screenshotting (default 1500, max 15000) — raise it for pages with async rendering"
+                    "minimum": 0,
+                    "maximum": 15000,
+                    "description": "Settle after DOM load in ms; default 1500."
                 }
             },
-            "required": []
+            "oneOf": [
+                {
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                },
+                {
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"]
+                }
+            ],
+            "additionalProperties": False
         }
     }
 }

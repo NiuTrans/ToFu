@@ -7,6 +7,8 @@
   "base_url": "https://tokenhub.tencentmaas.com/v1",
   "balance_url": "",
   "offering_recipes": [
+    { "model_id": "hy4-preview",                   "capabilities": ["text", "thinking"],           "rpm": 30, "cost": 0.003,
+      "pricing": { "input": 0.829, "output": 2.486, "cacheWriteMul": 1.00, "cacheReadMul": 0.05,  "name": "Hunyuan HY4 Preview (TokenHub)" } },
     { "model_id": "hy3-preview",                   "capabilities": ["text", "thinking", "cheap"], "rpm": 30, "cost": 0.001,
       "pricing": { "input": 0.166, "output": 0.553, "cacheWriteMul": 1.00, "cacheReadMul": 0.333, "name": "Hunyuan HY3 Preview (TokenHub)" } },
     { "model_id": "hunyuan-2.0-thinking-20251109", "capabilities": ["text", "thinking", "cheap"], "rpm": 30, "cost": 0.003,

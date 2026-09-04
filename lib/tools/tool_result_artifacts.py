@@ -8,11 +8,14 @@ from lib.tools.contracts import ToolContractV2, ToolErrorContract
 READ_TOOL_ARTIFACT = ToolContractV2(
     name="read_tool_artifact",
     namespace="artifacts",
-    model_description="Read a bounded range from a prior large tool result.",
+    model_description=(
+        "Read one or more bounded ranges from prior large tool results."
+    ),
     detailed_help=(
-        "Use artifact_ref and cursor returned by a ToolResultEnvelopeV2. "
-        "The artifact is owner-scoped and expires; request only the next "
-        "range needed for the task."
+        "For one artifact, use artifact_ref plus optional cursor/limit. For "
+        "independent ranges, pass reads (maximum 16); they run with bounded "
+        "parallelism and return in input order. Each artifact is owner-scoped "
+        "and expires."
     ),
     search_metadata=(
         "large result continuation range cursor",
@@ -21,6 +24,22 @@ READ_TOOL_ARTIFACT = ToolContractV2(
     parameters={
         "type": "object",
         "properties": {
+            "reads": {
+                "type": "array", "minItems": 1, "maxItems": 16,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_ref": {"type": "string", "minLength": 1,
+                                         "maxLength": 96},
+                        "cursor": {"type": "string", "default": "0",
+                                   "maxLength": 24},
+                        "limit": {"type": "integer", "minimum": 1,
+                                  "maximum": 65536, "default": 8192},
+                    },
+                    "required": ["artifact_ref"],
+                    "additionalProperties": False,
+                },
+            },
             "artifact_ref": {"type": "string", "minLength": 1,
                              "maxLength": 96},
             "cursor": {"type": "string", "default": "0",
@@ -28,7 +47,6 @@ READ_TOOL_ARTIFACT = ToolContractV2(
             "limit": {"type": "integer", "minimum": 1,
                       "maximum": 65536, "default": 8192},
         },
-        "required": ["artifact_ref"],
         "additionalProperties": False,
     },
     permission="read",
@@ -45,10 +63,14 @@ READ_TOOL_ARTIFACT = ToolContractV2(
 SEARCH_TOOL_ARTIFACT = ToolContractV2(
     name="search_tool_artifact",
     namespace="artifacts",
-    model_description="Search within a prior large tool result by text.",
+    model_description=(
+        "Search one or more prior large tool results by text."
+    ),
     detailed_help=(
-        "Search an owner-scoped ToolResultEnvelopeV2 artifact without loading "
-        "the whole result. Continue with next_cursor when truncated."
+        "For one artifact, use artifact_ref and query. For independent "
+        "searches, pass searches (maximum 16); they run with bounded "
+        "parallelism and return in input order. Continue each item with its "
+        "nextCursor when truncated."
     ),
     search_metadata=(
         "find grep prior tool output artifact",
@@ -57,6 +79,24 @@ SEARCH_TOOL_ARTIFACT = ToolContractV2(
     parameters={
         "type": "object",
         "properties": {
+            "searches": {
+                "type": "array", "minItems": 1, "maxItems": 16,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_ref": {"type": "string", "minLength": 1,
+                                         "maxLength": 96},
+                        "query": {"type": "string", "minLength": 1,
+                                  "maxLength": 200},
+                        "cursor": {"type": "string", "default": "0",
+                                   "maxLength": 24},
+                        "limit": {"type": "integer", "minimum": 1,
+                                  "maximum": 20, "default": 8},
+                    },
+                    "required": ["artifact_ref", "query"],
+                    "additionalProperties": False,
+                },
+            },
             "artifact_ref": {"type": "string", "minLength": 1,
                              "maxLength": 96},
             "query": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -64,7 +104,6 @@ SEARCH_TOOL_ARTIFACT = ToolContractV2(
             "limit": {"type": "integer", "minimum": 1,
                       "maximum": 20, "default": 8},
         },
-        "required": ["artifact_ref", "query"],
         "additionalProperties": False,
     },
     permission="read",

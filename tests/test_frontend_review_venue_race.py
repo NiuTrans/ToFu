@@ -145,7 +145,7 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // Stubs for unrelated subsystems the switch path would otherwise hit.
-_getActivePaperEntry = () => ({ id: 'paper-1', title: 'P' });
+win._getActivePaperEntry = _getActivePaperEntry = () => ({ id: 'paper-1', title: 'P' });
 win._saveActivePaperState = _saveActivePaperState = () => {};
 win._renderReportSkeleton = _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
 win._syncReportToolbar = _syncReportToolbar = () => {};
@@ -272,9 +272,14 @@ def _run_harness(
     harness = _write_harness()
     try:
         with compiled_typescript(
-            SESSION_TS, contents=session_source,
+            SESSION_TS,
+            contents=session_source,
+            expose_feature_registry_to_window=True,
         ) as session_js:
-            with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+            with compiled_typescript(
+                REPORT_RUNTIME_TS,
+                expose_feature_registry_to_window=True,
+            ) as runtime_js:
                 proc = subprocess.run(
                     ['node', harness, paper_js_path, ROOT, core_js,
                      runtime_js, session_js],

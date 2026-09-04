@@ -154,7 +154,7 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // Stubs for unrelated subsystems.
-_getActivePaperEntry = () => ({ id: 'paper-1', title: 'P' });
+win._getActivePaperEntry = _getActivePaperEntry = () => ({ id: 'paper-1', title: 'P' });
 win._saveActivePaperState = _saveActivePaperState = () => {};
 win._renderReportSkeleton = _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
 win._syncReportToolbar = _syncReportToolbar = () => {};
@@ -247,8 +247,14 @@ def _write_harness() -> str:
 def _run_harness(report_js_path: str, core_js: str = CORE_JS):
     harness = _write_harness()
     try:
-        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
-            with compiled_typescript(SESSION_TS) as session_js:
+        with compiled_typescript(
+            REPORT_RUNTIME_TS,
+            expose_feature_registry_to_window=True,
+        ) as runtime_js:
+            with compiled_typescript(
+                SESSION_TS,
+                expose_feature_registry_to_window=True,
+            ) as session_js:
                 proc = subprocess.run(
                     ['node', harness, report_js_path, ROOT, core_js,
                      runtime_js, session_js],

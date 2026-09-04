@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 from lib.log import get_logger
 
@@ -535,48 +535,3 @@ def translate_pptx(
     }
 
 
-def translate_pptx_bytes(
-    file_bytes: bytes,
-    filename: str = 'presentation.pptx',
-    *,
-    translate_fn: Callable[[str], str],
-    progress_fn: Optional[Callable[[int, int, str], None]] = None,
-) -> Tuple[Optional[bytes], dict]:
-    """Translate a PPTX from bytes, returning translated bytes.
-
-    Convenience wrapper that writes to a temp file, translates,
-    reads back the result bytes.
-
-    Args:
-        file_bytes: Raw PPTX file content.
-        filename: Original filename (used for logging and output naming).
-        translate_fn: Translation function.
-        progress_fn: Optional progress callback.
-
-    Returns:
-        (translated_bytes_or_None, result_dict)
-    """
-    import tempfile
-
-    if not _check_pptx():
-        return None, {
-            'ok': False,
-            'error': 'python-pptx not installed — run: pip install python-pptx',
-        }
-
-    stem = Path(filename).stem
-    with tempfile.TemporaryDirectory(prefix='pptx_translate_') as tmpdir:
-        input_path = Path(tmpdir) / filename
-        output_path = Path(tmpdir) / f'{stem}_translated.pptx'
-
-        input_path.write_bytes(file_bytes)
-        result = translate_pptx(
-            input_path,
-            output_path,
-            translate_fn=translate_fn,
-            progress_fn=progress_fn,
-        )
-
-        if result.get('ok') and output_path.is_file():
-            return output_path.read_bytes(), result
-        return None, result

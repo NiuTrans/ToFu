@@ -1,4 +1,4 @@
-"""Economic compaction horizon earned by demonstrated long-task survival."""
+"""Economic compaction horizon follows prefix-rewrite cadence, not task age."""
 
 from __future__ import annotations
 
@@ -16,20 +16,26 @@ def _user(content: str) -> dict:
 
 
 @pytest.mark.parametrize(
-    ('current_round', 'remaining_rounds', 'expected_horizon', 'expected_policy'),
+    ('cadence', 'current_round', 'remaining_rounds',
+     'expected_horizon', 'expected_policy'),
     [
-        (0, 192, 1.0, 'fixed_one_round'),
-        (3, 189, 1.0, 'fixed_one_round'),
-        (4, 188, 2.0, 'fixed_observed_survival'),
-        (8, 184, 3.0, 'fixed_observed_survival'),
-        (16, 176, 4.0, 'fixed_observed_survival'),
-        (32, 160, 5.0, 'fixed_observed_survival'),
-        (64, 128, 6.0, 'fixed_observed_survival'),
-        (64, 2, 2.0, 'fixed_observed_survival'),
-        (64, 0, 1.0, 'fixed_one_round'),
+        ({}, 64, 128, 1.0, 'fixed_one_round'),
+        ({'_compactionCadenceLastRound': 60}, 64, 128,
+         4.0, 'fixed_compaction_cadence'),
+        ({'_compactionCadenceLastRound': 60,
+          '_compactionCadenceRoundGaps': [5, 3]}, 64, 128,
+         3.0, 'fixed_compaction_cadence'),
+        ({'_compactionCadenceLastRound': 40,
+          '_compactionCadenceRoundGaps': [10, 12]}, 64, 128,
+         6.0, 'fixed_compaction_cadence'),
+        ({'_compactionCadenceLastRound': 60}, 64, 2,
+         2.0, 'fixed_compaction_cadence'),
+        ({'_compactionCadenceLastRound': 60}, 64, 0,
+         1.0, 'fixed_one_round'),
     ],
 )
-def test_fixed_policy_earns_only_budgeted_observed_survival_horizon(
+def test_fixed_policy_uses_only_budgeted_compaction_cadence(
+    cadence,
     current_round,
     remaining_rounds,
     expected_horizon,
@@ -37,8 +43,9 @@ def test_fixed_policy_earns_only_budgeted_observed_survival_horizon(
 ):
     from lib.tasks_pkg.compaction._layer2 import _compact as layer2
 
+    task = {'config': {'compaction': {'strategy': 'fixed'}}, **cadence}
     horizon, policy = layer2._proactive_payback_policy(
-        {'config': {'compaction': {'strategy': 'fixed'}}},
+        task,
         current_round=current_round,
         remaining_api_rounds=remaining_rounds,
     )
@@ -66,7 +73,7 @@ def test_adaptive_policy_keeps_its_explicit_expected_value_horizon():
     assert policy == 'adaptive_expected_horizon'
 
 
-def test_new_survival_step_invalidates_only_the_stale_economic_veto(
+def test_longer_observed_compaction_window_invalidates_stale_economic_veto(
     monkeypatch,
 ):
     import lib.tasks_pkg.cache_tracking._state as cache_state
@@ -92,6 +99,7 @@ def test_new_survival_step_invalidates_only_the_stale_economic_veto(
             'convId': 'survival-veto',
             '_userId': 1,
             'config': {'model': 'kimi-k3'},
+            '_compactionCadenceLastRound': 2,
             '_autoCompactRetryAfterTokens': 250_000,
             '_autoCompactRetryWitness': {
                 'reason': 'cache_negative',
@@ -120,7 +128,7 @@ def test_new_survival_step_invalidates_only_the_stale_economic_veto(
     assert '_autoCompactRetryWitness' not in earned_second_round
 
 
-def test_three_round_candidate_is_declined_early_then_admitted_late(
+def test_three_round_candidate_requires_observed_three_round_window(
     monkeypatch,
 ):
     from lib.tasks_pkg.compaction._layer2 import _compact as layer2
@@ -192,10 +200,14 @@ def test_three_round_candidate_is_declined_early_then_admitted_late(
 
     late_messages = messages()
     late_meta = {}
+    late_task = {
+        'convId': 'fixed-late', 'id': 't',
+        'config': {'model': 'kimi-k3'},
+        '_compactionCadenceLastRound': 5,
+    }
     layer2.execute_compact_tool(
         late_messages,
-        task={'convId': 'fixed-late', 'id': 't',
-              'config': {'model': 'kimi-k3'}},
+        task=late_task,
         preserve_budget_tokens=1,
         _proactive_economic=True,
         _compaction_skip_archive=True,
@@ -208,7 +220,56 @@ def test_three_round_candidate_is_declined_early_then_admitted_late(
     assert late_meta['compacted'] is True
     assert late_meta['economics']['payback_limit_rounds'] == 3.0
     assert late_meta['economics']['payback_policy'] == (
-        'fixed_observed_survival')
+        'fixed_compaction_cadence')
+
+
+def test_successful_rewrite_cadence_is_bounded_and_idempotent():
+    from lib.tasks_pkg.compaction import _tokens as tokens
+
+    task = {}
+    assert tokens._record_compaction_cadence(task, 3) is None
+    assert tokens._record_compaction_cadence(task, 3) is None
+    for round_num in range(4, 20):
+        assert tokens._record_compaction_cadence(task, round_num) == 1
+
+    assert task['_compactionCadenceLastRound'] == 19
+    assert task['_compactionCadenceRoundGaps'] == [1] * 8
+
+
+def test_cache_economics_resolves_before_and_after_pricing_tiers(monkeypatch):
+    import lib.tasks_pkg.cache_tracking._state as cache_state
+    from lib.pricing import clear_provider_pricing, set_provider_pricing
+    from lib.tasks_pkg.compaction._layer2 import _compact as layer2
+
+    monkeypatch.setattr(
+        cache_state, 'get_warm_cache_read',
+        lambda *args, **kwargs: 280_000)
+    set_provider_pricing('econ-provider', 'econ-model', {
+        'contextTiers': [
+            {'id': 'base', 'maxPromptTokens': 250_000, 'input': 1,
+             'output': 2, 'cacheReadMul': .1, 'cacheWriteMul': 1.25},
+            {'id': 'premium', 'maxPromptTokens': 1_000_000, 'input': 2,
+             'output': 3, 'cacheReadMul': .1, 'cacheWriteMul': 1.25},
+        ]})
+    try:
+        economics = layer2._proactive_cache_economics(
+            {'convId': 'tier-economics', '_userId': 1,
+             'provider_id': 'econ-provider',
+             'config': {'model': 'econ-model'}},
+            tokens_before=300_000,
+            candidate_tokens=200_000,
+            summary_usage_tokens=10_000,
+        )
+    finally:
+        clear_provider_pricing('econ-provider')
+
+    assert economics['crosses_pricing_tier'] is True
+    assert economics['pricing_before']['tier_id'] == 'premium'
+    assert economics['pricing_after']['tier_id'] == 'base'
+    assert economics['cache_replay_tokens_before'] == 280_000
+    assert economics['cache_replay_tokens_after'] == 200_000
+    assert economics['savings_per_round_usd'] == pytest.approx(0.036)
+    assert economics['rewrite_cost_usd'] == pytest.approx(0.25)
 
 
 def test_pipeline_threads_remaining_round_budget_into_l2(monkeypatch):

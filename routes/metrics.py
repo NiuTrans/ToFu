@@ -15,9 +15,24 @@ Metrics:
   * ``tofu_idempotency_cache_size``
   * ``tofu_rate_limit_buckets``                    — number of
                                                      in-memory rate buckets
+  * ``tofu_rate_limit_memory_buckets``              — bounded shared-store
+                                                     identity working set
+  * ``tofu_rate_limit_memory_events``               — exact timestamps held
   * ``tofu_storage_queries_total{backend="…"}``
   * ``tofu_storage_commands_total{backend="…"}``
+  * ``tofu_storage_client_predispatch_command_retries_total``
+  * ``tofu_storage_client_response_frame_bytes_inflight``
+  * ``tofu_storage_process_rss_bytes{backend="…"}``
+  * ``tofu_storage_rpc_active{backend="…"}``
+  * ``tofu_storage_rpc_frame_bytes_inflight{backend="…"}``
+  * ``tofu_storage_idle_heap_trim_duration_seconds_total``
   * ``tofu_storage_writer_queue_depth{priority="…"}``
+  * ``tofu_storage_writer_write_admission_rejections_total``
+  * ``tofu_storage_fastpath_snapshots_total{backend="…"}``
+  * ``tofu_storage_fastpath_snapshot_database_bytes_copied_total``
+  * ``tofu_storage_fastpath_write_pressure_active{backend="…"}``
+  * ``tofu_cgroup_relief_reclaimed_bytes_total{source="…"}``
+  * ``tofu_cgroup_relief_duration_seconds``
 
 Auth: requires ``admin`` scope. Without auth the
 endpoint 401s — Prometheus scrapers configure a Bearer header.
@@ -115,7 +130,11 @@ def _collect_task_metrics(out: list) -> None:
         registry_ttl = []
         registry_over_capacity = []
         retained_events = []
+        retained_event_bytes = []
         event_limits = []
+        event_buffer_byte_limits = []
+        event_max_byte_limits = []
+        event_hard_byte_limits = []
         totals: dict[tuple[str, str], int] = {}
         for kind, rt in _registries().items():
             try:
@@ -131,7 +150,15 @@ def _collect_task_metrics(out: list) -> None:
             registry_ttl.append((labels, stats['ttl_seconds']))
             registry_over_capacity.append((labels, stats['over_capacity']))
             retained_events.append((labels, stats['events']))
+            retained_event_bytes.append(
+                (labels, stats['event_retained_bytes']))
             event_limits.append((labels, stats['max_events_per_task']))
+            event_buffer_byte_limits.append((
+                labels, stats['event_buffer_byte_capacity_per_task']))
+            event_max_byte_limits.append(
+                (labels, stats['event_max_bytes']))
+            event_hard_byte_limits.append((
+                labels, stats['event_retention_hard_capacity_per_task']))
             for status in ('pending', 'running', 'done', 'error', 'aborted'):
                 totals[(kind, status)] = int(lifecycle.get(status, 0))
         _emit_gauge(out, 'tofu_tasks_inflight',
@@ -157,6 +184,18 @@ def _collect_task_metrics(out: list) -> None:
                     retained_events)
         _emit_gauge(out, 'tofu_task_event_retention_limit',
                     'Maximum replay events retained per task', event_limits)
+        _emit_gauge(out, 'tofu_task_event_retained_bytes',
+                    'Serialized replay bytes retained by task kind',
+                    retained_event_bytes)
+        _emit_gauge(out, 'tofu_task_event_buffer_bytes_per_task',
+                    'Ordinary replay-tail byte target per task',
+                    event_buffer_byte_limits)
+        _emit_gauge(out, 'tofu_task_event_max_bytes',
+                    'Maximum retained bytes for one task event',
+                    event_max_byte_limits)
+        _emit_gauge(out, 'tofu_task_event_hard_bytes_per_task',
+                    'Hard replay residency ceiling per task',
+                    event_hard_byte_limits)
         from lib.production.runtime import production_retention_stats
         production_stats = production_retention_stats()
         _emit_gauge(
@@ -195,15 +234,182 @@ def _collect_storage_metrics(out: list) -> None:
     try:
         from lib.storage import get_storage_client
 
-        metrics = get_storage_client().metrics() or {}
+        client = get_storage_client()
+        metrics = client.metrics() or {}
         backend = str(metrics.get('backend') or 'unknown')
         labels = {'backend': backend}
+        transport_metrics_fn = getattr(client, 'transport_metrics', None)
+        transport_metrics = (
+            transport_metrics_fn() if callable(transport_metrics_fn) else {})
+        _emit_counter(
+            out, 'tofu_storage_client_predispatch_command_retries_total',
+            'Commands replayed after proof that dispatch never started',
+            [(labels, transport_metrics.get(
+                'pre_dispatch_command_retries', 0))])
+        _emit_counter(
+            out,
+            'tofu_storage_client_predispatch_command_retry_exhaustions_total',
+            'Proven pre-dispatch command retries that exhausted their bound',
+            [(labels, transport_metrics.get(
+                'pre_dispatch_command_retry_exhaustions', 0))])
+        _emit_gauge(
+            out, 'tofu_storage_client_response_frame_bytes_inflight',
+            'Serialized Sidecar response body bytes held by this client process',
+            [(labels, transport_metrics.get(
+                'response_frame_bytes_inflight', 0))])
+        _emit_gauge(
+            out, 'tofu_storage_client_response_frame_bytes_capacity',
+            'Client-process Sidecar response body byte budget',
+            [(labels, transport_metrics.get(
+                'response_frame_bytes_capacity', 0))])
+        _emit_gauge(
+            out, 'tofu_storage_client_response_frame_bytes_peak',
+            'Peak Sidecar response body bytes admitted in this client process',
+            [(labels, transport_metrics.get(
+                'response_frame_bytes_peak', 0))])
+        _emit_gauge(
+            out, 'tofu_storage_client_response_frame_admission_waiting',
+            'Sidecar responses waiting on the client-process byte budget',
+            [(labels, transport_metrics.get(
+                'response_frame_admission_waiting', 0))])
+        _emit_counter(
+            out, 'tofu_storage_client_response_frame_admission_waits_total',
+            'Sidecar responses that encountered client byte-budget contention',
+            [(labels, transport_metrics.get(
+                'response_frame_admission_waits', 0))])
+        _emit_counter(
+            out,
+            'tofu_storage_client_response_frame_admission_rejections_total',
+            'Sidecar responses rejected after bounded client byte-budget waits',
+            [(labels, transport_metrics.get(
+                'response_frame_admission_rejections', 0))])
+        _emit_counter(
+            out, 'tofu_storage_client_response_frame_bytes_admitted_total',
+            'Sidecar response body reservation bytes admitted by this client',
+            [(labels, transport_metrics.get(
+                'response_frame_bytes_admitted_total', 0))])
+        _emit_counter(
+            out, 'tofu_storage_client_response_frame_bytes_observed_total',
+            'Declared Sidecar response body bytes observed by this client',
+            [(labels, transport_metrics.get(
+                'response_frame_bytes_observed_total', 0))])
+        _emit_gauge(
+            out, 'tofu_storage_client_response_frame_bytes_observed_max',
+            'Largest declared Sidecar response body observed by this client',
+            [(labels, transport_metrics.get(
+                'response_frame_bytes_observed_max', 0))])
         query_metrics = metrics.get('queries')
         if not isinstance(query_metrics, dict):
             query_metrics = metrics
         writer = metrics.get('writer')
         if not isinstance(writer, dict):
             writer = {}
+        process_metrics = metrics.get('process')
+        if isinstance(process_metrics, dict):
+            _emit_gauge(
+                out, 'tofu_storage_process_rss_bytes',
+                'Resident bytes held by the storage Sidecar process',
+                [(labels, process_metrics.get('rss_bytes', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_process_open_fds_or_handles',
+                'Open file descriptors or handles held by the storage Sidecar',
+                [(labels, process_metrics.get('open_fds_or_handles', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_process_threads',
+                'Operating-system threads in the storage Sidecar',
+                [(labels, process_metrics.get('threads', 0))])
+        rpc = metrics.get('rpc')
+        if isinstance(rpc, dict):
+            _emit_gauge(
+                out, 'tofu_storage_rpc_active',
+                'Storage RPC handlers currently active',
+                [(labels, rpc.get('active', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_capacity',
+                'Maximum simultaneous storage RPC handlers',
+                [(labels, rpc.get('capacity', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_waiting',
+                'Storage RPC connections in the bounded admission wait',
+                [(labels, rpc.get('waiting', 0))])
+            _emit_counter(
+                out, 'tofu_storage_rpc_rejections_total',
+                'Storage RPC connections rejected at handler capacity',
+                [(labels, rpc.get('rejected', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_frame_bytes_inflight',
+                'Serialized storage frame bytes currently reserved',
+                [(labels, rpc.get('frame_bytes_inflight', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_frame_bytes_capacity',
+                'Process-wide serialized storage frame byte budget',
+                [(labels, rpc.get('frame_bytes_capacity', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_frame_bytes_peak',
+                'Peak serialized storage frame bytes reserved',
+                [(labels, rpc.get('frame_bytes_peak', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_frame_admission_waiting',
+                'Storage frames waiting on the FIFO byte budget',
+                [(labels, rpc.get('frame_admission_waiting', 0))])
+            _emit_counter(
+                out, 'tofu_storage_rpc_frame_admission_waits_total',
+                'Storage frames that encountered byte-budget contention',
+                [(labels, rpc.get('frame_admission_waits', 0))])
+            _emit_counter(
+                out, 'tofu_storage_rpc_frame_admission_rejections_total',
+                'Storage frames rejected after bounded byte-budget waits',
+                [(labels, rpc.get('frame_admission_rejections', 0))])
+            _emit_counter(
+                out, 'tofu_storage_rpc_frame_bytes_admitted_total',
+                'Serialized storage frame reservation bytes admitted',
+                [(labels, rpc.get('frame_bytes_admitted_total', 0))])
+            _emit_counter(
+                out, 'tofu_storage_rpc_request_frame_bytes_total',
+                'Declared storage request frame bytes observed',
+                [(labels, rpc.get('request_frame_bytes_total', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_request_frame_bytes_max',
+                'Largest declared storage request frame observed',
+                [(labels, rpc.get('request_frame_bytes_max', 0))])
+            _emit_counter(
+                out, 'tofu_storage_rpc_response_frame_bytes_total',
+                'Encoded storage response JSON-body bytes observed',
+                [(labels, rpc.get('response_frame_bytes_total', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_rpc_response_frame_bytes_max',
+                'Largest encoded storage response JSON body observed',
+                [(labels, rpc.get('response_frame_bytes_max', 0))])
+            _emit_counter(
+                out, 'tofu_storage_idle_heap_trim_attempts_total',
+                'Sidecar idle-edge allocator trim attempts',
+                [(labels, rpc.get('idle_trim_attempts', 0))])
+            _emit_counter(
+                out, 'tofu_storage_idle_heap_trim_successes_total',
+                'Sidecar idle-edge allocator trims accepted by libc',
+                [(labels, rpc.get('idle_trim_successes', 0))])
+            _emit_counter(
+                out, 'tofu_storage_idle_heap_trim_reclaimed_bytes_total',
+                'Resident bytes returned by Sidecar idle heap trims',
+                [(labels, rpc.get('idle_trim_reclaimed_bytes', 0))])
+            _emit_counter(
+                out, 'tofu_storage_idle_heap_trim_duration_seconds_total',
+                'Admission-fenced seconds spent in Sidecar idle heap trims',
+                [(labels, rpc.get(
+                    'idle_trim_duration_ns_total', 0) / 1_000_000_000)])
+            _emit_gauge(
+                out, 'tofu_storage_idle_heap_trim_last_before_bytes',
+                'Sidecar RSS immediately before the latest idle heap trim',
+                [(labels, rpc.get('idle_trim_last_before_bytes', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_idle_heap_trim_last_after_bytes',
+                'Sidecar RSS immediately after the latest idle heap trim',
+                [(labels, rpc.get('idle_trim_last_after_bytes', 0))])
+            _emit_gauge(
+                out, 'tofu_storage_idle_heap_trim_last_duration_seconds',
+                'Admission-fenced duration of the latest idle heap trim',
+                [(labels, rpc.get(
+                    'idle_trim_last_duration_ns', 0) / 1_000_000_000)])
         _emit_counter(
             out, 'tofu_storage_queries_total',
             'Semantic storage queries completed by the authority',
@@ -260,6 +466,10 @@ def _collect_storage_metrics(out: list) -> None:
             'Writer deadline stalls that required sqlite3_interrupt',
             [(labels, writer.get('stall_interrupts', 0))])
         _emit_counter(
+            out, 'tofu_storage_writer_write_admission_rejections_total',
+            'Writes refused before BEGIN by a storage resource fence',
+            [(labels, writer.get('write_admission_rejections', 0))])
+        _emit_counter(
             out, 'tofu_storage_writer_batches_total',
             'Physical group-commit batches executed by SQLite',
             [(labels, writer.get('batches', 0))])
@@ -300,6 +510,68 @@ def _collect_storage_metrics(out: list) -> None:
                         out, 'tofu_storage_fastpath_last_ship_age_seconds',
                         'Seconds since the durable shadow last advanced',
                         [(labels, shipper['last_ship_age_s'])])
+                _emit_counter(
+                    out, 'tofu_storage_fastpath_snapshots_total',
+                    'Complete fastpath shadow generations published',
+                    [(labels, shipper.get('snapshots', 0))])
+                _emit_counter(
+                    out,
+                    'tofu_storage_fastpath_snapshot_database_bytes_copied_total',
+                    'Physical database-image bytes copied by shadow rebases',
+                    [(labels, shipper.get(
+                        'snapshot_database_bytes_copied', 0))])
+                _emit_counter(
+                    out,
+                    'tofu_storage_fastpath_snapshot_wal_bytes_copied_total',
+                    'Physical concurrent-WAL bytes copied by shadow rebases',
+                    [(labels, shipper.get('snapshot_wal_bytes_copied', 0))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_snapshot_progress_bytes',
+                    'Durable progress of the current shadow image copy',
+                    [(labels, shipper.get('snapshot_progress_bytes', 0))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_wal_rebase_trigger_bytes',
+                    'Local WAL size that proactively starts a shadow rebase',
+                    [(labels, shipper.get('wal_rebase_trigger_bytes', 0))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_wal_rebase_budget_bytes',
+                    'Hard local WAL budget retained by the write fence',
+                    [(labels, shipper.get('wal_rebase_budget_bytes', 0))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_rebase_active',
+                    'Whether a checkpointed shadow replacement is in progress',
+                    [(labels, int(bool(shipper.get('rebase_active'))))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_write_pressure_active',
+                    'Whether new writes are fenced at the rebase WAL threshold',
+                    [(labels, int(bool(
+                        shipper.get('write_pressure_active'))))])
+                _emit_counter(
+                    out, 'tofu_storage_fastpath_write_pressure_activations_total',
+                    'Rebase windows that reached the WAL write-pressure threshold',
+                    [(labels, shipper.get('write_pressure_activations', 0))])
+                _emit_counter(
+                    out, 'tofu_storage_fastpath_write_pressure_rejections_total',
+                    'Writes refused while the rebase WAL pressure fence was active',
+                    [(labels, shipper.get('write_pressure_rejections', 0))])
+                _emit_counter(
+                    out,
+                    'tofu_storage_fastpath_write_pressure_observation_failures_total',
+                    'Local WAL size observations that failed closed',
+                    [(labels, shipper.get(
+                        'write_pressure_observation_failures', 0))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_wal_write_pressure_bytes',
+                    'Local WAL size that activates the rebase write fence',
+                    [(labels, shipper.get('wal_write_pressure_bytes', 0))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_local_wal_bytes',
+                    'Current physical bytes in the local authority WAL',
+                    [(labels, shipper.get('local_wal_bytes', 0))])
+                _emit_gauge(
+                    out, 'tofu_storage_fastpath_wal_write_headroom_bytes',
+                    'Bytes remaining before the rebase write fence threshold',
+                    [(labels, shipper.get('wal_write_headroom_bytes', 0))])
     except Exception as e:
         logger.debug('[Metrics] storage block failed: %s', e)
 
@@ -333,11 +605,50 @@ def _collect_infra_metrics(out: list) -> None:
         logger.debug('[Metrics] idempotency block failed: %s', e)
     try:
         from lib import rate_limit_api
+        s = rate_limit_api.api_rate_limit_stats()
         _emit_gauge(out, 'tofu_rate_limit_buckets',
-                     'In-memory rate-limit buckets',
-                     [({}, len(rate_limit_api._state))])
+                     'In-memory API-key rate-limit entries',
+                     [({}, s.get('entries', 0))])
+        _emit_gauge(out, 'tofu_rate_limit_bucket_capacity',
+                     'Maximum resident API-key rate-limit entries',
+                     [({}, s.get('capacity', 0))])
+        _emit_counter(out, 'tofu_rate_limit_bucket_evictions_total',
+                      'API-key rate-limit entries evicted at capacity',
+                      [({}, s.get('capacity_evictions', 0))])
     except Exception as e:
         logger.debug('[Metrics] rate-limit block failed: %s', e)
+    try:
+        from lib.rate_limit_store import rate_limit_store_stats
+        s = rate_limit_store_stats()
+        if s.get('backend') == 'memory':
+            _emit_gauge(out, 'tofu_rate_limit_memory_buckets',
+                        'Resident endpoint and client rate-limit buckets',
+                        [({}, s.get('buckets', 0))])
+            _emit_gauge(out, 'tofu_rate_limit_memory_bucket_capacity',
+                        'Maximum resident endpoint and client buckets',
+                        [({}, s.get('bucket_capacity', 0))])
+            _emit_gauge(out, 'tofu_rate_limit_memory_events',
+                        'Resident exact sliding-window timestamps',
+                        [({}, s.get('events', 0))])
+            _emit_gauge(out, 'tofu_rate_limit_memory_event_capacity',
+                        'Maximum resident exact timestamps',
+                        [({}, s.get('event_capacity', 0))])
+            _emit_counter(
+                out, 'tofu_rate_limit_memory_bucket_evictions_total',
+                'Rate-limit buckets evicted by reason', [
+                    ({'reason': 'expired'},
+                     s.get('expired_bucket_evictions', 0)),
+                    ({'reason': 'bucket_capacity'},
+                     s.get('bucket_capacity_evictions', 0)),
+                    ({'reason': 'event_capacity'},
+                     s.get('event_capacity_evictions', 0)),
+                ])
+            _emit_counter(
+                out, 'tofu_rate_limit_memory_event_rejections_total',
+                'Requests rejected by the exact-timestamp capacity ceiling',
+                [({}, s.get('event_capacity_rejections', 0))])
+    except Exception as e:
+        logger.debug('[Metrics] memory rate-limit block failed: %s', e)
     try:
         from lib.agent_core.admission import controller
         st = controller.stats()
@@ -372,6 +683,18 @@ def _collect_infra_metrics(out: list) -> None:
         _emit_gauge(out, 'tofu_push_bus_reconnect_seconds',
                     'Seconds until the next push-bus reconnect attempt',
                     [({'backend': backend}, bus.get('reconnect_in_s', 0.0))])
+        for metric_name, description in (
+            ('client_capacity', 'Local /api/push WebSocket capacity'),
+            ('owner_client_capacity', 'Per-owner local /api/push capacity'),
+            ('event_queue_items', 'Queued lossy Push event frames'),
+            ('event_retained_bytes', 'Serialized bytes retained by Push queues'),
+            ('event_queue_byte_capacity_per_client',
+             'Push event byte capacity per client'),
+            ('event_max_bytes', 'Maximum bytes in one Push event frame'),
+        ):
+            _emit_gauge(
+                out, f'tofu_push_{metric_name}', description,
+                [({}, bus.get(metric_name, 0))])
         from lib.control_rpc import control_rpc_metrics
         rpc = control_rpc_metrics()
         for metric_name in (

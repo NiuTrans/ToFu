@@ -1,12 +1,10 @@
-"""tests/test_api_v1_byo_surface_polish.py — Surface ergonomics audit.
+"""Model-routing v2 discovery and outbound-header surface audit.
 
 Covers improvements layered on top of the original BYO surface:
 
-* /v1/models surfaces the caller's BYO providers as
-  ``{id: "<model>@<prov_id>"}`` so OpenAI SDKs see them.
+* /v1/models projects owner-visible official models without provider suffixes.
 * /api/v1/providers rejects reserved header names in ``extra_headers``.
-* /api/v1/providers' ``auto_discover`` defaults to ``false``
-  (registration is fast and unconditional; probe is a separate call).
+* ProviderAccess registration is a local CAS write, not a network probe.
 * sanitise_extra_headers() drops too-long values and non-scalars.
 """
 
@@ -14,6 +12,17 @@ pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import unittest
+
+import pytest
+
+from tests.support.model_routing import (
+    clear_test_model_routing,
+    install_native_test_model_route,
+    native_test_provider_bundle,
+)
+
+
+pytestmark = pytest.mark.unit
 
 
 def _new_loop_run(coro):
@@ -111,63 +120,170 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
             name='bob', scopes=['providers', 'chat'])
 
     def setUp(self):
-        from lib.byo_providers import delete_provider, list_providers
         for owner_user_id in (self.ALICE_OWNER, self.BOB_OWNER):
-            for provider in list_providers(owner_user_id):
-                delete_provider(provider['id'], owner_user_id)
+            clear_test_model_routing(owner_user_id=owner_user_id)
 
     def test_v1_models_includes_callers_byo(self):
         async def go():
             cli = self.app.test_client()
-            # Alice registers an endpoint
-            r1 = await cli.post(
-                '/api/v1/providers',
-                headers={'Authorization': f'Bearer {self.alice}'},
-                json={'name': 'A',
-                      'base_url': 'http://10.0.0.5:8080/v1',
-                      'models': [{'model_id': 'qwen3.5-FP8'},
-                                  {'model_id': 'glm-5.1'}]})
-            self.assertEqual(r1.status_code, 201,
-                              await r1.get_data(as_text=True))
-            prov_id = (await r1.get_json())['provider']['id']
+            install_native_test_model_route(owner_user_id=self.ALICE_OWNER)
 
-            # Alice sees both her models with the suffix attached
             r2 = await cli.get(
                 '/v1/models',
                 headers={'Authorization': f'Bearer {self.alice}'})
             self.assertEqual(r2.status_code, 200)
             data = await r2.get_json()
-            ids = {m['id'] for m in data['data']}
-            self.assertIn(f'qwen3.5-FP8@{prov_id}', ids)
-            self.assertIn(f'glm-5.1@{prov_id}', ids)
+            models = {m['id']: m for m in data['data']}
+            self.assertIn('stub-model', models)
+            self.assertEqual(
+                models['stub-model']['tofu']['creator_id'], 'tofu-test')
+            self.assertEqual(
+                models['stub-model']['tofu']['provider_ids'],
+                ['test-provider'])
 
-            # Bob does NOT see Alice's BYO models
             r3 = await cli.get(
                 '/v1/models',
                 headers={'Authorization': f'Bearer {self.bob}'})
             data3 = await r3.get_json()
             ids3 = {m['id'] for m in data3['data']}
-            self.assertNotIn(f'qwen3.5-FP8@{prov_id}', ids3)
+            self.assertNotIn('stub-model', ids3)
 
         _new_loop_run(go())
 
-    def test_provider_register_default_does_not_auto_discover(self):
-        # auto_discover defaults to False — registration is fast even
-        # if the endpoint would have hung. We assert nothing tries to
-        # contact the URL by giving an unroutable port and short
-        # success path: the request returns 201 quickly, with empty
-        # models.
+    def test_v1_models_lists_pending_identity_by_wire_request_id(self):
+        async def go():
+            from lib.model_routing import ModelRoutingRepository, OwnerBoundary
+
+            cli = self.app.test_client()
+            install_native_test_model_route(owner_user_id=self.ALICE_OWNER)
+            repository = ModelRoutingRepository()
+            boundary = OwnerBoundary.create(self.ALICE_OWNER)
+            aggregate = repository.get(boundary)
+            offering = aggregate.document['offerings'][0]
+            offering['identity_state'] = 'pending_identity'
+            offering['pending_model_id'] = 'unconfirmed-preview'
+            offering.pop('model')
+            repository.compare_and_swap(
+                boundary,
+                aggregate.document,
+                expected_revision=aggregate.revision,
+            )
+
+            response = await cli.get(
+                '/v1/models',
+                headers={'Authorization': f'Bearer {self.alice}'})
+            self.assertEqual(response.status_code, 200)
+            payload = await response.get_json()
+            models = {row['id']: row for row in payload['data']}
+            self.assertNotIn('stub-model', models)
+            self.assertEqual(
+                set(models),
+                {'stub-model-wire', 'stub-model-anthropic-wire'},
+            )
+            for row in models.values():
+                self.assertEqual(
+                    row['tofu']['preferred_provider_id'], 'test-provider')
+                self.assertEqual(row['tofu']['offering_id'], 'test-offering')
+                self.assertTrue(row['tofu']['pending_identity'])
+                self.assertNotIn('@', row['id'])
+
+        _new_loop_run(go())
+
+    def test_v1_embeddings_uses_owner_scoped_v2_route(self):
+        async def go():
+            import os
+
+            import lib.http_client as http_client
+            from lib.model_routing import ModelRoutingRepository, OwnerBoundary
+
+            cli = self.app.test_client()
+            install_native_test_model_route(owner_user_id=self.ALICE_OWNER)
+            repository = ModelRoutingRepository()
+            boundary = OwnerBoundary.create(self.ALICE_OWNER)
+            authority = repository.get(boundary)
+            authority.document['models'][0]['capabilities'] = ['embedding']
+            authority.document['offerings'][0]['capabilities'] = ['embedding']
+            for connection in authority.document['connections']:
+                if connection['protocol'] == 'openai':
+                    connection['base_url'] = 'http://127.0.0.1:18080/v1'
+            repository.compare_and_swap(
+                boundary,
+                authority.document,
+                expected_revision=authority.revision,
+            )
+
+            calls = []
+
+            class Response:
+                ok = True
+                status_code = 200
+                text = ''
+
+                @staticmethod
+                def json():
+                    return {
+                        'object': 'list',
+                        'data': [{'index': 0, 'embedding': [0.25, 0.75]}],
+                        'model': 'stub-model-wire',
+                    }
+
+            original_post = http_client.http_post
+            original_preflight = os.environ.get('TOFU_EPHEMERAL_PREFLIGHT')
+            os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
+            http_client.http_post = lambda url, **kwargs: (
+                calls.append((url, kwargs)) or Response())
+            try:
+                response = await cli.post(
+                    '/v1/embeddings',
+                    headers={'Authorization': f'Bearer {self.alice}'},
+                    json={'model': 'stub-model', 'input': 'owner text'},
+                )
+                self.assertEqual(
+                    response.status_code, 200,
+                    await response.get_data(as_text=True),
+                )
+                payload = await response.get_json()
+                self.assertEqual(payload['data'][0]['embedding'], [0.25, 0.75])
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(
+                    calls[0][0], 'http://127.0.0.1:18080/v1/embeddings')
+                self.assertEqual(calls[0][1]['json'], {
+                    'model': 'stub-model-wire',
+                    'input': ['owner text'],
+                })
+                self.assertNotIn('Authorization', calls[0][1]['headers'])
+
+                foreign = await cli.post(
+                    '/v1/embeddings',
+                    headers={'Authorization': f'Bearer {self.bob}'},
+                    json={'model': 'stub-model', 'input': 'foreign text'},
+                )
+                self.assertEqual(foreign.status_code, 400)
+                self.assertEqual(len(calls), 1)
+            finally:
+                http_client.http_post = original_post
+                if original_preflight is None:
+                    os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
+                else:
+                    os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = original_preflight
+
+        _new_loop_run(go())
+
+    def test_provider_registration_is_local_and_does_not_probe(self):
         async def go():
             cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.alice}'}
+            authority = await cli.get('/api/v1/model-routing', headers=headers)
+            revision = (await authority.get_json())['revision']
             import time as _time
             t0 = _time.time()
             r = await cli.post(
                 '/api/v1/providers',
-                headers={'Authorization': f'Bearer {self.alice}'},
-                json={'name': 'fast-reg',
-                      'base_url': 'http://127.0.0.1:1/v1',  # port 1 = no service
-                      'api_key': '',
-                      'models': []})
+                headers=headers,
+                json=native_test_provider_bundle(
+                    expected_revision=revision,
+                    provider_id='fast-reg',
+                    base_url='http://127.0.0.1:1/v1'))
             elapsed = _time.time() - t0
             self.assertEqual(r.status_code, 201,
                               await r.get_data(as_text=True))
@@ -176,24 +292,102 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
                              f'registration took {elapsed:.2f}s; '
                              f'auto_discover may not be off by default')
             body = await r.get_json()
-            self.assertEqual(body['provider']['models'], [])
+            self.assertEqual(body['provider']['offerings'], [])
+            self.assertEqual(body['provider']['deployments'], [])
+
+        _new_loop_run(go())
+
+    def test_provider_template_compiles_meituan_faces_into_v2_connections(self):
+        async def go():
+            cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.alice}'}
+            listed = await cli.get(
+                '/api/v1/providers/templates', headers=headers)
+            self.assertEqual(listed.status_code, 200)
+            templates = (await listed.get_json())['items']
+            self.assertIn('meituan', {row['key'] for row in templates})
+
+            compiled = await cli.post(
+                '/api/v1/providers/templates/compile',
+                headers=headers,
+                json={
+                    'template_key': 'meituan',
+                    'selected_model_ids': [
+                        'LongCat-2.0', 'claude-opus-4.8',
+                    ],
+                },
+            )
+            self.assertEqual(
+                compiled.status_code, 200,
+                await compiled.get_data(as_text=True))
+            bundle = (await compiled.get_json())['provider_bundle']
+            self.assertEqual(bundle['provider']['brand'], 'meituan')
+            self.assertEqual(
+                {row['protocol'] for row in bundle['connections']},
+                {'openai', 'anthropic'},
+            )
+            connection_protocol = {
+                row['connection_id']: row['protocol']
+                for row in bundle['connections']
+            }
+            offering_by_id = {
+                row['offering_id']: row for row in bundle['offerings']
+            }
+            claude_deployment = next(
+                row for row in bundle['deployments']
+                if offering_by_id[row['offering_id']].get('model', {}).get(
+                    'model_id') == 'claude-opus-4.8'
+            )
+            self.assertEqual(
+                connection_protocol[claude_deployment['connection_id']],
+                'anthropic',
+            )
+            self.assertTrue(all(
+                not row['secret_reference'] and not row['key_hint']
+                for row in bundle['credentials']))
+            self.assertNotIn('template-secret-placeholder', str(bundle))
 
         _new_loop_run(go())
 
     def test_provider_register_rejects_reserved_header(self):
         async def go():
+            from lib.model_routing import ModelRoutingRepository, OwnerBoundary
+
+            cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.alice}'}
+            repository = ModelRoutingRepository()
+            boundary = OwnerBoundary.create(self.ALICE_OWNER)
+            secrets_before = repository.secret_metadata(boundary)
+            authority = await cli.get('/api/v1/model-routing', headers=headers)
+            revision = (await authority.get_json())['revision']
+            r = await cli.post(
+                '/api/v1/providers',
+                headers=headers,
+                json=native_test_provider_bundle(
+                    expected_revision=revision,
+                    provider_id='evil',
+                    extra_headers={'Authorization': 'Bearer override'}))
+            self.assertEqual(r.status_code, 400)
+            body = await r.get_json()
+            self.assertIn('reserved', str(body))
+            self.assertEqual(
+                repository.secret_metadata(boundary), secrets_before,
+                'a rejected aggregate must reclaim its staged secret',
+            )
+        _new_loop_run(go())
+
+    def test_provider_register_requires_explicit_cas_revision(self):
+        async def go():
             cli = self.app.test_client()
             r = await cli.post(
                 '/api/v1/providers',
                 headers={'Authorization': f'Bearer {self.alice}'},
-                json={'name': 'evil',
-                      'base_url': 'http://10.0.0.5:8080/v1',
-                      'api_key': 'sk-x',
-                      'extra_headers': {'Authorization': 'Bearer override'},
-                      'models': [{'model_id': 'm'}]})
+                json={},
+            )
             self.assertEqual(r.status_code, 400)
             body = await r.get_json()
-            self.assertIn('reserved', str(body))
+            self.assertEqual(body['field'], 'expected_revision')
+
         _new_loop_run(go())
 
 

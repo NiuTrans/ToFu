@@ -25,6 +25,7 @@ import threading
 import time
 
 from lib import agent_inbox
+from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.swarm.integration._config import (
     MAX_SESSIONS,
@@ -32,6 +33,7 @@ from lib.swarm.integration._config import (
     _CLEANUP_INTERVAL,
 )
 from lib.swarm.master import MasterOrchestrator
+from lib.swarm.persistence_contract import SWARM_SESSION_TERMINAL_STATUSES
 
 logger = get_logger(__name__)
 
@@ -66,6 +68,11 @@ _last_cleanup: float = 0.0
 _cleanup_timer: threading.Timer | None = None
 _cleanup_timer_starts = 0
 _cleanup_timer_retirements = 0
+_RETIRED_ALIAS_CAPACITY = max(8, MAX_SESSIONS * 4)
+
+
+class SwarmSessionCapacityExceeded(RuntimeError):
+    """The finite process registry has no slot for another live session."""
 
 
 def _resolve_key(arg: str) -> str:
@@ -347,12 +354,18 @@ def swarm_cleanup_snapshot() -> dict:
     """Return bounded, non-authoritative timer lifecycle diagnostics."""
     with _sessions_lock:
         timer = _cleanup_timer
-        return {
+        snapshot = {
             'activeSessions': len(_active_sessions),
+            'sessionCapacity': MAX_SESSIONS,
+            'aliases': len(_key_aliases),
+            'retiredAliasCapacity': _RETIRED_ALIAS_CAPACITY,
             'timerAlive': bool(timer is not None and timer.is_alive()),
             'timerStarts': _cleanup_timer_starts,
             'timerRetirements': _cleanup_timer_retirements,
         }
+    from lib.swarm.execution_gate import process_swarm_execution_gate
+    snapshot['execution'] = process_swarm_execution_gate().snapshot()
+    return snapshot
 
 
 # ── Session getters / setters ────────────────────────────
@@ -365,6 +378,40 @@ def _get_session(task_id: str) -> MasterOrchestrator | None:
         return session
 
 
+def _retire_oldest_terminal_session_locked() -> str | None:
+    """Release one in-memory terminal session while preserving durable truth.
+
+    A completed swarm may remain queryable in memory until TTL, but it must
+    never block a new productive conversation at the live-session ceiling.
+    The persisted terminal row remains authoritative for later status/result
+    lookup; inbox delivery is also retained.
+    """
+    for key in sorted(_session_timestamps, key=_session_timestamps.get):
+        session = _active_sessions.get(key)
+        if session is None or not bool(getattr(session, 'is_terminated', False)):
+            continue
+        _active_sessions.pop(key, None)
+        _session_timestamps.pop(key, None)
+        # Keep recent task-id aliases pointing at the durable swarm key so a
+        # status route that only knows the spawning task id still resolves
+        # after terminal memory retires. Bound aliases independently; active
+        # session aliases are never candidates for this pruning.
+        retired_aliases = [
+            alias for alias, target in _key_aliases.items()
+            if target not in _active_sessions
+        ]
+        for alias in retired_aliases[:-_RETIRED_ALIAS_CAPACITY]:
+            _key_aliases.pop(alias, None)
+        with _autocontinue_lock:
+            _autocontinue_chain.pop(key, None)
+            _autocontinue_inflight.discard(key)
+        logger.info(
+            '[Swarm:%s] retired terminal in-memory session to admit new work '
+            '(durable result preserved)', key)
+        return key
+    return None
+
+
 def _set_session(swarm_key: str, session: MasterOrchestrator, *,
                  task_id: str = ''):
     """Register *session* under its stable swarm key.
@@ -375,6 +422,13 @@ def _set_session(swarm_key: str, session: MasterOrchestrator, *,
     """
     with _sessions_lock:
         _cleanup_stale_sessions()
+        if (swarm_key not in _active_sessions
+                and len(_active_sessions) >= MAX_SESSIONS):
+            _retire_oldest_terminal_session_locked()
+        if (swarm_key not in _active_sessions
+                and len(_active_sessions) >= MAX_SESSIONS):
+            raise SwarmSessionCapacityExceeded(
+                f'swarm session capacity reached ({MAX_SESSIONS})')
         _active_sessions[swarm_key] = session
         _session_timestamps[swarm_key] = time.time()
         if task_id and task_id != swarm_key:
@@ -490,8 +544,13 @@ def _status_from_persistence(task_id: str, *, user_id: int) -> dict | None:
     if row is None:
         return None
     config = row.get('config') or {}
-    if (not isinstance(config, dict)
-            or int(config.get('user_id') or 0) != int(user_id)):
+    try:
+        persisted_owner_user_id = require_user_id(
+            config.get('user_id') if isinstance(config, dict) else None,
+            context='persisted swarm status')
+    except ValueError:
+        return None
+    if persisted_owner_user_id != int(user_id):
         return None
     agents: list[dict] = []
     for a in (row.get('agents') or []):
@@ -506,7 +565,7 @@ def _status_from_persistence(task_id: str, *, user_id: int) -> dict | None:
             'error':     (result.get('error_message') or '')
                          if isinstance(result, dict) else '',
         })
-    if row.get('status') == 'terminated':
+    if row.get('status') in SWARM_SESSION_TERMINAL_STATUSES:
         return {
             'active':     False,
             'known':      True,

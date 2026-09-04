@@ -24,19 +24,19 @@ also *looked* like a bug being re-patched forever.
 
 The remaining 0.1% are genuine producers (send-race duplicate user rows,
 error-ghost adjacency from the DB, endpoint leaks). Those must ALARM — at
-WARNING, with the pair's location + a preview — so the source is one grep away
-instead of invisible.
+WARNING, with the pair's location + bounded content shape but never prompt
+text — so the source is one grep away without leaking private content.
 
 THE CONTRACT THIS SUITE PINS
 ----------------------------
-  1. A pair where EITHER side is a synthetic-context message (content starts
-     with ``<system-reminder>`` / ``<swarm-update>`` or carries a known marker)
-     merges with NO INFO/WARNING (debug only).
+  1. An ORIGINAL adjacency where EITHER side is a synthetic-context message
+     (content starts with ``<system-reminder>`` / ``<swarm-update>`` or carries
+     a known marker) merges with NO INFO/WARNING (debug only).
   2. Any other pair merges (the provider-safety behavior is unchanged) AND
-     fires ONE WARNING carrying the merged-away index ``#i/role`` + a preview.
-  3. The accumulator is NOT a laundering channel: after a designed pair fuses,
-     a following REAL duplicate user row must still alarm (the fused message
-     is no longer "purely synthetic").
+     fires ONE WARNING carrying the merged-away index ``#i/role`` + shape.
+  3. Classification follows original pair boundaries, not the fused
+     accumulator.  This makes ``real anchor → retained wrapper → current user``
+     silent while a following REAL duplicate still alarms.
   4. The merged CONTENT is byte-identical to the legacy merge (this change is
      observability-only).
 
@@ -76,6 +76,12 @@ _CARRIER_BODY = ('<system-reminder>\n[PROJECT CO-PILOT MODE]\n'
 _ATTACHMENT_BODY = ('<system-reminder>\n## Recently Modified Files\n'
                     'Files that were modified earlier…\n</system-reminder>')
 _SWARM_BODY = '<swarm-update>\n  <agent-id>a1</agent-id>\n</swarm-update>'
+_RETAINED_BODY = (
+    '<retained_user_messages>\n'
+    "The user's earlier messages, preserved verbatim.\n"
+    '[1] earlier instruction\n'
+    '</retained_user_messages>'
+)
 
 
 @contextmanager
@@ -127,7 +133,7 @@ def test_designed_carrier_pair_merges_silently():
         f'designed seam must not log WARNING: {[r.getMessage() for r in _at(recs, logging.WARNING)]}')
 
 
-def test_unexpected_user_pair_warns_with_location_and_preview():
+def test_unexpected_user_pair_warns_with_location_and_shape_only():
     """Two plain adjacent user rows (send-race dup / ghost-created adjacency):
     merge still happens (provider safety) AND one WARNING names the merged-away
     index ``#1/user`` + a content preview."""
@@ -141,7 +147,8 @@ def test_unexpected_user_pair_warns_with_location_and_preview():
         f'{[r.getMessage() for r in recs]}')
     text = warns[0].getMessage()
     assert '#1/user' in text, f'location token #1/user missing: {text}'
-    assert '第二句' in text, f'merged-away preview missing: {text}'
+    assert 'text_chars=3' in text, f'content shape missing: {text}'
+    assert '第二句' not in text, f'private prompt content leaked: {text}'
 
 
 def test_swarm_inbox_pair_is_by_design():
@@ -164,11 +171,62 @@ def test_attachment_reminder_pair_is_by_design():
     assert not _at(recs, logging.WARNING)
 
 
+def test_compaction_retained_wrapper_bridges_anchor_and_current_user():
+    """Compaction rebuilds ``system → objective anchor → retained wrapper →
+    current user`` (with an optional Context Composer carrier before the
+    anchor).  Both ORIGINAL edges around the synthetic wrapper are designed;
+    merging the left edge must not make the right edge look like a second
+    naked user row."""
+    msgs = [
+        {'role': 'system', 'content': 'sys'},
+        _carrier(),
+        _user('immutable objective anchor'),
+        _user(_RETAINED_BODY),
+        _user('current user request'),
+    ]
+    with _capture() as recs:
+        out = _merge_consecutive_same_role(msgs)
+    assert len(out) == 2, f'the four-user header must merge (got {len(out)})'
+    assert out[1]['content'] == '\n\n'.join(
+        [
+            _CARRIER_BODY,
+            'immutable objective anchor',
+            _RETAINED_BODY,
+            'current user request',
+        ]
+    )
+    assert not _at(recs, logging.INFO)
+    assert not _at(recs, logging.WARNING), (
+        'a compaction retention wrapper is a designed boundary on both sides: '
+        f'{[r.getMessage() for r in _at(recs, logging.WARNING)]}')
+
+
+def test_relocated_anchor_hint_pair_is_by_design_and_hint_is_consumed():
+    """With zero retained rows, L2 rebuilds anchor→current directly.  The
+    field-strip carrier is deliberately internal and must disappear here."""
+    from lib.llm_sanitize._fields import _SAME_ROLE_SEAM_HINT_FIELD
+
+    msgs = [
+        {'role': 'user', 'content': 'immutable objective anchor',
+         _SAME_ROLE_SEAM_HINT_FIELD: True},
+        _user('current user request'),
+    ]
+    with _capture() as recs:
+        out = _merge_consecutive_same_role(msgs)
+    assert len(out) == 1
+    assert out[0]['content'] == (
+        'immutable objective anchor\n\ncurrent user request')
+    assert _SAME_ROLE_SEAM_HINT_FIELD not in out[0]
+    assert not _at(recs, logging.WARNING), (
+        'a relocated objective-anchor boundary is designed: '
+        f'{[r.getMessage() for r in _at(recs, logging.WARNING)]}')
+
+
 def test_fused_accumulator_does_not_launder_a_real_dup():
     """[system, carrier, user1, user1-dup]: pair 1 (carrier+user1) is designed
-    and silent, but pair 2 (fused-accumulator + a REAL duplicate user row)
-    must still alarm — the fused message is no longer purely synthetic, so a
-    genuine bad-data producer can never hide behind the carrier."""
+    and silent, but pair 2 is an original user1→REAL-duplicate boundary and
+    must still alarm. A genuine bad-data producer can never hide behind a
+    carrier that occurred two positions earlier."""
     with _capture() as recs:
         msgs = [{'role': 'system', 'content': 'sys'}, _carrier(),
                 _user('真实用户消息'), _user('真实用户消息')]
@@ -197,9 +255,11 @@ def test_unexpected_assistant_pair_warns():
 
 _POSITIVE = [
     test_designed_carrier_pair_merges_silently,
-    test_unexpected_user_pair_warns_with_location_and_preview,
+    test_unexpected_user_pair_warns_with_location_and_shape_only,
     test_swarm_inbox_pair_is_by_design,
     test_attachment_reminder_pair_is_by_design,
+    test_compaction_retained_wrapper_bridges_anchor_and_current_user,
+    test_relocated_anchor_hint_pair_is_by_design_and_hint_is_consumed,
     test_fused_accumulator_does_not_launder_a_real_dup,
     test_unexpected_assistant_pair_warns,
 ]
@@ -210,12 +270,15 @@ _POSITIVE = [
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TARGET = os.path.join(_ROOT, 'lib', 'llm_sanitize', '_messages.py')
 
-# Anchor: the synthetic-context predicate's prefix classification. Neutering
-# it to always-False makes every pair "unexpected", so the designed seams
-# flip into WARNING and the silent-tests fail.
-_NC_FIND = '    if head.startswith(_SYNTHETIC_PAIR_PREFIXES):\n'
-_NC_REPL = ('    return False  # NC: neuter synthetic-context classification\n'
-            '    if head.startswith(_SYNTHETIC_PAIR_PREFIXES):\n')
+# Anchor the predicate itself, not one of its text-prefix branches. Designed
+# carriers may be identified by producer-owned fields before content sniffing;
+# neutering only the latter leaves ``_isMeta`` live and makes the mutation
+# control lie about classifier coverage.
+_NC_FIND = 'def _is_synthetic_context_msg(msg) -> bool:\n'
+_NC_REPL = (
+    'def _is_synthetic_context_msg(msg) -> bool:\n'
+    '    return False  # NC: neuter ALL synthetic-context classification\n'
+)
 
 
 def _run(fn):
@@ -248,8 +311,12 @@ def main():
         silent_ok = _run(test_designed_carrier_pair_merges_silently)
         swarm_ok = _run(test_swarm_inbox_pair_is_by_design)
         attach_ok = _run(test_attachment_reminder_pair_is_by_design)
-        warn_ok = _run(test_unexpected_user_pair_warns_with_location_and_preview)
-    if silent_ok or swarm_ok or attach_ok:
+        compact_ok = _run(
+            test_compaction_retained_wrapper_bridges_anchor_and_current_user)
+        anchor_ok = _run(
+            test_relocated_anchor_hint_pair_is_by_design_and_hint_is_consumed)
+        warn_ok = _run(test_unexpected_user_pair_warns_with_location_and_shape_only)
+    if silent_ok or swarm_ok or attach_ok or compact_ok or anchor_ok:
         sys.exit('NC: a designed-seam test PASSED with the classifier neutered — '
                  'classification is not load-bearing!')
     if not warn_ok:

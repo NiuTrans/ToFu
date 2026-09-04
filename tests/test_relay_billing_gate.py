@@ -20,6 +20,9 @@ import pytest
 import lib.relay_config as rc
 
 
+pytestmark = pytest.mark.unit
+
+
 @pytest.fixture()
 def relay_file(tmp_path, monkeypatch):
     """Point lib.relay_config at a temp relay.json and clear the env."""
@@ -321,23 +324,32 @@ def test_model_relay_guard_allows_when_enabled(relay_file):
 
 
 def test_guard_or_dispose_invariant(relay_file, monkeypatch):
-    """The one-shot helper rejects ONLY when there is no BYO handle (pool
-    request); a present handle is a BYO request and always passes. This
-    is the invariant that makes the disposal branch unreachable — assert
-    it so a future refactor that breaks it fails loudly here."""
+    """BYO-only mode allows only all-owner v2 failover sets.
+
+    Public or mixed groups are disposed before dispatch, so a retry can never
+    escape onto an operator credential after an owner candidate fails.
+    """
     relay_file({'model_relay_enabled': False})
     import server  # noqa: F401 — installs Flask→Quart shim
     from server import app
     from lib.api_keys import AuthContext
     from quart import g
-    import lib.llm_dispatch.ephemeral as eph
+    import lib.model_routing as model_routing
 
     disposed = []
-    monkeypatch.setattr(eph, 'dispose_ephemeral_slot',
-                        lambda h: disposed.append(h), raising=False)
+    monkeypatch.setattr(
+        model_routing,
+        'dispose_routed_slot_group',
+        lambda group: disposed.append(group),
+    )
 
-    class _FakeHandle:
-        handle_id = 'h_test'
+    class _Candidate:
+        def __init__(self, scope):
+            self.provider = {'scope': scope}
+
+    class _RouteGroup:
+        def __init__(self, *scopes):
+            self.candidates = [_Candidate(scope) for scope in scopes]
 
     from routes.api_v1.auth import guard_model_relay_or_dispose
 
@@ -348,12 +360,20 @@ def test_guard_or_dispose_invariant(relay_file, monkeypatch):
                                      rate_limit_rpm=0, rate_limit_tpd=0,
                                      owner_user_id=2,
                                      account_user_id='usr_1')
-            # Pool request (no handle) → rejected, nothing to dispose.
+            # Missing/public routes may consume an operator credential.
             assert guard_model_relay_or_dispose(None) is not None
-            # BYO request (handle present) → allowed, slot survives.
-            handle = _FakeHandle()
-            assert guard_model_relay_or_dispose(handle) is None
-            assert handle not in disposed
+            public_group = _RouteGroup('public')
+            assert guard_model_relay_or_dispose(public_group) is not None
+            assert public_group in disposed
+
+            # Every failover candidate must remain owner-scoped. A mixed group
+            # is denied because retry must not cross onto an operator key.
+            owner_group = _RouteGroup('owner', 'owner')
+            assert guard_model_relay_or_dispose(owner_group) is None
+            assert owner_group not in disposed
+            mixed_group = _RouteGroup('owner', 'public')
+            assert guard_model_relay_or_dispose(mixed_group) is not None
+            assert mixed_group in disposed
 
     import asyncio
     asyncio.new_event_loop().run_until_complete(_run())

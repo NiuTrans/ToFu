@@ -45,6 +45,7 @@ def test_library_routes_scope_every_sidecar_operation_to_request_owner(monkeypat
     monkeypatch.setattr(library, "async_parse_body", lambda: _async_value({"title": "T"}))
 
     asyncio.run(library.list_library())
+    asyncio.run(library.list_library_summaries())
     asyncio.run(library.upsert_library_entry("paper-1"))
     asyncio.run(library.delete_library_entry("paper-1"))
     asyncio.run(library.prune_broken_library_rows())
@@ -57,6 +58,91 @@ def test_library_routes_scope_every_sidecar_operation_to_request_owner(monkeypat
         f":{OWNER}:" in command_id
         for _operation, _payload, command_id in client.commands
     )
+
+
+def test_library_http_summaries_omit_content_but_detail_restores_it(monkeypatch):
+    import routes.paper_pkg._library as library
+    from lib.paper.library_repository import PaperLibraryEntry
+
+    entry = PaperLibraryEntry(
+        paper_id="paper-1",
+        title="Paper",
+        arxiv_id="2608.00001",
+        parsed_text="full body",
+        qa_history=[{"q": "why"}],
+        images=[{"path": "figure.png"}],
+        babel_cache={"1": "translated"},
+    )
+
+    class Repository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == OWNER
+
+        def list_summaries(self):
+            return [entry]
+
+        def get(self, paper_id):
+            assert paper_id == "paper-1"
+            return entry
+
+        def reader_detail(self, paper_id):
+            return self.get(paper_id)
+
+    monkeypatch.setattr(library, "request_user_id", lambda: OWNER)
+    monkeypatch.setattr(library, "PaperLibraryRepository", Repository)
+    monkeypatch.setattr(library, "api_ok", lambda value=None: value or {"ok": True})
+
+    summaries = asyncio.run(library.list_library_summaries())
+    detail = asyncio.run(library.get_library_entry("paper-1"))
+
+    summary = summaries["papers"][0]
+    assert not {"parsedText", "qaHistory", "images", "babelCache"} & summary.keys()
+    assert detail["paper"]["parsedText"] == "full body"
+    assert detail["paper"]["qaHistory"] == [{"q": "why"}]
+    assert "babelCache" not in detail["paper"]
+
+
+def test_metadata_only_http_upsert_preserves_unmentioned_large_fields(monkeypatch):
+    import routes.paper_pkg._library as library
+    from lib.paper.library_repository import PaperLibraryEntry
+
+    stored = PaperLibraryEntry(
+        paper_id="paper-1",
+        title="Paper",
+        qa_history=[{"q": "keep"}],
+        babel_cache={"zh": "keep translated body"},
+        folder_id="old-folder",
+    )
+    written = []
+
+    class Repository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == OWNER
+
+        def get(self, paper_id):
+            assert paper_id == "paper-1"
+            return stored
+
+        def put(self, entry, *, command_id):
+            written.append((entry, command_id))
+            return True
+
+    monkeypatch.setattr(library, "request_user_id", lambda: OWNER)
+    monkeypatch.setattr(library, "PaperLibraryRepository", Repository)
+    monkeypatch.setattr(
+        library,
+        "async_parse_body",
+        lambda: _async_value({"folderId": "new-folder"}),
+    )
+    monkeypatch.setattr(library, "api_ok", lambda value=None: value or {"ok": True})
+
+    asyncio.run(library.upsert_library_entry("paper-1"))
+
+    entry, command_id = written[0]
+    assert entry.folder_id == "new-folder"
+    assert entry.qa_history == [{"q": "keep"}]
+    assert entry.babel_cache == {"zh": "keep translated body"}
+    assert f":{OWNER}:paper-1:" in command_id
 
 
 async def _async_value(value):
@@ -124,8 +210,8 @@ def test_report_export_title_lookup_uses_request_owner(monkeypatch):
         def __init__(self, user_id):
             calls.append(("library.owner", user_id))
 
-        def identity(self, paper_hash):
-            calls.append(("library.identity", paper_hash))
+        def identity(self, paper_hash, *, max_text_chars=None):
+            calls.append(("library.identity", paper_hash, max_text_chars))
             return SimpleNamespace(title="Owned title", arxiv_id="")
 
     monkeypatch.setattr(report, "request_user_id", lambda: OWNER)
@@ -151,4 +237,4 @@ def test_report_export_title_lookup_uses_request_owner(monkeypatch):
     assert ("artifact.owner", OWNER) in calls
     assert ("artifact.get", "abc123", "en") in calls
     assert ("library.owner", OWNER) in calls
-    assert ("library.identity", "abc123") in calls
+    assert ("library.identity", "abc123", 0) in calls

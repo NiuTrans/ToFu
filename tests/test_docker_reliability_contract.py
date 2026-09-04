@@ -31,19 +31,51 @@ def test_compose_has_bounded_self_healing_runtime():
         'mem_reservation: ${TOFU_MEMORY_RESERVATION:-512m}',
         'pids_limit: ${TOFU_PIDS_LIMIT:-512}',
         'TOFU_MAX_INFLIGHT_TASKS=${TOFU_MAX_INFLIGHT_TASKS:-}',
-        'TOFU_TASK_MAX_API_ROUNDS=${TOFU_TASK_MAX_API_ROUNDS:-}',
         'MALLOC_ARENA_MAX=${TOFU_MALLOC_ARENA_MAX:-2}',
         'TOFU_STORAGE_RPC_CAPACITY=${TOFU_STORAGE_RPC_CAPACITY:-}',
+        'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB=${TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB:-}',
+        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY=${TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY:-}',
         'TOFU_STORAGE_MIN_FREE_BYTES=${TOFU_STORAGE_MIN_FREE_BYTES:-}',
         'TOFU_LOG_TOTAL_BUDGET_MB=${TOFU_LOG_TOTAL_BUDGET_MB:-}',
+        'TOFU_TRANSLATE_CACHE_MAX_MIB=${TOFU_TRANSLATE_CACHE_MAX_MIB:-}',
+        'TOFU_TRANSLATE_MAX_429_ATTEMPTS=${TOFU_TRANSLATE_MAX_429_ATTEMPTS:-}',
+        'TOFU_TRANSLATE_WORKERS=${TOFU_TRANSLATE_WORKERS:-}',
+        'TOFU_TRANSLATE_QUEUE_CAPACITY=${TOFU_TRANSLATE_QUEUE_CAPACITY:-}',
+        'TOFU_TRANSLATE_WORKER_IDLE_SECONDS=${TOFU_TRANSLATE_WORKER_IDLE_SECONDS:-}',
         'TOFU_RUN_PYTHON_CACHE=${TOFU_RUN_PYTHON_CACHE:-}',
         'TOFU_RUN_PYTHON_CACHE_MAX_MIB=${TOFU_RUN_PYTHON_CACHE_MAX_MIB:-}',
+        'TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY=${TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY:-}',
+        'TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY=${TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY:-}',
+        'TOFU_TOOL_RESULT_CACHE_CAPACITY=${TOFU_TOOL_RESULT_CACHE_CAPACITY:-}',
+        'TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS=${TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS:-}',
+        'TOFU_MEMORY_METADATA_CACHE_CAPACITY=${TOFU_MEMORY_METADATA_CACHE_CAPACITY:-}',
+        'TOFU_MEMORY_METADATA_CACHE_MAX_MIB=${TOFU_MEMORY_METADATA_CACHE_MAX_MIB:-}',
+        'TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY=${TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY:-}',
     ):
         assert contract in text, f'missing Docker reliability contract: {contract}'
     for name in (
         'TOFU_SYNC_WORKERS', 'TOFU_AGENT_WORKERS',
-        'TOOL_MAX_PARALLEL_WORKERS', 'TOFU_NUMERIC_THREADS',
+        'TOOL_MAX_PARALLEL_WORKERS', 'TOFU_PRODUCTION_LLM_FANOUT',
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS',
+        'TOFU_PRODUCTION_IMAGE_FANOUT',
+        'TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS',
+        'TOFU_PRODUCTION_TTS_FANOUT',
+        'TOFU_NUMERIC_THREADS',
         'TOFU_STORAGE_SQLITE_READ_POOL', 'TOFU_ATTEMPT_EVENT_TTL_DAYS',
+        'TOFU_PAPER_REPORT_AGENT_TOKEN_BUDGET',
+        'TOFU_PAPER_REPORT_AGENT_DISPATCH_BUDGET',
+        'TOFU_PAPER_QA_AGENT_TOKEN_BUDGET',
+        'TOFU_PAPER_QA_AGENT_DISPATCH_BUDGET',
+        'TOFU_PAPER_DEEPEN_AGENT_TOKEN_BUDGET',
+        'TOFU_PAPER_DEEPEN_AGENT_DISPATCH_BUDGET',
+        'TOFU_PAPER_INSIGHT_AGENT_TOKEN_BUDGET',
+        'TOFU_PAPER_INSIGHT_AGENT_DISPATCH_BUDGET',
+        'TOFU_PAPER_RECOMMEND_AGENT_TOKEN_BUDGET',
+        'TOFU_PAPER_RECOMMEND_AGENT_DISPATCH_BUDGET',
+        'TOFU_RESEARCH_SURVEY_TOKEN_BUDGET',
+        'TOFU_RESEARCH_SURVEY_DISPATCH_BUDGET',
+        'TOFU_RESEARCH_IDEATE_TOKEN_BUDGET',
+        'TOFU_RESEARCH_IDEATE_DISPATCH_BUDGET',
     ):
         assert f'{name}=${{{name}:-}}' in text
 
@@ -66,7 +98,7 @@ def test_image_healthcheck_uses_liveness_endpoint():
     assert 'http://localhost:15000/health/live' in text
 
 
-def test_empty_optional_provider_environment_does_not_hide_ui_config(
+def test_empty_optional_provider_environment_never_reads_legacy_provider_rows(
         monkeypatch):
     import lib
 
@@ -80,7 +112,7 @@ def test_empty_optional_provider_environment_does_not_hide_ui_config(
     monkeypatch.setenv('LLM_BASE_URL', '')
     monkeypatch.setenv('LLM_MODEL', '')
 
-    assert lib._resolve_base_url() == 'https://saved.example/v1'
+    assert lib._resolve_base_url() == 'https://api.openai.com/v1'
     assert lib._cfg(
         'LLM_MODEL', 'opus', 'fallback', empty_env_is_unset=True,
     ) == 'saved-model'

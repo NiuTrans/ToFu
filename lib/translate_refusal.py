@@ -56,8 +56,13 @@ def _effective_dir() -> str:
     if 'pytest' in sys.modules:
         current = os.environ.get('PYTEST_CURRENT_TEST', '')
         slug = re.sub(r'[^A-Za-z0-9_.-]+', '_', current.split(' ')[0]) or 'collection'
-        # pid in the path: tmpfs outlives a pytest run, and a refusal recorded
-        # by run N (e.g. a manual NEUTER experiment) must not replay in run N+1.
+        # The shared conftest owns one disposable root per pytest process and
+        # reclaims it after normal exit or, on the next run, after a dead-owner
+        # crash. Keep the legacy standalone fallback for runners that bypass
+        # conftest; they must still never write into production refusal state.
+        run_root = os.environ.get('TOFU_PYTEST_RUN_ROOT', '').strip()
+        if run_root:
+            return os.path.join(run_root, 'translate_refusal', slug)
         return os.path.join(tempfile.gettempdir(),
                             f'tofu-translate-refusal-pytest-{os.getpid()}', slug)
     return _REFUSAL_DIR

@@ -21,7 +21,7 @@ const { window, document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body></body>',
   targets: [],
-  globals: { toast: function(){} },
+  globals: {},
 });
 document.head.appendChild = function(node){ injected.push(node); return node; };
 (0, eval)(fs.readFileSync(process.argv[4], 'utf8'));
@@ -74,6 +74,24 @@ def test_owner_failure_is_terminal_and_does_not_load_another_implementation():
       report();
     ''', min_pass=2, label='feature-bridge-terminal')
 
+
+def test_owner_failure_surfaces_error_toast_via_showtoast():
+    _run(r'''
+      let seen = null;
+      globalThis.t = (key) => key;
+      globalThis.showToast = (message, kind) => { seen = { message, kind }; };
+      window.TofuModules = {
+        canInvokeFeature: () => true,
+        invokeFeature: () => Promise.reject(new Error('chunk unavailable')),
+      };
+      window.openSettings();
+      await Promise.resolve();
+      await Promise.resolve();
+      check('load failure reported via showToast', !!seen);
+      check('toast carries the loadFailed copy', seen && seen.message === 'feature.loadFailed');
+      check('toast is an error toast', seen && seen.kind === 'error');
+      report();
+    ''', min_pass=3, label='feature-bridge-failure-toast')
 
 def test_existing_owner_is_never_clobbered():
     _run(r'''

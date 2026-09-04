@@ -13,9 +13,10 @@ from datetime import datetime, timedelta, timezone
 from lib.identity import PrincipalContext
 from lib.log import get_logger
 
-from ._logs import _collect_app_log_signals, _collect_error_log_excerpts
-from ._audit import _collect_audit_events, _collect_audit_secondary
-from ._issues import _collect_recurring_issues
+from lib.optimizer import analyzer as _facade
+from ._logs import _collect_app_log_signals, _safe_tail_lines
+from ._audit import _collect_audit_log_evidence
+from ._issues import _collect_error_log_evidence, _collect_recurring_issues
 from ._signals import (
     _collect_conversation_tool_distribution,
     _collect_cost_outliers,
@@ -94,7 +95,19 @@ def gather_evidence(
     )
 
     if allow_unowned_observability:
-        app_signals = _collect_app_log_signals(cutoff_local)
+        # Reuse one immutable tail across both app-log consumers.  Compute the
+        # post-apply metrics while it is live, then release it before loading
+        # another bounded log tail.
+        app_log_lines = tuple(_safe_tail_lines(_facade.APP_LOG))
+        app_signals = _collect_app_log_signals(
+            cutoff_local, log_lines=app_log_lines)
+        prior_actions = _compute_post_apply_metrics(
+            cutoff_local,
+            owner_user_id=owner_user_id,
+            allow_unowned_observability=True,
+            app_log_lines=app_log_lines,
+        )
+        del app_log_lines
     else:
         app_signals = {
             'tool_call_counts': {},
@@ -108,6 +121,12 @@ def gather_evidence(
             'context_near_full_count': 0,
             'compaction_trigger_count': 0,
         }
+        prior_actions = _compute_post_apply_metrics(
+            cutoff_local,
+            owner_user_id=owner_user_id,
+            allow_unowned_observability=False,
+            app_log_lines=(),
+        )
     bundle.tool_call_counts = app_signals['tool_call_counts']
     bundle.tool_error_counts = app_signals['tool_error_counts']
     bundle.irrelevant_dropped_domains = app_signals['irrelevant_dropped_domains']
@@ -119,12 +138,37 @@ def gather_evidence(
     bundle.context_near_full_count = app_signals['context_near_full_count']
     bundle.compaction_trigger_count = app_signals['compaction_trigger_count']
 
-    audit2 = _collect_audit_secondary(
+    # Audit evidence is owner-filtered in every deployment mode.  Error-log
+    # evidence is personal-only because raw process lines carry no owner.
+    audit_log_lines = tuple(_safe_tail_lines(_facade.AUDIT_LOG_FILE))
+    audit_evidence = _collect_audit_log_evidence(
         cutoff_utc,
         owner_user_id=owner_user_id,
         allow_unowned=allow_unowned_observability,
+        log_lines=audit_log_lines,
     )
-    bundle.model_switch_events = audit2['model_switch_events']
+    del audit_log_lines
+    bundle.model_switch_events = audit_evidence['model_switch_events']
+    bundle.audit_event_counts = audit_evidence['audit_event_counts']
+    optimizer_audit = audit_evidence['optimizer_events']
+    audit_issue_clusters = audit_evidence['tool_error_clusters']
+    error_issue_clusters: dict[str, dict] = {}
+    if allow_unowned_observability:
+        error_log_lines = tuple(_safe_tail_lines(
+            _facade.ERROR_LOG, max_bytes=2 * 1024 * 1024))
+        bundle.error_log_excerpts, error_issue_clusters = (
+            _collect_error_log_evidence(
+                cutoff_local, log_lines=error_log_lines)
+        )
+        del error_log_lines
+    bundle.recurring_issues = _collect_recurring_issues(
+        cutoff_local,
+        cutoff_utc,
+        owner_user_id=owner_user_id,
+        allow_unowned=allow_unowned_observability,
+        audit_issue_clusters=audit_issue_clusters,
+        error_issue_clusters=error_issue_clusters,
+    )
 
     sched = _collect_scheduler_signals(owner_user_id=owner_user_id)
     bundle.failing_scheduled_tasks = sched['failing_scheduled_tasks']
@@ -143,26 +187,9 @@ def gather_evidence(
     bundle.tool_call_counts = merged
     bundle.top_search_domains = conv_signals['search_urls']
 
-    bundle.audit_event_counts, optimizer_audit = _collect_audit_events(
-        cutoff_utc,
-        owner_user_id=owner_user_id,
-        allow_unowned=allow_unowned_observability,
-    )
-    if allow_unowned_observability:
-        bundle.error_log_excerpts = _collect_error_log_excerpts(cutoff_local)
-    bundle.recurring_issues = _collect_recurring_issues(
-        cutoff_local,
-        cutoff_utc,
-        owner_user_id=owner_user_id,
-        allow_unowned=allow_unowned_observability,
-    )
     bundle.daily_report_snippets = _collect_daily_report_snippets(
         days=7, owner_user_id=owner_user_id)
-    bundle.prior_actions = _compute_post_apply_metrics(
-        cutoff_local,
-        owner_user_id=owner_user_id,
-        allow_unowned_observability=allow_unowned_observability,
-    )
+    bundle.prior_actions = prior_actions
 
     # optimizer_audit is kept as debug-only detail — expose via warn_log_excerpts
     # so it shows up in the prompt without a dedicated field

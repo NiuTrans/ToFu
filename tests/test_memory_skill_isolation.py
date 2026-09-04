@@ -12,12 +12,15 @@ Pins the decoupling contract (board epic pt_229606ca):
     create_memory (flat memories unaffected).
 """
 
+import inspect
+import io
 import os
 
 import pytest
 
 import lib.memory.storage as storage
 import lib.memory.storage._dirs as dirs
+import lib.memory.storage._files as memory_files
 
 
 @pytest.fixture()
@@ -187,3 +190,230 @@ def test_flat_memory_crud_unaffected(isolated):
 
     assert storage.delete_memory(mem['id'], project_path=proj) is True
     assert storage.get_memory(mem['id'], project_path=proj) is None
+
+
+@pytest.mark.unit
+def test_metadata_only_memory_read_stops_before_the_body(isolated, monkeypatch):
+    proj = _proj(isolated)
+    memory_dir = os.path.join(proj, '.tofu', 'memories')
+    _write_flat(memory_dir, 'large', body='x' * 1_000_000)
+    path = os.path.join(memory_dir, 'large.md')
+    full = memory_files._memory_from_file(path)
+    source = open(path, encoding='utf-8').read()
+
+    class TrackedText(io.StringIO):
+        def close(self):
+            # Keep ``tell`` observable after the production context manager.
+            pass
+
+    tracked = TrackedText(source)
+
+    def tracked_open(filepath, *args, **kwargs):
+        assert filepath == path
+        return tracked
+
+    monkeypatch.setattr(memory_files, 'open', tracked_open, raising=False)
+    summary = memory_files._memory_from_file(path, include_body=False)
+
+    assert summary is not None and full is not None
+    assert summary['body'] == ''
+    assert {key: value for key, value in summary.items() if key != 'body'} == {
+        key: value for key, value in full.items() if key != 'body'
+    }
+    assert tracked.tell() < 1_024
+
+
+@pytest.mark.unit
+def test_summary_route_requests_metadata_only_storage(monkeypatch):
+    from quart import Quart
+
+    from routes.api_v1.memory import list_memories_v1
+
+    captured = {}
+
+    def fake_list_memories(*, project_path, scope, include_body=None):
+        captured.update(
+            project_path=project_path,
+            scope=scope,
+            include_body=include_body,
+        )
+        return []
+
+    monkeypatch.setattr(storage, 'list_memories', fake_list_memories)
+    app = Quart('memory-summary-io')
+
+    async def invoke():
+        async with app.test_request_context('/api/v1/memory?scope=all&summary=1'):
+            result = inspect.unwrap(list_memories_v1)()
+            if inspect.isawaitable(result):
+                await result
+
+    import asyncio
+    asyncio.run(invoke())
+    assert captured['scope'] == 'all'
+    assert captured['include_body'] is False
+
+
+@pytest.mark.unit
+def test_memory_metadata_cache_is_fresh_and_does_not_reread(isolated, monkeypatch):
+    proj = _proj(isolated)
+    memory_dir = os.path.join(proj, '.tofu', 'memories')
+    _write_flat(memory_dir, 'cached', body='not part of metadata')
+    path = os.path.join(memory_dir, 'cached.md')
+    memory_files._metadata_cache.clear()
+    original = memory_files._read_memory_source
+    reads = []
+
+    def counted_read(filepath, *, include_body=True):
+        reads.append(filepath)
+        return original(filepath, include_body=include_body)
+
+    monkeypatch.setattr(memory_files, '_read_memory_source', counted_read)
+    first = memory_files._memory_from_file(path, include_body=False)
+    monkeypatch.setattr(
+        memory_files._metadata_cache, '_clock_ns', lambda: 10**30)
+    second = memory_files._memory_from_file(path, include_body=False)
+    assert first == second
+    assert reads == [path]
+
+    with open(path, 'w', encoding='utf-8') as target:
+        target.write(
+            '---\nname: revised\n'
+            'description: refreshed metadata after direct edit\n---\n'
+            'not part of metadata\n'
+        )
+    third = memory_files._memory_from_file(path, include_body=False)
+    assert third['name'] == 'revised'
+    assert reads == [path, path]
+    memory_files._metadata_cache.clear()
+
+
+@pytest.mark.unit
+def test_memory_metadata_cache_enforces_entry_and_byte_lru():
+    from lib.memory.storage._metadata_cache import MemoryMetadataCache
+
+    cache = MemoryMetadataCache(max_entries=2, max_bytes=4_096)
+    fingerprint = (1, 2, 3, 4, 5)
+    assert cache.store('/a', fingerprint, {'name': 'a'})
+    assert cache.store('/b', fingerprint, {'name': 'b'})
+    assert cache.lookup('/a', fingerprint) == (True, {'name': 'a'})
+    assert cache.store('/c', fingerprint, {'name': 'c'})
+    assert cache.lookup('/b', fingerprint) == (False, {})
+    assert cache.lookup('/a', fingerprint)[0] is True
+    assert cache.lookup('/c', fingerprint)[0] is True
+    assert not cache.store('/oversized', fingerprint, {
+        'description': 'x' * 4_096,
+    })
+    snapshot = cache.snapshot()
+    assert snapshot['entries'] == 2
+    assert snapshot['retainedBytes'] <= snapshot['maxBytes'] == 4_096
+    assert snapshot['evictions'] == 1
+    assert snapshot['oversized'] == 1
+
+
+@pytest.mark.unit
+def test_memory_metadata_cache_settles_identical_recent_fingerprint():
+    from lib.memory.storage._metadata_cache import MemoryMetadataCache
+
+    cache = MemoryMetadataCache(
+        max_entries=2,
+        max_bytes=4_096,
+        fingerprint_settle_ns=2_100,
+    )
+    clock_ns = [10_000]
+    cache._clock_ns = lambda: clock_ns[0]
+    fingerprint = (1, 2, 3, 9_000, 9_000)
+    assert cache.store('/recent', fingerprint, {'name': 'recent'})
+
+    assert cache.lookup('/recent', fingerprint) == (False, {})
+    assert cache.snapshot()['unstable'] == 1
+
+    clock_ns[0] = 11_101
+    assert cache.lookup('/recent', fingerprint) == (
+        True, {'name': 'recent'})
+    snapshot = cache.snapshot()
+    assert snapshot['hits'] == 1
+    assert snapshot['misses'] == 1
+
+
+@pytest.mark.unit
+def test_memory_metadata_cache_readonly_hit_is_recursively_immutable():
+    from lib.memory.storage._metadata_cache import MemoryMetadataCache
+
+    cache = MemoryMetadataCache(
+        max_entries=2,
+        max_bytes=4_096,
+        fingerprint_settle_ns=0,
+    )
+    fingerprint = (1, 2, 3, 4, 5)
+    metadata = {
+        'name': 'immutable',
+        'tags': ['one'],
+        'metadata': {'openclaw': {'install': [{'kind': 'node'}]}},
+    }
+    assert cache.store('/immutable', fingerprint, metadata)
+
+    cached, readonly = cache.lookup_readonly('/immutable', fingerprint)
+    assert cached
+    with pytest.raises(TypeError):
+        readonly['name'] = 'changed'
+    with pytest.raises(AttributeError):
+        readonly['tags'].append('changed')
+    with pytest.raises(TypeError):
+        readonly['metadata']['openclaw']['install'][0]['kind'] = 'changed'
+
+    cached, mutable = cache.lookup('/immutable', fingerprint)
+    assert cached and mutable == metadata
+    mutable['tags'].append('caller-owned')
+    assert cache.lookup('/immutable', fingerprint)[1]['tags'] == ['one']
+
+    cyclic = []
+    cyclic.append(cyclic)
+    assert not cache.store('/cyclic', fingerprint, {'cycle': cyclic})
+    assert cache.snapshot()['unfreezable'] == 1
+
+
+@pytest.mark.unit
+def test_cached_package_metadata_does_not_alias_returned_record(
+        tmp_path, monkeypatch):
+    package_dir = tmp_path / 'nested-package'
+    package_dir.mkdir()
+    skill_path = package_dir / 'SKILL.md'
+    skill_path.write_text(
+        '---\n'
+        'name: Nested package\n'
+        'description: nested immutable metadata fixture\n'
+        'tags: [one]\n'
+        'metadata:\n'
+        '  openclaw:\n'
+        '    install:\n'
+        '      - kind: node\n'
+        '        package: stable-package\n'
+        '---\n\nbody\n',
+        encoding='utf-8',
+    )
+    memory_files._metadata_cache.clear()
+    first = memory_files._memory_from_file(
+        str(skill_path),
+        package_dir=str(package_dir),
+        memory_id_override='nested-package',
+        include_body=False,
+    )
+    monkeypatch.setattr(
+        memory_files._metadata_cache, '_clock_ns', lambda: 10**30)
+
+    first['tags'].append('caller-owned')
+    first['install_specs'][0]['kind'] = 'changed'
+    second = memory_files._memory_from_file(
+        str(skill_path),
+        package_dir=str(package_dir),
+        memory_id_override='nested-package',
+        include_body=False,
+    )
+
+    assert second['tags'] == ['one']
+    assert second['install_specs'] == [{
+        'kind': 'node',
+        'package': 'stable-package',
+    }]
+    memory_files._metadata_cache.clear()

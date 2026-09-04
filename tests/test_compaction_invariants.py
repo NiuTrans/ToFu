@@ -65,6 +65,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # can change in a §10.1 turn); presence + reachability are.
 _PUBLIC_CONSTANTS = [
     'MICRO_HOT_TAIL',
+    'MICRO_HOT_TAIL_TOKENS',
     'MICRO_COMPACT_THRESHOLD',
     '_SUMMARY_TRIGGER_RATIO',
     '_THINKING_HOT_TAIL',
@@ -103,6 +104,7 @@ class TestConstantsHaveOneOwner:
         a botched extraction)."""
         import lib.tasks_pkg.compaction._constants as _comp
         assert _comp.MICRO_HOT_TAIL > 0
+        assert _comp.MICRO_HOT_TAIL_TOKENS > 0
         assert _comp.MICRO_COMPACT_THRESHOLD > 0
         assert 0 < _comp._SUMMARY_TRIGGER_RATIO <= 1.0
 

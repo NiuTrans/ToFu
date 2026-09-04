@@ -203,6 +203,71 @@ class TestChatSaturationEscalation:
         assert clock.now > 120, 'test did not actually pass the budget mark'
 
 
+# ── caller-owned upstream-attempt budget ────────────────────────────
+
+@pytest.mark.unit
+class TestPerCall429AttemptBudget:
+
+    def test_stream_stops_after_exact_upstream_attempt_budget(
+            self, monkeypatch, fake_env):
+        monkeypatch.setenv('TOFU_429_SATURATION_SECS', '0')
+        calls = {'n': 0}
+
+        def _always_limited(*_args, **_kwargs):
+            calls['n'] += 1
+            raise RateLimitError('provider body must not leak', status_code=429)
+
+        monkeypatch.setattr('lib.llm.stream_chat', _always_limited)
+
+        with pytest.raises(api.DispatchRateLimitBudgetExceeded) as raised:
+            api.dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}],
+                max_429_attempts=3,
+                log_prefix='[budget]',
+            )
+
+        assert calls['n'] == 3
+        assert raised.value.attempts == 3
+        assert raised.value.limit == 3
+        assert 'provider body' not in str(raised.value)
+
+    def test_chat_stops_after_exact_upstream_attempt_budget(
+            self, monkeypatch, fake_env):
+        monkeypatch.setenv('TOFU_429_SATURATION_SECS', '0')
+        calls = {'n': 0}
+
+        def _always_limited(*_args, **_kwargs):
+            calls['n'] += 1
+            raise RateLimitError('slow down', status_code=429)
+
+        monkeypatch.setattr('lib.llm.chat', _always_limited)
+
+        with pytest.raises(api.DispatchRateLimitBudgetExceeded) as raised:
+            api.dispatch_chat(
+                [{'role': 'user', 'content': 'hi'}],
+                max_429_attempts=4,
+                log_prefix='[budget]',
+            )
+
+        assert calls['n'] == 4
+        assert (raised.value.attempts, raised.value.limit) == (4, 4)
+
+    @pytest.mark.parametrize('invalid', [0, -1, True, 1.5, '3'])
+    def test_invalid_attempt_budget_fails_before_dispatch(
+            self, monkeypatch, invalid):
+        monkeypatch.setattr(
+            api,
+            'get_dispatcher',
+            lambda: (_ for _ in ()).throw(
+                AssertionError('dispatcher should not initialize')),
+        )
+        with pytest.raises(ValueError, match='positive integer'):
+            api.dispatch_chat(
+                [{'role': 'user', 'content': 'hi'}],
+                max_429_attempts=invalid,
+            )
+
+
 # ── waitable default ────────────────────────────────────────────────
 
 @pytest.mark.unit
@@ -229,7 +294,7 @@ class TestFallbackSwallowsSaturation:
 
         events = []
 
-        def _fake_stream(task, body, tag='', on_tool_call_ready=None):
+        def _fake_stream(task, body, tag='', on_tool_call_ready=None, **kwargs):
             if body.get('model') == 'claude-opus-5':
                 raise RateLimitError(
                     '429 saturation: all candidate slots continuously '

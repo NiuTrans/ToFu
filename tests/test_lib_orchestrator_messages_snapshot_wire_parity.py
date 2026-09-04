@@ -4,13 +4,12 @@ stream loop into
 lib.tasks_pkg.orchestrator._messages_snapshot
     .emit_messages_snapshot_event().
 
-The cluster runs RIGHT AFTER ``sort_tool_results`` — messages are now
-in their real outbound ordering, so the debug panel sees the same
-sequence the model will. The cluster:
+The cluster runs after ``sort_tool_results`` and canonical body construction,
+so the debug panel reuses the same sequence the model will receive. The
+cluster:
 
-    * Runs ``apply_wire_sanitize`` on an INDEPENDENT copy of ``messages``
-      (never mutating the live list — build_body re-runs its own copy
-      at request time).
+    * Reuses successful ``build_body`` messages; failed body construction runs
+      ``apply_wire_sanitize`` on an independent diagnostic copy.
     * Strips base64 data URLs from the snapshot via
       ``_strip_base64_for_snapshot`` — keeps the debug event small
       enough to travel over SSE.
@@ -57,7 +56,7 @@ LEAF_PY = (
     '_messages_snapshot.py')
 # Slice 28 (2026-07-31) moved the snapshot call site out of _run.py into
 # the round-request-prep leaf: the snapshot runs as step 3 of the
-# preamble cluster (sort → snapshot → build_body), and the whole
+# preamble cluster (sort → build_body → snapshot), and the whole
 # cluster now lives in _round_request_prep.build_round_request —
 # _run.py delegates the whole cluster. The two wiring guards below
 # therefore assert on the prep leaf, not _run.py.
@@ -94,7 +93,8 @@ def test_helper_signature_is_keyword_only():
     assert 'messages' in params
     for name in ('tid', 'round_num', 'model',
                  'thinking_enabled', 'thinking_depth', 'preset',
-                 'temperature', 'max_tokens', 'response_format', 'tools'):
+                 'temperature', 'max_tokens', 'response_format', 'tools',
+                 'prepared_messages'):
         assert name in params, (
             f'emit_messages_snapshot_event must accept {name}')
         assert params[name].kind == inspect.Parameter.KEYWORD_ONLY, (
@@ -126,7 +126,7 @@ def test_run_task_delegates_to_helper():
     src = PREP_PY.read_text()
     assert 'emit_messages_snapshot_event(' in src, (
         '_round_request_prep.py must call emit_messages_snapshot_event '
-        'as preamble step 3 (after sort_tool_results, before build_body)')
+        'after canonical request-body construction')
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +220,8 @@ def test_leaf_carries_flow_phase_turn_tag():
         'the turn tag on the emitted event')
 
 
-def test_leaf_carries_independent_copy_semantics():
-    """The wire-sanitized snapshot must run on an INDEPENDENT copy —
-    build_body re-runs the sanitizer on its own copy at request time,
-    so a shared mutation would double-sanitize."""
+def test_leaf_carries_failed_build_copy_semantics():
+    """The failed-build fallback sanitizes an independent diagnostic copy."""
     src = LEAF_PY.read_text()
     # The apply_wire_sanitize call itself is the primitive that produces
     # the independent copy; the load-bearing marker is that we consume
@@ -280,6 +278,49 @@ def _make_task(**overrides):
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
     assert chat_task_runtime.adopt(t) is True
     return t
+
+
+def test_prepared_body_messages_skip_second_sanitize_and_strip_sidecars(
+        monkeypatch):
+    """Successful rounds project the canonical body without another scan."""
+    import copy
+    import lib.tasks_pkg.orchestrator._messages_snapshot as mod
+
+    task = _make_task()
+    prepared = [{
+        'role': 'assistant',
+        'content': [
+            {'type': 'text', 'text': 'answer'},
+            {'type': 'image_url', 'image_url': {
+                'url': 'data:image/png;base64,AAAA'}},
+        ],
+        '_responses_items': [{'type': 'reasoning', 'id': 'private'}],
+        '_anthropic_content_blocks': [{'type': 'thinking', 'private': True}],
+    }]
+    before = copy.deepcopy(prepared)
+    monkeypatch.setattr(
+        mod,
+        'apply_wire_sanitize',
+        lambda *_a, **_k: pytest.fail(
+            'successful body messages must not be sanitized twice'),
+    )
+
+    mod.emit_messages_snapshot_event(
+        task,
+        [{'role': 'user', 'content': 'unprepared'}],
+        tid='reuse', round_num=0, model='gpt-5.6-sol',
+        thinking_enabled=False, thinking_depth=0, preset='default',
+        temperature=1.0, max_tokens=8192, response_format=None, tools=None,
+        prepared_messages=prepared,
+    )
+
+    message = task['events'][-1]['messages'][0]
+    assert message['content'][0]['text'] == 'answer'
+    assert message['content'][1]['image_url']['url'].startswith(
+        '[base64 image, ')
+    assert '_responses_items' not in message
+    assert '_anthropic_content_blocks' not in message
+    assert prepared == before
 
 
 def test_helper_emits_event_on_success():

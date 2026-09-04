@@ -157,6 +157,7 @@ def test_reexec_arms_shutdown_before_saving_snapshot(monkeypatch, tmp_path):
     from routes.api_v1 import update as upd
     import lib.server_reexec as reexec
     calls = []
+    monkeypatch.delenv('TOFU_MANAGED_BY', raising=False)
     monkeypatch.setattr(
         reexec, 'begin_server_reexec',
         lambda reason: calls.append(('begin', reason)) or True)
@@ -166,6 +167,8 @@ def test_reexec_arms_shutdown_before_saving_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr('lib.write_freshness.save_snapshot',
                         lambda: calls.append(('save', None)) or True)
     monkeypatch.setattr(upd, 'data_root', lambda: str(tmp_path))
+    monkeypatch.setattr(
+        upd, '_prepare_server_reexec_frontend', lambda: '')
     assert upd._perform_server_reexec('test') is True
     assert calls == [
         ('begin', 'test'),

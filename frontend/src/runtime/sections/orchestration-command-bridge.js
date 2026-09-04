@@ -33,10 +33,6 @@ async function _orchLoadBuiltin(name) {
   return _orchWorkspaceController.loadBuiltin(name, arguments[1] || {});
 }
 
-async function _orchChooseBuiltin(name) {
-  return _orchWorkspaceController.chooseBuiltin(name);
-}
-
 async function _orchTidy(opts) {
   return _orchWorkspaceController.tidy(opts);
 }
@@ -56,4 +52,3 @@ function _orchExport() {
 function _orchToast(text, isErr, opts) {
   return _orchStudioApi.toast(text, isErr, opts);
 }
-

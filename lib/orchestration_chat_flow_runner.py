@@ -1,7 +1,7 @@
 """lib/orchestration_chat_flow_runner.py — Chat flows via FlowExecutor.
 
-The convergence point where goal mode (autopilot worker ⇄ VU graph, when
-flagged) AND arbitrary user-authored Studio flows all run through ONE engine
+The convergence point where goal mode (autopilot worker ⇄ VU graph) AND
+arbitrary user-authored Studio flows all run through ONE engine
 (:class:`lib.orchestration_engine.FlowExecutor`) and ONE translator
 (:class:`lib.orchestration_chat_flow_adapter.FlowEventAdapter` → flow
 SSE/message schema, so the existing frontend renders every flow unchanged).
@@ -14,9 +14,8 @@ Entry points (both share :func:`_run_flow_as_chat_task`):
 ``lib/conversation_sync/task_start.py`` calls :func:`resolve_chat_flow_entry`
 to pick one (or ``None`` → fall back to the live path / a normal task).
 
-Flag (default OFF):
-    TOFU_AUTOPILOT_VIA_FLOW=1   → goal-mode toggle uses this engine path
-    (a user-selected flow is ALWAYS honored — the selection is the opt-in)
+Goal Mode has no fallback interpreter or rollout flag.  Every newly accepted
+goal turn runs through this owner.
 """
 
 from __future__ import annotations
@@ -38,13 +37,11 @@ from lib.orchestration_chat_failure import (
 from lib.orchestration_chat_flow_selection import (
     CHAT_FLOW_ENTRY_AUTOPILOT,
     CHAT_FLOW_ENTRY_SELECTED,
-    autopilot_via_flow_enabled,
     resolve_chat_flow_definition as _resolve_chat_flow_definition,
     select_chat_flow_entry,
 )
-from lib.orchestration.loop_policy import (
-    DEFAULT_EXECUTOR_MAX_ITERATIONS,
-)
+from lib.goal_runs.contract import goal_iteration_budget
+from lib.orchestration.loop_policy import DEFAULT_EXECUTOR_MAX_ITERATIONS
 
 def _authoring_service():
     """Build the authoring capability used by non-HTTP chat launches."""
@@ -124,23 +121,13 @@ def resolve_chat_flow_entry(config: dict):
       1. An explicit flow selection (``flowDefinition`` / ``flowBuiltin`` /
          ``flowId``) → :func:`run_flow_via_chat` (honored whenever the user
          selects a flow; no flag, the selection is the opt-in). The
-         "编排流程" dropdown is the deliberate way to exercise the ENGINE
-         implementation of goal mode (so engine bugs are observable in the
-         frontend), distinct from the "模式" toggle which drives the live
-         ``tasks_pkg`` implementation.
-      2. ``autopilot`` + ``TOFU_AUTOPILOT_VIA_FLOW`` → :func:`run_autopilot_via_flow`.
-
-    The ``TOFU_AUTOPILOT_VIA_FLOW`` flag governs ONLY the "模式" toggle path:
-    with the flag OFF the toggle uses the live ``tasks_pkg`` loop; ON reroutes
-    it through the engine. A dropdown flow SELECTION (1) is always the engine,
-    flag-independent.
+         "编排流程" dropdown is another deliberate projection of the same
+         FlowExecutor owner used by the Goal Mode toggle.
+      2. ``autopilot`` → :func:`run_autopilot_via_flow`.
 
     Returns a ``callable(task)`` or ``None`` (caller uses a normal task).
     """
-    kind = select_chat_flow_entry(
-        config,
-        autopilot_enabled=autopilot_via_flow_enabled,
-    )
+    kind = select_chat_flow_entry(config)
     if kind == CHAT_FLOW_ENTRY_SELECTED:
         return run_flow_via_chat
     if kind == CHAT_FLOW_ENTRY_AUTOPILOT:
@@ -169,7 +156,7 @@ def _build_tools_for_task(task: dict):
 
 
 def run_autopilot_via_flow(task: dict):
-    """Run goal mode (autopilot) through FlowExecutor (flagged path).
+    """Run goal mode (autopilot) through its sole FlowExecutor path.
 
     Runs the canonical autopilot graph (``build_autopilot_definition`` —
     worker ⇄ virtual_user loop) on the unified engine. The virtual_user's
@@ -178,8 +165,7 @@ def run_autopilot_via_flow(task: dict):
     frontend change.
     """
     cfg = task.get('config') or {}
-    max_iter = int(cfg.get('autopilotMaxIterations')
-                   or DEFAULT_EXECUTOR_MAX_ITERATIONS)
+    max_iter = goal_iteration_budget(cfg.get('autopilotMaxIterations'))
     _run_flow_as_chat_task(
         task, _build_builtin('autopilot', max_iterations=max_iter),
         label='autopilot', max_iter=max_iter)
@@ -208,9 +194,16 @@ def run_flow_via_chat(task: dict):
         # event/persistence/busy projection consistently.
         finalize_unavailable_orchestration_chat_flow(task)
         return
-    max_iter = int(
-        cfg.get('flowMaxIterations')
-        or DEFAULT_EXECUTOR_MAX_ITERATIONS)
+    from lib.orchestration._chat_projection import chat_projection_for_flow
+
+    if chat_projection_for_flow(defn) == 'autopilot':
+        max_iter = goal_iteration_budget(
+            cfg.get('flowMaxIterations')
+            or cfg.get('autopilotMaxIterations'))
+    else:
+        max_iter = int(
+            cfg.get('flowMaxIterations')
+            or DEFAULT_EXECUTOR_MAX_ITERATIONS)
     _run_flow_as_chat_task(
         task,
         defn,
@@ -221,9 +214,17 @@ def run_flow_via_chat(task: dict):
 
 
 def _run_flow_as_chat_task(task: dict, defn: dict, *, label: str,
-                           max_iter: int, definition_service=None):
+                           max_iter: int, definition_service=None,
+                           goal_run_service=None):
     """Run one Flow-backed chat task behind the canonical fatal boundary."""
     try:
+        from lib.orchestration._chat_projection import chat_projection_for_flow
+
+        if chat_projection_for_flow(defn) == 'autopilot':
+            if goal_run_service is None:
+                from lib.goal_runs.service import GoalRunService
+                goal_run_service = GoalRunService()
+            goal_run_service.start(task, defn)
         return _execute_flow_as_chat_task(
             task,
             defn,
@@ -263,6 +264,6 @@ def _execute_flow_as_chat_task(
 
 
 __all__ = [
-    'run_autopilot_via_flow', 'autopilot_via_flow_enabled',
+    'run_autopilot_via_flow',
     'run_flow_via_chat', 'resolve_chat_flow_definition', 'resolve_chat_flow_entry',
 ]

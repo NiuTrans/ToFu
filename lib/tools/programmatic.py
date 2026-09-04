@@ -1,9 +1,10 @@
 """Production contracts for Programmatic Tool Calling (PTC).
 
-The ordinary tool runtime returns canonical text.  PTC JavaScript needs a
-predictable JSON object, so every opted-in tool exposes the same lossless text
-envelope.  Eligibility is separately and explicitly declared on ``ToolSpec``;
-it must never be inferred from the broader retry/dedup partition.
+The ordinary tool runtime returns canonical text. Hosted PTC JavaScript needs
+a predictable JSON object, so every opted-in tool exposes the same lossless
+text envelope. Hosted eligibility is separately and explicitly declared on
+``ToolSpec``; local ToolScript instead uses the task executable catalog and the
+ordinary ToolContract/approval pipeline.
 
 PTC is ONE semantic capability with TWO execution backends (mirroring the
 Tool Search dual-backend precedent):
@@ -17,8 +18,9 @@ Tool Search dual-backend precedent):
 
 The local backend exposes the SAME full ToolScript surface to every model:
 small models are not demoted to a code-less form — a malformed program just
-earns a typed, retryable interpreter error, and the read-only latch plus the
-hard call/byte ceilings bound any damage.  ``TOFU_PTC_TIER=batch`` remains
+earns a typed, retryable interpreter error, and the catalog/schema/approval
+checks plus hard call/byte ceilings bound execution.
+``TOFU_PTC_TIER=batch`` remains
 as an operator/benchmark override that strips the ``program`` parameter and
 advertises only the parallel ``calls[]`` form.
 """
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any
 
 
@@ -59,9 +62,9 @@ _PROGRAMMATIC_TIERS = frozenset({'program', 'batch'})
 #: future mode can never drift across the four independent checkpoints.
 ACTIVE_PROGRAMMATIC_MODES = frozenset({'auto', 'on'})
 
-#: Shared tail of both local-backend guidance shapes.
-_DIRECT_CALL_SUFFIX = (
-    'Use direct calls for semantic judgment, writes, and approvals.')
+_LOCAL_CHILD_AUTHORITY_NOTE = (
+    'Each child must name a task-executable tool and keeps ordinary '
+    'schema, authority, and approval checks.')
 
 def resolve_programmatic_backend(
         requested: str, *, protocol: str = '', model: str = '',
@@ -110,36 +113,34 @@ def programmatic_tier(model: str, *, provider_id: str = '') -> str:
 
 
 def local_ptc_guidance(tier: str, eligible: list[str] | tuple | set) -> str:
-    """Return byte-stable read-only routing text for the local backend.
+    """Return byte-stable routing text for the local backend.
 
     The text is spliced into the provider-bound ``execute_tools`` schema, which
     is part of the cached request prefix.  It therefore depends only on the
-    stable tier. ``eligible`` is accepted for caller compatibility and for the
-    explicit authority boundary, but names are deliberately not interpolated:
+    stable tier. ``eligible`` is accepted for hosted-PTC activation diagnostics
+    and caller compatibility, but names are deliberately not interpolated:
     both changing visibility and a growing serial-read chain are per-round
-    state that would invalidate the provider's prompt-cache prefix.  Execution
-    still checks the task-owned eligible set independently.
+    state that would invalidate the provider's prompt-cache prefix. Local
+    execution independently checks the task executable catalog.
     """
     del eligible
-    allowlist_note = (
-        'PTC may call only task-approved read-only tools returned by '
-        'search_tools.')
     if str(tier or '').strip().lower() == 'program':
         return (
-            f'{allowlist_note} Use one program for dependent reads and compact JSON; '
-            'batch independent reads with calls execution=parallel. '
-            'Do not continue a serial chain of dependent direct reads. '
-            'Writes, approvals, and judgment stay direct.')
+            'ToolScript may call any task-executable tool. '
+            f'{_LOCAL_CHILD_AUTHORITY_NOTE} Use one program for dependent calls '
+            'and compact JSON; batch independent calls with calls '
+            'execution=parallel. Do not continue a serial chain.')
     return (
-        f'{allowlist_note} Batch independent reads into one calls array with '
-        f'execution=parallel. {_DIRECT_CALL_SUFFIX}')
+        f'{_LOCAL_CHILD_AUTHORITY_NOTE} Batch independent calls into one calls '
+        'array with execution=parallel.')
 
 
 def eligible_programmatic_tool_names() -> set[str]:
-    """Return explicitly reviewed built-in tool names.
+    """Return built-ins reviewed for hosted PTC and activation decisions.
 
-    Third-party plugins remain direct-only until the plugin trust/approval
-    boundary has an equally explicit PTC review mechanism.
+    This set never narrows local ToolScript child calls. Third-party plugins
+    remain hosted-PTC-direct-only until the plugin trust/approval boundary has
+    an equally explicit review mechanism.
     """
     from lib.tools.registry import all_specs
 
@@ -179,12 +180,120 @@ def encode_programmatic_output(content: Any, *, max_bytes: int | None = None
                        ensure_ascii=False), consumed, truncated)
 
 
+class ProgrammaticResultBudget:
+    """One-program, memory-bounded lane for local ToolScript child results.
+
+    Model-visible and durable child receipts still pass through the ordinary
+    tool-result budget.  This transient lane gives the local interpreter the
+    post-hook result before L0 compaction so it can reduce data itself. Each
+    synchronous batch reserves a deterministic share per call; parallel
+    completion order therefore cannot decide which sibling consumes the
+    program's 1 MiB allowance, and retained transient text never exceeds that
+    allowance.
+    """
+
+    def __init__(self, max_bytes: int = PROGRAMMATIC_MAX_OUTPUT_BYTES):
+        self._max_bytes = max(0, int(max_bytes))
+        self._remaining = self._max_bytes
+        self._raw_bytes = 0
+        self._output_bytes = 0
+        self._truncated_results = 0
+        self._lock = threading.Lock()
+
+    def begin_batch(self, call_ids: list[str]) -> "ProgrammaticResultBatch":
+        ordered = list(dict.fromkeys(str(call_id or '') for call_id in call_ids))
+        if not ordered:
+            return ProgrammaticResultBatch(self, {})
+        with self._lock:
+            remaining = self._remaining
+        share, extra = divmod(remaining, len(ordered))
+        limits = {
+            call_id: share + (1 if index < extra else 0)
+            for index, call_id in enumerate(ordered)
+        }
+        return ProgrammaticResultBatch(self, limits)
+
+    def _commit(self, *, raw_bytes: int, output_bytes: int,
+                truncated_results: int) -> None:
+        with self._lock:
+            consumed = min(self._remaining, max(0, int(output_bytes)))
+            self._remaining -= consumed
+            self._raw_bytes += max(0, int(raw_bytes))
+            self._output_bytes += consumed
+            self._truncated_results += max(0, int(truncated_results))
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                'maxBytes': self._max_bytes,
+                'rawBytes': self._raw_bytes,
+                'outputBytes': self._output_bytes,
+                'remainingBytes': self._remaining,
+                'truncatedResults': self._truncated_results,
+            }
+
+
+class ProgrammaticResultBatch:
+    """Thread-safe transient sink for one ordered child-call batch."""
+
+    def __init__(self, owner: ProgrammaticResultBudget,
+                 limits: dict[str, int]):
+        self._owner = owner
+        self._limits = dict(limits)
+        self._results: dict[str, dict[str, Any]] = {}
+        self._finished = False
+        self._lock = threading.Lock()
+
+    def capture(self, call_id: str, content: Any) -> None:
+        call_id = str(call_id or '')
+        with self._lock:
+            if self._finished or call_id in self._results \
+                    or call_id not in self._limits:
+                return
+        text = (content if isinstance(content, str)
+                else json.dumps(content if content is not None else '',
+                                ensure_ascii=False, default=str))
+        raw_bytes = len(text.encode('utf-8'))
+        visible, truncated = truncate_utf8(text, self._limits[call_id])
+        delivery = {
+            'content': visible,
+            'rawBytes': raw_bytes,
+            'outputBytes': len(visible.encode('utf-8')),
+            'truncated': bool(truncated),
+        }
+        with self._lock:
+            if self._finished or call_id in self._results:
+                return
+            self._results[call_id] = delivery
+
+    def result(self, call_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            value = self._results.get(str(call_id or ''))
+            return dict(value) if isinstance(value, dict) else None
+
+    def finish(self) -> None:
+        with self._lock:
+            if self._finished:
+                return
+            self._finished = True
+            values = list(self._results.values())
+        self._owner._commit(
+            raw_bytes=sum(int(value.get('rawBytes') or 0) for value in values),
+            output_bytes=sum(
+                int(value.get('outputBytes') or 0) for value in values),
+            truncated_results=sum(
+                bool(value.get('truncated')) for value in values),
+        )
+
+
 __all__ = [
     'ACTIVE_PROGRAMMATIC_MODES',
     'PROGRAMMATIC_MAX_CALLS',
     'PROGRAMMATIC_MAX_CONCURRENT_CALLS',
     'PROGRAMMATIC_MAX_OUTPUT_BYTES',
     'PROGRAMMATIC_MAX_CONTINUATIONS',
+    'ProgrammaticResultBatch',
+    'ProgrammaticResultBudget',
     'eligible_programmatic_tool_names',
     'encode_programmatic_output',
     'local_ptc_guidance',

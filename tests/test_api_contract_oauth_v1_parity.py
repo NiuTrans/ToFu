@@ -24,10 +24,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart
 sys.modules.setdefault('flask', _quart)
 
+from tests._runtime_sections import runtime_section_path
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TARGET = os.path.join(_ROOT, 'routes', 'api_v1', 'oauth.py')
-_CONSUMER_JS = os.path.join(
-    _ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+_CONSUMER_JS = runtime_section_path('settings/oauth.js')
 
 pytestmark = pytest.mark.unit
 

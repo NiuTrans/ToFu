@@ -52,6 +52,11 @@ from lib.tasks_pkg.cache_tracking._state import get_prev_turn_cache_read
 from lib.tasks_pkg.cache_tracking._roi import log_round_cache_stats
 from lib.tasks_pkg.manager import task_user_id
 from lib.tasks_pkg.write_breakdown import _compute_write_breakdown
+from lib.task_result_checkpoint_contract import (
+    TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
+    TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
+    TASK_RESULT_CACHE_FACT_MAXIMUM,
+)
 
 
 logger = get_logger(__name__)
@@ -77,8 +82,8 @@ def stamp_round_cache_accounting(
     Parameters
     ----------
     task
-        Live task dict. Only ``task['convId']`` is read; no
-        mutations on ``task`` itself.
+        Live task dict. Two bounded integer cache facts may be staged for the
+        next task-result checkpoint; no cache payload or message is retained.
     round_num
         Zero-based stream-loop round number; api_rounds[-1] is
         stamped ONLY when its ``round`` equals ``round_num + 1``.
@@ -109,11 +114,41 @@ def stamp_round_cache_accounting(
 
     owner_user_id = task_user_id(task)
 
+    cache_prefix_hwm_sink = None
+    last_turn_cache_read_sink = None
+    if (not task.get('_transientRuntime')
+            and not task.get('_inline_messages')):
+        def stage_cache_prefix_hwm(boundary: int) -> None:
+            if (isinstance(boundary, bool)
+                    or not isinstance(boundary, int)
+                    or not 0 < boundary <= TASK_RESULT_CACHE_FACT_MAXIMUM):
+                raise ValueError('cache-prefix HWM candidate is invalid')
+            current = task.get(TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD)
+            current = (
+                current if isinstance(current, int)
+                and not isinstance(current, bool) else 0
+            )
+            task[TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD] = max(
+                current, boundary,
+            )
+
+        def stage_last_turn_cache_read(cache_read: int) -> None:
+            if (isinstance(cache_read, bool)
+                    or not isinstance(cache_read, int)
+                    or not 0 < cache_read <= TASK_RESULT_CACHE_FACT_MAXIMUM):
+                raise ValueError('last-turn cache-read candidate is invalid')
+            task[TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD] = cache_read
+
+        cache_prefix_hwm_sink = stage_cache_prefix_hwm
+        last_turn_cache_read_sink = stage_last_turn_cache_read
+
     _cache_break = detect_cache_break(
         task['convId'], messages,
         tools=tools, model=model,
         usage=usage,
         user_id=owner_user_id,
+        cache_prefix_hwm_sink=cache_prefix_hwm_sink,
+        last_turn_cache_read_sink=last_turn_cache_read_sink,
     )
     # Codex's private Responses endpoint can step back exactly one or more
     # 1,024-token implicit breakpoints while the sent wire remains append-only.
@@ -149,6 +184,15 @@ def stamp_round_cache_accounting(
     # "generated" only a few hundred output tokens leads to a
     # multi-thousand-token write next round.
     if api_rounds and api_rounds[-1].get('round') == round_num + 1:
+
+        # The final prompt-admission guard runs immediately before dispatch,
+        # while the api-round row only exists after the provider returns. Bind
+        # the matching content-free measurement here so a persisted cost row
+        # can explain a large first request without retaining prompt content.
+        _admission = task.get('_lastPromptAdmission')
+        if (isinstance(_admission, dict)
+                and _admission.get('round') == round_num + 1):
+            api_rounds[-1]['promptAdmission'] = dict(_admission)
         try:
             _tcs = (assistant_msg or {}).get('tool_calls') or []
             _names = [

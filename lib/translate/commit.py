@@ -35,10 +35,9 @@ def _stamp_segment_translations(
 ) -> int:
     """Stamp translated narration / reasoning on matching segments.
 
-    Keying mirrors ``_translate_segments_to_map``: non-deliverable ``text``
-    segments resolve by ``llmRound`` (the live incremental worker's map shape);
-    ``thinking`` segments resolve by ``blockId`` because reasoning shares its
-    round with the narration prose.
+    Modern producers address every segment by stable ``blockId``. Integer
+    ``llmRound`` keys remain a read-only compatibility fallback for persisted
+    translation work created before attempt-scoped block identities shipped.
     """
     if not translations_by_round:
         return 0
@@ -57,12 +56,15 @@ def _stamp_segment_translations(
             if block_id:
                 translated = translations_by_round.get(block_id)
         elif segment_type == "text" and not segment.get("deliverable"):
-            round_number = segment.get("llmRound")
-            if round_number is None:
-                continue
-            translated = translations_by_round.get(round_number)
+            block_id = segment.get("blockId")
+            if block_id:
+                translated = translations_by_round.get(block_id)
             if translated is None:
-                translated = translations_by_round.get(str(round_number))
+                round_number = segment.get("llmRound")
+                if round_number is not None:
+                    translated = translations_by_round.get(round_number)
+                    if translated is None:
+                        translated = translations_by_round.get(str(round_number))
         else:
             continue
         if not isinstance(translated, str) or not translated.strip():

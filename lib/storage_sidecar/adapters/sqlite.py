@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 import faulthandler
 import os
@@ -17,6 +18,7 @@ import uuid
 
 from lib.storage.errors import StorageError
 from lib.storage.startup_control import StartupProgressCallback
+from lib.storage_metric_policy import bounded_storage_metric_sample_capacity
 from lib.log import get_logger
 from lib.storage_sidecar.adapters.base import Backend, Operation, receipt_cacheable
 from lib.storage_sidecar.backup_policy import (
@@ -30,10 +32,13 @@ from lib.storage_sidecar.backup_policy import (
 from lib.storage_sidecar.config import SidecarConfig
 from lib.storage_sidecar.preflight import run_filesystem_preflight
 from lib.storage_sidecar.receipt_codec import (
-    decode_receipt_response,
+    COMMAND_RECEIPT_LOOKUP_SQL,
+    command_receipt_identity_v2,
+    decode_command_receipt_lookup,
     encode_receipt_response,
 )
 from lib.storage_sidecar.schema import deferred_index_statements, initialize_schema
+from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
 from lib.storage_sidecar.durability import (
     fsync_directory, fsync_file, sha256_file, write_json_durable,
 )
@@ -112,8 +117,13 @@ def _deferred_index_name(statement: str) -> str:
 class SQLiteSession:
     backend = 'sqlite'
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        turn_projection_cache: TurnProjectionCache | None = None,
+    ) -> None:
         self.connection = connection
+        self.turn_projection_cache = turn_projection_cache
 
     def lock_key(self, namespace: str, key: str) -> None:
         # The backend's single physical writer already serializes every key.
@@ -129,6 +139,21 @@ class SQLiteSession:
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> int:
         cursor = self.connection.execute(sql, params)
         return max(0, int(cursor.rowcount))
+
+    def execute_many_exact(
+        self, sql: str, params: Sequence[tuple[Any, ...]],
+    ) -> int:
+        """Execute a bounded DML batch that must match every input row."""
+        if not params:
+            return 0
+        cursor = self.connection.executemany(sql, params)
+        affected = max(0, int(cursor.rowcount))
+        if affected != len(params):
+            raise StorageError(
+                'database_conflict',
+                'Bulk mutation did not affect every expected row',
+            )
+        return affected
 
     def fetch_one(self, sql: str, params: tuple[Any, ...] = ()):
         row = self.connection.execute(sql, params).fetchone()
@@ -163,6 +188,7 @@ class _WriteJob:
     deadline_at: float
     priority: str
     operation_name: str = ''
+    transaction_timeout_s: float | None = None
     started: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     result: Any = None
@@ -217,16 +243,23 @@ class _FairWriter:
         stall_grace_s: float = 15.0,
         hard_kill_s: float = 60.0,
         watchdog_interval_s: float = 1.0,
+        queue_capacity: int = 64,
         max_batch_jobs: int = _MAX_BATCH_JOBS,
         segment_budget_s: float = _SEGMENT_BUDGET_S,
+        metric_sample_capacity: int | None = None,
+        turn_projection_cache: TurnProjectionCache | None = None,
     ) -> None:
         self._connection = connection
         self._transaction_timeout_s = transaction_timeout_s
         self._stall_grace_s = max(0.05, float(stall_grace_s))
         self._hard_kill_s = max(self._stall_grace_s + 0.05, float(hard_kill_s))
         self._watchdog_interval_s = max(0.05, float(watchdog_interval_s))
+        if queue_capacity <= 0:
+            raise ValueError('queue_capacity must be positive')
+        self.queue_capacity = int(queue_capacity)
         self._max_batch_jobs = max(1, int(max_batch_jobs))
         self._segment_budget_s = max(0.0, float(segment_budget_s))
+        self._turn_projection_cache = turn_projection_cache
         self._queues = {name: deque() for name in {'user', 'event', 'maintenance'}}
         self._condition = threading.Condition()
         self._stop = False
@@ -235,6 +268,8 @@ class _FairWriter:
             target=self._run, name='storage-sqlite-writer', daemon=True)
         self.metrics = {
             'submitted': 0, 'completed': 0, 'failed': 0, 'timed_out': 0,
+            'queue_rejections': 0, 'cancelled_before_start': 0,
+            'write_admission_rejections': 0,
             'max_queue_depth': 0, 'transaction_retries': 0,
             'stall_interrupts': 0,
             'batches': 0, 'batched_jobs': 0, 'max_batch_size': 0,
@@ -247,9 +282,17 @@ class _FairWriter:
         # Fast-path shipper hook: invoked after every successful COMMIT on
         # the writer thread so the shadow tracks the front in near-real-time.
         self._on_commit: Any = None
+        # Checked before retaining a job and again immediately before BEGIN.
+        # The writer-side check is authoritative for work queued before a
+        # resource threshold changed. Raw shipper checkpoints bypass it so
+        # pressure can never deadlock the operation that releases pressure.
+        self._write_admission_hook: Callable[[], None] | None = None
         # Commit-latency ground truth (seconds), sampled for the metrics
         # surface — this is how the fast path's measured win stays honest.
-        self._commit_latencies: deque[float] = deque(maxlen=100_000)
+        self._metric_sample_capacity = bounded_storage_metric_sample_capacity(
+            metric_sample_capacity)
+        self._commit_latencies: deque[float] = deque(
+            maxlen=self._metric_sample_capacity)
         self._latency_lock = threading.Lock()
         self._watchdog_stop = threading.Event()
         self._watchdog = threading.Thread(
@@ -274,6 +317,13 @@ class _FairWriter:
                 'interrupted': False,
                 'token': id(job),
             }
+
+    def _transaction_budget_s(self, job: _WriteJob) -> float:
+        return (
+            self._transaction_timeout_s
+            if job.transaction_timeout_s is None
+            else float(job.transaction_timeout_s)
+        )
 
     def _set_current_batch(self, jobs: list['_WriteJob']) -> None:
         # The watchdog/metrics surface reads one "current" record; a batch
@@ -349,6 +399,37 @@ class _FairWriter:
     def queue_depths(self) -> dict[str, int]:
         with self._condition:
             return {name: len(q) for name, q in self._queues.items()}
+
+    def set_write_admission_hook(
+        self,
+        hook: Callable[[], None] | None,
+    ) -> None:
+        """Install the backend-owned, fail-closed resource admission fence."""
+        with self._condition:
+            self._write_admission_hook = hook
+
+    def _write_admission_error(self) -> StorageError | None:
+        with self._condition:
+            hook = self._write_admission_hook
+        if hook is None:
+            return None
+        try:
+            hook()
+        except StorageError as exc:
+            return exc
+        except Exception:
+            logger.exception('SQLite write admission hook failed')
+            return StorageError(
+                'database_unavailable',
+                'Storage write admission check failed',
+                True,
+                100,
+            )
+        return None
+
+    def _record_write_admission_rejection(self) -> None:
+        with self._condition:
+            self.metrics['write_admission_rejections'] += 1
 
     def _watchdog_loop(self) -> None:
         while not self._watchdog_stop.wait(self._watchdog_interval_s):
@@ -643,7 +724,7 @@ class _FairWriter:
         # failed mid-op and were mislabeled ``database_timeout`` (2026-08-20
         # audit).  Per-job arming keeps the segment watchdog intact while a
         # job can only ever be interrupted by its OWN deadline.
-        segment_deadline = batch_start + self._transaction_timeout_s
+        segment_deadline = batch_start + self._transaction_budget_s(jobs[0])
         self._connection.set_progress_handler(
             lambda: 1 if time.monotonic() >= segment_deadline else 0, 1000)
         segment_start = batch_start
@@ -677,7 +758,12 @@ class _FairWriter:
                 # documented 2s fail-fast boundary.
                 job.started.set()
                 if not in_transaction:
-                    segment_deadline = now + self._transaction_timeout_s
+                    admission_error = self._write_admission_error()
+                    if admission_error is not None:
+                        self._record_write_admission_rejection()
+                        self._resolve(job, error=admission_error)
+                        continue
+                    segment_deadline = now + self._transaction_budget_s(job)
                     self._arm_current_job(job, segment_deadline)
                     self._set_phase('begin')
                     self._connection.set_progress_handler(
@@ -691,7 +777,9 @@ class _FairWriter:
                     in_transaction = True
                     segment_start = time.monotonic()
                 segment_deadline = min(
-                    job.deadline_at, segment_start + self._transaction_timeout_s)
+                    job.deadline_at,
+                    segment_start + self._transaction_budget_s(job),
+                )
                 self._connection.set_progress_handler(
                     lambda: 1 if time.monotonic() >= segment_deadline else 0,
                     1000)
@@ -700,7 +788,8 @@ class _FairWriter:
                 try:
                     self._connection.execute('SAVEPOINT tofu_gc')
                     try:
-                        result = job.operation(SQLiteSession(self._connection))
+                        result = job.operation(SQLiteSession(
+                            self._connection, self._turn_projection_cache))
                     except BaseException as op_exc:
                         try:
                             self._set_phase('rollback')
@@ -787,13 +876,24 @@ class _FairWriter:
                 # it must never fail the commit that already landed.
                 logger.debug('SQLite on-commit hook failed', exc_info=True)
 
-    def commit_latency_stats(self) -> dict[str, float]:
+    def commit_latency_stats(self) -> dict[str, float | int]:
         with self._latency_lock:
-            samples = sorted(self._commit_latencies)
+            recent_samples = tuple(self._commit_latencies)
+        # Prometheus/support snapshots must not hold the writer's observation
+        # lock while sorting reconstructible history; commits remain the
+        # higher-authority path.
+        samples = sorted(recent_samples)
         if not samples:
-            return {'samples': 0, 'p50_ms': 0.0, 'p95_ms': 0.0, 'max_ms': 0.0}
+            return {
+                'sample_capacity': self._metric_sample_capacity,
+                'samples': 0,
+                'p50_ms': 0.0,
+                'p95_ms': 0.0,
+                'max_ms': 0.0,
+            }
         import math as _math
         return {
+            'sample_capacity': self._metric_sample_capacity,
             'samples': len(samples),
             'p50_ms': round(samples[len(samples) // 2] * 1000, 3),
             'p95_ms': round(
@@ -802,10 +902,17 @@ class _FairWriter:
         }
 
     def _transaction(self, job: _WriteJob) -> Any:
+        if not job.raw:
+            admission_error = self._write_admission_error()
+            if admission_error is not None:
+                self._record_write_admission_rejection()
+                raise admission_error
         attempts = 0
         while True:
             transaction_deadline = min(
-                job.deadline_at, time.monotonic() + self._transaction_timeout_s)
+                job.deadline_at,
+                time.monotonic() + self._transaction_budget_s(job),
+            )
             self._connection.set_progress_handler(
                 lambda: 1 if time.monotonic() >= transaction_deadline else 0,
                 1000,
@@ -813,11 +920,13 @@ class _FairWriter:
             try:
                 if job.raw:
                     self._set_phase('execute')
-                    return job.operation(SQLiteSession(self._connection))
+                    return job.operation(SQLiteSession(
+                        self._connection, self._turn_projection_cache))
                 self._set_phase('begin')
                 self._connection.execute('BEGIN IMMEDIATE')
                 self._set_phase('execute')
-                result = job.operation(SQLiteSession(self._connection))
+                result = job.operation(SQLiteSession(
+                    self._connection, self._turn_projection_cache))
                 if time.monotonic() >= transaction_deadline:
                     raise StorageError(
                         'database_timeout', 'Storage transaction exceeded its watchdog',
@@ -855,6 +964,7 @@ class _FairWriter:
         operation_name: str = '',
         *,
         raw: bool = False,
+        transaction_timeout_s: float | None = None,
     ) -> Any:
         if priority not in self._queues:
             raise StorageError('database_protocol_error', 'Invalid storage priority')
@@ -865,23 +975,64 @@ class _FairWriter:
             # restarts the authority.
             raise StorageError(
                 'database_unavailable', 'Storage writer thread has exited', True, 100)
-        job = _WriteJob(
-            operation=operation, deadline_at=deadline_at, priority=priority,
-            operation_name=operation_name, raw=raw)
         with self._condition:
             if self._stop:
                 raise StorageError(
                     'database_unavailable', 'Storage writer is stopping', True, 100)
-            self._queues[priority].append(job)
+        if not raw:
+            admission_error = self._write_admission_error()
+            if admission_error is not None:
+                self._record_write_admission_rejection()
+                raise admission_error
+        if transaction_timeout_s is not None and not (
+            0.05 <= float(transaction_timeout_s) <= 300.0
+        ):
+            raise StorageError(
+                'database_protocol_error',
+                'Invalid storage transaction timeout override',
+            )
+        job = _WriteJob(
+            operation=operation, deadline_at=deadline_at, priority=priority,
+            operation_name=operation_name, raw=raw,
+            transaction_timeout_s=transaction_timeout_s)
+        with self._condition:
+            if self._stop:
+                raise StorageError(
+                    'database_unavailable', 'Storage writer is stopping', True, 100)
             depth = sum(len(items) for items in self._queues.values())
+            if depth >= self.queue_capacity:
+                self.metrics['queue_rejections'] += 1
+                raise StorageError(
+                    'database_busy',
+                    'Storage writer queue is full',
+                    True,
+                    25,
+                )
+            self._queues[priority].append(job)
+            depth += 1
             self.metrics['submitted'] += 1
             self.metrics['max_queue_depth'] = max(self.metrics['max_queue_depth'], depth)
             self._condition.notify()
         acquire_wait = max(0.0, min(
             _ACQUIRE_CAP_S.get(priority, 2.0), deadline_at - time.monotonic()))
         if not job.started.wait(acquire_wait):
-            job.cancelled = True
-            self.metrics['timed_out'] += 1
+            # The caller no longer owns a useful write. Remove the job while
+            # it is still queued so its operation closure and decoded RPC
+            # payload become reclaimable immediately. If the writer already
+            # drained it into a local batch, the cancellation bit preserves
+            # the existing pre-execution/commit fence.
+            removed_before_start = False
+            with self._condition:
+                job.cancelled = True
+                try:
+                    self._queues[priority].remove(job)
+                    removed_before_start = True
+                except ValueError:
+                    pass
+                self.metrics['timed_out'] += 1
+                if removed_before_start:
+                    self.metrics['cancelled_before_start'] += 1
+                self._condition.notify_all()
             now = time.monotonic()
             if now - self._last_acquisition_warning >= 5.0:
                 self._last_acquisition_warning = now
@@ -949,6 +1100,8 @@ class SQLiteBackend(Backend):
         self._closed = False
         self._preflight: dict[str, Any] = {}
         self._metrics = {'queries': 0, 'query_failures': 0, 'pool_rotations': 0}
+        self._turn_projection_cache = TurnProjectionCache(
+            config.turn_projection_cache_mib * 1024 * 1024)
         # Fast-path authority (see lib/storage_sidecar/fastpath.py): when a
         # measured-local filesystem wins decisively, the write front opens
         # THERE and the shipper keeps a durable shadow on the data dir.
@@ -1003,6 +1156,20 @@ class SQLiteBackend(Backend):
     @property
     def _fastpath_active(self) -> bool:
         return self._authority_path != self.config.sqlite_path
+
+    def diagnostic_locator(self) -> dict[str, Any]:
+        """Describe the active file without exposing the private RPC token."""
+        locator: dict[str, Any] = {
+            'format': 'tofu.storage-locator/v1',
+            'backend': self.name,
+            'authority_path': str(self._authority_path.resolve()),
+            'configured_path': str(self.config.sqlite_path.resolve()),
+            'fastpath_active': self._fastpath_active,
+        }
+        decision = self._fastpath_decision
+        if self._fastpath_active and decision is not None and decision.shadow_dir:
+            locator['shadow_dir'] = str(Path(decision.shadow_dir).resolve())
+        return locator
 
     @staticmethod
     def _arm_no_checkpoint_on_close(connection: sqlite3.Connection) -> None:
@@ -1193,6 +1360,8 @@ class SQLiteBackend(Backend):
             self.config.transaction_timeout_s,
             stall_grace_s=self.config.writer_stall_grace_s,
             hard_kill_s=self.config.writer_hard_kill_s,
+            queue_capacity=self.config.sqlite_writer_queue_capacity,
+            turn_projection_cache=self._turn_projection_cache,
         )
         if self._fastpath_active:
             # Keep one connection open for the backend's lifetime so a
@@ -1211,6 +1380,8 @@ class SQLiteBackend(Backend):
                     self.config.fastpath_wal_rebase_max_mib * 1024 ** 2),
             )
             self._shipper.start()
+            self._writer.set_write_admission_hook(
+                self._shipper.assert_write_admitted)
             self._writer._on_commit = self._shipper.notify_commit
             # The local half of the split-brain guard: reconcile() compares
             # this against the shadow manifest before trusting either side.
@@ -1300,7 +1471,8 @@ class SQLiteBackend(Backend):
             lambda: 1 if time.monotonic() >= deadline_at else 0, 1000)
         try:
             slot.connection.execute('BEGIN')
-            result = operation(SQLiteSession(slot.connection))
+            result = operation(SQLiteSession(
+                slot.connection, self._turn_projection_cache))
             slot.connection.rollback()
             self._metrics['queries'] += 1
             return result
@@ -1327,6 +1499,7 @@ class SQLiteBackend(Backend):
         deadline_at: float,
         *,
         receipt_required: bool,
+        transaction_timeout_s: float | None = None,
     ) -> Any:
         if receipt_required and (
                 not isinstance(command_id, str)
@@ -1334,6 +1507,11 @@ class SQLiteBackend(Backend):
                 or len(command_id) > 200):
             raise StorageError(
                 'database_protocol_error', 'A valid command_id is required')
+        receipt_identity = (
+            command_receipt_identity_v2(
+                command_id, operation_name, payload_digest)
+            if receipt_required else None
+        )
 
         # The Python watchdog can interrupt SQLite VM opcodes, but it cannot
         # pre-empt a filesystem call already executing inside one
@@ -1360,25 +1538,30 @@ class SQLiteBackend(Backend):
 
         def transactional(session: SQLiteSession) -> Any:
             if receipt_required:
-                receipt = session.fetch_one(
-                    'SELECT operation, request_digest, response_json '
-                    'FROM storage_command_receipts WHERE command_id = ?',
-                    (command_id,),
+                assert receipt_identity is not None
+                command_key, request_digest = receipt_identity
+                found, replay = decode_command_receipt_lookup(
+                    session.fetch_all(
+                        COMMAND_RECEIPT_LOOKUP_SQL,
+                        (
+                            operation_name, payload_digest, command_id,
+                            operation_name, request_digest, command_key,
+                        ),
+                    )
                 )
-                if receipt is not None:
-                    if (receipt['operation'] != operation_name
-                            or receipt['request_digest'] != payload_digest):
-                        raise StorageError(
-                            'database_conflict', 'command_id was reused for a different request')
-                    return decode_receipt_response(receipt['response_json'])
+                if found:
+                    return replay
             response = operation(session)
             if receipt_required and receipt_cacheable(response):
+                assert receipt_identity is not None
+                command_key, request_digest = receipt_identity
                 encoded = encode_receipt_response(response)
                 session.execute(
-                    'INSERT INTO storage_command_receipts('
-                    'command_id, operation, request_digest, response_json, committed_at_ms) '
+                    'INSERT INTO storage_command_receipts_v2('
+                    'command_key, operation, request_digest, response_json, '
+                    'committed_at_ms) '
                     'VALUES (?, ?, ?, ?, ?)',
-                    (command_id, operation_name, payload_digest, encoded,
+                    (command_key, operation_name, request_digest, encoded,
                      int(time.time() * 1000)),
                 )
             return response
@@ -1386,7 +1569,12 @@ class SQLiteBackend(Backend):
         if self._writer is None:
             raise StorageError('database_unavailable', 'SQLite writer is not ready', True, 100)
         result = self._writer.submit(
-            transactional, priority, deadline_at, operation_name=operation_name)
+            transactional,
+            priority,
+            deadline_at,
+            operation_name=operation_name,
+            transaction_timeout_s=transaction_timeout_s,
+        )
         if self._turn_search_projection is not None:
             self._turn_search_projection.wake()
         return result
@@ -1411,6 +1599,7 @@ class SQLiteBackend(Backend):
     def metrics(self) -> dict[str, Any]:
         writer = dict(self._writer.metrics) if self._writer else {}
         if self._writer is not None:
+            writer['queue_capacity'] = self.config.sqlite_writer_queue_capacity
             current = self._writer.current_job()
             if current is not None:
                 now = time.monotonic()
@@ -1434,6 +1623,7 @@ class SQLiteBackend(Backend):
             'read_pool_size': self._read_pool.qsize(),
             'read_pool_capacity': self.config.read_pool_size,
             'writer_cache_mib': self.config.sqlite_writer_cache_mib,
+            'turn_projection_cache': self._turn_projection_cache.stats(),
             'writer_watchdog': (
                 self._writer.watchdog_policy()
                 if self._writer is not None else {
@@ -1585,20 +1775,45 @@ class SQLiteBackend(Backend):
     ) -> dict[str, Any]:
         """Back up a fastpath front through one stable shipper generation."""
         estimated_bytes = self._authority_path.stat().st_size
-        capacity = capacity_preflight(backups, estimated_bytes)
+        capacity = capacity_preflight(
+            backups,
+            estimated_bytes,
+            allow_verified_rotation=True,
+        )
+        budget_rotation_required = bool(
+            capacity['budget_rotation_required'])
+        retire_verified_artifacts = {
+            str(name) for name in capacity['retire_verified_artifacts']
+        }
+        if budget_rotation_required:
+            logger.info(
+                '[backup] recovery-copy peak exceeds budget; publishing one '
+                'verified hard-link replacement before retiring %d old backup(s)',
+                len(retire_verified_artifacts),
+            )
         write_job_manifest(
             temporary,
             source=self._authority_path,
             state='copying',
-            extra={'estimated_bytes': capacity['estimated_bytes']},
+            extra={
+                'estimated_bytes': capacity['estimated_bytes'],
+                'budget_rotation_required': budget_rotation_required,
+            },
         )
         published = False
         try:
             try:
-                pinned = self._shipper.pin_checkpointed_snapshot_for_backup(
-                    temporary,
-                    deadline_at=deadline_at,
-                )
+                if budget_rotation_required:
+                    pinned = self._shipper.pin_checkpointed_snapshot_for_backup(
+                        temporary,
+                        deadline_at=deadline_at,
+                        require_hardlink=True,
+                    )
+                else:
+                    pinned = self._shipper.pin_checkpointed_snapshot_for_backup(
+                        temporary,
+                        deadline_at=deadline_at,
+                    )
             except TimeoutError as exc:
                 raise StorageError(
                     'database_timeout', str(exc), True, 100) from exc
@@ -1610,12 +1825,17 @@ class SQLiteBackend(Backend):
                     'estimated_bytes': capacity['estimated_bytes'],
                     'snapshot_generation': pinned['generation'],
                     'copy_strategy': pinned['copy_strategy'],
+                    'recovery_point_at': pinned['recovery_point_at'],
                 },
             )
             _verify_readonly_backup(temporary, deadline_at)
             fsync_file(temporary)
             size = temporary.stat().st_size
             checksum = sha256_file(temporary, deadline_at)
+            recovery_point_at = datetime.fromtimestamp(
+                float(pinned['recovery_point_at']),
+                tz=timezone.utc,
+            ).isoformat()
             os.replace(temporary, target)
             fsync_directory(backups)
             manifest = {
@@ -1629,11 +1849,16 @@ class SQLiteBackend(Backend):
                 'source_mode': 'fastpath-checkpointed-shadow',
                 'snapshot_generation': pinned['generation'],
                 'copy_strategy': pinned['copy_strategy'],
+                'recovery_point_at': recovery_point_at,
             }
             manifest_path = target.with_name(target.name + '.manifest.json')
             write_json_durable(manifest_path, manifest)
             published = True
-            pruned = prune_verified_backups(backups, preserve=target)
+            pruned = prune_verified_backups(
+                backups,
+                preserve=target,
+                retire_names=retire_verified_artifacts,
+            )
             return {
                 'ok': True,
                 'backup': str(target.relative_to(self.config.project_root)),
@@ -1648,13 +1873,18 @@ class SQLiteBackend(Backend):
                     'retained_recovery_bytes'],
                 'projected_recovery_bytes': capacity[
                     'projected_recovery_bytes'],
+                'peak_projected_recovery_bytes': capacity[
+                    'peak_projected_recovery_bytes'],
                 'same_volume_rollback_bytes': capacity[
                     'same_volume_rollback_bytes'],
+                'budget_rotation_required': budget_rotation_required,
+                'budget_retired_backups': len(retire_verified_artifacts),
                 'reclaimed_temp_artifacts': reclaimed,
                 'pruned': pruned,
                 'source_mode': manifest['source_mode'],
                 'snapshot_generation': pinned['generation'],
                 'copy_strategy': pinned['copy_strategy'],
+                'recovery_point_at': recovery_point_at,
             }
         finally:
             if not published:
@@ -1703,6 +1933,7 @@ class SQLiteBackend(Backend):
         if self._turn_search_projection is not None:
             self._turn_search_projection.close()
             self._turn_search_projection = None
+        self._turn_projection_cache.clear()
         if self._writer is not None:
             self._writer.close()
             self._writer = None

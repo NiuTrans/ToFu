@@ -77,6 +77,15 @@ npm run typecheck:modules
 
 Tests own temporary storage and processes and clean them up. Network, clock,
 randomness, provider, and browser dependencies are injected or bounded.
+At pytest bootstrap, inherited production lifecycle identity, manager endpoints,
+ports, storage credentials, and project paths are removed before the first
+project import. Lifecycle fault-injection copies additionally prove their
+private pytest root, project/data containment, dynamically owned port, and exact
+child-process identity before signalling; a test flag by itself never
+authorizes a production lifecycle operation.
+Detached lifecycle fixtures declare the pytest worker as their explicit
+Supervisor owner, so an interrupted worker cannot strand a self-healing
+watchdog or test server under PID 1.
 
 ## Parallel execution policy
 
@@ -94,6 +103,11 @@ dedicated-host override; `JOBS=0` is the debugging/serial override.
 
 Every worker owns separate data, storage, log, and temporary roots. Tests may
 not mutate shipped source or use a fixed host-global port as an implicit lock.
+Disposable pytest roots live under one current-UID temp parent and encode their
+creating PID; normal teardown removes the current roots, while the next session
+performs one bounded, exact-name reclaim of roots whose owner is dead. Translation
+refusal markers and virtual Vite stdin entries stay inside these declared
+lifecycles rather than accumulating across the host temp directory.
 `loadscope`, `loadfile`, and `loadgroup` are optimization tools, not correctness
 barriers: grouping one file does not prevent another worker from touching the
 same external resource.

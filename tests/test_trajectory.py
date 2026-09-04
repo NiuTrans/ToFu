@@ -54,7 +54,7 @@ class TrajectoryFormatTest(unittest.TestCase):
         from lib.trajectory import AVAILABLE_FORMATS
         self.assertEqual(set(AVAILABLE_FORMATS),
                           {'sharegpt', 'openai-finetune', 'anthropic',
-                           'tofu-native'})
+                           'tofu-native', 'atif'})
 
     def test_unknown_format_raises(self):
         from lib.trajectory import flatten
@@ -130,6 +130,35 @@ class TrajectoryFormatTest(unittest.TestCase):
         self.assertEqual(len(traj['tool_rounds']), 1)
         self.assertEqual(traj['final_assistant']['content'],
                          'Done — refactored 3 functions.')
+
+    def test_atif_shape(self):
+        from lib.trajectory import flatten
+        out = flatten(_sample_task(with_tools=True), 'atif')
+        traj = out['trajectory']
+        self.assertEqual(traj['schema_version'], 'ATIF-v1.3')
+        self.assertEqual(traj['session_id'], 'task_abc123')
+        self.assertEqual(traj['agent']['name'], 'tofu-agent')
+        # system + user + tool-round agent step + final agent step
+        self.assertEqual(len(traj['steps']), 4)
+        self.assertEqual([s['step_id'] for s in traj['steps']], [1, 2, 3, 4])
+        self.assertEqual(traj['steps'][0]['source'], 'system')
+        self.assertEqual(traj['steps'][1]['source'], 'user')
+        rnd = traj['steps'][2]
+        self.assertEqual(rnd['source'], 'agent')
+        self.assertEqual(rnd['tool_calls'][0]['function_name'], 'read_files')
+        self.assertEqual(rnd['tool_calls'][0]['arguments'], {'path': 'foo.py'})
+        self.assertEqual(rnd['observation']['results'][0]['source_call_id'],
+                         'call_1')
+        self.assertEqual(rnd['observation']['results'][0]['content'],
+                         '<contents of foo.py>')
+        final = traj['steps'][3]
+        self.assertEqual(final['message'], 'Done — refactored 3 functions.')
+        self.assertEqual(final['reasoning_content'],
+                         'Let me look at foo.py first...')
+        metrics = traj['final_metrics']
+        self.assertEqual(metrics['total_prompt_tokens'], 100)
+        self.assertEqual(metrics['total_completion_tokens'], 50)
+        self.assertEqual(metrics['total_steps'], 4)
 
     def test_multimodal_user_collapses_text(self):
         from lib.trajectory import flatten

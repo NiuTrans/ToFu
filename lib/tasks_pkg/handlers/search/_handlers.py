@@ -358,6 +358,7 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     # A bare "Failed to fetch" tells the model nothing, so it retries sibling
     # hosts of the same dead origin — the exact loop this reason text kills.
     error_msg = item.get('error_msg')
+    round_entry['_cacheableResult'] = bool(page_content)
     tool_content = (f"Content from {target_url} ({filtered_chars:,} chars):\n\n{page_content}"
                     if page_content
                     else f"Failed to fetch {target_url}."
@@ -366,11 +367,11 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
 
 
 @tool_registry.handler(
-    'download_url_to_server',
-    category='search',
-    description='Download one remote URL into server staging',
+    'browser_download_url_to_server',
+    category='browser',
+    description='Download one remote URL or browser link into server staging',
 )
-def _handle_download_url_to_server(
+def _handle_browser_download_url_to_server(
     task,
     tc,
     fn_name,
@@ -385,6 +386,42 @@ def _handle_download_url_to_server(
 ):
     """Execute the explicit server-location download contract."""
     target_url = str((fn_args or {}).get('url') or '').strip()
+    resolved_browser_client_id = ''
+    if not target_url and ((fn_args or {}).get('text')
+                           or (fn_args or {}).get('selector')):
+        from lib.browser.download_target import (
+            BrowserDownloadTargetError,
+            resolve_browser_download_element,
+        )
+        try:
+            target_url, resolved_browser_client_id = (
+                resolve_browser_download_element(
+                    owner_user_id=task.get('_userId', '') or '',
+                    client_id=cfg.get('browserClientId') or '',
+                    tab_id=(fn_args or {}).get('tab_id'),
+                    text=(fn_args or {}).get('text') or '',
+                    selector=(fn_args or {}).get('selector') or '',
+                )
+            )
+        except BrowserDownloadTargetError as exc:
+            failure = typed_tool_error(
+                exc.code,
+                retryable=exc.retryable,
+                next_action=exc.next_action,
+                message=exc.message,
+            ).to_envelope_text()
+            _finalize_tool_round(
+                task, rn, round_entry,
+                [{
+                    'title': 'Browser download link unavailable',
+                    'snippet': exc.message,
+                    'url': '', 'source': 'Browser', 'fetched': False,
+                    'fetchedChars': 0, 'badge': exc.code,
+                }],
+                query_override='⬇ browser link',
+                status='error',
+            )
+            return tc_id, failure, False
     parsed = urlparse(target_url)
     if parsed.scheme.lower() not in {'http', 'https'} or not parsed.hostname:
         failure = typed_tool_error(
@@ -393,8 +430,10 @@ def _handle_download_url_to_server(
             next_action=(
                 'Pass one complete http:// or https:// URL. Use read_files for '
                 'a local path.'),
-            message='download_url_to_server requires one complete remote URL.',
-        ).to_model_text()
+            message=(
+                'browser_download_url_to_server requires a complete remote URL '
+                'or a browser element target.'),
+        ).to_envelope_text()
         _finalize_tool_round(
             task, rn, round_entry,
             [{
@@ -412,7 +451,8 @@ def _handle_download_url_to_server(
     from lib.search_bridge import bind_search_browser
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
-            client_id=cfg.get('browserClientId') or '',
+            client_id=(resolved_browser_client_id
+                       or cfg.get('browserClientId') or ''),
             required_capabilities=('file_export',)):
         result = search_core.download_url_to_server(
             target_url, owner_user_id=task.get('_userId', '') or '')
@@ -424,7 +464,7 @@ def _handle_download_url_to_server(
             next_action=result.get('next_action') or (
                 'Stop and report that the URL could not be downloaded.'),
             message=result.get('error_msg') or 'The URL could not be downloaded.',
-        ).to_model_text()
+        ).to_envelope_text()
         _finalize_tool_round(
             task, rn, round_entry,
             [{
@@ -553,6 +593,8 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
         all_parts.append(part)
 
     # Finalize the round
+    round_entry['_cacheableResult'] = bool(all_display_results) and all(
+        bool(row.get('fetched')) for row in all_display_results)
     _finalize_tool_round(task, rn, round_entry, all_display_results,
                          query_override=f'📄 {n} URLs')
     tool_content = '\n\n'.join(all_parts)

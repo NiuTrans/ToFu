@@ -322,9 +322,14 @@ def model_supports_vision(model: str) -> bool:
     # ── 1. Check active dispatcher slots (runtime state) ──
     try:
         from lib.llm_dispatch.factory import get_dispatcher
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
         dispatcher = get_dispatcher()
+        pinned_provider = get_pinned_provider()
         for slot in dispatcher.slots:
-            if slot.model == model:
+            if pinned_provider and slot.provider_id != pinned_provider:
+                continue
+            logical_model = getattr(slot, 'logical_model', '') or slot.model
+            if logical_model == model or slot.model == model:
                 return 'vision' in slot.capabilities
     except Exception as e:
         logger.debug('[ModelInfo] Could not check dispatcher for vision cap: %s', e)

@@ -25,6 +25,61 @@ from lib.tasks_pkg.handlers._adapter import simple_call
 logger = get_logger(__name__)
 
 
+def _settle_mcp_round_display(round_entry, meta, underlying, args,
+                              tool_content):
+    """Settle-time display upgrade for an MCP round — runs AFTER execution.
+
+    One helper for both the direct ``mcp__*`` path and the progressive
+    wrapper, so the two can never drift:
+
+    1. ``ingest_tool_result`` — opportunistically harvest id→name/title pairs
+       and full resource URLs from the result (best-effort; errors swallowed).
+    2. Re-compose the label with the SAME ``compose_mcp_display`` the
+       tool_start line used and adopt it on the round — e.g. a first
+       ``read_doc`` swaps the bare contentId for the article title the moment
+       the read lands. Mutating ``round_entry['query']`` before finalize
+       carries the fresh label onto the ``tool_result`` event too.
+    3. Re-key the clickable-link map to the fresh label — ``_mcpLinks`` wraps
+       the EXACT rendered substring, so after an id→title swap the old id key
+       would linkify nothing.
+    4. Surface MCP transport failures as an ERROR VERDICT on the round rather
+       than a decorative ``<server> (error)`` badge chip. The round already
+       carries server/tool in its label, and ``_finalize_tool_round``'s
+       verdict protection keeps this 'error' over the adapter's default
+       'done', so the row renders through the error lane (failed chip +
+       inline reason) instead of masquerading as success.
+    """
+    try:
+        from lib.mcp.project_names import ingest_tool_result
+        ingest_tool_result(underlying, args, tool_content)
+    except Exception as e:  # noqa: BLE001
+        logger.debug('[MCP] name/url ingest failed for %s: %s', underlying, e)
+
+    try:
+        from lib.tasks_pkg.tool_display import compose_mcp_display
+        fresh_display, _ = compose_mcp_display(underlying, args)
+        if fresh_display:
+            if fresh_display != round_entry.get('query'):
+                round_entry['query'] = fresh_display
+            meta['title'] = fresh_display
+    except Exception as e:
+        logger.debug('[MCP] settle display recompose failed for %s: %s',
+                     underlying, e)
+
+    try:
+        from lib.tasks_pkg.tool_display._mcp import _mcp_links
+        links = _mcp_links(args)
+        if links:
+            round_entry['_mcpLinks'] = links
+    except Exception as e:
+        logger.debug('[MCP] settle link refresh failed for %s: %s',
+                     underlying, e)
+
+    if isinstance(tool_content, str) and tool_content.startswith(
+            ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected')):
+        round_entry['status'] = 'error'
+
+
 def _run_progressive_mcp(fn_name, fn_args):
     """Executor callable for the stable progressive MCP meta tools."""
     from lib.mcp import get_bridge
@@ -79,17 +134,11 @@ def handle_progressive_mcp_tool(
             meta['badge'] = 'MCP catalog'
             meta['title'] = f"Search MCP tools: {str(fn_args.get('query') or '')[:120]}"
             return
-        try:
-            from lib.mcp import get_bridge
-            from lib.tasks_pkg.tool_display import compose_mcp_display
-            info = get_bridge().get_tool_info(underlying)
-            meta['badge'] = info['server_name'] if info else 'MCP'
-            display, _ = compose_mcp_display(
-                underlying, fn_args.get('arguments') or {})
-            meta['title'] = display or underlying or fn_name
-        except Exception as e:
-            logger.debug('[MCP:Progressive] display build failed for %s: %s',
-                         underlying, e)
+        _settle_mcp_round_display(
+            round_entry, meta, underlying, fn_args.get('arguments') or {},
+            _tool_content)
+        if not meta.get('title'):
+            meta['title'] = underlying or fn_name
 
     result = simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
@@ -165,38 +214,26 @@ def handle_mcp_tool(
     base_display, _ = compose_mcp_display(fn_name, fn_args)
 
     def _post_build(meta, tool_content, _fn_args):
-        """Upgrade badge/title with MCP server/tool pair + arg context.
+        """Settle-time display upgrade — see _settle_mcp_round_display.
 
-        Also opportunistically learns any project_id → name mappings from
-        overleaf tool results so future calls' title lines can show the
-        human-readable project name (e.g. ``@ [EMNLP Demo] Tofu``)
-        instead of an opaque ``@ 69f21…cca7``. Cache population is
-        best-effort — errors are logged and swallowed.
+        Rebuilds the label AFTER ingest so this very call benefits from the
+        name/title it just learned (e.g. the create_project call itself
+        renders as ``… — My Paper`` rather than a short-ID). No server-name
+        badge: the label already names server/tool, and success/failure is
+        the round status's job.
         """
-        # ── Opportunistic project-name learning ──
-        try:
-            from lib.mcp.project_names import ingest_tool_result
-            ingest_tool_result(fn_name, _fn_args, tool_content)
-        except Exception as e:  # noqa: BLE001
-            logger.debug('[MCP] project-name ingest failed for %s: %s', fn_name, e)
-
-        # ── Rebuild the display AFTER ingest so this very call can benefit
-        #    from the name it just learned (e.g. the create_project call
-        #    itself now renders as ``… — My Paper`` rather than a short-ID).
-        #    Same compose_mcp_display helper as the live line → no drift, incl.
-        #    the batch-file (one-path-per-line) form.
-        from lib.tasks_pkg.tool_display import compose_mcp_display
-        fresh_display, _ = compose_mcp_display(fn_name, fn_args)
-        fresh_display = fresh_display or base_display
-
-        is_error = isinstance(tool_content, str) and tool_content.startswith(
-            ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected'))
-        meta['badge'] = server_name if not is_error else f'{server_name} (error)'
-        meta['title'] = fresh_display
+        _settle_mcp_round_display(
+            round_entry, meta, fn_name, fn_args, tool_content)
+        if not meta.get('title'):
+            meta['title'] = base_display
 
     try:
         from lib.mcp.tool_search import record_mcp_tool_used
-        record_mcp_tool_used(str(task.get('id') or ''), fn_name)
+        record_mcp_tool_used(
+            str(task.get('id') or ''), fn_name,
+            selection_scope_id=str(
+                cfg.get('_mcpSelectionScopeId') or ''),
+        )
     except Exception as e:
         logger.debug('[MCP] sticky active-tool update failed for %s: %s',
                      fn_name, e)

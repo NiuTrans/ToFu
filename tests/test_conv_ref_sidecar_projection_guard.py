@@ -36,14 +36,39 @@ class _FakeStorageClient:
     def query(self, operation, payload=None):
         self.calls.append((operation, dict(payload or {})))
         if operation == 'conversation.list':
-            project_path = (payload or {}).get('project_path')
-            if project_path is None:
-                return self._documents
-            return [
-                document for document in self._documents
-                if (document.get('metadata', {}).get('settings', {})
-                    .get('projectPath')) == project_path
-            ]
+            payload = payload or {}
+            documents = list(self._documents)
+            project_path = payload.get('project_path')
+            if project_path is not None:
+                documents = [
+                    document for document in documents
+                    if (document.get('metadata', {}).get('settings', {})
+                        .get('projectPath')) == project_path
+                ]
+            ids = payload.get('ids')
+            if ids is not None:
+                selected_ids = set(ids)
+                documents = [
+                    document for document in documents
+                    if document.get('metadata', {}).get('id') in selected_ids
+                ]
+            title_contains = payload.get('title_contains')
+            if title_contains is not None:
+                needle = title_contains.lower()
+                documents = [
+                    document for document in documents
+                    if needle in str(
+                        document.get('metadata', {}).get('title') or ''
+                    ).lower()
+                ]
+            documents.sort(
+                key=lambda document: (
+                    int(document.get('metadata', {}).get('updated_at') or 0),
+                    str(document.get('metadata', {}).get('id') or ''),
+                ),
+                reverse=True,
+            )
+            return documents[:int(payload.get('limit', 1000))]
         if operation == 'conversation.search':
             return self._search_hits
         raise AssertionError(f'unexpected sidecar operation: {operation}')
@@ -92,12 +117,63 @@ class TestNeverRequestsTheTranscriptArchive:
             'full settings_json blobs (autopilot summaries et al.) must not '
             'ride the listing frame either')
 
+    def test_unfiltered_listing_requests_only_the_deliverable_rows(
+        self, monkeypatch
+    ):
+        client = _FakeStorageClient([
+            _doc(f'c{index}', f'Conversation {index}')
+            for index in range(100)
+        ])
+
+        _run(monkeypatch, client, scope='all', limit=20)
+
+        assert _list_payloads(client)[0]['limit'] == 20
+
+    def test_current_conversation_reserves_one_replacement_row(
+        self, monkeypatch
+    ):
+        client = _FakeStorageClient([
+            _doc(f'c{index}', f'Conversation {index}')
+            for index in range(100)
+        ])
+
+        _run(
+            monkeypatch,
+            client,
+            scope='all',
+            limit=20,
+            current_conv_id='c0',
+        )
+
+        assert _list_payloads(client)[0]['limit'] == 21
+
     def test_keyword_search_still_never_requests_blobs(self, monkeypatch):
         client = _FakeStorageClient([_doc('c1', 'Alpha')],
                                     search_hits=[{'id': 'c1', 'snippet': ''}])
         _run(monkeypatch, client, keyword='alpha', scope='all')
         for payload in _list_payloads(client):
             assert payload.get('include_messages') is False
+
+    def test_keyword_title_candidates_are_bounded_in_storage(
+        self, monkeypatch
+    ):
+        client = _FakeStorageClient([
+            _doc(f'c{index}', f'Alpha {index}')
+            for index in range(100)
+        ])
+
+        _run(monkeypatch, client, keyword='alpha', scope='all', limit=20)
+
+        payloads = _list_payloads(client)
+        assert payloads == [{
+            'user_id': 1,
+            'order_by': 'updated_at_desc',
+            'limit': 20,
+            'include_messages': False,
+            'derive_messages': False,
+            'title_contains': 'alpha',
+            'settings_keys': ['projectPath'],
+        }]
 
 
 class TestKeywordBodySearchRidesTheSearchOp:
@@ -111,11 +187,34 @@ class TestKeywordBodySearchRidesTheSearchOp:
         search = [p for op, p in client.calls if op == 'conversation.search']
         assert len(search) == 1, 'keyword path must use conversation.search'
         assert search[0]['query'] == 'wedge'
+        payloads = _list_payloads(client)
+        assert payloads[0]['title_contains'] == 'wedge'
+        assert payloads[0]['limit'] == 20
+        assert payloads[1]['ids'] == ['c2']
+        assert payloads[1]['limit'] == 1
 
     def test_title_hit_still_works_without_a_body_hit(self, monkeypatch):
         client = _FakeStorageClient([_doc('c1', 'Storage wedge postmortem')])
         out = _run(monkeypatch, client, keyword='wedge', scope='all')
         assert 'c1' in out
+
+    @pytest.mark.parametrize(
+        ('keyword', 'title'),
+        [
+            ('key', 'KEY planning'),
+            ('écl', 'ÉCLAIR notes'),
+            ('研究', '研究记录'),
+        ],
+    )
+    def test_title_filter_preserves_python_unicode_lower_semantics(
+        self, monkeypatch, keyword, title
+    ):
+        client = _FakeStorageClient([_doc('c1', title)])
+
+        out = _run(monkeypatch, client, keyword=keyword, scope='all')
+
+        assert 'c1' in out
+        assert _list_payloads(client)[0]['title_contains'] == keyword
 
     def test_no_match_anywhere_returns_the_guidance_message(self, monkeypatch):
         client = _FakeStorageClient([_doc('c1', 'Alpha')])

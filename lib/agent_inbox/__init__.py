@@ -68,6 +68,7 @@ from ._queue import (
     consume_peer,
     drain,
     enqueue,
+    enqueue_after_durable_commit,
     has_pending,
     is_tombstoned,
     peek,
@@ -87,6 +88,7 @@ logger = get_logger(__name__)
 __all__ = [
     # queue ops
     'enqueue',
+    'enqueue_after_durable_commit',
     'drain',
     'consume',
     'consume_peer',

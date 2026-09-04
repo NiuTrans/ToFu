@@ -30,10 +30,14 @@ Design (see android/docs/SUPERVISOR_DESIGN.md, in this repo):
 
 Endpoints (all under the proxied prefix):
 
-    GET  /health                     → {ok, version}
+    GET  /health                     → {ok, version, sourceFingerprint}
     GET  /status?projectPath=<abs>   → {running, pid, host, …}
     POST /start   {projectPath}      → {ok, running, pid, …}
     POST /stop    {projectPath}      → {ok, wasRunning, …}
+    POST /reload  {projectPath, expectedFingerprint}
+                                    → reload Supervisor, preserve worker
+    POST /restart-deferred {projectPath}
+                                    → reply, then replace worker
 
 Launch (owner-ratified): a systemd USER UNIT with ``Restart=always``; fall back
 to ``supervisor.sh`` + nohup where user-lingering is unavailable.
@@ -45,11 +49,18 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from server_manager import LifecycleManager, project_server_env
 from runtime_guards import install_process_resource_defaults
+from supervisor_protocol import (
+    SUPERVISOR_PROTOCOL_VERSION,
+    SUPERVISOR_VERSION,
+    supervisor_source_fingerprint,
+)
 
 # The lifecycle manager must stay available when application imports or the DB
 # are broken. Keep its dependency closure strictly standard-library; the shell
@@ -66,7 +77,6 @@ def audit_log(event, **details):
     logger.info('[audit] %s %s', event, details)
 
 
-SUPERVISOR_VERSION = '0.2.0'
 DEFAULT_PORT = 15001
 
 # ── Environment knobs ─────────────────────────────────────────────────
@@ -74,6 +84,11 @@ ENV_PROJECTS = 'TOFU_SUPERVISOR_PROJECTS'   # ':'-separated absolute project pat
 ENV_PORT = 'TOFU_SUPERVISOR_PORT'
 ENV_HOST = 'TOFU_SUPERVISOR_HOST'
 ENV_PYTHON = 'TOFU_SUPERVISOR_PYTHON'       # interpreter used to launch server.py
+ENV_OWNER_PID = 'TOFU_SUPERVISOR_OWNER_PID'  # optional ephemeral owner boundary
+
+
+class SupervisorOwnershipLost(RuntimeError):
+    """The checkout that owns this standalone manager no longer exists."""
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -101,6 +116,35 @@ def parse_allowlist(raw):
         if part:
             out.add(os.path.realpath(part))
     return out
+
+
+def parse_owner_pid(raw):
+    """Return a validated optional process-ownership boundary.
+
+    Production daemons intentionally outlive the shell that launches them, so
+    this is opt-in. Ephemeral test/dev launchers can set the variable to their
+    own PID; if that owner disappears, the detached supervisor and its worker
+    retire instead of becoming PID-1 orphans.
+    """
+    if raw is None or str(raw).strip() == '':
+        return None
+    try:
+        pid = int(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'{ENV_OWNER_PID} must be a positive PID') from exc
+    if pid <= 0:
+        raise ValueError(f'{ENV_OWNER_PID} must be a positive PID')
+    return pid
+
+
+def pid_is_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def is_allowed(project_path, allowlist):
@@ -375,8 +419,13 @@ class SupervisorHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 'ok': True,
                 'version': SUPERVISOR_VERSION,
+                'protocolVersion': SUPERVISOR_PROTOCOL_VERSION,
                 'managerPid': os.getpid(),
                 'projects': sorted(getattr(self.server, 'allowlist', set())),
+                'sourceFingerprint': getattr(
+                    self.server, 'source_fingerprint', ''),
+                'sourceProjectPath': getattr(self.server, 'source_root', ''),
+                'startedAt': getattr(self.server, 'started_at', 0.0),
             })
             return
         if path == '/status':
@@ -387,6 +436,14 @@ class SupervisorHandler(BaseHTTPRequestHandler):
             probe = (qs.get('probe', ['0'])[0] == '1')
             self._send_json(200, {
                 'ok': True,
+                'supervisorVersion': SUPERVISOR_VERSION,
+                'supervisorProtocolVersion': SUPERVISOR_PROTOCOL_VERSION,
+                'supervisorSourceFingerprint': getattr(
+                    self.server, 'source_fingerprint', ''),
+                'supervisorSourceProjectPath': getattr(
+                    self.server, 'source_root', ''),
+                'supervisorStartedAt': getattr(
+                    self.server, 'started_at', 0.0),
                 **self._manager(project_path).status(probe_health=probe),
             })
             return
@@ -394,7 +451,9 @@ class SupervisorHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip('/') or '/'
-        if path not in ('/start', '/stop', '/restart'):
+        if path not in (
+                '/start', '/stop', '/restart', '/reload',
+                '/restart-deferred'):
             self._send_json(404, {'ok': False, 'error': 'not found'})
             return
         body = self._read_json_body()
@@ -404,7 +463,51 @@ class SupervisorHandler(BaseHTTPRequestHandler):
         project_path = (body.get('projectPath') or '').strip()
         if not self._check_allowed(project_path):
             return
-        if path == '/start':
+        if path == '/reload':
+            expected = str(body.get('expectedFingerprint') or '').strip()
+            current_source = supervisor_source_fingerprint(
+                getattr(self.server, 'source_root', project_path))
+            if not expected or expected != current_source:
+                self._send_json(409, {
+                    'ok': False,
+                    'message': 'Supervisor reload fingerprint does not match disk.',
+                    'expectedFingerprint': expected,
+                    'diskFingerprint': current_source,
+                })
+                return
+            if expected == getattr(self.server, 'source_fingerprint', ''):
+                self._send_json(200, {
+                    'ok': True,
+                    'reloading': False,
+                    'sourceFingerprint': expected,
+                })
+                return
+            accepted = self.server.schedule_reload(
+                project_path=project_path,
+                expected_fingerprint=expected,
+                source=body.get('source') or 'http',
+            )
+            self._send_json(202 if accepted else 409, {
+                'ok': accepted,
+                'reloading': accepted,
+                'sourceFingerprint': expected,
+                **({} if accepted else {
+                    'message': 'Supervisor reload is already in progress.',
+                }),
+            })
+        elif path == '/restart-deferred':
+            accepted = self.server.schedule_deferred_restart(
+                project_path,
+                source=body.get('source') or 'http-deferred',
+            )
+            self._send_json(202 if accepted else 409, {
+                'ok': accepted,
+                'accepted': accepted,
+                **({} if accepted else {
+                    'message': 'A deferred worker restart is already pending.',
+                }),
+            })
+        elif path == '/start':
             result = self._manager(project_path).start(
                 server_args=body.get('serverArgs'),
                 server_env=body.get('serverEnv'),
@@ -426,9 +529,122 @@ class SupervisorHandler(BaseHTTPRequestHandler):
 
 
 class ManagerHTTPServer(ThreadingHTTPServer):
-    """HTTP adapter that also owns the project monitor threads."""
+    """HTTP adapter that owns project monitors and its checkout lifetime."""
 
     daemon_threads = True
+
+    def schedule_reload(
+        self,
+        *,
+        project_path: str,
+        expected_fingerprint: str,
+        source: str,
+    ) -> bool:
+        """Stop the HTTP loop once so ``main`` can exec the new generation."""
+        lock = getattr(self, '_reload_lock', None)
+        if lock is None:
+            lock = self._reload_lock = threading.Lock()
+        with lock:
+            if getattr(self, 'reload_request', None):
+                return False
+            self.reload_request = {
+                'projectPath': os.path.realpath(project_path),
+                'expectedFingerprint': str(expected_fingerprint),
+                'source': str(source or 'http'),
+                'requestedAt': time.time(),
+            }
+        audit_log('supervisor_reload_requested', **self.reload_request)
+
+        def _shutdown_after_response() -> None:
+            # ``server_close`` may run as soon as serve_forever returns. Give
+            # this handler a bounded flush window before the listening socket
+            # is closed and the process image is replaced.
+            time.sleep(0.1)
+            self.shutdown()
+
+        threading.Thread(
+            target=_shutdown_after_response,
+            name='tofu-supervisor-reload',
+            daemon=True,
+        ).start()
+        return True
+
+    def schedule_deferred_restart(self, project_path: str, *, source: str) -> bool:
+        """Acknowledge first, then let the manager replace its worker."""
+        project = os.path.realpath(project_path)
+        lock = getattr(self, '_deferred_restart_lock', None)
+        if lock is None:
+            lock = self._deferred_restart_lock = threading.Lock()
+            self._deferred_restarts = set()
+        with lock:
+            if project in self._deferred_restarts:
+                return False
+            self._deferred_restarts.add(project)
+
+        def _restart_after_response() -> None:
+            # The caller can be the worker being replaced.  Give its HTTP
+            # client time to receive the 202 before SIGTERM begins.
+            time.sleep(0.35)
+            try:
+                result = self.managers[project].restart(source=source)
+                if not result.get('ok'):
+                    logger.error(
+                        'deferred worker restart refused project=%s: %s',
+                        project, result.get('message') or result)
+            except Exception:
+                logger.exception(
+                    'deferred worker restart crashed project=%s', project)
+            finally:
+                with lock:
+                    self._deferred_restarts.discard(project)
+
+        threading.Thread(
+            target=_restart_after_response,
+            name=f'tofu-worker-restart-{Path(project).name}',
+            daemon=True,
+        ).start()
+        return True
+
+    def service_actions(self):
+        """Stop serving after the declared lifecycle owner disappears.
+
+        ``serve_forever`` invokes this hook on every bounded poll even when no
+        requests arrive.  A detached source manager must not retain memory,
+        ports, or deleted pytest/temporary files after its checkout is removed.
+        Raising returns control to ``main`` without adding another resident
+        monitor thread.
+        """
+        super().service_actions()
+        sentinel = getattr(self, 'ownership_sentinel', '')
+        if sentinel and not os.path.isfile(sentinel):
+            self._retire_owned_workers()
+            raise SupervisorOwnershipLost(
+                f'supervisor ownership sentinel disappeared: {sentinel}')
+        owner_pid = getattr(self, 'ownership_pid', None)
+        if owner_pid and not pid_is_alive(owner_pid):
+            self._retire_owned_workers()
+            raise SupervisorOwnershipLost(
+                f'supervisor owner process disappeared: pid={owner_pid}')
+
+    def _retire_owned_workers(self):
+        """Release process/port budget exactly once on ownership loss."""
+        if getattr(self, '_ownership_retired', False):
+            return
+        self._ownership_retired = True
+        for project, manager in getattr(self, 'managers', {}).items():
+            try:
+                status = manager.status()
+                if not status.get('running'):
+                    continue
+                result = manager.stop(source='supervisor-ownership-lost')
+                if not result.get('ok'):
+                    logger.error(
+                        'ownership-loss worker retirement failed project=%s: %s',
+                        project, result.get('message') or result)
+            except Exception:
+                logger.exception(
+                    'ownership-loss worker retirement crashed project=%s',
+                    project)
 
     def server_close(self):
         for manager in getattr(self, 'managers', {}).values():
@@ -453,7 +669,14 @@ def build_server():
     # Bind before constructing managers. A second supervisor therefore fails
     # without touching desired state or racing the active owner.
     httpd = ManagerHTTPServer((host, port), SupervisorHandler)
+    httpd.ownership_sentinel = os.path.realpath(__file__)
+    httpd.ownership_pid = parse_owner_pid(os.environ.get(ENV_OWNER_PID))
     httpd.allowlist = allowlist
+    httpd.started_at = time.time()
+    httpd.source_root = os.path.realpath(
+        os.path.dirname(os.path.abspath(__file__)))
+    httpd.source_fingerprint = supervisor_source_fingerprint(httpd.source_root)
+    httpd.reload_request = None
     httpd.managers = {
         project: LifecycleManager(project, os.environ.get(ENV_PYTHON) or sys.executable)
         for project in allowlist if is_allowed(project, allowlist)
@@ -472,6 +695,7 @@ def build_server():
 
 def main():
     httpd = build_server()
+    reload_request = None
 
     def _shutdown(signum, _frame):
         logger.info('Received signal %s — shutting down supervisor.', signum)
@@ -481,9 +705,19 @@ def main():
     signal.signal(signal.SIGINT, _shutdown)
     try:
         httpd.serve_forever()
+    except SupervisorOwnershipLost as exc:
+        logger.warning('%s; retiring detached manager.', exc)
     finally:
+        reload_request = getattr(httpd, 'reload_request', None)
         httpd.server_close()
         logger.info('Supervisor stopped.')
+    if reload_request:
+        script = os.path.abspath(__file__)
+        logger.warning(
+            'Re-executing Supervisor for source generation %s (source=%s).',
+            reload_request.get('expectedFingerprint'),
+            reload_request.get('source'))
+        os.execve(sys.executable, [sys.executable, script], os.environ.copy())
 
 
 if __name__ == '__main__':

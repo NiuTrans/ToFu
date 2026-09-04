@@ -1,212 +1,312 @@
-"""jsdom regression for the unified turn-provenance strip rendering.
-
-WHY
----
-The expanded provenance strip (`renderTurnProvenanceHtml` in
-static/js/ui/tool_rounds.js) showed three rendering defects (user screenshot):
-
-  1. Memory descriptions were clipped server-side to 120 chars, so the
-     expanded panel could never show the full text. (Backend fix in
-     lib/memory/prefetch/ — the frontend now just renders whatever it gets,
-     so this harness asserts the strip emits the FULL description it is given.)
-  2. Preference bullets carry lightweight markdown (`**bold**`, `*italic*`,
-     `` `code` ``). They were piped through bare escapeHtml(), so the literal
-     asterisks/backticks showed ("markdown 渲染, 字体不好看"). `_tpInlineMd`
-     now renders the three inline emphasis spans (XSS-safe: escape first).
-  3. Related-conversation titles were clipped with an ellipsis; they must wrap.
-
-This harness loads the REAL shipped tool_rounds.js under jsdom and asserts the
-emitted HTML for each segment. Skips cleanly when node + jsdom aren't installed.
-"""
+"""Public behavior contract for the typed Turn-provenance presenter."""
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import shutil
 import subprocess
 
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = _legacy_test_root()
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-
+ROOT = Path(__file__).resolve().parents[1]
+OWNER = ROOT / 'frontend/src/conversation/presentation/turn-provenance.ts'
+OWNER_JS = Path(native_module_path('.native/turn-provenance-contract.js', OWNER))
 
 _HARNESS = r"""
-const fs = require('fs');
-const path = require('path');
-const ROOT = process.argv[3];
-const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
-const win = dom.window;
-global.window = win;
-global.document = win.document;
-global.console = console;
+eval(process.env.OWNER_SOURCE);
 
-// ── Minimal globals tool_rounds.js touches at load / inside the builders ──
-win.escapeHtml = global.escapeHtml = (t) =>
-  String(t == null ? '' : t)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-win.t = global.t = (k, vars) => {
-  // Echo a usable string; the builders only need .replace('{n}', n) to work.
-  if (vars && typeof vars.n !== 'undefined') return String(vars.n) + ' ' + k;
-  return k;
+const checks = [];
+function check(name, condition) {
+  checks.push((condition ? 'PASS ' : 'FAIL ') + name);
+}
+
+const catalog = {
+  'memPrefetch.prefetched': 'Prefetched {n} memory',
+  'memPrefetch.prefetchedN': 'Prefetched {n} memories',
+  'memPrefetch.candidatesN': '{n} candidates',
+  'memPrefetch.tagN': '{n} memory',
+  'memPrefetch.tagNs': '{n} memories',
+  'prefs.appliedN': '{n} My Context items were provided this turn',
+  'prefs.tagN': '{n} context item',
+  'prefs.tagNs': '{n} context items',
+  'relatedConvs.tagN': '{n} related chat',
+  'relatedConvs.tagNs': '{n} related chats',
+  'mcpDelta.tag': 'MCP tools',
+  'mcpDelta.added': '1 MCP tool connected',
+  'mcpDelta.addedN': '{n} MCP tools connected',
+  'mcpDelta.removed': '1 MCP tool disconnected',
+  'mcpDelta.removedN': '{n} MCP tools disconnected',
+  'mcpDelta.addedTag': 'connected',
+  'mcpDelta.removedTag': 'dropped',
+  'mcpDelta.sub': 'schemas injected at the tail; call via execute_tools',
+  'pathChange.tag': 'Project path',
+  'pathChange.headline': 'Project path changed',
+  'prefs.learnedTagN': 'remembered {n} context item',
+  'prefs.learnedTagNs': 'remembered {n} context items',
 };
-win.Icon = global.Icon = () => '<svg></svg>';
-win.projectState = global.projectState = { active: false };
-
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // ui/tool_rounds.js
-
-const out = [];
-function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
-
-if (typeof renderTurnProvenanceHtml !== 'function') {
-  console.log('FAIL fn_exposed renderTurnProvenanceHtml missing');
-  process.exit(0);
+function translate(key, params) {
+  let value = catalog[key] || key;
+  if (!params) return value;
+  return value.replace(/\{([A-Za-z0-9_]+)\}/g, (token, name) => (
+    Object.prototype.hasOwnProperty.call(params, name)
+      ? String(params[name]) : token
+  ));
 }
-check('fn_exposed', true);
-
-// ════════════════════════════════════════════════════════════════════
-// Case 1 — memory description renders IN FULL and as inline markdown.
-// ════════════════════════════════════════════════════════════════════
-{
-  const longDesc = 'Centralized tool-arg repair (lib/tool_input_repair.py): '
-    + '6 value-repair patterns + **param-KEY alias** layer (`file_path`->path) '
-    + 'that fixes a whole class of cross-harness tool calls without rejection.';
-  const html = renderTurnProvenanceHtml({
-    _memoryPrefetch: {
-      phase: 'done', selected: 1,
-      memories: [{ name: 'tool-input-repair', scope: 'project', description: longDesc }],
-    },
-  });
-  // Full description present (NOT clipped at 120 chars).
-  check('c1_full_desc', html.indexOf('without rejection.') !== -1);
-  // Markdown rendered: **param-KEY alias** -> <strong>, `file_path` -> <code>.
-  check('c1_bold_rendered', html.indexOf('<strong>param-KEY alias</strong>') !== -1);
-  check('c1_code_rendered', html.indexOf('<code>file_path</code>') !== -1);
-  // Raw markdown tokens must NOT survive as literal text.
-  check('c1_no_literal_stars', html.indexOf('**param-KEY alias**') === -1);
+function iconHtml(name, size) {
+  return `<svg data-icon="${name}" data-size="${size}"></svg>`;
+}
+function decodeHtmlAttribute(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+function actionForClass(html, className) {
+  const start = html.indexOf(`class="${className}"`);
+  if (start < 0) return '';
+  const match = html.slice(start).match(/data-tofu-action="([^"]+)"/);
+  return match ? decodeHtmlAttribute(match[1]) : '';
 }
 
-// ════════════════════════════════════════════════════════════════════
-// Case 2 — preference bullets render inline markdown, not literal asterisks.
-// ════════════════════════════════════════════════════════════════════
-{
-  const html = renderTurnProvenanceHtml({
-    _preferencesApplied: {
-      chars: 200,
-      items: ['**Language:** Output in Chinese; profile file in English.',
-              'Use `listings` with *tofucode* for traces.'],
-    },
-  });
-  check('c2_pref_list', html.indexOf('class="mp-mem-list pa-list"') !== -1);
-  check('c2_bold_rendered', html.indexOf('<strong>Language:</strong>') !== -1);
-  check('c2_code_rendered', html.indexOf('<code>listings</code>') !== -1);
-  check('c2_italic_rendered', html.indexOf('<em>tofucode</em>') !== -1);
-  check('c2_no_literal_stars', html.indexOf('**Language:**') === -1);
-}
+const presentation = createTurnProvenancePresentation({ translate, iconHtml });
+check('immutable_public_port', Object.isFrozen(presentation));
+check('dom_free_public_surface',
+  typeof presentation.inlineMarkdown === 'function'
+  && typeof presentation.renderMcpLoginHintHtml === 'function'
+  && typeof presentation.renderTurnProvenanceHtml === 'function'
+  && typeof presentation.renderPreferenceLearnedHtml === 'function');
 
-// ════════════════════════════════════════════════════════════════════
-// Case 3 — XSS: a hostile preference/desc is escaped before emphasis.
-// ════════════════════════════════════════════════════════════════════
-{
-  const html = renderTurnProvenanceHtml({
-    _preferencesApplied: { chars: 1, items: ['<script>alert(1)</script> **x**'] },
-  });
-  check('c3_script_escaped', html.indexOf('<script>alert(1)</script>') === -1
-        && html.indexOf('&lt;script&gt;') !== -1);
-  check('c3_still_renders_bold', html.indexOf('<strong>x</strong>') !== -1);
-}
+const longDescription = 'Centralized tool-arg repair: **param-KEY alias** '
+  + 'layer (`file_path`->path) that fixes calls without rejection.';
+let html = presentation.renderTurnProvenanceHtml({
+  memoryPrefetch: {
+    phase: 'done', selected: 1, candidates: 4, totalMs: 12,
+    memories: [{
+      name: 'tool-input-repair', scope: 'project',
+      description: longDescription,
+    }],
+  },
+});
+check('memory_description_is_complete', html.includes('without rejection.'));
+check('memory_inline_bold', html.includes('<strong>param-KEY alias</strong>'));
+check('memory_inline_code', html.includes('<code>file_path</code>'));
+check('memory_metadata_is_visible',
+  html.includes('tool-input-repair') && html.includes('project')
+  && html.includes('4 candidates') && html.includes('12ms'));
 
-// ════════════════════════════════════════════════════════════════════
-// Case 4 — related-conversation title kept verbatim (no JS-side ellipsis);
-//          full long CJK title survives into the markup so CSS can wrap it.
-// ════════════════════════════════════════════════════════════════════
-{
-  const longTitle = '阅读报告模式如果我点击重新生成再强制刷新回来之后又只呈现旧报告了，'
-    + '但是后台搜索根本没停相当于出现了一个孤立任务';
-  const html = renderTurnProvenanceHtml({
-    _relatedConversations: {
-      count: 1,
-      items: [{ id: 'abc123', title: longTitle, summary: 'a long summary that must wrap fully and never get clipped' }],
-    },
-  });
-  check('c4_full_title', html.indexOf(longTitle) !== -1);
-  check('c4_no_ellipsis_token', html.indexOf(longTitle + '…') === -1);
-  check('c4_summary_present', html.indexOf('never get clipped') !== -1);
-}
+html = presentation.renderTurnProvenanceHtml({
+  preferencesApplied: {
+    chars: 200,
+    items: [
+      '**Language:** Output in Chinese.',
+      'Use `listings` with *tofucode* for traces.',
+    ],
+  },
+});
+check('preference_list_is_rendered', html.includes('mp-mem-list pa-list'));
+check('preference_inline_markdown',
+  html.includes('<strong>Language:</strong>')
+  && html.includes('<code>listings</code>')
+  && html.includes('<em>tofucode</em>'));
+check('generated_translator_params_are_used',
+  html.includes('2 My Context items were provided this turn'));
 
-// ════════════════════════════════════════════════════════════════════
-// Case 5 — AUTO-APPLIED learned preferences fold into the quiet strip
-//          (a segment), NOT the prominent box; the box renders ONLY the
-//          actionable `pending` rows.
-// ════════════════════════════════════════════════════════════════════
-{
-  const learned = [
-    { kind: 'added', summary: 'Reply in **Chinese** by default', pending: false },
-    { kind: 'reinforced', summary: 'Use `pytest` for tests', pending: false },
-  ];
-  const stripHtml = renderTurnProvenanceHtml({ _preferencesLearned: learned });
-  // Informational learned prefs appear as a folded segment in the strip.
-  check('c5_strip_has_learned_seg', stripHtml.indexOf('tp-seg-prefs-learned') !== -1);
-  check('c5_strip_bold_rendered', stripHtml.indexOf('<strong>Chinese</strong>') !== -1);
-  check('c5_strip_no_literal_stars', stripHtml.indexOf('**Chinese**') === -1);
+const hostileInline = presentation.inlineMarkdown(
+  '<script>alert(1)</script> **safe** `*literal*`',
+);
+check('inline_html_is_escaped_before_emphasis',
+  !hostileInline.includes('<script>')
+  && hostileInline.includes('&lt;script&gt;')
+  && hostileInline.includes('<strong>safe</strong>'));
+check('code_span_does_not_parse_emphasis',
+  hostileInline.includes('<code>*literal*</code>'));
 
-  // The prominent box renders NOTHING for purely informational learned prefs.
-  const boxHtml = renderPreferenceLearnedHtml(learned);
-  check('c5_box_empty_for_informational', boxHtml === '');
+const longTitle = '阅读报告模式强制刷新后仍应显示完整的相关对话标题';
+const hostileConversationId = "conv');globalThis.provenanceInjected=true;//";
+html = presentation.renderTurnProvenanceHtml({
+  relatedConversations: {
+    count: 1,
+    items: [{
+      id: hostileConversationId,
+      title: longTitle,
+      summary: '<img src=x onerror=alert(1)> complete summary',
+    }],
+  },
+});
+check('related_conversation_content_is_complete_and_escaped',
+  html.includes(longTitle) && html.includes('complete summary')
+  && !html.includes('<img src=x'));
+const openAction = actionForClass(html, 'rc-conv-link');
+let openedConversationId = '';
+globalThis.provenanceInjected = false;
+new Function('event', 'loadConversation', openAction)(
+  { stopPropagation() {} },
+  (conversationId) => { openedConversationId = conversationId; },
+);
+check('related_conversation_action_round_trips_hostile_id',
+  openedConversationId === hostileConversationId
+  && globalThis.provenanceInjected === false);
 
-  // A pending (actionable) row DOES render in the box, with Confirm/Dismiss.
-  const withPending = learned.concat([{ kind: 'pending', summary: 'X', pending: true, id: 'p1' }]);
-  const boxHtml2 = renderPreferenceLearnedHtml(withPending);
-  check('c5_box_renders_pending', boxHtml2.indexOf('pl-pending') !== -1
-        && boxHtml2.indexOf('pl-confirm') !== -1);
-  // The informational rows are NOT duplicated into the box.
-  check('c5_box_no_informational', boxHtml2.indexOf('pl-reinforced') === -1);
-}
+const informational = [
+  { kind: 'added', summary: 'Reply in **Chinese**', pending: false },
+  { kind: 'reinforced', summary: 'Use `pytest`', pending: false },
+];
+html = presentation.renderTurnProvenanceHtml({ preferencesLearned: informational });
+check('informational_preferences_fold_into_strip',
+  html.includes('tp-seg-prefs-learned')
+  && html.includes('<strong>Chinese</strong>'));
+check('informational_preferences_do_not_duplicate_box',
+  presentation.renderPreferenceLearnedHtml(informational) === '');
 
-console.log(out.join('\n'));
-// tool_rounds.js:3730 installs a load-time 1Hz _cmdTimerTicker that keeps the
-// node event loop alive — force a clean exit after the synchronous checks.
-process.exit(0);
+const hostilePreferenceId = "pref');globalThis.provenanceInjected=true;//";
+const pendingHtml = presentation.renderPreferenceLearnedHtml([
+  ...informational,
+  {
+    kind: 'pending', pending: true, id: hostilePreferenceId,
+    summary: '<script>pending</script>',
+  },
+]);
+check('pending_preference_is_the_only_prominent_row',
+  pendingHtml.includes('pl-pending')
+  && !pendingHtml.includes('pl-reinforced')
+  && !pendingHtml.includes('<script>'));
+const confirmAction = actionForClass(pendingHtml, 'pl-btn pl-confirm');
+let resolvedPreference = null;
+globalThis.provenanceInjected = false;
+new Function('resolvePreference', confirmAction)(
+  (_button, preferenceId, accepted) => {
+    resolvedPreference = [preferenceId, accepted];
+  },
+);
+check('preference_action_round_trips_hostile_id',
+  JSON.stringify(resolvedPreference) === JSON.stringify([hostilePreferenceId, true])
+  && globalThis.provenanceInjected === false);
+
+const awaitingHtml = presentation.renderMcpLoginHintHtml({
+  phase: 'awaiting_approval', username: '<owner>',
+});
+check('awaiting_login_stays_prominent',
+  awaitingHtml.includes('mp-login-hint')
+  && awaitingHtml.includes('&lt;owner&gt;')
+  && presentation.renderTurnProvenanceHtml({
+    mcpLoginHint: { phase: 'awaiting_approval' },
+  }) === '');
+const deniedHtml = presentation.renderTurnProvenanceHtml({
+  mcpLoginHint: {
+    phase: 'denied', snippet: '```json\n{"reason":"<denied>"}\n```',
+  },
+});
+check('resolved_login_folds_with_failure_state',
+  deniedHtml.includes('tp-has-failed')
+  && deniedHtml.includes('mp-snippet')
+  && deniedHtml.includes('&lt;denied&gt;')
+  && presentation.renderMcpLoginHintHtml({ phase: 'denied' }) === '');
+
+check('strip_state_precedence',
+  presentation.renderTurnProvenanceHtml({
+    memoryPrefetch: { phase: 'started' },
+  }).includes('tp-running')
+  && presentation.renderTurnProvenanceHtml({
+    memoryPrefetch: { phase: 'done', selected: 0 },
+  }).includes('tp-done')
+  && presentation.renderTurnProvenanceHtml({
+    memoryPrefetch: { phase: 'failed' },
+    preferencesApplied: { items: [] },
+  }).includes('tp-has-failed'));
+
+html = presentation.renderTurnProvenanceHtml({
+  mcpToolsDelta: {
+    added: ['mcp__docs__write', 'mcp__docs__delete', '<img src=x>'],
+    removed: ['mcp__docs__read'],
+    total: 3,
+  },
+});
+check('mcp_delta_segment_renders_counts_and_escaped_names',
+  html.includes('tp-seg-mcp')
+  && html.includes('3 MCP tools connected')
+  && html.includes('1 MCP tool disconnected')
+  && html.includes('mcp__docs__write')
+  && html.includes('>connected</span>')
+  && html.includes('>dropped</span>')
+  && !html.includes('<img src=x'));
+
+html = presentation.renderTurnProvenanceHtml({
+  projectPathChange: { from: '/tmp/<alpha>', to: '/tmp/beta' },
+});
+check('path_change_segment_renders_from_to_escaped',
+  html.includes('tp-seg-path')
+  && html.includes('&lt;alpha&gt;')
+  && html.includes('/tmp/beta'));
+
+check('delta_segments_fail_closed_on_invalid_shapes',
+  presentation.renderTurnProvenanceHtml({ mcpToolsDelta: { added: 'no' } }) === ''
+  && presentation.renderTurnProvenanceHtml({ projectPathChange: {} }) === ''
+  && !presentation.renderTurnProvenanceHtml({
+    mcpToolsDelta: { added: [], removed: [] },
+  }).includes('tp-seg-mcp'));
+const frozenInput = Object.freeze({
+  memoryPrefetch: Object.freeze({
+    phase: 'done', selected: 1,
+    memories: Object.freeze([Object.freeze({ name: 'stable' })]),
+  }),
+});
+const before = JSON.stringify(frozenInput);
+presentation.renderTurnProvenanceHtml(frozenInput);
+check('projection_is_not_mutated', JSON.stringify(frozenInput) === before);
+check('invalid_and_legacy_shapes_fail_closed',
+  presentation.renderTurnProvenanceHtml(null) === ''
+  && presentation.renderTurnProvenanceHtml({
+    _memoryPrefetch: { phase: 'started' },
+  }) === ''
+  && presentation.renderPreferenceLearnedHtml([null, 'pending']) === '');
+
+const hostileCopyPresentation = createTurnProvenancePresentation({
+  translate: () => '<img src=x onerror=alert(1)>',
+  iconHtml,
+});
+const hostileCopyHtml = hostileCopyPresentation.renderMcpLoginHintHtml({
+  phase: 'awaiting_approval',
+});
+check('translated_copy_is_escaped_but_trusted_icons_remain_markup',
+  !hostileCopyHtml.includes('<img src=x')
+  && hostileCopyHtml.includes('&lt;img src=x')
+  && hostileCopyHtml.includes('<svg'));
+
+console.log(checks.join('\n'));
 """
 
 
-def _run():
-    harness = os.path.join(HERE, '_provenance_strip_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),   # argv[2]
-             ROOT,                                            # argv[3]
-             ],
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'provenance-strip failures:\n' + output
-    assert output.count('PASS') >= 14, f'expected >=14 PASS lines, got:\n{output}'
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_turn_provenance_presentation_public_contract() -> None:
+    source = OWNER.read_text(encoding='utf-8')
+    assert 'runtimeScope' not in source
+    assert 'globalThis' not in source
+    assert 'window.' not in source
+    assert 'document.' not in source
 
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_provenance_strip_render():
-    _run()
+    process = subprocess.run(
+        [shutil.which('node'), '-e', _HARNESS],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            **os.environ,
+            'OWNER_SOURCE': OWNER_JS.read_text(encoding='utf-8'),
+        },
+    )
+    assert process.returncode == 0, process.stderr
+    failures = [
+        line for line in process.stdout.splitlines() if line.startswith('FAIL ')
+    ]
+    assert not failures, process.stdout
+    passes = [
+        line for line in process.stdout.splitlines() if line.startswith('PASS ')
+    ]
+    assert len(passes) == 26, process.stdout

@@ -61,7 +61,7 @@ def _worktree(repo: Path, path: Path) -> Path:
 def _row(repo: Path, task_id: str) -> dict:
     status = control.integration_status(str(repo), user_id=1, use_cache=False)
     return next(item for item in status['workspaces']
-                if item['taskId'] == task_id)
+                if item['workId'] == task_id)
 
 
 def test_gate_argv_expands_immutable_sha_placeholders_without_shell() -> None:
@@ -89,6 +89,26 @@ def test_checkpoint_captures_untracked_without_touching_writer_index(
     assert _run(writer, 'git', 'diff', '--cached', '--name-only') == ''
     assert _run(repository, 'git', 'show', f"{result['checkpointSha']}:new.txt") == 'untracked'
     assert _run(repository, 'git', 'show', f"{result['checkpointSha']}:shared.txt") == 'writer edit'
+
+
+def test_active_workspace_lookup_is_owner_scoped_and_terminal_at_submit(
+        repository: Path, tmp_path: Path) -> None:
+    writer = _worktree(repository, tmp_path / 'signal-writer')
+    work_id = 'pw_signal'
+    control.register_workspace(
+        str(repository), work_id, str(writer), user_id=1)
+
+    assert control.has_active_workspace_for_work(
+        str(repository), work_id, user_id=1) is True
+    assert control.has_active_workspace_for_work(
+        str(repository), work_id, user_id=2) is False
+
+    control.checkpoint_workspace(str(repository), work_id, user_id=1)
+    assert control.has_active_workspace_for_work(
+        str(repository), work_id, user_id=1) is True
+    control.submit_workspace(str(repository), work_id, user_id=1)
+    assert control.has_active_workspace_for_work(
+        str(repository), work_id, user_id=1) is False
 
 
 def test_disjoint_submissions_merge_then_promote_stable(
@@ -126,64 +146,6 @@ def test_disjoint_submissions_merge_then_promote_stable(
     assert control.integration_status(
         str(repository), user_id=1,
         use_cache=False)['refs']['candidateAheadStable'] == 0
-
-
-def test_board_completion_gate_requires_checkpoint_in_candidate(
-        repository: Path, tmp_path: Path) -> None:
-    ordinary = control.board_completion_gate(
-        str(repository), 'ordinary', user_id=1)
-    assert ordinary == {
-        'ok': True, 'integrationRequired': False, 'state': ''}
-
-    writer = _worktree(repository, tmp_path / 'board-gate-writer')
-    control.register_workspace(
-        str(repository), 'board-gate', str(writer), user_id=1)
-    before = control.board_completion_gate(
-        str(repository), 'board-gate', user_id=1)
-    assert before['ok'] is False
-    assert before['state'] == 'running'
-
-    (writer / 'board-gate.txt').write_text('ready\n', encoding='utf-8')
-    control.submit_workspace(str(repository), 'board-gate', user_id=1)
-    queued = control.board_completion_gate(
-        str(repository), 'board-gate', user_id=1)
-    assert queued['ok'] is False
-    assert queued['state'] == 'ready'
-
-    assert control.process_ready_once()
-    merged = control.board_completion_gate(
-        str(repository), 'board-gate', user_id=1)
-    assert merged['ok'] is True
-    assert merged['state'] == 'merged'
-
-
-def test_board_origin_auto_completes_only_after_candidate_moves(
-        repository: Path, tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    writer = _worktree(repository, tmp_path / 'board-auto-complete-writer')
-    completed: list[tuple[str, str, str, int]] = []
-
-    def record_complete(project_path, conv_id, task_id, *, user_id):
-        completed.append((project_path, conv_id, task_id, user_id))
-        return {'ok': True}
-
-    monkeypatch.setattr(
-        'lib.conversations.project_board.complete_task', record_complete)
-    control.register_workspace(
-        str(repository), 'board-auto', str(writer), user_id=1,
-        origin={
-            'source': 'board', 'epicId': 'board-auto', 'convId': 'conv-a',
-        })
-    (writer / 'board-auto.txt').write_text('ready\n', encoding='utf-8')
-    control.submit_workspace(str(repository), 'board-auto', user_id=1)
-    assert completed == []
-
-    assert control.process_ready_once()
-
-    assert completed == [
-        (str(repository), 'conv-a', 'board-auto', 1),
-    ]
-    assert _row(repository, 'board-auto')['state'] == 'merged'
 
 
 def test_prune_removes_only_metadata_for_missing_worktree(
@@ -378,45 +340,6 @@ def test_reconcile_head_conflict_does_not_move_candidate(
     assert control.integration_status(
         str(repository), user_id=1,
         use_cache=False)['refs']['candidate'] == candidate_before
-
-
-def test_declared_write_set_is_enforced_before_candidate_moves(
-        repository: Path, tmp_path: Path) -> None:
-    writer = _worktree(repository, tmp_path / 'write-set-writer')
-    (writer / 'outside.txt').write_text('outside\n', encoding='utf-8')
-    control.register_workspace(
-        str(repository), 'write-set', str(writer), user_id=1,
-        origin={'writeSet': ['allowed/']})
-    control.submit_workspace(str(repository), 'write-set', user_id=1)
-    candidate_before = control.integration_status(
-        str(repository), user_id=1, use_cache=False)['refs']['candidate']
-
-    assert control.process_ready_once()
-    row = _row(repository, 'write-set')
-    assert row['state'] == 'quarantined'
-    assert 'outside the epic declared write-set' in row['error']
-    assert control.integration_status(
-        str(repository), user_id=1,
-        use_cache=False)['refs']['candidate'] == candidate_before
-
-
-def test_board_write_set_update_replaces_active_integration_scope(
-        repository: Path, tmp_path: Path) -> None:
-    writer = _worktree(repository, tmp_path / 'write-set-update-writer')
-    control.register_workspace(
-        str(repository), 'write-set-update', str(writer), user_id=1,
-        origin={'source': 'board', 'writeSet': ['old/**']})
-
-    result = control.update_workspace_write_set(
-        str(repository), 'write-set-update',
-        ['new/**', 'new/**', ' tests/*.py '], user_id=1)
-
-    assert result['updated'] is True
-    assert result['writeSet'] == ['new/**', 'tests/*.py']
-    row = control._state.get_workspace(
-        str(repository), 'write-set-update', user_id=1)
-    assert row['origin']['source'] == 'board'
-    assert row['origin']['writeSet'] == ['new/**', 'tests/*.py']
 
 
 def test_forbidden_dependency_path_is_quarantined(
@@ -629,64 +552,6 @@ def test_git_211_scratch_merge_fallback_preserves_both_trees(
     assert _run(repository, 'git', 'show', f'{candidate}:two.txt') == 'two'
 
 
-def test_peek_walks_to_git_root_when_called_from_a_subdirectory(
-        repository: Path, tmp_path: Path) -> None:
-    """Regression pin for the 2026-08-20 review finding: get_workspace
-    RAISES IntegrationStateError on a missing row, and the peek loop's
-    except-Exception-return-None bailed on the FIRST candidate — the .git
-    parent walk was dead code, so a board path that is a subdirectory (or
-    symlink) of the repo silently found no workspace and dispatch downgraded
-    an isolated epic to shared-tree work on the canonical checkout."""
-    writer = _worktree(repository, tmp_path / 'writer')
-    control.register_workspace(
-        str(repository), 'epic-subdir', str(writer), user_id=1)
-
-    nested = repository / 'nested' / 'deeper'
-    nested.mkdir(parents=True)
-    row = control.peek_workspace_for_epic(
-        str(nested), 'epic-subdir', user_id=1)
-    assert row is not None, 'peek must walk to the git toplevel anchor'
-    assert row['task_id'] == 'epic-subdir'
-    assert row['workspace_path'] == str(writer)
-
-    # A genuine miss still returns None (both candidates miss cleanly).
-    assert control.peek_workspace_for_epic(
-        str(nested), 'no-such-epic', user_id=1) is None
-
-
-def test_peek_reports_only_active_writer_states(
-        repository: Path, tmp_path: Path) -> None:
-    """A ready/merged workspace is sealed or already integrated — injecting
-    the ISOLATED brief for it would send a re-dispatched assignee to edit an
-    immutable checkout.  Only running/checkpointed rows mean \"an isolated
-    writer owns this epic\"."""
-    writer = _worktree(repository, tmp_path / 'writer-states')
-    control.register_workspace(
-        str(repository), 'epic-states', str(writer), user_id=1)
-    row = control.peek_workspace_for_epic(
-        str(repository), 'epic-states', user_id=1)
-    assert row is not None and row['state'] == 'running'
-
-    control.submit_workspace(str(repository), 'epic-states', user_id=1)
-    assert _row(repository, 'epic-states')['state'] == 'ready'
-    assert control.peek_workspace_for_epic(
-        str(repository), 'epic-states', user_id=1) is None
-
-    # Discard is terminal. More work must use a new task id so history remains
-    # append-only and an operator action cannot be silently undone.
-    control.discard_workspace(str(repository), 'epic-states', user_id=1)
-    assert control.peek_workspace_for_epic(
-        str(repository), 'epic-states', user_id=1) is None
-    with pytest.raises(Exception, match='terminal'):
-        control.register_workspace(
-            str(repository), 'epic-states', str(writer), user_id=1)
-    control.register_workspace(
-        str(repository), 'epic-states-v2', str(writer), user_id=1)
-    row = control.peek_workspace_for_epic(
-        str(repository), 'epic-states-v2', user_id=1)
-    assert row is not None and row['state'] == 'running'
-
-
 def test_worker_loop_survives_transient_storage_error(monkeypatch):
     """A transient StorageError in claim_next must not kill the poll thread.
 
@@ -874,9 +739,9 @@ def test_candidate_cas_requeue_invalidates_status_and_pushes(
 ) -> None:
     writer = _worktree(repository, tmp_path / 'cas-writer')
     control.register_workspace(
-        str(repository), 'epic-cas', str(writer), user_id=1)
+        str(repository), 'pw_cas', str(writer), user_id=1)
     (writer / 'notes.txt').write_text('candidate race\n', encoding='utf-8')
-    control.submit_workspace(str(repository), 'epic-cas', user_id=1)
+    control.submit_workspace(str(repository), 'pw_cas', user_id=1)
     claimed = control._claim_next()
     assert claimed is not None
 
@@ -898,6 +763,6 @@ def test_candidate_cas_requeue_invalidates_status_and_pushes(
     control._integrate_row(claimed)
 
     row = control._state.get_workspace(
-        str(repository), 'epic-cas', user_id=1)
+        str(repository), 'pw_cas', user_id=1)
     assert row['state'] == 'ready'
     assert pushed == [(str(repository), 1)]

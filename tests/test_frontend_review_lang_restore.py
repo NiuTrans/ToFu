@@ -1,6 +1,6 @@
 """jsdom test: reopening the Review tab restores the persisted READING language.
 
-Loads the REAL shipped ``static/js/paper-reader.js`` under jsdom and reproduces
+Loads the real retained renderers plus the compiled typed report owner and reproduces
 the reopen flow the owner hit:
 
   • A paper's review reading language is persisted as 'zh'
@@ -17,8 +17,8 @@ Assertions:
   • ``translateStart`` was called exactly once;
   • ``reportStart`` was NOT called (the English review is never regenerated).
 
-Negative control (source-level, byte-reverting): neutering
-``_restoreReviewReadingLang`` to an immediate ``return`` (a no-op) MUST make the
+Negative control (source-level, byte-reverting): neutering the typed
+``restoreReviewReadingLanguage`` to an immediate ``return`` MUST make the
 restore assertions FAIL — the reopen stays English and no translate fires. The
 harness runs the SAME real JS twice; the NC run patches only the function body
 in-memory (the on-disk file is never modified).
@@ -33,13 +33,16 @@ import shutil
 import subprocess
 
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._paper_vite import compiled_typescript
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root, shipped_source_text
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+REPORT_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
 
 
 def _node_deps_available() -> bool:
@@ -52,7 +55,6 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[3];
-const NC = process.argv[4] === 'nc';   // neuter _restoreReviewReadingLang?
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body>' +
@@ -96,24 +98,16 @@ global.Api = win.Api = { paper: {
 localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
 localStorage.setItem('paper_review_lang_by_id', JSON.stringify({ 'paper-1': 'zh' }));
+localStorage.setItem('tofu_ui_lang', 'en');
 
 const PAPER_DIR = path.join(path.dirname(process.argv[2]), 'paper');
-// Report/Review rendering remains a classic renderer island. Task ownership
-// is native, but these reading-language helpers are intentionally exercised
-// through the renderer that still owns them.
-let reportSrc = fs.readFileSync(path.join(PAPER_DIR, 'report.js'), 'utf8');
-if (NC) {
-  // Source-level negative control: turn the restore into a no-op. Byte-identical
-  // on-disk file is untouched; only this in-memory copy is patched.
-  const before = reportSrc;
-  reportSrc = reportSrc.replace(
-    'function _restoreReviewReadingLang(view) {',
-    'function _restoreReviewReadingLang(view) {\n  return; // NC: neutered');
-  if (reportSrc === before) { console.log('FAIL nc_patch_applied'); process.exit(0); }
-}
-eval(reportSrc);  // paper/report.js (real, shipped)
+eval(fs.readFileSync(path.join(PAPER_DIR, 'report.js'), 'utf8'));
 let src = fs.readFileSync(process.argv[2], 'utf8');
 eval(src);  // paper-reader.js (real, shipped)
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // compiled typed report owner
+Object.keys(win).forEach((name) => {
+  if (name.startsWith('_') && typeof win[name] === 'function') global[name] = win[name];
+});
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -121,7 +115,9 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 // Stub helpers touching unrelated subsystems; keep the real render path simple.
 _getActivePaperEntry = () => null;
 _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
-_renderFinalReport = (c, text) => { if (c) c.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>'; };
+win._renderFinalReport = _renderFinalReport = (c, text) => {
+  if (c) c.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>';
+};
 _teardownReadingTracker = () => {};
 _rememberReportSnapshot = () => {};
 _persistGeneratedReviewVenue = () => {};
@@ -133,9 +129,9 @@ _paperReviewStream = null;
 _paperReportCache = '';
 _paperReviewCache = '';
 // Reopen: in-memory translation state was wiped by _resetAllReportViews.
-_paperReviewTranslatedText = '';
-_paperReviewShowTranslation = false;
-_paperReviewTranslating = false;
+win.__tofuTestFeatureRegistry._paperReviewTranslatedText = '';
+win.__tofuTestFeatureRegistry._paperReviewShowTranslation = false;
+win.__tofuTestFeatureRegistry._paperReviewTranslating = false;
 _paperHash = 'phash-1';
 _paperParsedText = 'x'.repeat(500);
 _paperFileName = 'P';
@@ -143,12 +139,14 @@ _paperReportModel = 'm';
 _paperReviewModel = 'm';
 _paperReviewVenue = 'neurips';
 _activePaperId = 'paper-1';
+win._activePaperId = _activePaperId;
 _paperActiveTab = 'review';
 _i18nLang = 'en';   // English UI — restore must still honour the per-paper 'zh'
 
 (async () => {
   for (let i = 0; i < 5; i++) { await new Promise(r => setTimeout(r, 0)); }
   _activePaperId = 'paper-1';
+  win._activePaperId = _activePaperId;
 
   // Sanity: the persisted reading language is 'zh'.
   check('persisted_zh', _activeReviewLang() === 'zh');
@@ -159,6 +157,7 @@ _i18nLang = 'en';   // English UI — restore must still honour the per-paper 'z
   reviewView.cache = 'ENGLISH REVIEW BODY';
   _renderFinalReport(document.getElementById('paperReviewContent'), reviewView.cache);
   await _restoreReviewReadingLang(reviewView);
+  for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
 
   const revHtml = document.getElementById('paperReviewContent').innerHTML;
   check('restored_chinese_view', revHtml.indexOf('中文译文') !== -1);
@@ -175,11 +174,26 @@ def _run(nc: bool):
     harness = os.path.join(HERE, '_review_lang_restore_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
-    argv = ['node', harness, os.path.join(JS_DIR, 'paper-reader.js'), ROOT]
-    if nc:
-        argv.append('nc')
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        runtime_src = shipped_source_text('frontend/src/features/paper/report-runtime.ts')
+        if nc:
+            marker = (
+                'export function restoreReviewReadingLanguage('
+                'viewArg?: LooseObject | null): void {\n'
+            )
+            assert marker in runtime_src, 'typed restore marker not found — test stale'
+            runtime_src = runtime_src.replace(
+                marker, marker + '  return;\n', 1)
+        with compiled_typescript(
+            REPORT_RUNTIME_TS,
+            contents=runtime_src if nc else None,
+            expose_feature_registry_to_window=True,
+        ) as runtime_js:
+            proc = subprocess.run(
+                ['node', harness, os.path.join(JS_DIR, 'paper-reader.js'),
+                 ROOT, runtime_js],
+                capture_output=True, text=True, timeout=60,
+            )
     finally:
         try:
             os.remove(harness)
@@ -207,13 +221,13 @@ def test_nc_neutered_restore_fails():
     """Neutering _restoreReviewReadingLang MUST break the restore assertions:
     the reopen stays English (no translate), proving the restore hook is what
     re-applies the persisted Chinese reading view."""
-    output = _run(nc=True)
+    neutered_output = _run(nc=True)
     # The persisted-lang sanity check still passes (localStorage unchanged), but
     # the restore-dependent checks MUST fail with the hook neutered.
-    assert 'FAIL restored_chinese_view' in output, \
-        'expected restored_chinese_view to FAIL under NC:\n' + output
-    assert 'FAIL translate_called_once' in output, \
-        'expected translate_called_once to FAIL under NC:\n' + output
+    assert 'FAIL restored_chinese_view' in neutered_output, \
+        'expected restored_chinese_view to FAIL under NC:\n' + neutered_output
+    assert 'FAIL translate_called_once' in neutered_output, \
+        'expected translate_called_once to FAIL under NC:\n' + neutered_output
 
 
 if __name__ == '__main__':

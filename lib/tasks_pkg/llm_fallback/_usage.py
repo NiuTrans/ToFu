@@ -1,4 +1,11 @@
-"""Per-round usage SSE emission."""
+"""Per-round usage emission and bounded live-record projection.
+
+Provider usage briefly carries full-history ``_wire_*`` evidence for cache
+settle, FloorRetry, and cache-break attribution. Those consumers receive the
+original mapping. Public events and the task's ``apiRounds`` ledger use
+``project_usage_for_round_record`` so consumed evidence does not grow once per
+round for the rest of the task lifetime.
+"""
 
 from lib.cost import normalize_usage
 from lib.log import get_logger
@@ -7,7 +14,73 @@ from lib.tasks_pkg.manager._events import append_event
 logger = get_logger(__name__)
 
 
-def _emit_round_usage(task, round_num, model, usage, *, tag=''):
+_EXTRA_BILLING_ROUNDS_KEY = '_extra_billing_rounds'
+_COMPACT_PREFIX_FINGERPRINT_KEY = '_wire_static'
+
+
+def project_usage_for_round_record(usage):
+    """Return the bounded usage view retained by events and ``apiRounds``.
+
+    Every ``_wire_*`` value except the fixed-size static-prefix fingerprint is
+    attempt-local backend evidence. Cache owners read it from the unchanged
+    original mapping and retain only the one previous-round copy they need;
+    keeping the same growing lists in every public round record creates
+    quadratic live memory and event bandwidth. Discarded billed attempts are
+    emitted as their own records, so their nested carrier is removed from the
+    authoring attempt as well.
+
+    The original mapping is never mutated. Unknown public usage fields remain
+    forward-compatible, and the compact prefix fingerprint stays available to
+    the cost-experiment join until terminal outcome construction.
+    """
+    if not isinstance(usage, dict):
+        return {}
+    projected = {}
+    for key, value in usage.items():
+        if key == _EXTRA_BILLING_ROUNDS_KEY:
+            continue
+        if isinstance(key, str) and key.startswith('_wire_'):
+            if (key == _COMPACT_PREFIX_FINGERPRINT_KEY
+                    and isinstance(value, str) and len(value) <= 128):
+                projected[key] = value
+            continue
+        projected[key] = value
+    return projected
+
+
+def _bounded_text(value, maximum):
+    """Return one bounded diagnostic string without retaining credentials."""
+    if value is None:
+        return ''
+    return str(value)[:maximum]
+
+
+def _response_route_projection(model, usage):
+    """Project the credential-free route facts for one completed response."""
+    dispatch = usage.get('_dispatch') if isinstance(usage, dict) else None
+    dispatch = dispatch if isinstance(dispatch, dict) else {}
+    projection = {
+        # ``model`` is the logical model selected by fallback/orchestration;
+        # ``resolvedModel`` is the dispatcher slot's real upstream model.
+        'model': _bounded_text(model, 512),
+    }
+    optional_fields = (
+        ('resolvedModel', dispatch.get('model'), 512),
+        ('providerId', dispatch.get('provider_id'), 160),
+        ('keyName', dispatch.get('key'), 160),
+        # Only the already-public last four characters are retained. Never
+        # project ``slot.api_key`` or another credential-bearing value here.
+        ('keyTail', dispatch.get('key_tail'), 32),
+    )
+    for field, value, maximum in optional_fields:
+        text = _bounded_text(value, maximum)
+        if text:
+            projection[field] = text
+    return projection
+
+
+def _emit_round_usage(
+        task, round_num, model, usage, *, tag='', response_authoring=True):
     """Emit a per-round usage SSE event so the frontend context-health
     gauge can reflect the size of the prompt JUST sent to the model,
     without waiting for the final ``done`` event to land ``apiRounds``.
@@ -35,6 +108,11 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
     tag : str
         Diagnostic label such as ``R1`` / ``R3-FALLBACK`` /
         ``R5-REACTIVE``.  Logged only.
+    response_authoring : bool
+        Whether this call produced the assistant response for the round.
+        Billed-but-discarded retries still emit their accounting event, but
+        must not replace the projection used for context and serving-route
+        presentation.
     """
     if not usage:
         return
@@ -46,7 +124,14 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
         # Anthropic convention: prompt_tokens excludes cache. OpenAI
         # convention: prompt_tokens already includes cache. Mirrors the
         # frontend test in ui.js:1853 / context-bar.js:_promptTokensFromUsage.
-        if (cw > 0 or cr > 0) and inp <= cw + cr:
+        try:
+            effective_prompt = max(
+                0, int(usage.get('effective_prompt_tokens') or 0))
+        except (TypeError, ValueError, OverflowError):
+            effective_prompt = 0
+        if effective_prompt > 0:
+            tokens_in = effective_prompt
+        elif (cw > 0 or cr > 0) and inp <= cw + cr:
             tokens_in = inp + cw + cr
         else:
             tokens_in = inp
@@ -62,13 +147,14 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
         #   it to the turn projection as ``lastRoundUsage``.  Compact fixed
         #   shape on purpose — the raw usage dict's ``_wire_*`` diagnostics
         #   are GiB-class bloat on durable rows (2026-08-20 measurement).
-        task['_lastRoundUsage'] = {
-            'round': round_num,
-            'model': model,
-            'tag': tag,
-            'tokensIn': int(tokens_in or 0),
-            'tokensOut': int(out or 0),
-        }
+        if response_authoring:
+            task['_lastRoundUsage'] = {
+                'round': round_num,
+                **_response_route_projection(model, usage),
+                'tag': _bounded_text(tag, 80),
+                'tokensIn': int(tokens_in or 0),
+                'tokensOut': int(out or 0),
+            }
         append_event(task, {
             'type': 'round_usage',
             'roundNum': round_num,
@@ -79,7 +165,7 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
             'turn': task.get('_flow_phase') or '',
             'tokensIn': int(tokens_in or 0),
             'tokensOut': int(out or 0),
-            'usage': dict(usage),
+            'usage': project_usage_for_round_record(usage),
         })
     except Exception as e:
         logger.debug('[round_usage] emit failed (round=%s tag=%s): %s',

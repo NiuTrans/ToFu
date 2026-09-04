@@ -43,6 +43,7 @@ class OrchestrationFeedbackState:
         self._pending_directive = ''
         self._history: list[str] = []
         self._vu_progress: list[dict] = []
+        self._verifier_tool_rounds = 0
 
     def reset_loop(self) -> None:
         """Reset loop-local state while retaining per-node attempt memory."""
@@ -51,6 +52,7 @@ class OrchestrationFeedbackState:
             self._pending_directive = ''
             self._history = []
             self._vu_progress = []
+            self._verifier_tool_rounds = 0
 
     def compose_shared_context(self, node_id: str, upstream: str) -> str:
         """Compose bounded memory and pending control feedback for a producer."""
@@ -90,6 +92,20 @@ class OrchestrationFeedbackState:
             if verifier:
                 self._pending_feedback = output
 
+    def record_verifier_tool_rounds(self, count: int) -> None:
+        """Accumulate verifier-owned tool rounds for the current loop.
+
+        The VU stop-acceptance gate requires independent verification
+        evidence: a stop declared while the verifier never touched a tool
+        this loop is challenged instead of accepted.  Recorded for every
+        verifier role; only the virtual_user gate consumes it today.
+        """
+        with self._lock:
+            self._verifier_tool_rounds += max(0, int(count or 0))
+
+    def verifier_tool_rounds(self) -> int:
+        with self._lock:
+            return self._verifier_tool_rounds
     def set_directive(self, directive: str) -> None:
         with self._lock:
             self._pending_directive = directive or ''
@@ -189,6 +205,11 @@ class OrchestrationFeedbackState:
     def replace_vu_progress(self, progress: list[dict]) -> None:
         with self._lock:
             self._vu_progress = [dict(entry) for entry in progress or []]
+
+    def replace_verifier_tool_rounds(self, count: int) -> None:
+        """Compatibility/test seam for restoring the verifier tool counter."""
+        with self._lock:
+            self._verifier_tool_rounds = max(0, int(count or 0))
 
 
 __all__ = [

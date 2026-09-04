@@ -6,7 +6,7 @@ import math
 import re
 import socket
 import struct
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import orjson
 
@@ -75,33 +75,45 @@ def encode_frame(message: Mapping[str, Any]) -> bytes:
     return _HEADER.pack(len(body)) + body
 
 
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = size
-    while remaining:
-        block = sock.recv(remaining)
-        if not block:
-            # EOF before a complete frame means the PEER went away — an
-            # overload close, a crash, or a supervised restart — which is
-            # transport unavailability, not a framing violation.  The
-            # previous 'database_protocol_error' classification was
-            # non-retryable, so a transient blip killed idempotent reads
-            # that the client retry loop exists to absorb (2026-08-19: 181
-            # SSE streams died on a sidecar capacity/restart window).
-            raise StorageError(
-                'database_unavailable', 'Storage connection closed mid-frame',
-                True, 100)
-        chunks.append(block)
-        remaining -= len(block)
-    return b''.join(chunks)
+def _recv_exact(sock: socket.socket, size: int) -> bytearray:
+    # Allocate the declared frame once. The previous chunk-list + join path
+    # retained both copies at the join boundary (92 MiB for a fragmented
+    # 46 MiB production-sized frame) and copied the entire payload again.
+    buffer = bytearray(size)
+    view = memoryview(buffer)
+    offset = 0
+    try:
+        while offset < size:
+            received = sock.recv_into(view[offset:], size - offset)
+            if not received:
+                # EOF before a complete frame means the PEER went away — an
+                # overload close, a crash, or a supervised restart — which is
+                # transport unavailability, not a framing violation.  The
+                # previous 'database_protocol_error' classification was
+                # non-retryable, so a transient blip killed idempotent reads
+                # that the client retry loop exists to absorb (2026-08-19: 181
+                # SSE streams died on a sidecar capacity/restart window).
+                raise StorageError(
+                    'database_unavailable',
+                    'Storage connection closed mid-frame', True, 100)
+            offset += received
+    finally:
+        view.release()
+    return buffer
 
 
-def recv_frame(sock: socket.socket) -> dict[str, Any]:
+def recv_frame(
+    sock: socket.socket,
+    *,
+    before_payload: Callable[[int], None] | None = None,
+) -> dict[str, Any]:
     raw_size = _recv_exact(sock, _HEADER.size)
     (size,) = _HEADER.unpack(raw_size)
     if size <= 0 or size > MAX_FRAME_BYTES:
         raise StorageError(
             'database_protocol_error', 'Invalid storage frame length')
+    if before_payload is not None:
+        before_payload(size)
     try:
         value = orjson.loads(_recv_exact(sock, size))
     except orjson.JSONDecodeError as exc:
@@ -113,8 +125,10 @@ def recv_frame(sock: socket.socket) -> dict[str, Any]:
     return value
 
 
-def send_frame(sock: socket.socket, message: Mapping[str, Any]) -> None:
-    sock.sendall(encode_frame(message))
+def send_frame(sock: socket.socket, message: Mapping[str, Any]) -> int:
+    frame = encode_frame(message)
+    sock.sendall(frame)
+    return len(frame)
 
 
 __all__ = [

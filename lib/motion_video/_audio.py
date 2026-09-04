@@ -33,8 +33,11 @@ silent video instead of dying.
 
 from __future__ import annotations
 
+import hashlib
+import math
 import os
 import re
+import threading
 
 from lib.log import get_logger
 
@@ -53,12 +56,49 @@ _SCENE_PAUSE_MS = 0
 _CHUNK_PAUSE_MS = 150
 #: Per-chunk synthesis attempts (transient provider hiccups).
 _CHUNK_RETRIES = 2
+_MAX_NARRATION_SCENES = 16
+_MAX_NARRATION_CHUNKS = 64
+_MAX_SCENE_DURATION_S = 60.0
+_MAX_SCENE_AUDIO_BYTES = 32 * 1024 * 1024
+_MAX_NARRATION_DISK_BYTES = 192 * 1024 * 1024
+_MAX_SCENE_ID_CHARS = 128
+_NARRATION_MANIFEST_VERSION = 2
 
 _SENTENCE_END_RE = re.compile(r'[。！？!?；;…\n]|\.(?:\s|$)')
 
 
 class NarrationAborted(Exception):
     """Raised when the task's abort_event fires mid-synthesis."""
+
+
+class _NarrationBudgetExceeded(Exception):
+    """Raised when provider output exceeds a declared narration boundary."""
+
+
+def _manifest_request_contract(*, voice, speed, alignment: str,
+                               tail_pad: float) -> dict:
+    """Canonical inputs that decide whether persisted narration is reusable."""
+    try:
+        normalised_speed = None if speed is None else float(speed)
+        normalised_tail_pad = float(tail_pad)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError('speed and tail_pad must be finite numbers') from exc
+    if normalised_speed is not None and not math.isfinite(normalised_speed):
+        raise ValueError('speed must be finite')
+    if not math.isfinite(normalised_tail_pad) or normalised_tail_pad < 0:
+        raise ValueError('tail_pad must be a finite non-negative number')
+    return {
+        'voice': str(voice or ''),
+        'speed': normalised_speed,
+        'alignment': str(alignment),
+        'tail_pad': normalised_tail_pad,
+    }
+
+
+def _scene_text_sha256(text) -> str:
+    """Hash the exact normalised text sent to TTS (never persist the text)."""
+    return hashlib.sha256(
+        str(text or '').strip().encode('utf-8')).hexdigest()
 
 
 def _chunk_text(text: str, max_chars: int) -> list[str]:
@@ -93,14 +133,21 @@ def _atomic_write(path: str, data: bytes) -> None:
     write_bytes_atomic(path, data)
 
 
-def _synth_chunk_with_retry(chunk: str, *, voice, fmt, speed) -> bytes:
+def _synth_chunk_with_retry(chunk: str, *, voice, fmt, speed,
+                            abort_event=None, synthesize_fn=None) -> bytes:
     import lib.tts as _tts  # facade — resolves through lib.tts for test seams
+    synthesize_fn = synthesize_fn or _tts.synthesize
     last: Exception | None = None
     for attempt in range(1, _CHUNK_RETRIES + 1):
+        if abort_event is not None and abort_event.is_set():
+            raise NarrationAborted('aborted before TTS chunk attempt')
         try:
-            res = _tts.synthesize(chunk, voice=voice, fmt=fmt, speed=speed)
+            res = synthesize_fn(chunk, voice=voice, fmt=fmt, speed=speed)
             return res.audio_bytes
         except Exception as e:
+            if abort_event is not None and abort_event.is_set():
+                raise NarrationAborted(
+                    'aborted during TTS chunk attempt') from e
             last = e
             logger.warning('[MotionVideo] TTS chunk attempt %d/%d failed: %s',
                            attempt, _CHUNK_RETRIES, e)
@@ -111,7 +158,10 @@ def synthesize_scene_narrations(
         scenes: list[dict], out_dir: str, *, voice: str | None = None,
         speed: float | None = None, alignment: str = 'loose',
         tail_pad: float = _DEFAULT_TAIL_PAD, abort_event=None,
-        on_scene_done=None) -> dict:
+        on_scene_done=None, max_workers: int | None = None,
+        owner_user_id: int | None = None,
+        tenant_id: str | None = None,
+        _synthesize_fn=None) -> dict:
     """Synthesize per-scene narration WAVs + the alignment manifest.
 
     Args:
@@ -136,8 +186,20 @@ def synthesize_scene_narrations(
                 'detail': f'invalid alignment {alignment!r} (loose|strict)'}
     if not scenes:
         return {'ok': False, 'degraded': False, 'detail': 'no scenes'}
+    if len(scenes) > _MAX_NARRATION_SCENES:
+        return {'ok': False, 'degraded': False,
+                'detail': f'{len(scenes)} narration scenes exceed the '
+                          f'{_MAX_NARRATION_SCENES}-scene limit'}
+    try:
+        request_contract = _manifest_request_contract(
+            voice=voice, speed=speed, alignment=alignment,
+            tail_pad=tail_pad)
+    except ValueError as exc:
+        return {'ok': False, 'degraded': False, 'detail': str(exc)}
+    speed = request_contract['speed']
+    tail_pad = request_contract['tail_pad']
 
-    if not _tts.tts_available():
+    if owner_user_id is None and not _tts.tts_available():
         logger.warning('[MotionVideo] no TTS slot configured — narration degraded')
         return {'ok': False, 'degraded': True,
                 'detail': 'no tts-capable slot configured (Settings → providers); '
@@ -146,49 +208,167 @@ def synthesize_scene_narrations(
     os.makedirs(out_dir, exist_ok=True)
     max_chars = _tts.max_input_chars()
     results: list[dict] = []
-    silent_entries: list[dict] = []
-    ref_params: tuple | None = None  # (channels, sampwidth, framerate) of provider WAVs
+    silent_entries: list[tuple[int, dict]] = []
+    voiced_plans = []
+    total_chunks = 0
+    completed_count = 0
+    seen_scene_ids: set[str] = set()
 
     def _scene_settled(scene_id: str) -> None:
+        nonlocal completed_count
+        completed_count += 1
         if on_scene_done is None:
             return
         try:
-            on_scene_done(len(results), len(scenes), scene_id)
+            on_scene_done(completed_count, len(scenes), scene_id)
         except Exception as e:
             logger.debug('[MotionVideo] on_scene_done sink failed: %s', e)
 
-    for sc in scenes:
+    for scene_index, sc in enumerate(scenes):
         if abort_event is not None and abort_event.is_set():
             raise NarrationAborted('aborted before scene '
                                    + str(sc.get('id', '?')))
         scene_id = str(sc.get('id') or f'scene-{len(results) + 1:03d}')
+        if (len(scene_id) > _MAX_SCENE_ID_CHARS or scene_id in ('.', '..')
+                or '/' in scene_id or '\\' in scene_id or '\x00' in scene_id):
+            return {'ok': False, 'degraded': False,
+                    'detail': f'unsafe narration scene id {scene_id!r}'}
+        if scene_id in seen_scene_ids:
+            return {'ok': False, 'degraded': False,
+                    'detail': f'duplicate narration scene id {scene_id!r}'}
+        seen_scene_ids.add(scene_id)
         text = str(sc.get('text') or '').strip()
-        srt_dur = float(sc.get('end') or 0) - float(sc.get('start') or 0)
+        try:
+            srt_dur = float(sc.get('end') or 0) - float(sc.get('start') or 0)
+        except (TypeError, ValueError, OverflowError):
+            return {'ok': False, 'degraded': False,
+                    'detail': f'scene {scene_id} start/end must be finite numbers'}
+        if (not math.isfinite(srt_dur) or srt_dur < 0
+                or srt_dur > _MAX_SCENE_DURATION_S):
+            return {'ok': False, 'degraded': False,
+                    'detail': f'scene {scene_id} duration {srt_dur:.3f}s is '
+                              f'outside 0..{_MAX_SCENE_DURATION_S:.0f}s'}
         entry = {'scene_id': scene_id, 'wav': '', 'text_chars': len(text),
+                 'text_sha256': _scene_text_sha256(text),
                  'audio_duration': 0.0, 'srt_duration': round(srt_dur, 3),
                  'target_duration': round(srt_dur, 3), 'overflow': 0.0}
         results.append(entry)
         if not text:
             logger.info('[MotionVideo] scene %s has no text — silence only', scene_id)
-            silent_entries.append(entry)
-            _scene_settled(scene_id)
+            silent_entries.append((scene_index, entry))
             continue
-
-        parts: list[bytes] = []
         chunks = _chunk_text(text, max_chars)
-        for ci, chunk in enumerate(chunks):
+        total_chunks += len(chunks)
+        voiced_plans.append((scene_index, scene_id, srt_dur, entry, chunks))
+
+    if total_chunks > _MAX_NARRATION_CHUNKS:
+        return {'ok': False, 'degraded': False,
+                'detail': f'narration requires {total_chunks} TTS chunks; '
+                          f'limit is {_MAX_NARRATION_CHUNKS}'}
+
+    if max_workers is None:
+        from runtime_guards import resolve_resource_budget
+        worker_limit = resolve_resource_budget(
+            'TOFU_PRODUCTION_TTS_FANOUT', maximum=8)
+    else:
+        try:
+            requested_workers = int(max_workers)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError('max_workers must be a positive integer') from exc
+        if requested_workers < 1:
+            raise ValueError('max_workers must be a positive integer')
+        worker_limit = min(8, requested_workers)
+
+    # All scene/chunk/resource validation above runs before model-routing
+    # access. Share one owner route across the bounded worker pool; the session
+    # installs its hard pin independently in each synthesis thread.
+    if owner_user_id is not None:
+        try:
+            with _tts.synthesis_session(owner_user_id, tenant_id) as session:
+                return synthesize_scene_narrations(
+                    scenes,
+                    out_dir,
+                    voice=voice,
+                    speed=speed,
+                    alignment=alignment,
+                    tail_pad=tail_pad,
+                    abort_event=abort_event,
+                    on_scene_done=on_scene_done,
+                    max_workers=worker_limit,
+                    _synthesize_fn=session.synthesize,
+                )
+        except _tts.TTSError as exc:
+            if exc.status != 503:
+                raise
+            logger.warning('[MotionVideo] owner has no TTS route — narration '
+                           'degraded: %s', exc.detail)
+            return {
+                'ok': False,
+                'degraded': True,
+                'detail': 'no owner-authorized tts route configured; '
+                          'delivering the silent video path instead',
+            }
+
+    artifact_lock = threading.Lock()
+    written_paths: set[str] = set()
+    reserved_audio_bytes = 0
+
+    def _reserve_audio_bytes(size: int) -> None:
+        nonlocal reserved_audio_bytes
+        with artifact_lock:
+            projected = reserved_audio_bytes + size
+            if projected > _MAX_NARRATION_DISK_BYTES:
+                raise _NarrationBudgetExceeded(
+                    f'narration WAVs retain {projected} bytes; limit is '
+                    f'{_MAX_NARRATION_DISK_BYTES}')
+            reserved_audio_bytes = projected
+
+    def _record_written(path: str) -> None:
+        with artifact_lock:
+            written_paths.add(path)
+
+    def _remove_written() -> None:
+        with artifact_lock:
+            paths = tuple(written_paths)
+            written_paths.clear()
+        for path in paths:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.debug('[MotionVideo] narration cleanup failed for %s: %s',
+                             path, exc)
+
+    def _render_voiced_scene(plan):
+        scene_index, scene_id, srt_dur, entry, chunks = plan
+        parts: list[bytes] = []
+        retained_bytes = 0
+        for chunk_index, chunk in enumerate(chunks):
             if abort_event is not None and abort_event.is_set():
                 raise NarrationAborted(f'aborted in scene {scene_id} '
-                                       f'chunk {ci + 1}/{len(chunks)}')
-            parts.append(_synth_chunk_with_retry(chunk, voice=voice,
-                                                 fmt='wav', speed=speed))
+                                       f'chunk {chunk_index + 1}/{len(chunks)}')
+            synthesize_kwargs = {
+                'voice': voice,
+                'fmt': 'wav',
+                'speed': speed,
+                'abort_event': abort_event,
+            }
+            if _synthesize_fn is not None:
+                synthesize_kwargs['synthesize_fn'] = _synthesize_fn
+            blob = _synth_chunk_with_retry(chunk, **synthesize_kwargs)
+            retained_bytes += len(blob)
+            if retained_bytes > _MAX_SCENE_AUDIO_BYTES:
+                raise _NarrationBudgetExceeded(
+                    f'scene {scene_id} retains {retained_bytes} audio bytes; '
+                    f'limit is {_MAX_SCENE_AUDIO_BYTES}')
+            parts.append(blob)
         wav = parts[0] if len(parts) == 1 else _tts.concat_wavs(
             parts, pause_ms=[_CHUNK_PAUSE_MS] * len(parts))
         audio_dur = _tts.wav_duration(wav)
         entry['audio_duration'] = round(audio_dur, 3)
         ch, sw, rate, _frames = _tts.wav_params(wav)
-        if ref_params is None:
-            ref_params = (ch, sw, rate)
+        params = (ch, sw, rate)
 
         if alignment == 'loose':
             target = max(srt_dur, audio_dur + tail_pad)
@@ -199,37 +379,131 @@ def synthesize_scene_narrations(
                 logger.warning('[MotionVideo] scene %s narration overflows '
                                'SRT span by %.2fs (strict mode)', scene_id,
                                entry['overflow'])
+        if target > _MAX_SCENE_DURATION_S:
+            raise _NarrationBudgetExceeded(
+                f'scene {scene_id} target {target:.3f}s exceeds '
+                f'{_MAX_SCENE_DURATION_S:.0f}s')
         if audio_dur < target:
             wav = _tts.concat_wavs(
                 [wav, _tts.silence_wav_bytes(target - audio_dur,
                                              channels=ch, sampwidth=sw,
                                              framerate=rate)],
                 pause_ms=[0, 0])
+        if len(wav) > _MAX_SCENE_AUDIO_BYTES:
+            raise _NarrationBudgetExceeded(
+                f'scene {scene_id} WAV is {len(wav)} bytes; limit is '
+                f'{_MAX_SCENE_AUDIO_BYTES}')
         entry['target_duration'] = round(target, 3)
         wav_path = os.path.join(out_dir, f'{scene_id}.wav')
+        _reserve_audio_bytes(len(wav))
         _atomic_write(wav_path, wav)
+        _record_written(wav_path)
         entry['wav'] = wav_path
+        entry['wav_bytes'] = len(wav)
+        entry['wav_sha256'] = hashlib.sha256(wav).hexdigest()
         logger.info('[MotionVideo] scene %s narration: %.2fs audio → target %.2fs',
                     scene_id, audio_dur, entry['target_duration'])
-        _scene_settled(scene_id)
+        return scene_index, entry, params
+
+    rendered = {}
+    try:
+        if worker_limit == 1 or len(voiced_plans) <= 1:
+            for plan in voiced_plans:
+                outcome = _render_voiced_scene(plan)
+                rendered[outcome[0]] = outcome
+                _scene_settled(outcome[1]['scene_id'])
+        elif voiced_plans:
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+            queued = list(voiced_plans)
+            active = {}
+            failure = None
+
+            def _submit_available(pool) -> None:
+                while queued and len(active) < worker_limit:
+                    plan = queued.pop(0)
+                    future = pool.submit(_render_voiced_scene, plan)
+                    active[future] = plan[0]
+
+            with ThreadPoolExecutor(
+                    max_workers=min(worker_limit, len(voiced_plans)),
+                    thread_name_prefix='motion-narration-tts') as pool:
+                _submit_available(pool)
+                while active:
+                    done, _not_done = wait(active, return_when=FIRST_COMPLETED)
+                    for future in sorted(done, key=lambda item: active[item]):
+                        scene_index = active.pop(future)
+                        try:
+                            outcome = future.result()
+                        except Exception as exc:
+                            logger.debug(
+                                '[MotionAudio] scene future failed index=%d: %s',
+                                scene_index, type(exc).__name__,
+                            )
+                            failure = failure or exc
+                        else:
+                            rendered[outcome[0]] = outcome
+                            _scene_settled(outcome[1]['scene_id'])
+                    if abort_event is not None and abort_event.is_set():
+                        failure = NarrationAborted(
+                            'aborted during narration batch')
+                    if failure is None:
+                        _submit_available(pool)
+            if failure is not None:
+                raise failure
+    except _NarrationBudgetExceeded as exc:
+        _remove_written()
+        return {'ok': False, 'degraded': True, 'detail': str(exc)}
+    except BaseException:
+        _remove_written()
+        raise
+
+    ordered_voiced = [rendered[index] for index in sorted(rendered)]
+    ref_params = ordered_voiced[0][2] if ordered_voiced else None
+    if ref_params is not None:
+        mismatches = [entry['scene_id'] for _index, entry, params
+                      in ordered_voiced if params != ref_params]
+        if mismatches:
+            _remove_written()
+            return {'ok': False, 'degraded': True,
+                    'detail': 'TTS WAV parameter mismatch in scene(s): '
+                              + ', '.join(mismatches)}
 
     # Second pass: text-less scenes get silence in the PROVIDER's WAV params
     # (falls back to the lib.tts default when no scene carries text at all),
     # so concat_narrations never mixes framerates.
-    for entry in silent_entries:
+    for _scene_index, entry in silent_entries:
         dur = entry['target_duration']
         if dur <= 0:
+            _scene_settled(entry['scene_id'])
             continue
         kwargs = (dict(zip(('channels', 'sampwidth', 'framerate'), ref_params))
                   if ref_params else {})
-        wav = _tts.silence_wav_bytes(dur, **kwargs)
         wav_path = os.path.join(out_dir, f"{entry['scene_id']}.wav")
-        _atomic_write(wav_path, wav)
+        try:
+            wav = _tts.silence_wav_bytes(dur, **kwargs)
+            if len(wav) > _MAX_SCENE_AUDIO_BYTES:
+                raise _NarrationBudgetExceeded(
+                    'silent narration WAV exceeds the bounded scene audio '
+                    'budget')
+            _reserve_audio_bytes(len(wav))
+            _atomic_write(wav_path, wav)
+            _record_written(wav_path)
+        except _NarrationBudgetExceeded as exc:
+            _remove_written()
+            return {'ok': False, 'degraded': True, 'detail': str(exc)}
+        except BaseException:
+            _remove_written()
+            raise
         entry['wav'] = wav_path
+        entry['wav_bytes'] = len(wav)
+        entry['wav_sha256'] = hashlib.sha256(wav).hexdigest()
         entry['audio_duration'] = round(dur, 3)
+        _scene_settled(entry['scene_id'])
 
     overflow_total = round(sum(e['overflow'] for e in results), 3)
-    return {'ok': True, 'degraded': False, 'alignment': alignment,
+    return {'ok': True, 'degraded': False,
+            'manifest_version': _NARRATION_MANIFEST_VERSION,
+            'request': request_contract, 'alignment': alignment,
             'overflow_total': overflow_total, 'scenes': results}
 
 

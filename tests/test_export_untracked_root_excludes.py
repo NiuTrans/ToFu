@@ -107,8 +107,11 @@ def test_dry_run_preview_matches_real_run(tmp_path, monkeypatch, capsys):
     copy" — otherwise the pre-flight lies about what the real tar copy drops."""
     export = pytest.importorskip('export', reason='export.py not shipped')
     repo = _make_repo(tmp_path)
-    # The dry-run walk enumerates the module-level ROOT; point it at our repo.
-    monkeypatch.setattr(export, 'ROOT', repo)
+    # The dry-run walk enumerates the orchestration module's ROOT; point it at
+    # our repo.
+    import export_pkg._orchestrate as orchestrate
+
+    monkeypatch.setattr(orchestrate, 'ROOT', repo)
     dest = tmp_path / 'out'
 
     export.export_project('opensource', dest, dry_run=True, push=False)

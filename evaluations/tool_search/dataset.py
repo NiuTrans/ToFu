@@ -40,6 +40,9 @@ CATALOG = [
     _tool('desktop_screenshot', 'Capture the current desktop screen.'),
     _tool('browser_navigate', 'Navigate a browser tab to a URL.', 'url'),
     _tool('browser_read_page', 'Read the visible content of a browser page.'),
+    _tool('browser_download_url_to_server',
+          'Download an exact URL or browser page link into temporary server staging.',
+          'url', 'tab_id', 'text', 'selector'),
     _tool('desktop_clipboard', 'Read or update the desktop clipboard.',
           'action', 'text'),
     _tool('scheduler_create', 'Create a scheduled task or reminder.',
@@ -90,6 +93,11 @@ SEARCH_TEXT_BY_NAME = {
     'desktop_screenshot': (
         'display monitor what is on my screen desktop capture '
         '桌面 屏幕 截屏 看看电脑'),
+    'browser_download_url_to_server': (
+        'download_url_to_server download save copy export archive zip install '
+        'unzip latest file to server project browser link button intranet SSO '
+        '下载 保存 拷贝 复制 导出 安装 解压 最新版 服务器 本地 内网 登录 '
+        '文件 压缩包 链接 按钮'),
     'scheduler_cancel': (
         'stop remove delete recurring reminder scheduled job '
         '取消提醒 不再提醒 停止定时任务'),
@@ -139,6 +147,17 @@ CASES = [
         'id': 'desktop_capture', 'target': 'desktop_screenshot',
         'intent': 'Capture what is currently visible on the computer display.',
         'seeds': ['Show me what is on my screen.', '看看我现在的桌面。'],
+    },
+    {
+        'id': 'browser_server_download',
+        'target': 'browser_download_url_to_server',
+        'intent': (
+            'Download the latest archive link from an authenticated browser '
+            'page into server-side staging.'),
+        'seeds': [
+            'Save the latest release archive from this browser page on the server.',
+            '把浏览器页面里的最新版压缩包下载到服务器本地。',
+        ],
     },
     {
         'id': 'stop_reminder', 'target': 'scheduler_cancel',

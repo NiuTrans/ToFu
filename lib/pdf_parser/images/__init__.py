@@ -24,8 +24,13 @@ from lib.pdf_parser.images._detect import (
     detect_and_clip_figures,
     _try_stitch_next_page_table,
 )
-from lib.pdf_parser.images._render import render_pdf_pages
+from lib.pdf_parser.images._render import PdfPageLimitExceeded, render_pdf_pages
 
 logger = get_logger(__name__)
 
-__all__ = ['detect_and_clip_figures', 'resize_image_bytes', 'render_pdf_pages']
+__all__ = [
+    'PdfPageLimitExceeded',
+    'detect_and_clip_figures',
+    'resize_image_bytes',
+    'render_pdf_pages',
+]

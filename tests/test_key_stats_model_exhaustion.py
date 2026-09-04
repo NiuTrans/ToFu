@@ -142,6 +142,61 @@ class TestPerModelBillingStop:
 
 
 @pytest.mark.unit
+class TestStrictBillingStopAdmission:
+    """Optional background work may spend healthy capacity, but must not
+    challenge an already-observed billing stop merely because Settings has a
+    persistent manual-ON override. Interactive calls retain user supremacy.
+    """
+
+    def test_keywide_stop_beats_override_only_inside_context(self, fresh_stats):
+        ks = fresh_stats
+        ks.set_key_override(PROV, KEY, True)
+        ks.mark_key_exhausted(PROV, KEY, reason='HTTP 402 credit exhausted')
+
+        assert ks.is_key_enabled(PROV, KEY, model='kimi-k3') is True
+        with ks.strict_billing_stop_admission():
+            assert ks.is_key_enabled(PROV, KEY, model='kimi-k3') is False
+        assert ks.is_key_enabled(PROV, KEY, model='kimi-k3') is True
+
+    def test_model_stop_isolated_under_strict_context(self, fresh_stats):
+        ks = fresh_stats
+        ks.set_key_override(PROV, KEY, True)
+        ks.mark_key_exhausted(
+            PROV, KEY, reason='insufficient_quota', model='qwen3.5-plus')
+
+        with ks.strict_billing_stop_admission():
+            assert ks.is_key_enabled(
+                PROV, KEY, model='qwen3.5-plus') is False
+            assert ks.is_key_enabled(PROV, KEY, model='kimi-k3') is True
+
+    def test_strict_context_never_last_resort_promotes_billing_dead_key(
+            self, fresh_stats):
+        ks = fresh_stats
+        ks.mark_key_exhausted(PROV, KEY, reason='HTTP 402 credit exhausted')
+
+        assert ks.is_key_enabled(PROV, KEY) is True, (
+            'ordinary admission preserves the historical sole-key '
+            'last-resort policy')
+        with ks.strict_billing_stop_admission():
+            assert ks.is_key_enabled(PROV, KEY) is False
+
+    def test_context_is_nested_and_thread_local(self, fresh_stats):
+        from concurrent.futures import ThreadPoolExecutor
+
+        ks = fresh_stats
+        assert ks.is_strict_billing_stop_admission() is False
+        with ks.strict_billing_stop_admission():
+            assert ks.is_strict_billing_stop_admission() is True
+            with ks.strict_billing_stop_admission():
+                assert ks.is_strict_billing_stop_admission() is True
+            assert ks.is_strict_billing_stop_admission() is True
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                assert pool.submit(
+                    ks.is_strict_billing_stop_admission).result() is False
+        assert ks.is_strict_billing_stop_admission() is False
+
+
+@pytest.mark.unit
 class TestDispatcherModelGate:
 
     def _dispatcher(self, slots):
@@ -150,6 +205,7 @@ class TestDispatcherModelGate:
         disp = object.__new__(LLMDispatcher)
         disp._lock = threading.Lock()
         disp.slots = list(slots)
+        disp._contention_strikes = {}
         disp.initialize = lambda: None
         return disp
 
@@ -180,6 +236,43 @@ class TestDispatcherModelGate:
                               model='qwen3.5-plus')
         disp = self._dispatcher([self._slot('qwen3.5-plus')])
         assert disp._pick('text', None, None, None) is None
+
+    def test_strict_billing_stop_is_not_reported_as_healable_capacity(
+            self, fresh_stats):
+        """A retry loop must not poll forever when policy, not cooldown,
+        rejected every otherwise-capable slot."""
+        ks = fresh_stats
+        ks.set_key_override(PROV, KEY, True)
+        ks.mark_key_exhausted(PROV, KEY, reason='HTTP 402 credit exhausted')
+        disp = self._dispatcher([self._slot('qwen3.5-plus')])
+
+        assert disp.has_capable_slots('text') is True
+        with ks.strict_billing_stop_admission():
+            assert disp.has_capable_slots('text') is False
+
+    def test_strict_stopped_pool_exits_without_cooldown_polling(
+            self, fresh_stats, monkeypatch):
+        """No-admission is terminal before the retry loop sleeps; this keeps
+        an optional translation from occupying its finite lane until timeout.
+        """
+        from lib.llm_dispatch import api
+
+        ks = fresh_stats
+        ks.set_key_override(PROV, KEY, True)
+        ks.mark_key_exhausted(PROV, KEY, reason='HTTP 402 credit exhausted')
+        disp = self._dispatcher([self._slot('qwen3.5-plus')])
+        sleeps = []
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr(api, '_audit_severity_downgrade', lambda: None)
+        monkeypatch.setattr(api.time, 'sleep', lambda seconds: sleeps.append(seconds))
+
+        with ks.strict_billing_stop_admission():
+            with pytest.raises(api.DispatchNoAdmissibleSlot):
+                api.dispatch_chat(
+                    [{'role': 'user', 'content': 'translate me'}],
+                    capability='text', max_retries=3)
+
+        assert sleeps == []
 
 
 @pytest.mark.unit

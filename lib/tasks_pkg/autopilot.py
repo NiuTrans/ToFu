@@ -138,6 +138,7 @@ from lib.tasks_pkg.autopilot_state import (  # noqa: E402
     _extract_objective,  # noqa: F401  (re-export facade attr)
     _extract_objective_from_db,  # noqa: F401  (re-export facade attr)
     _get_or_persist_objective,
+    _update_objective_from_receipt,  # noqa: F401  (re-export facade attr)
     _get_or_persist_run_id,
     _record_vu_turn_and_check_budget,
     _clear_run_id,
@@ -167,39 +168,18 @@ from lib.tasks_pkg.autopilot_run_lifecycle import (  # noqa: E402
 
 
 def is_autopilot_enabled(task: dict) -> bool:
-    """True iff autopilot is active and no Flow executor owns the task.
+    """Compatibility predicate for pre-cutover standalone carriers.
 
-    Autopilot is "active" when EITHER:
-      • ``config['autopilot']`` is set (config-driven — toggle was ON at the
-        real send, propagated into the task and its follow-ups), OR
-      • a persistent autopilot armed-marker exists for the conversation
-        (the mid-stream / idle "arm" gesture; survives page reload and is
-        cancellable from the queue bar).
-
-    A Flow-managed task (``_flow_managed``) never re-enters the live loop.
-    The VU sub-task
-    (``_vu_subtask``) and inline tasks never consult the marker — only
-    DB-backed parent/follow-up tasks do.
+    New Goal Mode turns are always Flow-managed and therefore return false.
+    Durable queue markers no longer activate this interpreter: doing so after
+    the accepted parent attempt settled was the stale-attempt failure that
+    motivated GoalRun. The only remaining true case is an explicitly
+    constructed legacy carrier whose frozen config already owns autopilot.
     """
     cfg = task.get('config') or {}
     if task.get('_flow_managed'):
         return False
-    if cfg.get('autopilot'):
-        return True
-    # Persistent armed-marker fallback (mid-stream arm / reload survival).
-    if task.get('_vu_subtask') or task.get('_inline_messages'):
-        return False
-    conv_id = task.get('convId') or ''
-    if not conv_id:
-        return False
-    try:
-        from lib.message_queue import has_autopilot_marker
-        from lib.tasks_pkg.manager import task_user_id
-        return has_autopilot_marker(
-            conv_id, user_id=int(task_user_id(task)))
-    except Exception as e:
-        logger.debug('[Autopilot] marker probe failed (non-fatal): %s', e)
-        return False
+    return cfg.get('autopilot') is True
 
 
 # ──  slice 5 — extracted VU event-forwarding cluster ─────
@@ -270,27 +250,24 @@ def _install_vu_carrier_contract(parent_task: dict, sub_task: dict,
     except Exception as e:
         logger.debug('[Autopilot %s] carrier vu_start seed failed: %s',
                      parent_task.get('id', '?')[:8], e)
+    for pending_phase in parent_task.pop('_pending_vu_setup_phases', []):
+        try:
+            _append_evt(sub_task, pending_phase)
+        except Exception as e:
+            logger.debug('[Autopilot %s] carrier setup phase failed: %s',
+                         parent_task.get('id', '?')[:8], e)
 
 
 def _emit_vu_lifecycle_frame(task: dict, event: dict) -> None:
-    """Dual-emit a VU lifecycle frame onto parent stream + carrier stream.
+    """Emit a legacy VU lifecycle frame only on its carrier stream.
 
-    Post-cutover the client may be attached to EITHER stream (the
-    parent's, during the pre-hop window; the carrier's, after the
-    supersede hop).  Both must carry the identical lifecycle fact — a
-    missed ``autopilot_vu_cancel`` leaves a live ghost bubble, a missed
-    ``autopilot_vu_done`` leaves the VU turn unfinalized.  The carrier
-    copy lands via the transform's lifecycle passthrough (verbatim,
-    never double-wrapped).  Best-effort: either leg failing leaves the
-    other intact.
+    The parent attempt is already settled when VU execution begins. Writing a
+    lifecycle copy there violates the turn fence and used to abort the carrier
+    as an apparent user stop. The client hops using ``latestLiveTaskId`` and
+    the carrier is the sole event authority.
     """
     from lib.tasks_pkg.manager import append_event as _append_evt
     tid = task.get('id', '?')[:8]
-    try:
-        _append_evt(task, event)
-    except Exception as e:
-        logger.debug('[Autopilot %s] lifecycle emit to parent failed: %s',
-                     tid, e)
     carrier = task.get('_vu_carrier')
     if carrier is not None and carrier is not task:
         try:
@@ -355,9 +332,10 @@ def _register_vu_carrier(task: dict, vu_msg_id: str | None = None) -> dict | Non
     # We pass the parent's full message list verbatim so the VU sees the
     # entire conversation (including tool_calls / tool_result pairs);
     # the orchestrator's compaction layer handles context bounding.
-    # Resolve the immutable objective anchor (north star).  Pinned to
+    # Resolve the pinned objective (north star).  Pinned to
     # settings.autopilotObjective so it survives across follow-up tasks and
-    # compaction; falls back to deriving from the live messages.
+    # compaction, and re-pinned from L2 receipts when the human replaces the
+    # goal; falls back to deriving from the live messages.
     # Attribute the (silent, up to tens of seconds) pre-stream window so the
     #   VU bubble names what's blocking instead of a bare "Autopilot…".
     _emit_vu_setup_phase(
@@ -374,11 +352,13 @@ def _register_vu_carrier(task: dict, vu_msg_id: str | None = None) -> dict | Non
     objective_block = ''
     if objective:
         objective_block = (
-            '=== ORIGINAL OBJECTIVE (your north star — does NOT change '
-            'across turns) ===\n'
+            '=== CURRENT OBJECTIVE (the user\'s latest binding goal — '
+            're-pinned when the human replaces it) ===\n'
             f'{objective}\n'
             '=== The assistant works for YOU toward this objective. '
-            'Hold it to this, not to its own self-report. ===\n\n'
+            'Hold it to this, not to its own self-report. If a later human '
+            'message in the conversation explicitly replaces this objective, '
+            'the newest human goal wins. ===\n\n'
         )
 
     vu_messages = [dict(m) for m in parent_messages]
@@ -426,6 +406,14 @@ def _register_vu_carrier(task: dict, vu_msg_id: str | None = None) -> dict | Non
         'excludeLast', 'toolHistory', 'contentPrefix',
         'checkpointToolRounds', 'checkpointUsage', 'checkpointApiRounds',
         'checkpointModifiedFiles', 'checkpointModifiedFileList',
+        # The VU carrier is an inline transport task, never another executor
+        # for the parent's durable turn.  Inheriting these client/turn ids made
+        # carrier frames alternate a short private projection with the full
+        # parent projection on the SAME attempt (1.11 GiB across 13k frames in
+        # one observed ask_human loop).  The wrapped parent-side copy remains
+        # authoritative; the carrier keeps its independent task-event replay.
+        'assistantMsgId', 'msgId',
+        '_turnId', '_attemptId', '_turnActor', '_turnKind',
     ):
         sub_cfg.pop(stale_key, None)
     # Autopilot must NOT recurse (the parent's hook already runs us).
@@ -1292,7 +1280,7 @@ def kick_autopilot(
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
     for task in chat_task_runtime.snapshot_owned(user_id=int(user_id)):
         if (task.get('convId') == conv_id
-                and task.get('status') == 'running'
+                and task.get('status') in ('pending', 'running')
                 and not task.get('_vu_subtask')):
             logger.info('[Autopilot kick] conv=%s already has a running '
                         'task %s — refusing kick (arm instead)',

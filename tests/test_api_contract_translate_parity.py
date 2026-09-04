@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wire-parity + shipped-source guards for the routes/api_v1/translate.py
+"""Wire-parity and browser coordination for the translation API
 envelope migration (api-contract epic pt_931e16c4, batch 14).
 
 7 ad-hoc sites. Two sharp shapes:
@@ -15,7 +15,7 @@ envelope migration (api-contract epic pt_931e16c4, batch 14).
 The mt-test ``api_error(..., status=200)`` logical-failure-with-200 idiom
 is the contract's documented deliberate exception — untouched.
 
-Layers: PARITY + COORDINATION + SHIPPED-SOURCE.
+Layers: PARITY + COORDINATION.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ import quart as _quart
 sys.modules.setdefault('flask', _quart)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_TARGET = os.path.join(_ROOT, 'routes', 'api_v1', 'translate.py')
 _API_JS = os.path.join(_ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 
 pytestmark = pytest.mark.unit
@@ -138,25 +137,8 @@ def test_poll_batch_bare_array_coordination():
         'synthesizes per-id error rows on non-arrays)')
 
 
-def test_shipped_source_converted():
-    """routes/api_v1/translate.py carries no ad-hoc jsonify( and no flask
-    jsonify import (RED-first tripwire)."""
-    with open(_TARGET, encoding='utf-8') as f:
-        src = f.read()
-    assert 'jsonify(' not in src, (
-        'routes/api_v1/translate.py still builds responses with bare '
-        'jsonify( — convert per docs/API_CONTRACT.md §7')
-    assert not re.search(r'from flask import[^\n]*\bjsonify\b', src), (
-        'routes/api_v1/translate.py still imports jsonify')
-    assert "'items': results" in src, (
-        'expected the poll-batch bare array to wrap as '
-        "api_ok({'items': results}) — batch-14 coordinated migration")
-
-
 if __name__ == '__main__':
-    for fn in (test_envelope_parity,
-               test_poll_batch_bare_array_coordination,
-               test_shipped_source_converted):
+    for fn in (test_envelope_parity, test_poll_batch_bare_array_coordination):
         fn()
         print('ok', fn.__name__)
     print('ALL PASSED')

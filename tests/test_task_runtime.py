@@ -547,6 +547,41 @@ def test_spawn_does_not_inherit_request_contextvars():
         'spawn propagated request ContextVars into a background worker')
 
 
+def test_submit_worker_isolates_context_and_forwards_explicit_owner():
+    """Injected schedulers cannot inherit request state, even when inline."""
+    import contextvars
+
+    rt = TaskRuntime('submitted-context-isolation')
+    request_marker = contextvars.ContextVar(
+        'task_runtime_submit_marker', default='no-request')
+    task = rt.create(user_id=7)
+    observed = {}
+
+    def submitter(task_id, owner_user_id, worker):
+        observed['task_id'] = task_id
+        observed['owner_user_id'] = owner_user_id
+        worker()
+        return 'receipt'
+
+    def worker():
+        observed['context'] = request_marker.get()
+        rt.finish(task['id'], result='done')
+
+    token = request_marker.set('request-context')
+    try:
+        receipt = rt.submit_worker(task['id'], submitter, worker)
+    finally:
+        request_marker.reset(token)
+
+    assert receipt == 'receipt'
+    assert observed == {
+        'task_id': task['id'],
+        'owner_user_id': 7,
+        'context': 'no-request',
+    }
+    assert task['status'] == 'done'
+
+
 def test_spawn_holds_strong_ref_under_gc():
     """The asyncio branch must keep a STRONG reference to the worker Task.
 

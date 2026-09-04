@@ -27,7 +27,7 @@ class SupervisorRunnerTest {
         id = 1, alias = "s",
         baseUrl = "https://$host/proxy/15000/",
         authType = AuthType.CODE_SERVER_PASSWORD,
-        cookieHost = cookieHost, projectPath = "/home/dev/chatui",
+        cookieHost = cookieHost, projectPath = "/home/dev/tofu",
     )
 
     // NOTE: `JSONObject.put()` returns null under the unit-test android.jar

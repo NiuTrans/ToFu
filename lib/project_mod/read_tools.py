@@ -35,7 +35,7 @@ from lib.project_mod.scanner import (
     _should_ignore,
 )
 from lib.project_mod.grep_engine import SearchRequest, run_search
-from lib.project_mod import tree_index
+from lib.project_mod import grep_timeout_circuit, tree_index
 
 logger = get_logger(__name__)
 
@@ -339,6 +339,28 @@ def _is_absolute_path(path: str) -> bool:
     return path.startswith('/') or path.startswith('~')
 
 
+def _has_explicit_line_range(start_line, end_line) -> bool:
+    """True when the caller supplied either bound, including zero.
+
+    Truthiness is unsafe at this contract boundary: ``0`` is invalid for a
+    1-based range, but it must never be reinterpreted as "no range" and turn
+    a bounded recovery attempt into a whole-file read.
+    """
+    return start_line is not None or end_line is not None
+
+
+def _line_range_validation_error(path, start_line, end_line) -> str:
+    """Reject invalid 1-based bounds before any file body is materialized."""
+    for name, value in (('start_line', start_line), ('end_line', end_line)):
+        if value is None:
+            continue
+        if (isinstance(value, bool) or not isinstance(value, int)
+                or value < 1):
+            return (f'Error: {name} must be a positive 1-based integer for '
+                    f'{path}; got {value!r}.')
+    return ''
+
+
 def _read_absolute_file(path: str, start_line=None, end_line=None):
     """Read a file by absolute path, supporting images, PDFs, Office docs, and text.
 
@@ -354,6 +376,10 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
         For images: dict with ``__screenshot__`` protocol.
         For all other files: str with extracted text content.
     """
+    range_error = _line_range_validation_error(path, start_line, end_line)
+    if range_error:
+        return range_error
+
     from lib.project_mod.abs_path_guard import AbsPathDenied, enforce_abs_read
     try:
         enforce_abs_read(path)
@@ -368,9 +394,15 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
     if isinstance(result, dict) and result.get('__screenshot__'):
         return result
 
-    # For text results, apply line range if requested
-    if isinstance(result, str) and (start_line or end_line) and not result.startswith('Error:'):
-        lines = result.split('\n')
+    # For extracted text results, apply the range to the DOCUMENT BODY, not to
+    # read_local_file's decorative ``File/PDF/Document`` header. Slicing the
+    # rendered wrapper shifted absolute-path reads by two or three lines while
+    # claiming the requested bounds in the replacement header.
+    if (isinstance(result, str)
+            and _has_explicit_line_range(start_line, end_line)
+            and not result.startswith('Error:')):
+        body = result.split('\n\n', 1)[1] if '\n\n' in result else result
+        lines = body.splitlines()
         total = len(lines)
         s = max(1, start_line or 1) - 1
         e = min(total, end_line or total)
@@ -394,6 +426,11 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
     and truncation.  Absolute paths are NOT handled here — the caller
     (tool_read_files) routes those to _read_absolute_file.
     """
+    range_error = _line_range_validation_error(
+        rel_path, start_line, end_line)
+    if range_error:
+        return range_error
+
     try:
         target = _safe_path(base, rel_path)
     except ValueError as e:
@@ -432,7 +469,7 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
         from lib.file_reader import read_local_file
         return read_local_file(target)
 
-    if sz > MAX_FILE_SIZE and not (start_line or end_line):
+    if sz > MAX_FILE_SIZE and not _has_explicit_line_range(start_line, end_line):
         return (f'File too large ({_fmt_size(sz)}). Use grep_search to find specific content, '
                 f'or read_files with start_line/end_line for a specific range.')
 
@@ -459,7 +496,7 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
 
     try:
         with open(target, errors='replace') as f:
-            if start_line or end_line:
+            if _has_explicit_line_range(start_line, end_line):
                 all_lines = f.readlines()
                 total = len(all_lines)
                 s = max(1, start_line or 1) - 1
@@ -594,7 +631,75 @@ def _merge_same_file_ranges(reads):
 
 
 
-def tool_read_files(base, reads, *, result_items=None):
+# Chars served by ONE no-range attachment read. Deliberately below the
+# tool-result persistence threshold (compaction TOOL_RESULT_MAX_CHARS,
+# default 60k) so the model pages a long document by line range instead of
+# bouncing the whole body into a spill file.
+_ATTACHMENT_READ_CHARS = 60_000
+
+
+def _read_attachment_text_ref(ref, start_line, end_line, *, task):
+    """Read an uploaded-attachment ref as a virtual, line-paged text file.
+
+    The extracted text lives in the durable attachment store (no filesystem
+    path the model could name); it is materialized once per call and sliced
+    by ``start_line``/``end_line`` exactly like a real file, so a long
+    document is a sliding window away instead of being truncated forever.
+    """
+    range_error = _line_range_validation_error(ref, start_line, end_line)
+    if range_error:
+        return range_error
+
+    from lib.attachments import read_text_attachment_ref
+    messages = task.get('messages') if isinstance(task, dict) else None
+    user_id = task.get('_userId') if isinstance(task, dict) else None
+    resolved = read_text_attachment_ref(
+        ref, user_id=user_id, messages=messages)
+    if resolved is None:
+        return (f'Error: could not resolve attachment reference {ref!r}. '
+                'The uploaded file may have been deleted, or the reference '
+                'does not belong to this conversation.')
+    name = str(resolved.get('name') or ref)
+    text = str(resolved.get('text') or '')
+    pages = int(resolved.get('pages') or 0)
+    page_part = f', {pages} pages' if pages else ''
+    if resolved.get('truncated'):
+        text += ('\n[attachment text beyond the read-back limit is not '
+                 'addressable]')
+    lines = text.split('\n')
+    total = len(lines)
+
+    if _has_explicit_line_range(start_line, end_line):
+        s = max(1, start_line or 1) - 1
+        e = min(total, end_line or total)
+        if s >= e:
+            return (f'Error: requested line range {start_line or 1}-'
+                    f'{end_line or total} is empty or out of bounds for '
+                    f'{name} ({total} lines).')
+        header = (f'File: {name} (user-uploaded attachment{page_part}, '
+                  f'lines {s + 1}-{e} of {total})\n')
+        return header + '─' * 40 + '\n' + '\n'.join(lines[s:e])
+
+    if len(text) > _ATTACHMENT_READ_CHARS:
+        cut = text[:_ATTACHMENT_READ_CHARS]
+        nl = cut.rfind('\n')
+        if nl > 0:
+            cut = cut[:nl]
+        shown_lines = cut.count('\n') + 1
+        header = (f'File: {name} (user-uploaded attachment{page_part}, '
+                  f'{total} lines) [showing first {shown_lines} lines]\n')
+        return (header + '─' * 40 + '\n' + cut +
+                f'\n\n… [{total - shown_lines} more lines not shown. Call '
+                f'read_files again with path="{ref}" and '
+                f'start_line={shown_lines + 1} (optionally end_line) to '
+                f'continue reading.]')
+
+    header = (f'File: {name} (user-uploaded attachment{page_part}, '
+              f'{total} lines)\n')
+    return header + '─' * 40 + '\n' + text
+
+
+def tool_read_files(base, reads, *, result_items=None, task=None):
     """Batch-read multiple files (or file ranges) in one call.
 
     Each spec in *reads* is ``{path, start_line?, end_line?}``.
@@ -604,6 +709,10 @@ def tool_read_files(base, reads, *, result_items=None):
     ``result_items`` is an optional request-owned sink for bounded structured
     per-file previews.  It does not change the legacy text return; the task
     result-envelope boundary consumes and discards the sidecar items.
+
+    ``task`` (optional) carries the owner id and conversation messages so an
+    ``att_media_<id>`` / ``att_txt_<hash>`` uploaded-attachment reference can
+    be resolved to its extracted text (a virtual, line-paged file).
 
     Absolute paths (starting with ``/`` or ``~``) are routed to
     ``_read_absolute_file`` and bypass the project sandbox.
@@ -621,19 +730,20 @@ def tool_read_files(base, reads, *, result_items=None):
     # occasionally returns ``start_line: "70"`` instead of ``70`` and
     # downstream arithmetic (``sl <= prev_e + GAP_THRESHOLD``) crashes
     # with ``TypeError: can only concatenate str (not "int") to str``.
-    # Treat unparseable values as None (== "no range given").
+    # Preserve malformed values as an invalid explicit bound instead of
+    # silently turning them into ``None`` (a whole-file request).
     for spec in reads:
         if not isinstance(spec, dict):
             continue
         for k in ('start_line', 'end_line'):
             v = spec.get(k)
-            if v is None or isinstance(v, int):
+            if v is None or (isinstance(v, int) and not isinstance(v, bool)):
                 continue
             try:
-                spec[k] = int(v)
+                spec[k] = int(v) if not isinstance(v, bool) else 0
             except (ValueError, TypeError) as e:
-                logger.debug('[Tools] read_files: dropping non-numeric %s=%r (%s)', k, v, e)
-                spec[k] = None
+                logger.debug('[Tools] read_files: rejecting non-numeric %s=%r (%s)', k, v, e)
+                spec[k] = 0
 
     # Repair reversed ranges (start > end) BEFORE merging. Order matters:
     #   _merge_same_file_ranges sorts by (start, end) and coalesces within
@@ -659,7 +769,6 @@ def tool_read_files(base, reads, *, result_items=None):
     image_results = {}  # index → dict for __screenshot__ results
     total_chars = 0
     BATCH_CHAR_BUDGET = 50 * 1024 * 1024  # lifted; per-file size bounds are the real limit
-    WHOLE_FILE_THRESHOLD = 40_000
 
     def _record_result(index, spec, result, *, status=None):
         if not isinstance(result_items, list):
@@ -693,6 +802,31 @@ def tool_read_files(base, reads, *, result_items=None):
         sl = spec.get('start_line')
         el = spec.get('end_line')
         spec_base = spec.get('_base', base)  # per-spec base override (multi-root)
+
+        # Route: uploaded-attachment reference (att_media_ / att_txt_) → the
+        # durable attachment store, read as a virtual line-paged text file.
+        if isinstance(rel_path, str) and rel_path.startswith(
+                ('att_media_', 'att_txt_')):
+            result = _read_attachment_text_ref(rel_path, sl, el, task=task)
+            if (not result.startswith('Error:')
+                    and isinstance(spec, dict)):
+                from lib.attachments import attachment_display_name
+                _exact = attachment_display_name(rel_path)
+                if _exact:
+                    spec['_display_path'] = _exact
+            if total_chars + len(result) > BATCH_CHAR_BUDGET:
+                remaining = BATCH_CHAR_BUDGET - total_chars
+                if remaining > 200:
+                    result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
+                else:
+                    notice = f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]'
+                    parts.append(notice)
+                    _record_batch_skips(i)
+                    break
+            total_chars += len(result)
+            parts.append(result)
+            _record_result(i, spec, result)
+            continue
 
         # Route: absolute paths → _read_absolute_file (images, PDFs, Office, text)
         if _is_absolute_path(rel_path):
@@ -729,21 +863,13 @@ def tool_read_files(base, reads, *, result_items=None):
             _record_result(i, spec, rendered)
             continue
 
-        # Project-relative path — auto-expand small files to whole-file.
-        # Compute ONE stat here and hand it to _read_project_file so the
-        # read path doesn't re-stat the target.
-        _pre_stat = None
-        if sl is not None or el is not None:
-            try:
-                target = _safe_path(spec_base, rel_path)
-                st = os.stat(target)
-                if stat.S_ISREG(st.st_mode) and st.st_size <= WHOLE_FILE_THRESHOLD:
-                    sl, el = None, None
-                _pre_stat = st
-            except (ValueError, OSError) as e:
-                logger.debug('[Tools] read_files range check failed for %s: %s', rel_path, e, exc_info=True)
-
-        result = _read_project_file(spec_base, rel_path, sl, el, _pre_stat=_pre_stat)
+        # Explicit ranges are an end-to-end contract: callers use them to
+        # recover from a compacted whole-file result, and the loop breaker
+        # reasons about the lines that were actually returned.  Never widen a
+        # project-relative range based on file size.  Omitting both bounds is
+        # the one and only whole-file request shape, matching absolute paths
+        # and uploaded-attachment virtual files above.
+        result = _read_project_file(spec_base, rel_path, sl, el)
         # Relative-path images/PDFs/Office now return a __screenshot__ dict
         # (parity with the absolute branch) — track separately so base64
         # never reaches the text accumulator below.
@@ -797,7 +923,7 @@ def tool_read_files(base, reads, *, result_items=None):
 # ═══════════════════════════════════════════════════════
 
 def tool_inspect_image(base, path, *, crop=None, rotate=0, zoom=None, grid=False,
-                       messages=None):
+                       messages=None, user_id=None):
     """Re-render a region of an image at full resolution (zoom/rotate/crop).
 
     Resolution order:
@@ -815,7 +941,8 @@ def tool_inspect_image(base, path, *, crop=None, rotate=0, zoom=None, grid=False
     """
     from lib.attachments import is_attachment_ref, resolve_attachment
     if is_attachment_ref(path):
-        resolved = resolve_attachment(path, messages=messages)
+        resolved = resolve_attachment(
+            path, messages=messages, user_id=user_id)
         if not resolved:
             return (f'Error: could not resolve attachment reference {path!r}. '
                     'The uploaded file may no longer be available.')
@@ -843,7 +970,7 @@ def tool_inspect_image(base, path, *, crop=None, rotate=0, zoom=None, grid=False
 # ═══════════════════════════════════════════════════════
 
 def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None,
-              max_results=None, count_only=False):
+              max_results=None, count_only=False, *, owner_user_id=None):
     """Search for a pattern across project files using ripgrep (preferred) or grep.
 
     Falls back through: rg → grep → pure-Python grep.
@@ -866,16 +993,32 @@ def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None,
                               count_only, io_timeout)
     if indexed is not None:
         return indexed
+
+    circuit = grep_timeout_circuit.check(owner_user_id, target, include)
+    if circuit is not None:
+        if circuit.should_log:
+            logger.info(
+                '[Tools] grep slow-root circuit rejected scan: target=%s '
+                'include=%s remaining_s=%.1f rejection=%d',
+                target, include or '', circuit.remaining_seconds,
+                circuit.rejection_count,
+            )
+        return _format_grep_circuit_open(
+            base, target, include, circuit.remaining_seconds)
     tree_index.warm(base)  # no index yet — build it behind the live walk
 
     if _HAS_RG:
-        result = _run_rg(base, target, pattern, include, ctx_n, cap, count_only)
+        result = _run_rg(
+            base, target, pattern, include, ctx_n, cap, count_only,
+            owner_user_id=owner_user_id)
         if result is not None:
             return result
         # rg binary vanished or failed — fall through to grep
         logger.warning('[Tools] ripgrep failed, falling back to grep')
 
-    result = _run_gnu_grep(base, target, pattern, include, ctx_n, cap, count_only)
+    result = _run_gnu_grep(
+        base, target, pattern, include, ctx_n, cap, count_only,
+        owner_user_id=owner_user_id)
     if result is not None:
         return result
 
@@ -1012,6 +1155,20 @@ def _format_grep_output(base, raw_output, pattern, include, ctx_n,
         hdr += f' ({include})'
     hdr += f' \u2014 {match_count} matches:\n\n'
     return hdr + '\n'.join(rel_lines)
+
+
+_GREP_TRUNCATION_MARKERS = (
+    "… (output truncated at ",
+    "… [truncated — batch budget exceeded]",
+    "more searches skipped — batch budget exceeded]",
+    "[partial results — grep timed out after ",
+)
+
+
+def grep_result_was_truncated(result):
+    """Whether grep omitted producer-side evidence before result budgeting."""
+    return isinstance(result, str) and any(
+        marker in result for marker in _GREP_TRUNCATION_MARKERS)
 
 
 # Max filesize that rg should bother searching (skip huge data/binary files)
@@ -1195,6 +1352,44 @@ def _format_grep_timeout(base, target, pattern, include, ctx_n, cap, count_only,
         return banner + formatted + footer
     return (f'Grep timed out after {io_timeout}s searching "{rel_target}". '
             f'Try a more specific subdirectory path or narrower file glob (include parameter).' + footer)
+
+
+def _format_grep_circuit_open(base, target, include, remaining_seconds):
+    """Explain a proven-slow scan rejection without implying search results."""
+    base_abs = os.path.abspath(base)
+    target_abs = os.path.abspath(target)
+    if target_abs == base_abs or target_abs.startswith(base_abs + os.sep):
+        display_target = os.path.relpath(target_abs, base_abs)
+    else:
+        display_target = target_abs
+    retry_seconds = max(1, int(remaining_seconds + 0.999))
+    include_note = f' with include={include!r}' if include else ''
+    return (
+        f'Grep scan skipped for "{display_target}"{include_note}: an equivalent '
+        f'full-directory scan already timed out, so this owner-scoped resource '
+        f'circuit remains open for up to {retry_seconds}s. Search a narrower '
+        f'subdirectory or use a different include glob now; otherwise retry after '
+        f'the cooldown. No filesystem scan was dispatched for this request.'
+    )
+
+
+def _tree_index_freshness_notice(entry):
+    """Compact visible evidence for an adaptively retained index snapshot."""
+    evidence = tree_index.freshness_evidence(entry)
+    if not evidence:
+        return ''
+    age = max(1, int(evidence['ageSeconds'] + 0.999))
+    scheduled = max(1, int(evidence['scheduledRefreshSeconds'] + 0.999))
+    return (
+        f'[tree index age {age}s/{scheduled}s; existing contents are read live '
+        f'and Tofu tool writes are synced; external path/size changes may not '
+        f'yet be reflected]'
+    )
+
+
+def _with_tree_index_freshness(result, entry):
+    notice = _tree_index_freshness_notice(entry)
+    return f'{notice}\n\n{result}' if notice else result
 
 
 # ── Index-backed grep (zero directory traversal) ─────────────────────
@@ -1411,7 +1606,9 @@ def _grep_via_index(base, target, pattern, include, ctx_n, cap, count_only,
         cands, total_bytes = tree_index.grep_candidates(
             entry, '' if rel_target == '.' else rel_target, include, _RG_MAX_BYTES)
         if not cands:
-            return _format_grep_output(base, '', pattern, include, ctx_n, cap, count_only)
+            formatted = _format_grep_output(
+                base, '', pattern, include, ctx_n, cap, count_only)
+            return _with_tree_index_freshness(formatted, entry)
         raw, timed_out, unavailable = _run_index_chunks(
             base, pattern, ctx_n, cap, count_only, cands,
             time.monotonic() + io_timeout, total_bytes)
@@ -1419,16 +1616,21 @@ def _grep_via_index(base, target, pattern, include, ctx_n, cap, count_only,
             return None  # rg vanished mid-flight — GNU path still available
         text = raw.decode('utf-8', errors='replace')
         if timed_out:
-            return _format_grep_timeout(base, target, pattern, include, ctx_n, cap,
-                                        count_only, io_timeout, text, 'rg_index_timeout')
-        return _format_grep_output(base, text, pattern, include, ctx_n, cap, count_only)
+            formatted = _format_grep_timeout(
+                base, target, pattern, include, ctx_n, cap,
+                count_only, io_timeout, text, 'rg_index_timeout')
+            return _with_tree_index_freshness(formatted, entry)
+        formatted = _format_grep_output(
+            base, text, pattern, include, ctx_n, cap, count_only)
+        return _with_tree_index_freshness(formatted, entry)
     except Exception as e:
         logger.warning('[Tools] index grep failed for %s: %s — falling back to live walk',
                        pattern[:40], e, exc_info=True)
         return None
 
 
-def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
+            count_only=False, owner_user_id=None):
     """Run ripgrep. Returns formatted string on success, None on binary-not-found."""
     cmd = _build_rg_cmd(base, target, pattern, include, ctx_n, cap, count_only)
     io_timeout = _get_io_timeout(base)
@@ -1439,17 +1641,21 @@ def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_o
             logger.warning('[Tools] rg binary not found despite detection at startup')
             return None
         if timed_out:
+            grep_timeout_circuit.record_timeout(
+                owner_user_id, target, include)
             logger.warning('[Tools] rg timed out after %ds: pattern=%s target=%s partial_bytes=%d',
                            io_timeout, pattern[:60], target, len(stdout))
             return _format_grep_timeout(base, target, pattern, include, ctx_n, cap,
                                         count_only, io_timeout, stdout, 'rg_timeout')
+        grep_timeout_circuit.record_success(owner_user_id, target, include)
         return _format_grep_output(base, stdout, pattern, include, ctx_n, cap, count_only)
     except Exception as e:
         logger.warning('[Tools] rg failed: pattern=%s target=%s: %s', pattern[:40], target, e, exc_info=True)
         return None
 
 
-def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
+                  count_only=False, owner_user_id=None):
     """Run GNU grep. Returns formatted string on success, None on binary-not-found."""
     cmd = _build_grep_cmd(base, target, pattern, include, ctx_n, cap, count_only)
     io_timeout = _get_io_timeout(base)
@@ -1460,10 +1666,13 @@ def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
             logger.debug('[Tools] GNU grep binary not found, will try fallback')
             return None
         if timed_out:
+            grep_timeout_circuit.record_timeout(
+                owner_user_id, target, include)
             logger.warning('[Tools] grep timed out after %ds: pattern=%s target=%s partial_bytes=%d',
                            io_timeout, pattern[:60], target, len(stdout))
             return _format_grep_timeout(base, target, pattern, include, ctx_n, cap,
                                         count_only, io_timeout, stdout, 'grep_timeout')
+        grep_timeout_circuit.record_success(owner_user_id, target, include)
         return _format_grep_output(base, stdout, pattern, include, ctx_n, cap, count_only)
     except Exception as e:
         logger.warning('[Tools] grep failed for pattern=%s target=%s: %s', pattern[:40], target, e, exc_info=True)
@@ -1578,6 +1787,9 @@ def _find_via_index(base, target, pattern, cap, *, case_sensitive=False):
         rows = tree_index.find_matching(
             entry, '' if rel_target == '.' else rel_target, pattern, cap,
             case_sensitive=case_sensitive)
+        notice = _tree_index_freshness_notice(entry)
+        if notice:
+            rows.append((None, notice))
         return rows
     except Exception as e:
         logger.warning('[Tools] index find failed for %s: %s — falling back to live walk',
@@ -1750,7 +1962,7 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
 
 
 
-def tool_grep_batch(base, searches):
+def tool_grep_batch(base, searches, *, owner_user_id=None):
     """Batch grep: run multiple searches in one call.
 
     Each spec in *searches* is ``{pattern, path?, include?, context_lines?, max_results?, count_only?}``.
@@ -1781,6 +1993,7 @@ def tool_grep_batch(base, searches):
             context_lines=spec.get('context_lines'),
             max_results=spec.get('max_results'),
             count_only=bool(spec.get('count_only', False)),
+            owner_user_id=owner_user_id,
         )
         if total_chars + len(result) > BATCH_CHAR_BUDGET:
             remaining = BATCH_CHAR_BUDGET - total_chars

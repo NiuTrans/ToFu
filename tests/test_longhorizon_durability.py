@@ -69,6 +69,7 @@ def fake_summary(monkeypatch):
         conv_id='',
         task=None,
         usage_out=None,
+        anchor_text='',
     ):
         return ('### 1. Primary Request\n[summary of earlier work — '
                 'objective paraphrased, not verbatim]\n### 6. All User Messages\n'

@@ -101,14 +101,14 @@ print("OK")
 
 
 def _tofu_search_root() -> Path | None:
-    """Locate the sibling tofu-search checkout, or None when absent."""
-    cand = _ROOT.parent / 'tofu-search'
-    return cand if (cand / 'pyproject.toml').is_file() else None
+    """Locate the canonical tofu-search monorepo member."""
+    candidate = _ROOT / 'packages' / 'tofu-search'
+    return candidate if (candidate / 'pyproject.toml').is_file() else None
 
 
 @pytest.fixture(scope='module')
 def clean_export():
-    """`git archive HEAD` of tofu-search into a temp dir.
+    """Archive the committed tofu-search member into a temporary package root.
 
     Uses HEAD rather than the working tree ON PURPOSE — the working tree is
     precisely where the missing symbols came from, so testing it would repeat
@@ -116,9 +116,10 @@ def clean_export():
     """
     src = _tofu_search_root()
     if src is None:
-        pytest.skip('sibling tofu-search checkout not present')
+        pytest.skip('tofu-search workspace member not present')
     with tempfile.TemporaryDirectory() as td:
-        proc = subprocess.run(['git', 'archive', 'HEAD'], cwd=src,
+        proc = subprocess.run(
+            ['git', 'archive', 'HEAD:packages/tofu-search'], cwd=_ROOT,
                               capture_output=True, timeout=120)
         if proc.returncode != 0:
             pytest.skip(f'git archive failed: {proc.stderr[:200]!r}')

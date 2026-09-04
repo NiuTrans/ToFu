@@ -10,8 +10,8 @@ What this module deliberately does NOT do:
 
   * **No billing.** Pre-flight reserve / post-flight settle is a multi-user
     HTTP concern; trusted in-process embedders don't have a wallet.
-  * **No BYO ephemeral-slot resolution.** The ``model@prov_xxx`` suffix and
-    its disposal thread are an HTTP-key-scoped feature.
+  * **No owner model-route resolution.** Structured model selection, route
+    group minting, and terminal disposal belong to the authenticated adapter.
   * **No SSE framing.** ``run_chat_stream`` yields the *native* Tofu event
     dicts (the declared event contract); the HTTP route is responsible for
     re-shaping those into OpenAI ``chat.completion.chunk`` frames.

@@ -1,3 +1,9 @@
+/**
+ * Responsibility: project fetch-like responses into one status-preserving
+ * result envelope and recover the canonical error at presentation boundaries.
+ * Entry points: normalizeHttpResult, adaptHttpResult, httpResultError, and the
+ * immutable HTTP_RESULT port. Dependencies: none; response values are injected.
+ */
 export interface HttpResultEnvelope {
   ok: boolean;
   status: number;
@@ -6,7 +12,7 @@ export interface HttpResultEnvelope {
 }
 
 export interface HttpResultApi {
-  normalize(value: unknown): Promise<unknown>;
+  normalize(value: unknown): Promise<HttpResultEnvelope>;
   adapt(value: unknown): Promise<unknown>;
   error(value: unknown): unknown;
 }
@@ -21,6 +27,14 @@ function responseLike(value: unknown): value is ResponseLike {
   return Boolean(value) && typeof (value as ResponseLike).json === 'function';
 }
 
+function projectHttpResult(
+  value: unknown,
+  passthrough: false,
+): Promise<HttpResultEnvelope>;
+function projectHttpResult(
+  value: unknown,
+  passthrough: true,
+): Promise<unknown>;
 async function projectHttpResult(
   value: unknown,
   passthrough: boolean,
@@ -52,7 +66,9 @@ async function projectHttpResult(
   };
 }
 
-export function normalizeHttpResult(value: unknown): Promise<unknown> {
+export function normalizeHttpResult(
+  value: unknown,
+): Promise<HttpResultEnvelope> {
   return projectHttpResult(value, false);
 }
 

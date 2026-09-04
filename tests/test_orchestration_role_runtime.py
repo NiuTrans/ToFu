@@ -12,7 +12,10 @@ from lib.orchestration_graph import FlowExecutionError
 from lib.orchestration.outcome_ledger import OrchestrationOutcomeLedger
 from lib.orchestration_progress import OrchestrationProgressLedger
 from lib.orchestration_role_runtime import OrchestrationRoleRuntime
-from lib.orchestration_runner_result import OrchestrationAgentResult
+from lib.orchestration_runner_result import (
+    OrchestrationAgentResult,
+    OrchestrationModelRoute,
+)
 from lib.orchestration_tool_usage import OrchestrationToolUsage
 from lib.orchestration_trace import OrchestrationTraceRecorder
 from lib.orchestration_transcript import OrchestrationTranscript
@@ -56,6 +59,13 @@ def test_role_runtime_owns_one_successful_leaf_lifecycle():
     typed = OrchestrationAgentResult(
         output='implemented',
         thinking='checked the contract',
+        model_route=OrchestrationModelRoute(
+            selected_model='kimi-k3',
+            resolved_model='deepseek-v4-pro',
+            role='worker',
+            tier='heavy',
+            kind='role_tier',
+        ),
         tool_usage=OrchestrationToolUsage(
             state_changing_tools=('write_file',),
             exploratory_tools=('read_file',),
@@ -108,6 +118,14 @@ def test_role_runtime_owns_one_successful_leaf_lifecycle():
     assert events[-1]['state_changing'] == 1
     assert events[-1]['exploratory'] == 1
     assert events[-1]['state_changing_tools'] == ['write_file']
+    assert events[-1]['model'] == 'deepseek-v4-pro'
+    assert events[-1]['modelRoute'] == {
+        'selectedModel': 'kimi-k3',
+        'resolvedModel': 'deepseek-v4-pro',
+        'role': 'worker',
+        'tier': 'heavy',
+        'kind': 'role_tier',
+    }
     assert [event['type'] for event in events] == [
         'step_start', 'step_trace', 'step_complete',
     ]

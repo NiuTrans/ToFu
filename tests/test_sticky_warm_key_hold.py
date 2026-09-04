@@ -31,6 +31,7 @@ Run:  pytest tests/test_sticky_warm_key_hold.py -v
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
@@ -170,6 +171,46 @@ class TestWarmKeyHold:
         assert keys_called == ['sk-0'], (
             'expected the request to land on the warm key sk-0, got %r'
             % keys_called)
+
+    def test_async_short_cooldown_holds_for_warm_key(
+            self, dispatcher_two_keys, monkeypatch):
+        """The production async relay preserves the same cache affinity."""
+        from lib.llm_dispatch import api, conv_affinity
+
+        dispatcher, warm_slot, _cold_slot = dispatcher_two_keys
+        conv_affinity.record_conv_key('conv-async-hold', 'key_0')
+        warm_slot.record_error(is_rate_limit=True, error='HTTP 429')
+        sleeps = []
+        keys_called = []
+
+        async def fake_sleep(seconds, abort_check=None):
+            sleeps.append(seconds)
+            warm_slot.cooldown_until = 0.0
+
+        async def fake_stream(_body, **kwargs):
+            keys_called.append(kwargs.get('api_key'))
+            return 'ok', 'stop', {}
+
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+        monkeypatch.setattr(
+            'lib.key_stats.is_key_enabled', lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            'lib.llm._transport.async_abortable_sleep', fake_sleep)
+        monkeypatch.setattr(
+            'lib.llm.astream.async_stream_chat', fake_stream)
+
+        conv_affinity.set_conv_affinity('conv-async-hold')
+        try:
+            result = asyncio.run(api.async_dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}],
+                prefer_model=_MODEL, strict_model=True, max_retries=2,
+            ))
+        finally:
+            conv_affinity.clear_conv_affinity()
+
+        assert result.message == 'ok'
+        assert any(0 < seconds <= 1.5 for seconds in sleeps)
+        assert keys_called == ['sk-0']
 
     def test_long_cooldown_does_not_hold_and_rebinds(self, dispatcher_two_keys,
                                                      monkeypatch, caplog):

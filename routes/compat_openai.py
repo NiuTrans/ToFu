@@ -18,14 +18,22 @@ from __future__ import annotations
 from quart import Blueprint
 
 from lib.agent_core.admission import (
-    await_terminal, controller, on_terminal, register_waiter,
+    await_terminal, controller, register_waiter,
     unregister_waiter,
 )
+from lib.agent_core.execution_session import (
+    ExecutionPhase,
+    bind_admission_lease,
+    bind_model_route,
+    execution_session_for_task,
+)
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_not_found,
+    api_bad_request, api_error, api_internal_error,
     sse_response,
 )
-from lib.byo_resolve import dispose_ephemeral_slot, resolve_model_and_provider
+from lib.model_routing import (
+    ModelRoutingError,
+)
 from lib.compat.openai import (
     build_openai_response, models_payload, stream_openai_chunks,
     translate_openai_request,
@@ -44,6 +52,11 @@ from routes.api_v1.auth import (
     guard_model_relay_or_dispose,
     request_user_id,
     require_scope,
+)
+from routes.model_routing_adapter import (
+    dispose_routed_slot_group,
+    mint_compatible_request_route,
+    routing_error_fields,
 )
 
 logger = get_logger(__name__)
@@ -87,32 +100,25 @@ async def chat_completions():
     if auth is None or auth.owner_user_id is None:
         return api_bad_request('caller has no repository owner identity')
 
-    # ── BYO model resolution ──
-    # Resolve ``model="name@prov_xxx"`` (and an inline ``provider``
-    # block, if any) against the caller's registered BYO providers,
-    # mirroring /api/v1/chat. Without this, a model that /v1/models
-    # advertised with the @prov suffix could not actually be invoked
-    # through the OpenAI-compat adapter.
-    _byo_handle = None
+    # String model IDs remain compatible; Tofu creator/provider preferences
+    # are orthogonal extension fields. Ambiguity is returned, never guessed.
+    _route_group = None
     _model_in = cfg.get('model') or ''
-    if _model_in:
-        _model_id, _byo_handle, _byo_prov, _err, _status = (
-            resolve_model_and_provider(
-                _model_in,
-                body.get('provider'),
-                auth.owner_user_id,
-                tenant_id=auth.tenant_id,
-            ))
-        if _err:
-            return (api_not_found(_err) if _status == 404
-                    else api_bad_request(_err, field='model'))
-        cfg['model'] = _model_id  # strip the @suffix
-
-    # BYO-only relay backstop (model_relay_enabled=false): refuse
-    # operator-pool requests; BYO + admin pass. See routes/api_v1/auth.py.
-    _relay_denied = guard_model_relay_or_dispose(_byo_handle)
-    if _relay_denied is not None:
-        return _relay_denied
+    try:
+        _model_id, _selection, _route_group = mint_compatible_request_route(
+            body,
+            model_id=_model_in,
+            owner_user_id=auth.owner_user_id,
+            tenant_id=auth.tenant_id,
+            owner_tag=f'compat-openai:{auth.owner_user_id}',
+            protocol='',
+        )
+        cfg['model'] = _model_id
+    except ModelRoutingError as exc:
+        return api_bad_request(str(exc), **routing_error_fields(exc))
+    relay_denial = guard_model_relay_or_dispose(_route_group)
+    if relay_denial is not None:
+        return relay_denial
 
     audit_log('compat_openai_chat',
               key_id=(auth.key_id if auth else ''),
@@ -131,42 +137,39 @@ async def chat_completions():
     if auth and auth.key_id:
         task['_api_key_id'] = auth.key_id
     # Hard provider isolation — see lib/llm_dispatch/provider_pin.py.
-    if _byo_handle is not None:
-        task['_pinned_provider_id'] = _byo_handle.slot.provider_id
+    task['_pinned_provider_id'] = _route_group.pin_id
+    task['_requested_model_ref'] = (
+        _selection.model.public_dict()
+        if _selection.model is not None
+        else _selection.provider_offering.public_dict()
+    )
+    execution_session = execution_session_for_task(task)
+    bind_model_route(
+        execution_session,
+        lambda: dispose_routed_slot_group(_route_group),
+    )
 
     # ── Admission control: refuse with 503 when at capacity ───────
-    if not controller.try_acquire():
-        if _byo_handle is not None:
-            dispose_ephemeral_slot(_byo_handle)
+    admission_lease = controller.acquire()
+    if admission_lease is None:
+        execution_session.settle(
+            ExecutionPhase.FAILED, cause='task_admission_refused')
         logger.warning('[compat:openai] admission refused (in_flight=%d/%d) '
                        'key=%s model=%s', controller.in_flight,
                        controller.capacity, auth.key_id, cfg.get('model', '?'))
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
-
-    # Release slot + dispose BYO ephemeral slot once, on terminal state.
-    _released = {'done': False}
-
-    def _on_done(_tid, _handle=_byo_handle):
-        if _released['done']:
-            return
-        _released['done'] = True
-        controller.release()
-        if _handle is not None:
-            try:
-                dispose_ephemeral_slot(_handle)
-            except Exception as ex:
-                logger.error('[compat:openai] ephemeral dispose failed '
-                             'handle=%s task=%s: %s', _handle.handle_id,
-                             _tid[:8], ex, exc_info=True)
-
-    on_terminal(task['id'], _on_done)
+    bind_admission_lease(
+        execution_session,
+        lambda: controller.release(admission_lease),
+    )
     register_waiter(task['id'])
 
     try:
         spawn_task(task)
     except Exception as e:
-        _on_done(task['id'])
+        execution_session.settle(
+            ExecutionPhase.FAILED, cause='task_spawn_failed')
         unregister_waiter(task['id'])
         logger.exception('[compat:openai] spawn_task failed task=%s',
                          task['id'][:8])
@@ -222,17 +225,18 @@ async def chat_completions():
 @compat_openai_bp.route('/v1/models', methods=['GET'])
 @require_scope('chat')
 @api_meta(summary='OpenAI-compatible /v1/models',
-          description=('Returns operator-curated models plus this '
-                        'caller\'s registered BYO providers (each '
-                        'served model surfaced as `id="<name>@<prov_id>"` '
-                        'so OpenAI SDKs can pin without custom code).'),
+          description=('Returns the owner\'s v2 official models and '
+                       'provider-scoped pending deployments. Creator and '
+                       'provider preferences are exposed as Tofu metadata.'),
           tags=['compat:openai'], scope='chat')
 def models():
     from quart import jsonify
     auth = current_auth()
+    if auth is None or auth.owner_user_id is None:
+        return jsonify({'object': 'list', 'data': []})
     return jsonify(models_payload(
-        owner_user_id=(auth.owner_user_id if auth else None),
-        tenant_id=(auth.tenant_id if auth else None),
+        owner_user_id=auth.owner_user_id,
+        tenant_id=auth.tenant_id,
     ))
 
 
@@ -253,59 +257,77 @@ def embeddings():
     else:
         return api_bad_request('input must be string or string[]',
                                 field='input')
-    if not model:
-        try:
-            from lib import EMBEDDING_MODELS
-            model = (EMBEDDING_MODELS or [''])[0]
-        except ImportError as e:
-            logger.debug('[compat:openai] EMBEDDING_MODELS unavailable: %s', e)
-            model = ''
-    if not model:
-        return api_bad_request('No embedding model configured', field='model')
-
+    auth = current_auth()
+    if auth is None or auth.owner_user_id is None:
+        return api_bad_request('Authenticated owner is required')
+    tofu = body.get('tofu') if isinstance(body.get('tofu'), dict) else {}
+    preferred_provider_id = str(
+        tofu.get('preferred_provider_id')
+        or body.get('tofu_preferred_provider_id') or '').strip()
+    route_group = None
     try:
-        # Some providers route embeddings through a dedicated client; we
-        # delegate to the dispatcher's pick_key flow and call the
-        # provider's /embeddings directly.
-        from lib.llm_dispatch import pick_key_for_model
-        api_key, _key_name, slot = pick_key_for_model(model)
-    except ImportError as e:
-        return api_internal_error(e, context='Dispatcher unavailable',
-                                  source='routes.compat_openai.embeddings')
-
-    from lib.http_client import http_post
-    base_url = ''
-    try:
-        if slot:
-            base_url = getattr(slot, 'base_url', '') or ''
-    except AttributeError as e:
-        logger.debug('[compat:openai] slot.base_url unavailable: %s', e)
-        base_url = ''
-    if not base_url:
-        try:
-            from lib import LLM_BASE_URL as base_url  # type: ignore
-        except ImportError as e:
-            logger.debug('[compat:openai] LLM_BASE_URL unavailable, using default: %s', e)
-            base_url = 'https://api.openai.com/v1'
-
-    url = base_url.rstrip('/') + '/embeddings'
-    try:
-        resp = http_post(url, json={'model': model, 'input': inputs},
-                         headers={'Authorization': f'Bearer {api_key}'},
-                         timeout=60)
-    except Exception as e:
-        logger.warning('[compat:openai] embeddings fetch failed url=%s: %s',
-                       url, e, exc_info=True)
-        return api_internal_error(e, context='compat:openai',
-                                  source='routes.compat_openai.embeddings',
-                                  log_traceback=False)
-    if not resp.ok:
-        return api_bad_request(
-            f'Upstream embedding failed: {resp.status_code}',
-            upstream_status=resp.status_code,
-            upstream_body=resp.text[:500])
-    from quart import jsonify
-    return jsonify(resp.json())
+        from lib.model_routing import (
+            ModelRoutingRepository,
+            OPENAI_COMPATIBLE_PROTOCOLS,
+            OwnerBoundary,
+            mint_capability_slot_group,
+        )
+        model, route_group = mint_capability_slot_group(
+            ModelRoutingRepository(),
+            OwnerBoundary.create(auth.owner_user_id, auth.tenant_id),
+            'embedding',
+            prefer_model=model,
+            preferred_provider_id=preferred_provider_id,
+            required_protocols=OPENAI_COMPATIBLE_PROTOCOLS,
+            owner_tag=f'compat-embeddings:{auth.owner_user_id}',
+        )
+        from lib.llm_dispatch import get_dispatcher
+        from lib.llm_dispatch.provider_pin import provider_pin
+        with provider_pin(route_group.pin_id):
+            slot = get_dispatcher().pick_and_reserve(
+                capability='embedding', prefer_model=model,
+                strict_model=True)
+            if slot is None:
+                return api_error(
+                    'No embedding deployment is currently available',
+                    status=503,
+                )
+            from lib.http_client import http_post
+            url = slot.base_url.rstrip('/') + '/embeddings'
+            headers = dict(slot.extra_headers or {})
+            if slot.api_key:
+                headers['Authorization'] = f'Bearer {slot.api_key}'
+            try:
+                resp = http_post(
+                    url,
+                    json={'model': slot.model, 'input': inputs},
+                    headers=headers,
+                    timeout=60,
+                )
+            except Exception as exc:
+                slot.record_error()
+                logger.warning(
+                    '[compat:openai] embeddings fetch failed url=%s: %s',
+                    url, exc, exc_info=True)
+                return api_internal_error(
+                    exc,
+                    context='compat:openai',
+                    source='routes.compat_openai.embeddings',
+                    log_traceback=False,
+                )
+            if not resp.ok:
+                slot.record_error(is_rate_limit=resp.status_code == 429)
+                return api_bad_request(
+                    f'Upstream embedding failed: {resp.status_code}',
+                    upstream_status=resp.status_code,
+                    upstream_body=resp.text[:500])
+            slot.record_success(latency_ms=0)
+            from quart import jsonify
+            return jsonify(resp.json())
+    except ModelRoutingError as exc:
+        return api_bad_request(str(exc), **routing_error_fields(exc))
+    finally:
+        dispose_routed_slot_group(route_group)
 
 
 __all__ = ['compat_openai_bp']

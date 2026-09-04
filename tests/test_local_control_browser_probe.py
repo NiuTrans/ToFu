@@ -558,7 +558,7 @@ def test_the_dl_link_form_is_not_regressed():
 # polls every 3s (`_LC_POLL_MS`). Uncached, the miss path is the expensive one:
 # with no browser installed, every candidate name misses and each miss walks
 # the WHOLE PATH. Measured on this host — 51 PATH entries, ~408 stat() calls
-# and ~6ms per probe, and that is a local disk; on the FUSE/dolphinfs mounts
+# and ~6ms per probe, and that is a local disk; on network FUSE mounts
 # this project actually deploys to, stat is markedly dearer.
 #
 # But a cache is itself a way to reinvent the bug this module was written to

@@ -179,7 +179,10 @@ class OrchestrationRoleRuntime:
             shared=shared,
             verifier=verifier,
         )
-        if not verifier:
+        if verifier:
+            self._feedback.record_verifier_tool_rounds(
+                state_changing + exploratory)
+        else:
             self._progress.record_producer({
                 'node_id': node_id,
                 'role': role,
@@ -194,10 +197,17 @@ class OrchestrationRoleRuntime:
             'node_id': node_id,
             'role': role,
             'status': result.status,
+            **({'error': result.error} if result.error else {}),
             'preview': event_preview(result.output),
             'output': result.output,
             'thinking': result.thinking,
             'emits': emits,
+            **({
+                'model': result.model_route.resolved_model,
+                'modelRoute': result.model_route.to_projection(),
+            } if result.model_route.resolved_model else {}),
+            **({'tool_log': [dict(row) for row in result.tool_log]}
+               if result.tool_log else {}),
             **activity,
         })
         return result.output

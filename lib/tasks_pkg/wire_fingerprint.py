@@ -52,8 +52,11 @@ message's own identity (first tool id / tool_use_id / role+content hash).
 
 Public API
 ==========
+  - ``capture_wire_message_evidence(messages) -> WireMessageEvidence`` — one
+    shared traversal for the three full-history fingerprints captured at the
+    live transport boundary.
   - ``canonical_messages(messages) -> list[dict]`` — envelope-agnostic per-msg
-    fingerprints (``{role, key, fields:{field→md5}, brief}``).
+    process-local fingerprints (``{key, fields:{field→int}}``).
   - ``diff_canonical(old, new, max_report=8) -> list[str]`` — the exact
     ``key.field`` entries that changed (stable-key aligned).
   - ``static_prefix_hash(messages) -> str`` — hash of the leading
@@ -62,9 +65,12 @@ Public API
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from typing import Any
+
+import orjson
 
 from lib.log import get_logger
 
@@ -87,16 +93,18 @@ def _canon_args(raw: Any) -> str:
     """
     if isinstance(raw, (dict, list)):
         try:
-            return json.dumps(raw, sort_keys=True, ensure_ascii=False)
+            return orjson.dumps(
+                raw, option=orjson.OPT_SORT_KEYS).decode('utf-8')
         except (TypeError, ValueError) as e:
             logger.debug('[WireFP] _canon_args dict/list dump failed (%s) — '
                          'using str() form', e)
             return str(raw)
     s = '' if raw is None else str(raw)
     try:
-        obj = json.loads(s or '{}')
-        return json.dumps(obj, sort_keys=True, ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        obj = orjson.loads(s or '{}')
+        return orjson.dumps(
+            obj, option=orjson.OPT_SORT_KEYS).decode('utf-8')
+    except (orjson.JSONDecodeError, TypeError, ValueError) as e:
         logger.debug('[WireFP] _canon_args JSON re-canon failed (%s) — '
                      'using stripped raw', e)
         return s.strip()
@@ -169,8 +177,10 @@ def _text_of(content: Any) -> str:
     return '\x01'.join(parts)
 
 
-def _fields_of(msg: dict) -> dict[str, str]:
-    """Per-field canonical hashes for ONE message, envelope-agnostic.
+def _canonical_fields_and_tool_key(
+    msg: dict,
+) -> tuple[dict[str, int], str | None]:
+    """Build canonical fields and any stable tool key in one message scan.
 
     Handles both the OpenAI shape (role tool / assistant.tool_calls /
     reasoning_content+thinking_signature) and the translated Anthropic shape
@@ -183,11 +193,15 @@ def _fields_of(msg: dict) -> dict[str, str]:
         spec = ((msg.get('call_id') or msg.get('id') or '') + '\x03'
                 + (msg.get('name') or '') + '\x03'
                 + _canon_args(msg.get('arguments')))
-        return {'role': _md5('assistant'), 'tool_calls': _md5(spec)}
+        fields = {'role': hash('assistant'), 'tool_calls': hash(spec)}
+        return fields, f'assistant/tool_call({msg.get("name") or "?"})'
     if item_type == 'function_call_output':
-        spec = ((msg.get('call_id') or '') + '\x03'
-                + _text_of(msg.get('output')))
-        return {'role': _md5('toolresult'), 'tool_result': _md5(spec)}
+        output = msg.get('output')
+        output_text = output if isinstance(output, str) else _text_of(output)
+        spec = (msg.get('call_id') or '') + '\x03' + output_text
+        fields = {'role': hash('toolresult'), 'tool_result': hash(spec)}
+        key = f'tool_result({_tool_id_token(msg.get("call_id"))})'
+        return fields, key
     if item_type in ('reasoning', 'compaction'):
         try:
             opaque = json.dumps(_strip_cache_control(msg), sort_keys=True,
@@ -196,7 +210,7 @@ def _fields_of(msg: dict) -> dict[str, str]:
             logger.debug('[WireFingerprint] opaque %s payload is not JSON serializable: %s',
                          item_type, exc)
             opaque = str(msg)
-        return {'role': _md5(item_type), item_type: _md5(opaque)}
+        return {'role': hash(item_type), item_type: hash(opaque)}, None
 
     role = msg.get('role', '')
     content = msg.get('content')
@@ -208,22 +222,30 @@ def _fields_of(msg: dict) -> dict[str, str]:
     # switch alone is not a change. Canonical form: role='toolresult', and the
     # tool_result hash = the ordered list of ``(tool_use_id, inner_text)``.
     _tr_specs: list[str] | None = None
+    tool_key: str | None = None
     if role == 'tool':
+        result_text = content if isinstance(content, str) else _text_of(content)
         _tr_specs = [(msg.get('tool_call_id') or '') + '\x03'
-                     + _text_of(content)]
+                     + result_text]
+        tool_key = f'tool_result({_tool_id_token(msg.get("tool_call_id"))})'
     elif (role == 'user' and isinstance(content, list) and content
           and isinstance(content[0], dict)
           and content[0].get('type') == 'tool_result'):
         _tr_specs = []
+        tool_key = f'tool_result({_tool_id_token(content[0].get("tool_use_id"))})'
         for blk in content:
             if isinstance(blk, dict) and blk.get('type') == 'tool_result':
+                inner = blk.get('content')
+                inner_text = (
+                    inner if isinstance(inner, str) else _text_of(inner))
                 _tr_specs.append((blk.get('tool_use_id') or '') + '\x03'
-                                 + _text_of(blk.get('content')))
+                                 + inner_text)
     if _tr_specs is not None:
-        return {'role': _md5('toolresult'),
-                'tool_result': _md5('\x01'.join(_tr_specs))}
+        return ({'role': hash('toolresult'),
+                 'tool_result': hash('\x01'.join(_tr_specs))},
+                tool_key)
 
-    fields: dict[str, str] = {'role': _md5(role)}
+    fields: dict[str, int] = {'role': hash(role)}
 
     # ── Assistant: DECOMPOSE either envelope into the SAME field set ──
     # OpenAI shape keeps text in ``content``, thinking in
@@ -232,12 +254,17 @@ def _fields_of(msg: dict) -> dict[str, str]:
     # (thinking / text / tool_use). To make a protocol switch alone NOT count
     # as a change, pull the Anthropic blocks back out into the same three
     # fields the OpenAI shape uses.
-    _text_parts: list[str] = []
     _think_text = msg.get('reasoning_content') or ''
     _think_sig = msg.get('thinking_signature') or ''
     _tool_specs: list[str] = []  # (id, name, canon_args) per call, any envelope
 
-    for tc in msg.get('tool_calls') or ():
+    tool_calls = msg.get('tool_calls') or ()
+    if tool_calls and isinstance(tool_calls[0], dict):
+        first_name = ((tool_calls[0].get('function') or {}).get('name')
+                      or '?')
+        tool_key = f'{msg.get("role", "?")}/tool_call({first_name})'
+
+    for tc in tool_calls:
         if isinstance(tc, dict):
             fn = tc.get('function') or {}
             _tool_specs.append((tc.get('id') or '') + '\x03'
@@ -245,9 +272,12 @@ def _fields_of(msg: dict) -> dict[str, str]:
                                + _canon_args(fn.get('arguments')))
 
     if isinstance(content, list):
+        _text_parts: list[str] = []
         for block in content:
             if not isinstance(block, dict):
-                _text_parts.append(str(block))
+                block_text = str(block)
+                if block_text:
+                    _text_parts.append(block_text)
                 continue
             btype = block.get('type')
             if btype == 'thinking':
@@ -258,18 +288,24 @@ def _fields_of(msg: dict) -> dict[str, str]:
                                    + (block.get('name') or '') + '\x03'
                                    + _canon_args(block.get('input')))
             else:
-                # text / image / other → the canonical text stream
-                _text_parts.append(_text_of([block]))
+                # Standard text blocks need no recursive list normalisation.
+                if btype == 'text' or ('text' in block and not btype):
+                    block_text = block.get('text') or ''
+                elif btype in ('input_text', 'output_text'):
+                    block_text = '\x02text\x03' + (block.get('text') or '')
+                else:
+                    # image / unknown → retain the generic exact fallback.
+                    block_text = _text_of([block])
+                if block_text:
+                    _text_parts.append(block_text)
+        _txt = '\x01'.join(_text_parts)
     else:
-        _t = _text_of(content)
-        if _t:
-            _text_parts.append(_t)
+        _txt = content if isinstance(content, str) else _text_of(content)
 
-    _txt = '\x01'.join(p for p in _text_parts if p)
     if _txt:
-        fields['content'] = _md5(_txt)
+        fields['content'] = hash(_txt)
     if _tool_specs:
-        fields['tool_calls'] = _md5('\x01'.join(_tool_specs))
+        fields['tool_calls'] = hash('\x01'.join(_tool_specs))
     if _think_text or _think_sig:
         # NOTE: ``reasoning_details`` is deliberately NOT a separate field.
         # build_body synthesises it FROM ``reasoning_content`` +
@@ -278,16 +314,17 @@ def _fields_of(msg: dict) -> dict[str, str]:
         # hashing ``reasoning_details`` on its own would make the two envelopes
         # diverge for the identical turn. The thinking text+signature is the
         # canonical, envelope-independent representation.
-        fields['thinking'] = _md5(_think_text + '\x03' + _think_sig)
+        fields['thinking'] = hash(_think_text + '\x03' + _think_sig)
 
-    return fields
+    return fields, tool_key
 
 
 def _tool_id_token(tool_id) -> str:
     """Return a short but DISCRIMINATING token for a tool-call id.
 
-    This token is not merely cosmetic: ``marker_signature`` uses the ``_brief``
-    string as a per-message SLOT KEY, and ``markers_ttl_flipped`` compares each
+    This token is not merely cosmetic: ``marker_signature`` uses the resulting
+    alignment string as a per-message SLOT KEY, and ``markers_ttl_flipped``
+    compares each
     slot's ttl value set across rounds. Two distinct tool_results sharing a slot
     key therefore merge into one slot whose value set holds BOTH markers' ttls.
 
@@ -307,30 +344,11 @@ def _tool_id_token(tool_id) -> str:
     return s[-12:] if len(s) > 12 else s
 
 
-def _brief(msg: dict) -> str:
-    """Short human token for a message (for readable diff output)."""
-    item_type = msg.get('type', '')
-    if item_type == 'function_call':
-        return f'assistant/tool_call({msg.get("name") or "?"})'
-    if item_type == 'function_call_output':
-        return f'tool_result({_tool_id_token(msg.get("call_id"))})'
-    if item_type in ('reasoning', 'compaction'):
-        return f'{item_type}({_tool_id_token(msg.get("id"))})'
-    role = msg.get('role', '?')
-    if role == 'tool':
-        return f'tool_result({_tool_id_token(msg.get("tool_call_id"))})'
-    content = msg.get('content')
-    if isinstance(content, list) and content and isinstance(content[0], dict):
-        t0 = content[0].get('type')
-        if t0 == 'tool_result':
-            # Same brief shape as the OpenAI ``tool`` role above, keyed on the
-            # FIRST tool_use_id, so both envelopes align on the same key.
-            return f'tool_result({_tool_id_token(content[0].get("tool_use_id"))})'
-    tcs = msg.get('tool_calls') or ()
-    if tcs and isinstance(tcs[0], dict):
-        return f'{role}/tool_call({((tcs[0].get("function") or {}).get("name") or "?")})'
-    txt = _text_of(content)
-    return f'{role}({txt[:24]!r})'
+def _canonical_field_alignment_key(role: str, fields: dict) -> str:
+    """Derive an ordinary message key from its already-built field evidence."""
+    field_items = tuple(sorted(fields.items()))
+    runtime_digest = hash(field_items) & 0xffffffffffffffff
+    return f'{role}:{runtime_digest:016x}'
 
 
 def canonical_key(entry: dict) -> str:
@@ -343,31 +361,35 @@ def canonical_key(entry: dict) -> str:
     """
     role = entry.get('role', '')
     fields = entry.get('fields') or {}
-    # Prefer a tool identity if the brief captured one.
+    # Legacy rich entries carried the tool identity in a diagnostic ``brief``.
+    # New compact entries compute it directly from the source message.
     brief = entry.get('brief', '')
     if 'tool_result(' in brief or 'tool_call(' in brief or 'tool_use(' in brief:
         return brief
-    return f'{role}:' + _md5(json.dumps(fields, sort_keys=True))
+    return _canonical_field_alignment_key(role, fields)
+
+
+def _canonical_message_entry(msg: dict) -> dict:
+    """Build one canonical entry shared by every message fingerprint."""
+    fields, key = _canonical_fields_and_tool_key(msg)
+    if key is None:
+        key = _canonical_field_alignment_key(msg.get('role', ''), fields)
+    return {'key': key, 'fields': fields}
 
 
 def canonical_messages(messages: list) -> list[dict]:
     """Canonicalise a post-translation wire message list to fingerprints.
 
-    Each entry: ``{'role', 'key', 'fields': {field: md5}, 'brief'}``. Envelope
-    (OpenAI vs Anthropic) is erased — the same conversation produces the same
+    Each retained entry is only ``{'key', 'fields': {field: int}}``; role and
+    tool identity are folded into ``key`` during construction. Envelope (OpenAI
+    vs Anthropic) is erased — the same conversation produces the same
     fingerprints on either protocol.
     """
     out: list[dict] = []
     for msg in messages or ():
         if not isinstance(msg, dict):
             continue
-        entry = {
-            'role': msg.get('role', ''),
-            'fields': _fields_of(msg),
-            'brief': _brief(msg),
-        }
-        entry['key'] = canonical_key(entry)
-        out.append(entry)
+        out.append(_canonical_message_entry(msg))
     return out
 
 
@@ -574,9 +596,7 @@ def marker_signature(body: dict) -> dict[str, Any]:
                       and (b.get('cache_control')
                            or b.get('prompt_cache_breakpoint')))]
         if marked:
-            entry = {'role': msg.get('role', ''),
-                     'fields': _fields_of(msg), 'brief': _brief(msg)}
-            key = canonical_key(entry)
+            key = _canonical_message_entry(msg)['key']
             # The system prompt sits at ``messages[0]`` on the OpenAI-protocol
             # wire path (system is NOT hoisted out to a top-level field there),
             # so its cache_control marker lands at cumulative block 0. That
@@ -763,6 +783,198 @@ def _strip_cache_control(obj: Any) -> Any:
     return obj
 
 
+@dataclass(frozen=True)
+class WireMessageEvidence:
+    """The three message-sized fingerprints captured for one wire attempt."""
+
+    canonical: list[dict]
+    message_bytes: list[dict]
+    field_bytes: list[dict]
+
+
+def _wire_message_byte_entry(
+    msg: dict,
+    *,
+    key: str,
+    clean: dict | None = None,
+) -> dict:
+    """Hash one message's marker-free serialized bytes."""
+    clean_message = (
+        _strip_cache_control(msg) if clean is None else clean
+    )
+    try:
+        raw = json.dumps(
+            clean_message, ensure_ascii=False, sort_keys=False)
+    except (TypeError, ValueError) as e:
+        logger.debug('[WireFP] wire_byte_prefix dump failed (%s) — '
+                     'using str() form', e)
+        raw = str(msg)
+    # This evidence lives only through the current process's FloorRetry/cache
+    # diagnostics and one previous-round baseline. A keyed runtime integer
+    # avoids another UTF-8 copy, MD5 digest and retained hex string.
+    return {'key': key, 'h': hash(raw)}
+
+
+_WIRE_JSON_ENCODER = json.JSONEncoder(ensure_ascii=False, sort_keys=False)
+# ``JSONEncoder.encode`` keeps its circular-reference map and iterator local to
+# each call; the shared instance owns immutable configuration only, so parallel
+# requests do not share payload state. This avoids ``json.dumps`` constructing
+# the same configured wrapper once per complex top-level message field.
+
+
+def _dump_wire_json_value(value: Any) -> str:
+    """Match stdlib JSON exactly while bypassing its wrapper for primitives."""
+    if isinstance(value, str):
+        return json.encoder.encode_basestring(value)
+    if value is None:
+        return 'null'
+    if value is True:
+        return 'true'
+    if value is False:
+        return 'false'
+    if type(value) is int:
+        return str(value)
+    return _WIRE_JSON_ENCODER.encode(value)
+
+
+def _wire_field_byte_entry(
+    msg: dict,
+    *,
+    key: str,
+    clean: dict | None = None,
+) -> dict:
+    """Hash each top-level field of one marker-free wire message."""
+    clean_message = (
+        _strip_cache_control(msg) if clean is None else clean
+    )
+    field_hashes: dict[Any, int] = {}
+    for field, value in clean_message.items():
+        try:
+            raw = _dump_wire_json_value(value)
+        except (TypeError, ValueError) as e:
+            logger.debug('[WireFP] wire_byte_field_prefix dump failed for '
+                         'field=%s (%s) — using str() form', field, e)
+            raw = str(value)
+        field_hashes[field] = hash(raw)
+    # A pure top-level field reorder changes serialized bytes while leaving
+    # every value stable. Keep that fact separately attributable.
+    field_hashes['__order__'] = hash(tuple(clean_message.keys()))
+    return {'key': key, 'fields': field_hashes}
+
+
+def _wire_message_and_field_byte_entries(
+    msg: dict,
+    *,
+    key: str,
+    clean: dict | None = None,
+) -> tuple[dict, dict]:
+    """Serialize each top-level value once for both raw-byte evidence views.
+
+    ``json.dumps(dict, ensure_ascii=False, sort_keys=False)`` is exactly an
+    insertion-ordered ``{key: value, ...}`` join using the same serialized
+    field values. Rebuilding it from those pieces removes the combined live
+    capture's second recursive serialization.  That serialization also proves
+    whether a ``cache_control`` JSON key exists: marker-free messages can reuse
+    the original graph, while the uncommon marker-bearing message is stripped
+    and serialized again. Invalid JSON and non-string top-level keys take the
+    conservative stripping path. Standalone APIs retain their independent
+    implementations and historical fallbacks.
+    """
+    source = msg if clean is None else clean
+    must_detect_cache_control = clean is None
+    cache_control_json_key = '"cache_control": '
+    has_cache_control = False
+    field_hashes: dict[Any, int] = {}
+    # Keep large ``raw_value`` strings as independent references until one
+    # final join. Building ``encoded_key + ': ' + raw_value`` first would copy
+    # every long field into an intermediate string and then copy it again when
+    # joining the whole message.
+    serialized_parts: list[str] = ['{']
+    has_serialized_field = False
+    message_json_valid = True
+    message_needs_direct_dump = False
+    for field, value in source.items():
+        try:
+            raw_value = _dump_wire_json_value(value)
+        except (TypeError, ValueError) as exc:
+            logger.debug(
+                '[WireFP] wire_byte_field_prefix dump failed for field=%s '
+                '(%s) — using str() form', field, exc)
+            raw_value = str(value)
+            message_json_valid = False
+        if must_detect_cache_control and (
+                field == 'cache_control'
+                or cache_control_json_key in raw_value):
+            has_cache_control = True
+        field_hashes[field] = hash(raw_value)
+        if isinstance(field, str):
+            if has_serialized_field:
+                serialized_parts.append(', ')
+            serialized_parts.extend((
+                json.encoder.encode_basestring(field), ': ', raw_value))
+            has_serialized_field = True
+        else:
+            # Provider messages use string keys. Preserve stdlib json's wider
+            # legacy key coercion without taxing that hot contract.
+            message_needs_direct_dump = True
+
+    if must_detect_cache_control and (
+            has_cache_control
+            or not message_json_valid
+            or message_needs_direct_dump):
+        return _wire_message_and_field_byte_entries(
+            msg, key=key, clean=_strip_cache_control(msg))
+
+    field_hashes['__order__'] = hash(tuple(source.keys()))
+    if message_json_valid and not message_needs_direct_dump:
+        serialized_parts.append('}')
+        raw_message = ''.join(serialized_parts)
+    else:
+        try:
+            raw_message = json.dumps(
+                source, ensure_ascii=False, sort_keys=False)
+        except (TypeError, ValueError):
+            logger.debug(
+                '[WireFP] wire_byte_prefix dump failed — using str() form')
+            raw_message = str(msg)
+    return (
+        {'key': key, 'h': hash(raw_message)},
+        {'key': key, 'fields': field_hashes},
+    )
+
+
+def capture_wire_message_evidence(messages: list) -> WireMessageEvidence:
+    """Capture all message-sized wire fingerprints in one shared traversal.
+
+    Live transport needs the canonical semantic fingerprint, whole-message
+    byte fingerprint, and top-level-field byte fingerprint together. Computing
+    them independently repeated canonical-key construction and recursively
+    stripped ``cache_control`` twice across the complete prompt. This owner
+    computes the canonical entry once and detects the uncommon marker while
+    serializing the raw fields already required for evidence. Only a message
+    that actually carries the marker is recursively stripped; marker-free
+    inputs stay read-only and allocation-free. Standalone helpers remain for
+    callers that need only one view.
+    """
+    canonical: list[dict] = []
+    message_bytes: list[dict] = []
+    field_bytes: list[dict] = []
+    for msg in messages or ():
+        if not isinstance(msg, dict):
+            continue
+        canonical_entry = _canonical_message_entry(msg)
+        canonical.append(canonical_entry)
+        message_entry, field_entry = _wire_message_and_field_byte_entries(
+            msg, key=canonical_entry['key'])
+        message_bytes.append(message_entry)
+        field_bytes.append(field_entry)
+    return WireMessageEvidence(
+        canonical=canonical,
+        message_bytes=message_bytes,
+        field_bytes=field_bytes,
+    )
+
+
 def wire_byte_prefix(messages: list) -> list[dict]:
     """Per-message hash of the ACTUAL serialized wire bytes — the TRUE-byte
     instrument that closes the "canonical says identical but the bytes weren't"
@@ -802,17 +1014,8 @@ def wire_byte_prefix(messages: list) -> list[dict]:
     for msg in messages or ():
         if not isinstance(msg, dict):
             continue
-        entry = {'role': msg.get('role', ''),
-                 'fields': _fields_of(msg), 'brief': _brief(msg)}
-        key = canonical_key(entry)
-        try:
-            raw = json.dumps(_strip_cache_control(msg),
-                             ensure_ascii=False, sort_keys=False)
-        except (TypeError, ValueError) as e:
-            logger.debug('[WireFP] wire_byte_prefix dump failed (%s) — '
-                         'using str() form', e)
-            raw = str(msg)
-        out.append({'key': key, 'h': _md5(raw)})
+        entry = _canonical_message_entry(msg)
+        out.append(_wire_message_byte_entry(msg, key=entry['key']))
     return out
 
 
@@ -871,24 +1074,8 @@ def wire_byte_field_prefix(messages: list) -> list[dict]:
     for msg in messages or ():
         if not isinstance(msg, dict):
             continue
-        entry = {'role': msg.get('role', ''),
-                 'fields': _fields_of(msg), 'brief': _brief(msg)}
-        key = canonical_key(entry)
-        clean = _strip_cache_control(msg)
-        field_hashes: dict[str, str] = {}
-        for fld, val in clean.items():
-            try:
-                raw = json.dumps(val, ensure_ascii=False, sort_keys=False)
-            except (TypeError, ValueError) as e:
-                logger.debug('[WireFP] wire_byte_field_prefix dump failed for '
-                             'field=%s (%s) — using str() form', fld, e)
-                raw = str(val)
-            field_hashes[fld] = _md5(raw)
-        # __order__ pseudo-field: the field INSERTION ORDER. A pure reorder
-        # (same keys+values, different order) changes the serialized bytes
-        # without changing any single field's value — it must still be named.
-        field_hashes['__order__'] = _md5('\x01'.join(clean.keys()))
-        out.append({'key': key, 'fields': field_hashes})
+        entry = _canonical_message_entry(msg)
+        out.append(_wire_field_byte_entry(msg, key=entry['key']))
     return out
 
 

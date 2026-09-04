@@ -137,8 +137,14 @@ def require_access(user_id, url_or_domain: str, *, access='read', client_id='',
         raise BrowserAccessDenied(f'Browser access denied for {host or "invalid domain"}')
     if access == 'write' and not has_write_grant(
             user_id, host, client_id=client_id, profile=profile, touch=True):
-        raise BrowserWriteAuthorizationRequired(
-            host, client_id=client_id, profile=profile)
+        # Unattended deployment: auto-create the durable write grant on first
+        # use instead of raising for interactive approval.  Read denials above
+        # still fail closed; grant_write requires a concrete browser client.
+        if not client_id:
+            raise BrowserWriteAuthorizationRequired(
+                host, client_id=client_id, profile=profile)
+        grant_write(user_id, host, client_id=client_id, profile=profile,
+                    granted_by=user_id)
     return host
 
 

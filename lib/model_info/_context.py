@@ -64,6 +64,7 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     ('glm-5.3', 1_000_000, 'vendor_official'),
     ('glm-5v-turbo', 200_000, 'vendor_official'),
     ('hy3-preview', 256_000, 'vendor_official'),
+    ('hy4-preview', 1_000_000, 'vendor_official'),
     ('longcat-2.0', 1_000_000, 'vendor_official'),
     ('text-embedding-3', 8_191, 'vendor_official'),
     ('text-embedding-v4', 8_192, 'vendor_official'),

@@ -46,11 +46,20 @@ class OrchestrationHumanGateRuntime:
         ports: HumanGateRequestPorts | None = None,
         request_scope: str = '',
         identity: HumanGateRequestIdentity | None = None,
+        owner_user_id: int | None = None,
     ) -> None:
         self._emit = emit
         self._abort_check = abort_check
         self._ports = ports or HumanGateRequestPorts()
         self.identity = identity or HumanGateRequestIdentity(request_scope)
+        self._owner_user_id = owner_user_id
+
+    def _require_owner_user_id(self) -> int:
+        from lib.identity import require_user_id
+        return require_user_id(
+            self._owner_user_id,
+            context='orchestration human gate owner',
+        )
 
     def execute(self, node: dict, context: str) -> HumanGateRuntimeResult:
         mode = resolve_node_runtime_param(node, 'mode')
@@ -77,6 +86,7 @@ class OrchestrationHumanGateRuntime:
             answer = self._ports.request_guidance(
                 request_id,
                 _AbortAwareTask(self._abort_check, request_id),
+                self._require_owner_user_id(),
             )
             if answer is None:
                 self._emit(human_gate_resolved_event(
@@ -95,7 +105,11 @@ class OrchestrationHumanGateRuntime:
 
         timeout = self._approval_timeout(resolve_node_runtime_param(
             node, 'timeout_sec'))
-        approved = self._ports.request_approval(request_id, timeout)
+        approved = self._ports.request_approval(
+            request_id,
+            timeout,
+            self._require_owner_user_id(),
+        )
         self._emit(human_gate_resolved_event(
             node_id=node_id, mode=mode, request_id=request_id,
             resolution='approved' if approved else 'rejected',

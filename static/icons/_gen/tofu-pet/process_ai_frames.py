@@ -77,6 +77,7 @@ USAGE
 ─────
     python3 static/icons/_gen/tofu-pet/process_ai_frames.py            # write frames
     python3 static/icons/_gen/tofu-pet/process_ai_frames.py --check    # CI gate
+    python3 static/icons/_gen/tofu-pet/process_ai_frames.py --out-dir DIR   # write/check DIR instead
 
 Output: static/icons/pet/tofu/tofu-<frame>.png (a PRODUCT asset dir).
 This workbench lives under _gen/; it is never served.
@@ -163,6 +164,47 @@ def _keyed(src_path, rotate_deg):
     return im
 
 
+def _largest_component(solid):
+    """Boolean mask of the largest 4-connected component of ``solid``.
+
+    Pure-numpy stand-in for ``scipy.ndimage.label`` + ``ndimage.sum`` so the
+    pipeline stays runnable without the optional scipy dependency (scipy is
+    deliberately absent from the public CI footprint — the test suite skips its
+    own body-mask proofs via ``_requires_scipy``). 4-connectivity matches
+    ndimage.label's default structure, and the tofu body is by far the largest
+    component, so the body mask is identical either way.
+    """
+    import numpy as np
+    from collections import deque
+
+    h, w = solid.shape
+    visited = np.zeros((h, w), dtype=bool)
+    best_ys = best_xs = None
+    best_size = 0
+    for sy, sx in zip(*np.nonzero(solid)):
+        if visited[sy, sx]:
+            continue
+        queue = deque([(sy, sx)])
+        visited[sy, sx] = True
+        cy, cx = [sy], [sx]
+        while queue:
+            y, x = queue.popleft()
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < h and 0 <= nx < w and solid[ny, nx] and not visited[ny, nx]:
+                    visited[ny, nx] = True
+                    queue.append((ny, nx))
+                    cy.append(ny)
+                    cx.append(nx)
+        if len(cy) > best_size:
+            best_size = len(cy)
+            best_ys, best_xs = cy, cx
+    if best_ys is None:
+        raise SystemExit('ERROR: no connected component found in frame')
+    mask = np.zeros((h, w), dtype=bool)
+    mask[best_ys, best_xs] = True
+    return mask
+
+
 def _anchors(im):
     """(body_cx, foot_y, ink_left, ink_right, ink_top) in this image's own px.
 
@@ -178,18 +220,12 @@ def _anchors(im):
     line, which is what makes a squash pose settle instead of hover.
     """
     import numpy as np
-    from scipy import ndimage
 
     a = np.asarray(im)
     solid = a[..., 3] > INK_A
     if not solid.any():
         raise SystemExit('ERROR: frame has no opaque ink — keyer thresholds off?')
-    labels, n = ndimage.label(solid)
-    if n < 1:
-        raise SystemExit('ERROR: no connected component found in frame')
-    # largest component by pixel count (label 0 is background)
-    sizes = ndimage.sum(solid, labels, range(1, n + 1))
-    body = labels == (int(np.argmax(sizes)) + 1)
+    body = _largest_component(solid)
     bys, bxs = np.nonzero(body)
     iys, ixs = np.nonzero(solid)
     return ((bxs.min() + bxs.max()) / 2.0,
@@ -256,12 +292,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--check', action='store_true',
                     help='verify on-disk frames match this pipeline (CI gate)')
+    ap.add_argument('--out-dir', type=Path, default=OUT_DIR,
+                    help='directory to write/check frames in '
+                         f'(default: {OUT_DIR.relative_to(REPO)})')
     args = ap.parse_args()
+    out_dir = args.out_dir
 
     frames = _render_all()
     if args.check:
         drift = [n for n, im in frames.items()
-                 if not _same(OUT_DIR / f'tofu-{n}.png', im)]
+                 if not _same(out_dir / f'tofu-{n}.png', im)]
         if drift:
             print(f'DRIFT: {len(drift)} frame(s) differ from the pipeline: '
                   f'{", ".join(sorted(drift))}', file=sys.stderr)
@@ -271,10 +311,14 @@ def main():
         print(f'OK: all {len(frames)} frames match the pipeline.')
         return 0
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     for name, im in frames.items():
-        im.save(OUT_DIR / f'tofu-{name}.png', optimize=True)
-    print(f'Wrote {len(frames)} frames → {OUT_DIR.relative_to(REPO)}')
+        im.save(out_dir / f'tofu-{name}.png', optimize=True)
+    try:
+        shown = out_dir.relative_to(REPO)
+    except ValueError:
+        shown = out_dir
+    print(f'Wrote {len(frames)} frames → {shown}')
     return 0
 
 

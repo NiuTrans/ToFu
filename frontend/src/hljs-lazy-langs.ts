@@ -55,5 +55,3 @@ export const lazyHljsGrammars = {
   vbnet: hljsVbnet,
   wasm: hljsWasm,
 } as const;
-
-export type LazyHljsLanguage = keyof typeof lazyHljsGrammars;

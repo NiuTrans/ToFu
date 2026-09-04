@@ -52,8 +52,8 @@ def handle_abort_during_prep(
         ``prep_<stage>``, ``exit_reason`` ← ``aborted_during_prep_<stage>``).
     stage : str
         Prep-stage label for the exit-reason stamp and log line
-        (e.g. ``'startup'`` / ``'tool_setup'`` / ``'context_inject'`` /
-        ``'prefinal'``). The FIRST tripped stage wins, so the stamp tells
+        (e.g. ``'startup'`` / ``'project_setup'`` / ``'tool_setup'`` /
+        ``'context_inject'`` / ``'prefinal'``). The FIRST tripped stage wins, so the stamp tells
         the postmortem exactly which stretch of prep absorbed the abort.
     tid : str
         8-char task id for logging.

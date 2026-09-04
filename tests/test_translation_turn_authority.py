@@ -115,6 +115,41 @@ def test_translation_merges_into_turn_projection(turn_store):
     assert assistant["translation"]["status"] == "completed"
 
 
+def test_segment_translation_block_id_is_attempt_scoped():
+    from lib.translate.commit import _stamp_segment_translations
+
+    projection = {
+        'segments': [
+            {
+                'type': 'text', 'deliverable': False,
+                'blockId': 'text:attempt-old:llm-0',
+                'attemptId': 'old', 'llmRound': 0,
+                'text': 'old narration',
+            },
+            {
+                'type': 'text', 'deliverable': False,
+                'blockId': 'text:attempt-new:llm-0',
+                'attemptId': 'new', 'llmRound': 0,
+                'text': 'new narration',
+            },
+            {
+                'type': 'text', 'deliverable': True, 'terminal': True,
+                'blockId': 'text:terminal', 'text': 'final answer',
+            },
+        ],
+    }
+
+    stamped = _stamp_segment_translations(
+        projection,
+        {'text:attempt-new:llm-0': '新旁白'},
+    )
+
+    assert stamped == 1
+    assert 'translatedText' not in projection['segments'][0]
+    assert projection['segments'][1]['translatedText'] == '新旁白'
+    assert 'translatedText' not in projection['segments'][2]
+
+
 def test_stale_translation_retry_preserves_sibling_projection_change(
         turn_store, monkeypatch):
     import lib.translate.commit as commit

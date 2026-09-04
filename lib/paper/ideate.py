@@ -48,6 +48,8 @@ without package facades or reflective self-imports.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from itertools import islice
 from typing import Callable, Optional
 
 from lib.log import get_logger
@@ -83,6 +85,11 @@ _IDEATE_AGENT_TOKEN_BUDGET = 160_000
 # Rubric judging is a judgement, not creative — deterministic.
 _RUBRIC_TEMPERATURE = 0.0
 _RUBRIC_MAX_TOKENS = 3000
+_MAX_PARALLEL_IDEA_JUDGES = 2
+# Self-reported prior art is audit context, never the novelty basis (the forced
+# retrieved set owns that). Bound title verification so a malformed model list
+# cannot turn one idea into hundreds of sequential arXiv probes.
+_MAX_SELF_REPORTED_PRIOR_ART = 20
 
 _IDEATE_LANG_PREFIX = 'ideate'
 
@@ -395,7 +402,7 @@ def _structural_gate(idea: dict, valid_gap_ids: set) -> Optional[str]:
 # ── Gate ②: forced-neighbor-retrieval novelty prior set ────────────────────
 
 def _novelty_prior_set(idea: dict, *, k: int = IDEATE_NOVELTY_RETRIEVAL_K,
-                       batch_terms=None) -> dict:
+                       batch_terms=None, retrieval_cache: Optional[dict] = None) -> dict:
     """Build the neighbor set the novelty judge MUST use (owner pin #1).
 
     ALWAYS runs ``search_arxiv`` on a SANITIZED term query and takes the top-k
@@ -480,6 +487,12 @@ def _novelty_prior_set(idea: dict, *, k: int = IDEATE_NOVELTY_RETRIEVAL_K,
 
     def _search(ident, dom, field):
         """Retrieve via the shared vertical. Returns (papers, outcome)."""
+        cache_key = (tuple(ident or ()), tuple(dom or ()), field,
+                     max(k, IDEATE_NOVELTY_RETRIEVAL_K))
+        if retrieval_cache is not None and cache_key in retrieval_cache:
+            cached_papers, cached_outcome, cached_query = retrieval_cache[cache_key]
+            return ([dict(row) for row in cached_papers],
+                    cached_outcome, cached_query)
         try:
             res = ts_search_by_query(
                 ident, dom, field=field,
@@ -493,7 +506,14 @@ def _novelty_prior_set(idea: dict, *, k: int = IDEATE_NOVELTY_RETRIEVAL_K,
             if aid:
                 out.append({'arxiv_id': aid, 'title': h.get('title') or '',
                             'summary': (h.get('summary') or '')[:400]})
-        return out, res.get('outcome') or '', res.get('query') or ''
+        outcome = res.get('outcome') or ''
+        wire_query = res.get('query') or ''
+        # A transport failure is transient and must remain retryable. Exact
+        # successful/no-match/unusable outcomes are stable for this one run.
+        if retrieval_cache is not None and outcome != 'request_failed':
+            retrieval_cache[cache_key] = (
+                tuple(dict(row) for row in out), outcome, wire_query)
+        return out, outcome, wire_query
 
     query, query_mode, retrieved = '', 'all', []
     for _ident, _dom, _field, _mode in attempts:
@@ -546,28 +566,9 @@ def _coerce_score(v):
     return max(1, min(5, n))
 
 
-def _judge_prompt(idea: dict, prior_set: dict, gap: dict, lang: str) -> str:
-    """Prompt for the combined novelty + four-axis judgement.
-
-    Feeds the RETRIEVED neighbor set (not the model's self-report) as the
-    comparison basis, and demands an explicit mechanism-level vs
-    parameter-level verdict against the closest retrieved paper."""
+def _judge_system_prompt(lang: str) -> str:
+    """Stable rubric prefix shared by every per-idea judge in one run."""
     zh = (lang or 'en').startswith('zh')
-    neigh_lines = []
-    for r in prior_set.get('retrieved', []):
-        neigh_lines.append(f"- arXiv:{r['arxiv_id']}  {r['title']}\n    {r['summary']}")
-    neighbors = '\n'.join(neigh_lines) or '(retrieval returned nothing)'
-    gap_txt = f"{gap.get('id')}: {gap.get('gap','')}" if gap else '(no linked gap)'
-    idea_txt = (f"title: {idea.get('title')}\nkind: {idea.get('kind')}\n"
-                f"corpus_anchor_id: {idea.get('corpus_anchor_id')}\n"
-                f"corpus_delta: {idea.get('corpus_delta')}\n"
-                f"failure_cause: {idea.get('failure_cause')}\n"
-                f"new_invariant: {idea.get('new_invariant')}\n"
-                f"intervention_level: {idea.get('intervention_level')}\n"
-                f"core_mechanism: {idea.get('core_mechanism')}\n"
-                f"novelty_claim: {idea.get('novelty_claim')}\n"
-                f"falsifiable_prediction: {idea.get('falsifiable_prediction')}\n"
-                f"why_not_AB: {idea.get('why_not_AB')}")
     if zh:
         head = (
             '你是一位严格的审稿人,正在判定一个研究 idea 是否真正新颖,还是「A+B 缝合」。\n'
@@ -596,12 +597,42 @@ def _judge_prompt(idea: dict, prior_set: dict, gap: dict, lang: str) -> str:
         fmt = ('Return ONLY one JSON: {"mechanism_delta":"mechanism-level|parameter-level",'
                '"closest_neighbor":"arxiv_id","scores":{"novelty":n,"falsifiability":n,'
                '"mechanism_depth":n,"value":n},"justifications":{axis:one-line},"verdict":"one-line"}')
-    return (f'{head}\n{axes}\n\n## LINKED GAP\n{gap_txt}\n\n## RETRIEVED NEIGHBORS '
-            f'(the ONLY novelty basis)\n{neighbors}\n\n## IDEA\n{idea_txt}\n\n{fmt}')
+    return f'{head}\n{axes}\n\n{fmt}'
+
+
+def _judge_evidence_prompt(idea: dict, prior_set: dict, gap: dict) -> str:
+    """Dynamic evidence packet; no rubric policy is repeated in this block."""
+    neigh_lines = []
+    for row in prior_set.get('retrieved', []):
+        neigh_lines.append(
+            f"- arXiv:{row['arxiv_id']}  {row['title']}\n    {row['summary']}")
+    neighbors = '\n'.join(neigh_lines) or '(retrieval returned nothing)'
+    gap_txt = f"{gap.get('id')}: {gap.get('gap','')}" if gap else '(no linked gap)'
+    idea_txt = (f"title: {idea.get('title')}\nkind: {idea.get('kind')}\n"
+                f"corpus_anchor_id: {idea.get('corpus_anchor_id')}\n"
+                f"corpus_delta: {idea.get('corpus_delta')}\n"
+                f"failure_cause: {idea.get('failure_cause')}\n"
+                f"new_invariant: {idea.get('new_invariant')}\n"
+                f"intervention_level: {idea.get('intervention_level')}\n"
+                f"core_mechanism: {idea.get('core_mechanism')}\n"
+                f"novelty_claim: {idea.get('novelty_claim')}\n"
+                f"falsifiable_prediction: {idea.get('falsifiable_prediction')}\n"
+                f"why_not_AB: {idea.get('why_not_AB')}")
+    return (f'## LINKED GAP\n{gap_txt}\n\n## RETRIEVED NEIGHBORS '
+            f'(the ONLY novelty basis)\n{neighbors}\n\n## IDEA\n{idea_txt}')
+
+
+def _judge_messages(idea: dict, prior_set: dict, gap: dict, lang: str) -> list:
+    """Put immutable policy before per-idea evidence for prompt-cache reuse."""
+    return [
+        {'role': 'system', 'content': _judge_system_prompt(lang)},
+        {'role': 'user', 'content': _judge_evidence_prompt(idea, prior_set, gap)},
+    ]
 
 
 def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
-                model=None, abort=None, usage_meter=None) -> Optional[dict]:
+                model=None, abort=None, usage_meter=None,
+                max_429_attempts: Optional[int] = None) -> Optional[dict]:
     """Judge one idea: novelty-vs-retrieved + four-axis rubric, one dispatch.
 
     Returns::
@@ -618,6 +649,10 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
 
     abort_signal = AbortSignal.from_callback(abort)
     buf = {'content': ''}
+    if max_429_attempts is None:
+        from runtime_guards import resolve_resource_budget
+        max_429_attempts = resolve_resource_budget(
+            'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', maximum=64)
 
     def _on_content(t):
         buf['content'] += t
@@ -625,11 +660,12 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
     try:
         from lib.llm.stream_result import require_verified_provider_stream_result
         stream_result = require_verified_provider_stream_result(dispatch_stream(
-            [{'role': 'user', 'content': _judge_prompt(idea, prior_set, gap, lang)}],
+            _judge_messages(idea, prior_set, gap, lang),
             on_content=_on_content, abort_check=abort_signal.is_set,
             prefer_model=model or None, strict_model=bool(model), capability='text',
             max_tokens=_RUBRIC_MAX_TOKENS, temperature=_RUBRIC_TEMPERATURE,
-            thinking_enabled=False, log_prefix='[Paper:Ideate:Judge]'),
+            thinking_enabled=False, max_429_attempts=max_429_attempts,
+            log_prefix='[Paper:Ideate:Judge]'),
             context='paper ideate judge')
         msg = stream_result.message
         _usage = stream_result.usage
@@ -679,23 +715,40 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
 
 # ── Grounding ──────────────────────────────────────────────────────────────
 
-def _ground_idea_prior_art(idea: dict) -> tuple:
+def _ground_idea_prior_art(idea: dict, *, title_cache: Optional[dict] = None) -> tuple:
     """Ground every arXiv id in the idea's prior_art; return (grounded, dropped).
 
     Reuses the arXiv seam. An id that cannot be grounded is removed from
     prior_art and counted — an idea whose novelty rests on hallucinated papers
     should not survive on their strength. Mutates ``idea['prior_art']`` in place.
     """
+    raw_values = idea.get('prior_art') or []
+    if not isinstance(raw_values, (list, tuple)):
+        idea['prior_art_invalid_shape'] = True
+        raw_values = []
+    input_count = len(raw_values)
+    idea['prior_art_input_count'] = input_count
+    overflow = max(0, input_count - _MAX_SELF_REPORTED_PRIOR_ART)
+    if overflow:
+        idea['prior_art_truncated'] = overflow
+
     grounded, dropped = [], 0
-    for raw in (idea.get('prior_art') or []):
+    seen = set()
+    for raw in islice(raw_values, _MAX_SELF_REPORTED_PRIOR_ART):
         aid = _norm_id(raw)
-        if not aid:
+        if not aid or aid in seen:
             continue
-        try:
-            title = fetch_arxiv_title(aid)
-        except Exception as e:
-            logger.debug('[Paper:Ideate] grounding lookup failed for %s: %s', aid, e)
-            title = ''
+        seen.add(aid)
+        if title_cache is not None and aid in title_cache:
+            title = title_cache[aid]
+        else:
+            try:
+                title = fetch_arxiv_title(aid)
+            except Exception as e:
+                logger.debug('[Paper:Ideate] grounding lookup failed for %s: %s', aid, e)
+                title = ''
+            if title_cache is not None:
+                title_cache[aid] = title or ''
         if title:
             grounded.append(aid)
         else:
@@ -703,6 +756,113 @@ def _ground_idea_prior_art(idea: dict) -> tuple:
             logger.debug('[Paper:Ideate] dropped ungrounded prior_art id %s', aid)
     idea['prior_art'] = grounded
     return grounded, dropped
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedIdeaJudge:
+    """Immutable scheduling record; referenced evidence remains read-only."""
+
+    raw_index: int
+    idea: dict
+    prior_set: dict
+    gap: Optional[dict]
+    prior_art_dropped: int
+
+
+def _idea_judge_worker_limit(requested: int) -> int:
+    """Resolve personal launch budget under the hard two-judge ceiling."""
+    from runtime_guards import resolve_resource_budget
+    return min(
+        max(1, int(requested)),
+        resolve_resource_budget(
+            'TOFU_PRODUCTION_LLM_FANOUT', maximum=_MAX_PARALLEL_IDEA_JUDGES),
+    )
+
+
+def _score_prepared_ideas(rows: list[_PreparedIdeaJudge], *, lang: str,
+                          model=None, abort=None, usage_meter=None) -> list:
+    """Warm one rubric call, then judge the bounded remainder with 1..2 workers.
+
+    The first serial call establishes both the provider prompt prefix and the
+    task's sticky slot before concurrency begins. The active window admits no
+    queued row after abort/failure; results retain input order regardless of
+    completion order.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return []
+
+    from lib.llm_dispatch.conv_affinity import (
+        conv_affinity, get_conv_affinity,
+    )
+    from runtime_guards import resolve_resource_budget
+
+    affinity_key = get_conv_affinity()
+    max_429_attempts = resolve_resource_budget(
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', maximum=64)
+
+    def _one(row: _PreparedIdeaJudge):
+        with conv_affinity(affinity_key):
+            return _score_idea(
+                row.idea, row.prior_set, row.gap, lang, model=model,
+                abort=abort, usage_meter=usage_meter,
+                max_429_attempts=max_429_attempts)
+
+    results = [None] * len(rows)
+    # Deliberate warm-up: never race two cold writes of the same static rubric.
+    results[0] = _one(rows[0])
+    if len(rows) == 1:
+        return results
+
+    remaining = list(enumerate(rows[1:], start=1))
+    worker_limit = _idea_judge_worker_limit(len(remaining))
+    if worker_limit == 1:
+        for index, row in remaining:
+            results[index] = _one(row)
+        return results
+
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from lib.llm_errors import AbortedError
+
+    queued = list(remaining)
+    active = {}
+    failures = {}
+    aborted = False
+
+    def _aborted() -> bool:
+        return bool(abort is not None and abort())
+
+    def _submit_available(pool) -> None:
+        nonlocal aborted
+        while queued and len(active) < worker_limit and not failures:
+            if _aborted():
+                aborted = True
+                return
+            index, row = queued.pop(0)
+            active[pool.submit(_one, row)] = index
+
+    with ThreadPoolExecutor(
+            max_workers=worker_limit,
+            thread_name_prefix='research-idea-judge') as pool:
+        _submit_available(pool)
+        while active:
+            done, _not_done = wait(active, return_when=FIRST_COMPLETED)
+            for future in done:
+                index = active.pop(future)
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    logger.debug('research idea judge worker failed: %s', exc)
+                    failures[index] = exc
+            if failures:
+                queued.clear()
+            _submit_available(pool)
+
+    if failures:
+        raise failures[min(failures)]
+    if aborted:
+        raise AbortedError('research idea judging aborted')
+    return results
 
 
 # ── Generation ─────────────────────────────────────────────────────────────
@@ -715,7 +875,9 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
     Single seam tests monkeypatch (``ideate._generate_raw_ideas``) to drive the
     gate pipeline offline. Mirrors insight/survey synthesis with the narrow
     research tool profile."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop import AbortSignal
+    from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
+    from lib.paper.agent_usage import PaperAgentUsageMeter
     from lib.paper.prompts import date_anchor_clause
     from lib.paper.tools import (
         PaperToolResultBudgetV2,
@@ -725,6 +887,8 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
         make_research_tool_executor,
     )
 
+    usage_meter = usage_meter or PaperAgentUsageMeter.for_stage(
+        'ideate', fallback_model=model or '')
     system = date_anchor_clause(lang) + _ideate_system_prompt(lang, n_ideas)
     gaps_json = _compact_gaps(open_gaps)
     parts = [f'## RESEARCH DIRECTION\n{direction}']
@@ -753,10 +917,8 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
 
         def _on_content(t):
             _round['content'] += t
-        allowed_tools = (usage_meter.allowed_tools(tools)
-                         if usage_meter else tools)
         effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
-            allowed_tools, owner_user_id=user_id)
+            tools, owner_user_id=user_id)
         from lib.llm.stream_result import ensure_provider_stream_result
         return ensure_provider_stream_result(dispatch_stream(
             messages, on_content=_on_content, abort_check=abort_signal.is_set,
@@ -767,8 +929,6 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
-        if usage_meter:
-            usage_meter.observe_agent_round(usage, msg)
 
     def _begin_tool_round(rnd, msg):
         _round['content'] = ''
@@ -782,7 +942,9 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
         log_prefix='[Paper:Ideate]',
         contract_documents_for_round=contracts_by_round.get)
 
-    run_agent_loop(
+    run_guarded_paper_agent_loop(
+        context='Paper Ideate agent',
+        usage_meter=usage_meter,
         abort=abort_signal,
         round_tools=paper_tools, dispatch=_dispatch, execute_tool=_execute_tool,
         on_round_result=_on_round_result, on_tool_round=_begin_tool_round,
@@ -917,15 +1079,19 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
     Every rejected idea keeps its scores + the gate that killed it, so the
     threshold can be calibrated from real data.
     """
+    from lib.research.contracts import normalize_research_idea_count
+    from lib.paper.agent_usage import paper_agent_dispatch_budget
     from lib.research.telemetry import ResearchUsageMeter, research_token_budget
 
     direction = (direction or '').strip()
+    n_ideas = normalize_research_idea_count(n_ideas)
     thr = IDEATE_GATE_THRESHOLD if threshold is None else float(threshold)
     valid_gaps = _valid_gap_ids(open_gaps)
     usage_meter = ResearchUsageMeter(
         'ideate', fallback_model=model or '',
         token_budget=research_token_budget(
-            'TOFU_RESEARCH_IDEATE_TOKEN_BUDGET', _IDEATE_AGENT_TOKEN_BUDGET))
+            'TOFU_RESEARCH_IDEATE_TOKEN_BUDGET', _IDEATE_AGENT_TOKEN_BUDGET),
+        dispatch_budget=paper_agent_dispatch_budget('ideate'), repeat_limit=0)
     if not direction:
         return {'ok': False, 'error': 'empty direction', 'direction': '', 'lang': lang,
                 'accepted': [], 'rejected': [], 'threshold': thr,
@@ -944,7 +1110,7 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
         # old monkeypatch seam. Production recipes always provide an owner.
         if user_id is not None:
             generation_kwargs['user_id'] = user_id
-        raw = _generate_raw_ideas(
+        raw_result = _generate_raw_ideas(
             direction, open_gaps, reader_context, lang, **generation_kwargs)
     except Exception as e:
         from lib.llm_errors import AbortedError
@@ -957,7 +1123,25 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
                 'lang': lang, 'accepted': [], 'rejected': [], 'threshold': thr,
                 'usage': usage_meter.snapshot()}
 
-    accepted, rejected = [], []
+    # The requested output count is also the downstream cost ceiling. A model
+    # can ignore its prompt and return a much larger list; never fan that excess
+    # into title probes, retrievals, and one rubric LLM call per row.
+    if isinstance(raw_result, (list, tuple)):
+        offered_ideas = len(raw_result)
+        raw = list(raw_result[:n_ideas])
+    else:
+        raw = list(islice(raw_result or (), n_ideas + 1))
+        offered_ideas = len(raw)
+        raw = raw[:n_ideas]
+    truncated_ideas = max(0, offered_ideas - len(raw))
+    if truncated_ideas:
+        logger.warning('[Paper:Ideate] model returned %d idea(s), requested %d; '
+                       'discarded %d before downstream gates',
+                       offered_ideas, n_ideas, truncated_ideas)
+
+    accepted_indexed = []
+    rejected_indexed = []
+    prepared_judges: list[_PreparedIdeaJudge] = []
     # Batch-wide term census for the fielded query: a term several ideas share is
     # domain background, a term unique to one idea is its identity. Computed ONCE
     # over the whole batch so the identity/domain split is a recomputable
@@ -978,7 +1162,11 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
                 _t = ''
             if _t:
                 _batch_terms.append(_t)
-    for idea in raw:
+    # Exact run-local memoization only. These caches are bounded by the request
+    # contract/model output and die with the job; no cross-owner state exists.
+    _ground_title_cache = {}
+    _retrieval_cache = {}
+    for raw_index, idea in enumerate(raw):
         if not isinstance(idea, dict):
             continue
         # `kind` is template metadata, not a validity verdict — coerce it into
@@ -991,7 +1179,9 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
         # Gate ① — structural (free, first)
         reason = _structural_gate(idea, valid_gaps)
         if reason:
-            rejected.append({**idea, 'reject_stage': 'structural', 'reject_reason': reason})
+            rejected_indexed.append((
+                raw_index,
+                {**idea, 'reject_stage': 'structural', 'reject_reason': reason}))
             logger.info('[Paper:Ideate] REJECT(structural) %.50s — %s', idea.get('title'), reason)
             continue
         gap = _gap_by_id(open_gaps, idea.get('linked_gap_id'))
@@ -1002,42 +1192,61 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
         if evidence_ids and anchor_id not in evidence_ids:
             reason = (f'corpus_anchor_id {anchor_id!r} is not evidence for linked gap '
                       f'{idea.get("linked_gap_id")!r}')
-            rejected.append({**idea, 'reject_stage': 'structural',
-                             'reject_reason': reason})
+            rejected_indexed.append((
+                raw_index,
+                {**idea, 'reject_stage': 'structural',
+                 'reject_reason': reason}))
             logger.info('[Paper:Ideate] REJECT(structural) %.50s — %s',
                         idea.get('title'), reason)
             continue
         idea['corpus_anchor_id'] = anchor_id
         # Grounding — strip hallucinated prior_art
-        _grounded, dropped = _ground_idea_prior_art(idea)
+        _grounded, dropped = _ground_idea_prior_art(
+            idea, title_cache=_ground_title_cache)
         # Gate ② — forced-neighbor retrieval prior set
-        prior_set = _novelty_prior_set(idea, batch_terms=_batch_terms)
-        # Gate ③ — four-axis rubric judged against the RETRIEVED set
-        verdict = _score_idea(idea, prior_set, gap, lang, model=model, abort=abort,
-                              usage_meter=usage_meter)
+        prior_set = _novelty_prior_set(
+            idea, batch_terms=_batch_terms,
+            retrieval_cache=_retrieval_cache)
+        prepared_judges.append(_PreparedIdeaJudge(
+            raw_index=raw_index, idea=idea, prior_set=prior_set, gap=gap,
+            prior_art_dropped=dropped))
+
+    verdicts = _score_prepared_ideas(
+        prepared_judges, lang=lang, model=model, abort=abort,
+        usage_meter=usage_meter)
+    for prepared, verdict in zip(prepared_judges, verdicts):
+        raw_index = prepared.raw_index
+        idea = prepared.idea
+        prior_set = prepared.prior_set
+        gap = prepared.gap
+        dropped = prepared.prior_art_dropped
         if verdict is None:
-            rejected.append({**idea, 'reject_stage': 'rubric',
-                             'reject_reason': 'judge failed/unparseable',
-                             'retrieved_ids': prior_set['retrieved_ids'],
-                             'self_reported_ids': prior_set['self_reported_ids'],
-                             'novelty_basis': prior_set['novelty_basis'],
-                             'query_mode': prior_set['query_mode']})
+            rejected_indexed.append((raw_index, {
+                **idea, 'reject_stage': 'rubric',
+                'reject_reason': 'judge failed/unparseable',
+                'retrieved_ids': prior_set['retrieved_ids'],
+                'self_reported_ids': prior_set['self_reported_ids'],
+                'novelty_basis': prior_set['novelty_basis'],
+                'query_mode': prior_set['query_mode'],
+            }))
             continue
         # pin #1 hard floor: novelty is f(RETRIEVED set). With an empty basis
         # there is nothing to measure novelty against, so a high rubric score is
         # not evidence of novelty — it is an unjudged idea wearing a score.
         # 宁可判不了,不许假装判过.
         if prior_set['novelty_basis'] == 'none':
-            rejected.append({**idea, **verdict, 'reject_stage': 'novelty_basis',
-                             'reject_reason': (
-                                 'retrieval produced no neighbours (query='
-                                 f'{prior_set["retrieval_query"]!r}, source='
-                                 f'{prior_set["query_source"]}) — novelty could not be '
-                                 'judged against any prior art'),
-                             'retrieved_ids': [],
-                             'self_reported_ids': prior_set['self_reported_ids'],
-                             'novelty_basis': 'none',
-                             'retrieval_query': prior_set['retrieval_query']})
+            rejected_indexed.append((raw_index, {
+                **idea, **verdict, 'reject_stage': 'novelty_basis',
+                'reject_reason': (
+                    'retrieval produced no neighbours (query='
+                    f'{prior_set["retrieval_query"]!r}, source='
+                    f'{prior_set["query_source"]}) — novelty could not be '
+                    'judged against any prior art'),
+                'retrieved_ids': [],
+                'self_reported_ids': prior_set['self_reported_ids'],
+                'novelty_basis': 'none',
+                'retrieval_query': prior_set['retrieval_query'],
+            }))
             logger.error('[Paper:Ideate] REJECT(novelty_basis) %.50s — empty basis',
                          idea.get('title'))
             continue
@@ -1065,20 +1274,27 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
                   'prior_art_dropped': dropped,
                   'linked_gap_low_confidence': linked_low_conf}
         if verdict['overall'] >= thr:
-            accepted.append(record)
+            accepted_indexed.append((raw_index, record))
             logger.info('[Paper:Ideate] ACCEPT %.50s overall=%.2f', idea.get('title'),
                         verdict['overall'])
         else:
-            rejected.append({**record, 'reject_stage': 'rubric',
-                             'reject_reason': f'overall {verdict["overall"]:.2f} < threshold {thr}'})
+            rejected_indexed.append((raw_index, {
+                **record, 'reject_stage': 'rubric',
+                'reject_reason': (
+                    f'overall {verdict["overall"]:.2f} < threshold {thr}'),
+            }))
             logger.info('[Paper:Ideate] REJECT(rubric) %.50s overall=%.2f < %.2f',
                         idea.get('title'), verdict['overall'], thr)
 
+    accepted = [record for _index, record in sorted(accepted_indexed)]
+    rejected = [record for _index, record in sorted(rejected_indexed)]
     logger.info('[Paper:Ideate] done — direction=%.60s generated=%d accepted=%d rejected=%d thr=%.2f',
                 direction, len(raw), len(accepted), len(rejected), thr)
     out = {'ok': True, 'direction': direction, 'lang': lang, 'accepted': accepted,
            'rejected': rejected, 'threshold': thr,
            'usage': usage_meter.snapshot(), 'error': ''}
+    if truncated_ideas:
+        out['generated_truncated'] = truncated_ideas
 
     # Pipeline-pathology invariant: the zero-LLM structural gate wiping EVERY
     # generated idea is a DEFECT, not 宁缺毋滥 — it means the expensive gates

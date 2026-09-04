@@ -135,22 +135,27 @@ class OrchestrationParallelRuntime:
                 raise
         elif branches:
             workers = min(self._max_parallel, len(branches))
+            ordered_outputs: list[str | None] = [None] * len(branches)
             with ThreadPoolExecutor(
                 max_workers=workers,
                 thread_name_prefix='flow-par',
             ) as pool:
                 futures = {
-                    pool.submit(run_branch, branch): branch
-                    for branch in branches
+                    pool.submit(run_branch, branch): (index, branch)
+                    for index, branch in enumerate(branches)
                 }
                 for future in as_completed(futures):
+                    index, branch = futures[future]
                     try:
-                        outputs.append(future.result())
+                        ordered_outputs[index] = future.result()
                     except Exception as error:
                         if self._is_abort(error):
                             raise OrchestrationParallelAborted() from error
-                        outputs.append(self._branch_failure(
-                            futures[future], error))
+                        ordered_outputs[index] = self._branch_failure(
+                            branch, error)
+            outputs = [
+                output for output in ordered_outputs if output is not None
+            ]
 
         merged = self._merge(context, outputs)
         next_node = self._navigator.single_next(barrier) if barrier else None

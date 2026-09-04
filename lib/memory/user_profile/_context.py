@@ -159,10 +159,6 @@ def _legacy_items(body: str) -> list[dict]:
     return rows
 
 
-def _empty_doc() -> dict:
-    return {'version': CONTEXT_VERSION, 'items': []}
-
-
 def _valid_doc(data) -> dict | None:
     if not isinstance(data, dict) or not isinstance(data.get('items'), list):
         return None

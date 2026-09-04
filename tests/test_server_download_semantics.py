@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -111,24 +113,193 @@ def test_cookie_tool_returns_metadata_but_never_replayable_values(monkeypatch):
 
     assert 'top-secret-cookie-value' not in result
     assert 'session = <redacted>' in result
-    assert 'download_url_to_server' in result
+    assert 'browser_download_url_to_server' in result
     assert '1 cookies found' in result
 
 
 def test_download_tool_is_the_declared_server_location_contract():
     from lib.tools.registry import all_specs
-    from lib.tools.search import build_download_url_to_server_tool
+    from lib.tools.search import build_browser_download_url_to_server_tool
 
-    schema = build_download_url_to_server_tool()['function']
-    assert schema['name'] == 'download_url_to_server'
-    assert schema['parameters']['required'] == ['url']
+    schema = build_browser_download_url_to_server_tool()['function']
+    assert schema['name'] == 'browser_download_url_to_server'
+    assert {'url', 'tab_id', 'text', 'selector'} <= set(
+        schema['parameters']['properties'])
     assert 'server_staging' in schema['description']
     assert 'browser_get_cookies' in schema['description']
     owners = [
         spec.key for spec in all_specs()
-        if 'download_url_to_server' in spec.provides
+        if 'browser_download_url_to_server' in spec.provides
     ]
-    assert owners == ['server_download']
+    assert owners == ['browser_download']
+    owner = next(spec for spec in all_specs() if spec.key == owners[0])
+    assert owner.category == 'browser'
+    assert owner.discovery_policy == 'eager'
+    assert owner.cacheable_tools == frozenset()
+
+
+def test_download_tool_has_a_dedicated_human_display():
+    from lib.tasks_pkg.tool_display import (
+        _TOOL_DISPLAY_DISPATCH,
+        _tool_display_generic,
+        tool_round_label,
+    )
+
+    handler = _TOOL_DISPLAY_DISPATCH['browser_download_url_to_server']
+    assert handler is not _tool_display_generic
+    label = tool_round_label(
+        'browser_download_url_to_server',
+        {'url': 'https://files.test/releases/citadel.zip?token=secret'},
+    )
+    assert label == 'Download to server: files.test/releases/citadel.zip'
+
+
+def test_browser_element_resolves_exact_untruncated_link_without_click_or_cookie(
+        monkeypatch):
+    import lib.browser.download_target as target
+
+    calls = []
+
+    class Runtime:
+        route_key = ('41', 'browser-a')
+
+        def __init__(self, owner_user_id, client_id):
+            assert owner_user_id == '41'
+            assert client_id == 'browser-a'
+
+        @staticmethod
+        def send(command, params=None, timeout=30):
+            calls.append(command)
+            if command == 'list_tabs':
+                return [{
+                    'id': 7, 'active': True,
+                    'url': 'https://files.test/releases',
+                }], None
+            if command == 'get_interactive_elements':
+                return {'elements': [{
+                    'text': '下载最新版', 'selector': '#latest',
+                    # Deliberately unusable/truncated discovery projection.
+                    'href': 'https://files.test/download?token=truncated',
+                }]}, None
+            if command == 'execute_js':
+                assert '#latest' in params['code']
+                return {
+                    'url': (
+                        'https://files.test/download?token='
+                        + 'signed-value-' * 40),
+                }, None
+            raise AssertionError(f'unexpected browser command: {command}')
+
+    monkeypatch.setattr(target, 'BrowserToolRuntime', Runtime)
+    monkeypatch.setattr(
+        'lib.browser.queue.get_connected_clients',
+        lambda **_kwargs: [{
+            'client_id': 'browser-a', 'last_poll': 10,
+            'capabilities': ['file_export'],
+        }],
+    )
+    monkeypatch.setattr(target, 'browser_tool_access', lambda *_a, **_k: '')
+
+    url, client_id = target.resolve_browser_download_element(
+        owner_user_id='41', text='下载最新版')
+
+    assert client_id == 'browser-a'
+    assert url.endswith('signed-value-' * 40)
+    assert calls == ['list_tabs', 'get_interactive_elements', 'execute_js']
+    assert 'click_element' not in calls
+    assert 'get_cookies' not in calls
+
+
+def test_browser_element_read_denial_is_a_typed_download_failure(monkeypatch):
+    import lib.browser.download_target as target
+
+    class Runtime:
+        route_key = ('41', 'browser-a')
+
+        def __init__(self, owner_user_id, client_id):
+            assert (owner_user_id, client_id) == self.route_key
+
+        @staticmethod
+        def send(command, params=None, timeout=30):
+            assert command == 'list_tabs'
+            return [{
+                'id': 7,
+                'active': True,
+                'url': 'https://denied.test/releases',
+            }], None
+
+    monkeypatch.setattr(target, 'BrowserToolRuntime', Runtime)
+    monkeypatch.setattr(
+        'lib.browser.queue.get_connected_clients',
+        lambda **_kwargs: [{
+            'client_id': 'browser-a',
+            'last_poll': 10,
+            'capabilities': ['file_export'],
+        }],
+    )
+
+    def deny_browser_read(*_args, **_kwargs):
+        raise target.BrowserAccessDenied('denied.test')
+
+    monkeypatch.setattr(target, 'browser_tool_access', deny_browser_read)
+
+    with pytest.raises(target.BrowserDownloadTargetError) as caught:
+        target.resolve_browser_download_element(
+            owner_user_id='41', text='下载最新版')
+
+    assert caught.value.code == 'browser_download_access_denied'
+    assert caught.value.retryable is False
+
+
+def test_download_handler_routes_page_element_and_transfer_through_same_device(
+        monkeypatch):
+    import lib.browser.download_target as target
+    import lib.search_bridge as search_bridge
+    import lib.tasks_pkg.handlers.search._core as core
+    import lib.tasks_pkg.handlers.search._handlers as handlers
+
+    resolved_url = 'https://files.test/download?token=exact-signed-value'
+    monkeypatch.setattr(
+        target, 'resolve_browser_download_element',
+        lambda **kwargs: (
+            resolved_url,
+            'browser-a' if kwargs['owner_user_id'] == '41' else 'wrong',
+        ),
+    )
+    acquired = []
+    monkeypatch.setattr(
+        core, 'download_url_to_server',
+        lambda url, **_kwargs: acquired.append(url) or {
+            'location': 'server_staging',
+            'saved_path': '/safe/exact.zip',
+            'size_bytes': 9,
+            'sha256': 'd' * 64,
+            'content_type': 'application/zip',
+            'transport': 'browser_authenticated',
+            'error_code': None,
+        },
+    )
+    bindings = []
+
+    @contextmanager
+    def fake_binding(*, user_id='', client_id='', required_capabilities=()):
+        bindings.append((user_id, client_id, tuple(required_capabilities)))
+        yield (user_id, client_id, 'Default')
+
+    monkeypatch.setattr(search_bridge, 'bind_search_browser', fake_binding)
+    monkeypatch.setattr(
+        handlers, '_finalize_tool_round', lambda *_args, **_kwargs: None)
+
+    _tc_id, content, is_read = handlers._handle_browser_download_url_to_server(
+        {'_userId': '41'}, {}, 'browser_download_url_to_server', 'tc-link',
+        {'text': '下载最新版', 'tab_id': 7}, 1, {},
+        {'browserClientId': ''}, '', False,
+    )
+
+    assert is_read is True
+    assert acquired == [resolved_url]
+    assert bindings == [('41', 'browser-a', ('file_export',))]
+    assert json.loads(content)['path'] == '/safe/exact.zip'
 
 
 def test_unselected_download_prefers_freshest_file_export_device(monkeypatch):
@@ -344,6 +515,34 @@ def test_offline_browser_error_survives_as_actionable_download_failure(
     assert '5.4' in result['next_action']
 
 
+def test_direct_failure_is_safely_observable_before_browser_fallback(
+        monkeypatch, caplog):
+    import lib.search_bridge as search_bridge
+    import lib.tasks_pkg.handlers.search._core as core
+
+    def fail_direct(_url):
+        raise RuntimeError('direct transport unavailable')
+
+    def fail_browser(*_args, **_kwargs):
+        raise RuntimeError('browser transport unavailable')
+
+    monkeypatch.setattr(core, 'fetch_url_bytes', fail_direct)
+    monkeypatch.setattr(
+        search_bridge, 'require_bound_browser_file', fail_browser)
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger='lib.tasks_pkg.handlers.search._core',
+    ):
+        result = core.download_url_to_server(
+            'https://files.test/download', owner_user_id='41')
+
+    assert result['error_code'] == 'server_download_failed'
+    assert 'server transport: direct transport unavailable' in result['error_msg']
+    assert 'direct server transport failed' in caplog.text
+    assert 'direct transport unavailable' in caplog.text
+
+
 def test_missing_file_export_is_an_explicit_upgrade_failure(monkeypatch):
     import lib.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
@@ -510,8 +709,8 @@ def test_download_handler_preserves_typed_recovery_error(monkeypatch):
         lambda _task, _rn, _entry, results, **kwargs: finalized.update(
             results=results, status=kwargs.get('status')),
     )
-    _tc_id, content, is_read = handlers._handle_download_url_to_server(
-        {'_userId': '41'}, {}, 'download_url_to_server', 'tc-1',
+    _tc_id, content, is_read = handlers._handle_browser_download_url_to_server(
+        {'_userId': '41'}, {}, 'browser_download_url_to_server', 'tc-1',
         {'url': 'https://files.test/download'}, 1, {},
         {'browserClientId': 'browser-a'}, '', False,
     )
@@ -549,8 +748,8 @@ def test_download_handler_returns_machine_readable_server_receipt(monkeypatch):
         lambda _task, _rn, _entry, results, **kwargs: finalized.update(
             results=results, status=kwargs.get('status')),
     )
-    _tc_id, content, is_read = handlers._handle_download_url_to_server(
-        {'_userId': '41'}, {}, 'download_url_to_server', 'tc-1',
+    _tc_id, content, is_read = handlers._handle_browser_download_url_to_server(
+        {'_userId': '41'}, {}, 'browser_download_url_to_server', 'tc-1',
         {'url': 'https://files.test/download'}, 1, {},
         {'browserClientId': 'browser-a'}, '', False,
     )

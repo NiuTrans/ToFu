@@ -303,5 +303,3 @@ export function installActionRegistry(resolve: ActionResolver): () => void {
   }
   return () => controller.abort();
 }
-
-export const actionEvents = Object.freeze([...delegatedEvents]);

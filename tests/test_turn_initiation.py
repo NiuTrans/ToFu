@@ -97,14 +97,12 @@ def _map_queue_payload(payload: dict) -> dict:
     if payload.get('_peerMessage'):
         stamp_initiator(user_msg,
                         INITIATOR_OPERATOR if payload.get('_peerHuman') else INITIATOR_PEER)
-    if payload.get('_brainDispatch'):
-        stamp_initiator(user_msg, INITIATOR_BRAIN)
     return user_msg
 
 
-def test_queue_brain_dispatch_stamps_brain():
+def test_retired_brain_dispatch_marker_does_not_infer_identity():
     m = _map_queue_payload({'_brainDispatch': True, 'text': 'do epic'})
-    assert resolve_initiator(m) == INITIATOR_BRAIN
+    assert resolve_initiator(m) == INITIATOR_HUMAN
 
 
 def test_queue_peer_stamps_peer():
@@ -120,9 +118,9 @@ def test_queue_operator_stamps_operator():
 def test_shared_queue_mapper_covers_v1_and_v2_consumers():
     from lib.message_queue import _stamp_queued_turn_initiator
 
-    brain = {'role': 'user', 'content': 'do epic'}
-    _stamp_queued_turn_initiator(brain, {'_brainDispatch': True})
-    assert resolve_initiator(brain) == INITIATOR_BRAIN
+    retired_brain = {'role': 'user', 'content': 'do epic'}
+    _stamp_queued_turn_initiator(retired_brain, {'_brainDispatch': True})
+    assert resolve_initiator(retired_brain) == INITIATOR_HUMAN
 
     operator = {'role': 'user', 'content': 'human nudge'}
     _stamp_queued_turn_initiator(
@@ -145,7 +143,8 @@ def _read(path: str) -> str:
 def test_queue_seam_source_contains_stamp():
     src = _read('lib/message_queue.py')
     assert 'stamp_initiator' in src
-    assert 'INITIATOR_BRAIN' in src and 'INITIATOR_PEER' in src and 'INITIATOR_OPERATOR' in src
+    assert 'INITIATOR_BRAIN' not in src
+    assert 'INITIATOR_PEER' in src and 'INITIATOR_OPERATOR' in src
 
 
 def test_scheduler_seam_source_contains_stamp():

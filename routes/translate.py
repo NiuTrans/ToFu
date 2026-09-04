@@ -23,6 +23,7 @@ from lib.log import get_logger
 from lib.translate.pptx import (
     _MAX_PPTX_BYTES, _PPTX_UPLOAD_DIR, _ensure_pptx_upload_dir,
 )
+from lib.translate.execution import submit_translation_task
 from lib.translate.runtime._state import (
     _cleanup_translate_tasks, _translate_runtime,
 )
@@ -113,13 +114,24 @@ def translate_pptx_upload():
         meta={'type': 'pptx', 'filename': filename, 'targetLang': target,
               'fileSize': len(file_bytes)},
     )
-    _translate_runtime.mark_running(
-        task_id, fields={'model': None, 'progress': None})
-
-    _translate_runtime.spawn(
+    accepted = submit_translation_task(
+        _translate_runtime,
         task_id, _do_translate_pptx,
         task_id, input_path, filename, target, source,
+        running_fields={'model': None, 'progress': None},
     )
+    if not accepted:
+        try:
+            os.remove(input_path)
+        except OSError as cleanup_error:
+            logger.debug(
+                '[PPTX-Translate] rejected input cleanup failed: %s',
+                cleanup_error,
+            )
+        return api_error(
+            'Translation worker capacity is unavailable; retry shortly',
+            status=503,
+        )
 
     logger.info('[PPTX-Translate] Started task %s: %s (%d KB) → %s',
                 task_id, filename, len(file_bytes) // 1024, target)

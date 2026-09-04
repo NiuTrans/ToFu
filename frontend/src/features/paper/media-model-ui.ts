@@ -1,5 +1,7 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtmlText as escapeHtml } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
+import { createModelDisplayNames } from '../../core/model-display-names';
 type LooseObject = Record<string, any>;
 
 interface MediaModel {
@@ -33,16 +35,18 @@ function translate(key: I18nKey, fallback: string): string {
   return typeof fn === 'function' ? String(fn(key)) : fallback;
 }
 
-function escapeHtml(value: unknown): string {
-  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+const mediaModelDisplayNames = createModelDisplayNames({
+  lookupModelDisplayName(modelId) {
+    const cache = globals()._modelPricingCache;
+    return cache && typeof cache === 'object' ? cache[modelId]?.name : '';
+  },
+  lookupProviderDisplayName() {
+    return '';
+  },
+});
 
 export function shortModelName(modelId: string): string {
-  const formatter = globals()._modelShortName;
-  return typeof formatter === 'function'
-    ? String(formatter(modelId))
-    : modelId;
+  return mediaModelDisplayNames.modelShortName(modelId);
 }
 
 function chatModels(): MediaModel[] {
@@ -130,15 +134,7 @@ export function pickMediaOption(button: HTMLElement): void {
 }
 
 function compareModels(left: unknown, right: unknown): number {
-  const compare = globals()._compareModelsByDisplayName;
-  if (typeof compare === 'function') return Number(compare(left, right)) || 0;
-  const leftName = typeof left === 'string'
-    ? left
-    : String((left as MediaModel | null)?.model_id || '');
-  const rightName = typeof right === 'string'
-    ? right
-    : String((right as MediaModel | null)?.model_id || '');
-  return leftName.localeCompare(rightName);
+  return mediaModelDisplayNames.compareModelsByDisplayName(left, right);
 }
 
 export function populateModelDropdown(panel: MediaPanel): void {

@@ -9,9 +9,11 @@ requests, so the debug preview and the real request see the same structure.
 
 from __future__ import annotations
 
-import json
-
 from lib.log import get_logger
+from lib.tool_round_identity import tool_round_batches
+from lib.tool_round_replay import (
+    scan_replayable_tool_round_prefix,
+)
 
 logger = get_logger(__name__)
 
@@ -69,9 +71,10 @@ def build_assistant_tool_call_message(
     Returns:
         A normalized assistant message dict in canonical key order.
     """
-    _content = (content or '').strip()
-    _reasoning = reasoning_content or ''
-    _sig = thinking_signature or ''
+    _content = content.strip() if isinstance(content, str) else ''
+    _reasoning = (reasoning_content
+                  if isinstance(reasoning_content, str) else '')
+    _sig = thinking_signature if isinstance(thinking_signature, str) else ''
     msg: dict = {'role': 'assistant'}
     if _content:
         msg['content'] = _content
@@ -79,10 +82,11 @@ def build_assistant_tool_call_message(
         msg['reasoning_content'] = _reasoning
         if _sig:
             msg['thinking_signature'] = _sig
-    if responses_items:
+    if isinstance(responses_items, (list, tuple)) and responses_items:
         msg['_responses_items'] = [dict(item) for item in responses_items
                                    if isinstance(item, dict)]
-    if anthropic_content_blocks:
+    if (isinstance(anthropic_content_blocks, (list, tuple))
+            and anthropic_content_blocks):
         msg['_anthropic_content_blocks'] = [dict(block)
                                              for block in anthropic_content_blocks
                                              if isinstance(block, dict)]
@@ -96,19 +100,18 @@ def _is_reconstructable_round(r: dict) -> bool:
     The identity + result fields must all be present:
       * ``toolCallId`` (non-empty) — pairs the tool_use with its tool_result
       * ``toolName`` (non-empty)   — the function name
-      * ``toolContent`` is not None — the result the model saw
+      * ``toolContent`` is text       — the exact result the model saw
 
     Keyed on field COMPLETENESS, NOT on ``status``. ``status`` is only the label
     the last-touching path stamped (``done`` / ``aborted`` / ``error`` / a future
     lane); the real invariant for wire reconstruction is "does this row have the
     data to form a legal pair". So an interrupted round that DID capture a real
     result (``toolContent`` present) is a legitimate pair and is KEPT, while an
-    orphan announcement round left result-less by a discarded FloorRetry /
-    stream-retry attempt is dropped regardless of what status it was swept to.
+    orphan announcement round explicitly marked as a discarded FloorRetry /
+    stream-retry attempt is transparent regardless of its swept status.
     """
-    return (bool(r.get('toolCallId'))
-            and bool(r.get('toolName'))
-            and r.get('toolContent') is not None)
+    replay_prefix = scan_replayable_tool_round_prefix([r])
+    return len(replay_prefix.rounds) == 1
 
 
 def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
@@ -119,42 +122,32 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
     fall back to the legacy summary placeholder on ``None``.
 
     Per-round requirements (see ``_is_reconstructable_round``): ``toolCallId`` +
-    ``toolName`` + non-None ``toolContent``. A row lacking any of these is
-    DROPPED and the turn is rebuilt from the survivors — it no longer collapses
-    the WHOLE turn (see the entry-filter rationale below).
+    ``toolName`` + text ``toolContent`` plus valid caller/argument envelopes.
+    Identity-free display carriers and explicitly superseded provider-attempt
+    artifacts are transparent. Any other identity-bearing malformed row is a
+    causal gap: reconstruction stops there instead of replaying later calls as
+    if the missing result had existed.
 
-    ``toolArgs`` is best-effort normalized to a JSON string suitable for
-    ``function.arguments``.  ``assistantContent`` on the first round of
+    ``toolArgs`` is normalized by the shared replay boundary to a JSON string
+    suitable for ``function.arguments``. ``assistantContent`` on the first round of
     a batch becomes the batch's assistant ``content`` (text written
     alongside the tool_calls, à la Claude).
     """
-    # ── Wire-purity guard ──
-    # Drop rows that cannot contribute a valid assistant(tool_use)+tool(result)
-    # PAIR — at the single entry seam, so the reconstructor is immune to partial
-    # rows from ANY source and rebuilds from the survivors instead of collapsing
-    # the whole turn. TWO classes are dropped:
-    #
-    #   1. Synthetic inbox-inject rows (async <swarm-update> / peer / user-steer
-    #      display chips): a lane marker, no tool_call data — persisted as a
-    #      display-only underscore sidecar, never on the wire. See
-    #      lib/tasks_pkg/segments/_types.is_synthetic_inbox_round.
-    #   2. Result-less / identity-less rounds (``_is_reconstructable_round`` is
-    #      False): e.g. an orphan 'searching' round left by a discarded FloorRetry
-    #      or stream-retry attempt (reused on_tool_call_ready announced a round
-    #      whose tc_id never survived into the final assistant_msg) and later
-    #      swept to 'aborted' with an EMPTY result. Such a round cannot form a
-    #      pair; keeping it USED TO fail the all-or-nothing validation and
-    #      collapse the ENTIRE turn — dozens of completed tool calls — into the
-    #      lossy toolSummary placeholder, erasing them from the model's context
-    #      AND shifting the prefix-cache bytes. Dropping ONLY the unreconstructable
-    #      row preserves every completed call. (Verified on live conv
-    #      mrw0rubcbb5qv9: a single such orphan collapsed a 66-tool-call turn to
-    #      one 1871-char text blob.)
-    from lib.tasks_pkg.segments._types import is_synthetic_inbox_round
-    rounds = [
-        r for r in rounds
-        if not is_synthetic_inbox_round(r) and _is_reconstructable_round(r)
-    ]
+    # ── Wire-purity + causality guard ──
+    # The same scanner owns Continue, checkpoint settlement, segment replay,
+    # and this cold-history path. That prevents one path from skipping an
+    # unknown execution gap while another truncates it. Explicitly marked
+    # discarded-attempt rows remain transparent, so known transport artifacts
+    # cannot collapse an otherwise complete historical turn.
+    if not isinstance(rounds, (list, tuple)):
+        return None
+    replay_prefix = scan_replayable_tool_round_prefix(rounds)
+    rounds = list(replay_prefix.rounds)
+    if replay_prefix.blocked_position is not None:
+        logger.warning(
+            '[conv_message_builder] Stopped tool replay at causal gap position '
+            '%d (%s); later occurrences remain audit-only',
+            replay_prefix.blocked_position, replay_prefix.blocked_reason)
     if not rounds:
         return None
 
@@ -165,28 +158,10 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
     from lib.tools.todo import compact_todo_rounds_for_replay
     rounds = compact_todo_rounds_for_replay(rounds)
 
-    # Group into batches by llmRound (preferred) or roundNum gap (legacy).
-    has_llm_round = any(r.get('llmRound') is not None for r in rounds)
-    batches: list[list[dict]] = []
-    current: list[dict] = []
-    prev_key = None
-    for r in rounds:
-        if has_llm_round:
-            key = r.get('llmRound')
-        else:
-            key = r.get('roundNum')
-            if current and isinstance(prev_key, int) and isinstance(key, int):
-                # legacy: gap > 1 in roundNum → new batch
-                if key > prev_key + 1:
-                    batches.append(current)
-                    current = []
-        if current and has_llm_round and key != prev_key:
-            batches.append(current)
-            current = []
-        current.append(r)
-        prev_key = key
-    if current:
-        batches.append(current)
+    # One durable Turn may contain several attempts whose counters all start
+    # at zero.  Use the shared ordered identity helper so two attempts' R17s
+    # can never become one synthetic assistant(tool_calls) message.
+    batches = tool_round_batches(rounds)
 
     out: list[dict] = []
     for batch in batches:
@@ -199,29 +174,7 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
         assistant_anthropic_blocks = None
         for r in batch:
             tc_id = r['toolCallId']
-            args_raw = r.get('toolArgs')
-            if isinstance(args_raw, str):
-                args_str = args_raw
-            elif isinstance(args_raw, dict):
-                try:
-                    args_str = json.dumps(args_raw, ensure_ascii=False)
-                except (TypeError, ValueError) as _e_audit:
-                    logger.debug('[conv_message_builder] _reconstruct_tool_call_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
-                    args_str = '{}'
-            else:
-                args_str = '{}'
-            # Defense-in-depth: if a stored toolArgs string is itself not
-            # valid JSON, replay it as ``'{}'`` so the upstream gateway
-            # doesn't HTTP 400 ``invalid function arguments json string``.
-            # The matching tool_result still tells the model the original
-            # call failed, so this replay path stays equivalent to live
-            # execution. See orchestrator.py:1364 (live sanitizer) and
-            # the May 2026 incident memory.
-            try:
-                json.loads(args_str)
-            except (json.JSONDecodeError, TypeError) as _e_audit:
-                logger.debug('[conv_message_builder] _reconstruct_tool_call_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
-                args_str = '{}'
+            args_str = r['toolArgs']
             tc_entry: dict = {
                 'id': tc_id,
                 'type': 'function',
@@ -233,9 +186,9 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
             # Gemini: echo back thought_signature verbatim — the OpenAI-compat
             # proxy requires it on every replayed tool_call or returns HTTP 400.
             # Unused by other providers (they strip unknown fields server-side).
-            if r.get('extraContent'):
-                tc_entry['extra_content'] = r['extraContent']
-            if isinstance(r.get('caller'), dict):
+            if isinstance(r.get('extraContent'), dict) and r['extraContent']:
+                tc_entry['extra_content'] = dict(r['extraContent'])
+            if r.get('caller') is not None:
                 tc_entry['caller'] = dict(r['caller'])
             tool_calls.append(tc_entry)
             tool_result = {
@@ -243,7 +196,7 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
                 'tool_call_id': tc_id,
                 'content': r['toolContent'] or '',
             }
-            if isinstance(r.get('caller'), dict):
+            if r.get('caller') is not None:
                 tool_result['caller'] = dict(r['caller'])
             tool_results.append(tool_result)
             # First-seen assistantContent / thinking in the batch become the

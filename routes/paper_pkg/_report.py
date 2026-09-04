@@ -62,6 +62,7 @@ from lib.paper_identity import (
 )
 from lib.request_parser import async_parse_body
 from lib.paper.artifact_repository import PaperArtifactRepository
+from lib.paper.contracts import PAPER_REPORT_MAX_SOURCE_CHARS
 from lib.paper.library_repository import PaperLibraryRepository
 from lib.paper.request_policy import paper_request_policy_telemetry
 from routes.task_http import task_replay_cursor, task_replay_response
@@ -69,11 +70,9 @@ from routes.task_http import task_replay_cursor, task_replay_response
 logger = get_logger(__name__)
 
 from routes.paper_pkg._common import (
-    _append_cached_insight,
-    _load_cached_checkpoints_payload,
-    _load_cached_insight_payload,
-    _merge_cached_termfill,
     _parse_report_meta,
+    _project_prefetched_report_siblings,
+    _report_reopen_sibling_groups,
     _task_poll_fields,
     api_v1_paper_bp,
 )
@@ -86,6 +85,92 @@ def run_report_task(*args, **kwargs):
     return implementation(*args, **kwargs)
 
 
+def _cached_report_payload(
+    row,
+    phash,
+    lang,
+    *,
+    user_id: int,
+    siblings,
+    images=None,
+):
+    """Project one prefetched report bundle without repository I/O."""
+    if images is None:
+        images = load_image_manifest(phash)
+    enriched = inject_images_into_report(
+        row.report,
+        images,
+        lang=parse_report_lang(lang)["ui_lang"],
+        appendix=not is_review_family(lang),
+        allow_images=not is_review_family(lang),
+    )
+    enriched = ensure_title_heading(enriched, phash, user_id=user_id)
+    cache_meta = _parse_report_meta(row)
+    enriched, cache_meta, insight_payload, checkpoints_payload = (
+        _project_prefetched_report_siblings(
+            enriched, cache_meta, phash, lang, siblings)
+    )
+    payload = {
+        "cached": True,
+        "report": enriched,
+        "paper_hash": phash,
+        "lang": lang,
+        "meta": cache_meta,
+    }
+    if insight_payload:
+        payload["insight"] = insight_payload
+    if checkpoints_payload:
+        payload["checkpoints"] = checkpoints_payload
+    return payload
+
+
+def _resolve_cached_report_payload(
+    artifacts,
+    phash,
+    preferred_lang,
+    *,
+    user_id: int,
+    fallback_lang=None,
+    images=None,
+    repair_library_title=False,
+):
+    """Read and project one report reopen through one Sidecar round-trip."""
+    reopened = artifacts.reopen_report(
+        phash,
+        preferred_lang,
+        fallback_lang,
+        sibling_langs_by_base=_report_reopen_sibling_groups(
+            preferred_lang, fallback_lang),
+    )
+    row = reopened.report
+    if not row or not row.report:
+        return None
+    payload = _cached_report_payload(
+        row,
+        phash,
+        row.lang,
+        user_id=user_id,
+        siblings=reopened.siblings,
+        images=images,
+    )
+    if repair_library_title:
+        resolved_title = ""
+        card_title = extract_title_from_report(row.report)
+        if card_title:
+            try:
+                resolved_title = backfill_library_title(
+                    phash, card_title, user_id=user_id)
+            except Exception as e:
+                logger.warning(
+                    "[Paper:Report] Cache-path title backfill failed "
+                    "hash=%s: %s",
+                    phash,
+                    e,
+                )
+        payload["resolvedTitle"] = resolved_title
+    return payload
+
+
 @api_v1_paper_bp.route("/api/v1/paper/report/start", methods=["POST"])
 async def start_report_task():
     """Start (or join) a background paper-report generation task.
@@ -95,7 +180,11 @@ async def start_report_task():
     arms remain independent.
 
     Body JSON:
-        paper_text: str — full text of the paper
+        paper_hash: str — preferred ingest-minted identity; a cache/live hit
+            needs no paper body, and a new task resolves its bounded source
+            from this owner's library row.
+        paper_text: str — compatibility/fallback full text when no stored
+            source is available or no valid paper_hash exists.
         model: str (optional) — LLM model to use
         lang: str (optional) — 'zh' for Chinese prompt, else English. Default 'en'.
         force: bool (optional) — bypass DB cache AND restart any running task.
@@ -111,11 +200,19 @@ async def start_report_task():
     owner_user_id = int(request_user_id())
     artifacts = PaperArtifactRepository(owner_user_id)
     data = await async_parse_body()
-    paper_text = data.get("paper_text", "").strip()
-    if not paper_text:
-        logger.warning("[Paper:Report] Start request with no paper_text")
-        return api_bad_request("No paper_text provided")
-    if len(paper_text) < 100:
+    offered_text = data.get("paper_text", "")
+    if offered_text is not None and not isinstance(offered_text, str):
+        return api_bad_request("paper_text must be a string")
+    paper_text = str(offered_text or "").strip()
+    offered_hash = _safe_hash_dir(str(data.get("paper_hash") or "").strip())
+    if not paper_text and not offered_hash:
+        logger.warning(
+            "[Paper:Report] Start request with no paper_hash or paper_text")
+        return api_bad_request(
+            "No paper_hash or paper_text provided",
+            error_code="paper_source_required",
+        )
+    if paper_text and len(paper_text) < 100:
         logger.warning("[Paper:Report] Paper text too short: %d chars", len(paper_text))
         return api_bad_request("Paper text too short (< 100 chars)")
 
@@ -153,92 +250,11 @@ async def start_report_task():
     _execution_fingerprint = _request_policy["executionFingerprint"]
     _cache_isolated = _request_policy["cacheMode"] == "request_local"
 
-    phash = resolve_paper_hash(data.get("paper_hash"), paper_text)
-    # Server is the source of truth for figure manifests. The client never
-    # forwards the images list any more — we load (or extract) it here.
-    images = load_image_manifest(phash)
-    if not images:
-        # Manifest missing — try to derive a filename from the request and
-        # extract on-the-fly. Otherwise the report renders without figures.
-        derived_fn = os.path.basename((data.get("filename") or "").strip())
-        if derived_fn:
-            images = await asyncio.to_thread(ensure_paper_images, derived_fn, phash)
+    phash = resolve_paper_hash(offered_hash, paper_text)
 
-    # DB cache check (unless force/request-local policy) — no task needed when
-    # the canonical report was produced under the same shipped runtime.
-    if not force and not _cache_isolated:
-        try:
-            row = await asyncio.to_thread(artifacts.get_report, phash, lang)
-            if row and row.report:
-                logger.info(
-                    "[Paper:Report] DB cache hit — hash=%s lang=%s %d chars",
-                    phash,
-                    lang,
-                    len(row.report),
-                )
-                enriched = inject_images_into_report(
-                    row.report,
-                    images,
-                    lang=parse_report_lang(lang)["ui_lang"],
-                    appendix=not is_review_family(lang),
-                    allow_images=not is_review_family(lang),
-                )
-                enriched = ensure_title_heading(
-                    enriched, phash, user_id=owner_user_id)
-                # Structured insight payload (v2 rows) — the reader distributes
-                # anchored cards from it. Legacy rows merge into the body below.
-                _insight_payload = await _load_cached_insight_payload(
-                    phash, lang, user_id=owner_user_id)
-                # Merge the sibling persisted insight section so a reopened
-                # paper shows it (read-only; never regenerates).
-                enriched = await _append_cached_insight(
-                    enriched, phash, lang, user_id=owner_user_id)
-                # Merge the gap-closing backfill addendum + downgrade the stale
-                # terminology warning card (read-only; never regenerates).
-                _cached_meta = _parse_report_meta(row)
-                enriched, _cached_meta = await _merge_cached_termfill(
-                    enriched, _cached_meta, phash, lang,
-                    user_id=owner_user_id,
-                )
-                # Self-heal a sidebar title still stuck at the bare arXiv:<id>
-                # from the cached report's Paper Card (cached reports never go
-                # through the engine's backfill). Only placeholder rows change.
-                resolved_title = ""
-                card_title = extract_title_from_report(row.report)
-                if card_title:
-                    try:
-                        resolved_title = await asyncio.to_thread(
-                            backfill_library_title, phash, card_title,
-                            user_id=owner_user_id,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "[Paper:Report] Cache-path title backfill failed "
-                            "hash=%s: %s",
-                            phash,
-                            e,
-                        )
-                _resp = {
-                    "cached": True,
-                    "report": enriched,
-                    "paper_hash": phash,
-                    "meta": _cached_meta,
-                    "resolvedTitle": resolved_title,
-                }
-                if _insight_payload:
-                    _resp["insight"] = _insight_payload
-                _cp_payload = await _load_cached_checkpoints_payload(
-                    phash, lang, user_id=owner_user_id)
-                if _cp_payload:
-                    _resp["checkpoints"] = _cp_payload
-                return api_ok(_resp)
-        except Exception as e:
-            logger.warning(
-                "[Paper:Report] DB cache lookup failed (will start task): %s", e
-            )
-
-    # In-flight reuse requires the exact model + request configuration. A
-    # paired benchmark can therefore run control/candidate concurrently.
+    # Live work wins over a stale persisted result and needs neither figure
+    # extraction nor a paper-body projection. The exact model/config identity
+    # still keeps benchmark arms independent.
     existing = _report_index_get(
         phash,
         lang,
@@ -262,7 +278,75 @@ async def start_report_task():
             }
         )
 
-    # Force: abort the old task if any, then create a new one
+    # Server is the source of truth for figure manifests. The client never
+    # forwards the images list any more — we load (or extract) it here.
+    images = load_image_manifest(phash)
+    if not images:
+        # Manifest missing — try to derive a filename from the request and
+        # extract on-the-fly. Otherwise the report renders without figures.
+        derived_fn = os.path.basename((data.get("filename") or "").strip())
+        if derived_fn:
+            images = await asyncio.to_thread(ensure_paper_images, derived_fn, phash)
+
+    # DB cache check (unless force/request-local policy) — no task needed when
+    # the canonical report was produced under the same shipped runtime.
+    if not force and not _cache_isolated:
+        try:
+            cached_payload = await asyncio.to_thread(
+                _resolve_cached_report_payload,
+                artifacts,
+                phash,
+                lang,
+                user_id=owner_user_id,
+                images=images,
+                repair_library_title=True,
+            )
+            if cached_payload:
+                logger.info(
+                    "[Paper:Report] DB cache hit — hash=%s lang=%s %d chars",
+                    phash,
+                    lang,
+                    len(cached_payload["report"]),
+                )
+                return api_ok(cached_payload)
+        except Exception as e:
+            logger.warning(
+                "[Paper:Report] DB cache lookup failed (will start task): %s", e
+            )
+
+    # Current clients send only the ingest-minted hash. Resolve the exact
+    # owner-scoped source only after live/cache fast paths miss, and project no
+    # more than the prompt can consume. Rolling clients may still send text.
+    source_text_length = len(paper_text)
+    if not paper_text:
+        try:
+            identity = await asyncio.to_thread(
+                PaperLibraryRepository(owner_user_id).identity,
+                phash,
+                max_text_chars=PAPER_REPORT_MAX_SOURCE_CHARS,
+            )
+        except Exception as e:
+            logger.warning(
+                "[Paper:Report] Stored source lookup failed hash=%s: %s",
+                phash,
+                e,
+            )
+            identity = None
+        if identity is not None:
+            paper_text = identity.parsed_text.strip()
+            source_text_length = identity.parsed_text_length
+            if not client_title:
+                client_title = identity.title.strip()
+        if len(paper_text) < 100:
+            logger.warning(
+                "[Paper:Report] No usable stored source for hash=%s", phash)
+            return api_bad_request(
+                "Stored paper text unavailable; retry with paper_text",
+                error_code="paper_source_required",
+            )
+
+    # Force: abort only after every fallible source-preparation gate succeeds,
+    # so a missing legacy source cannot destroy the task it meant to replace.
     if existing and force:
         logger.info(
             "[Paper:Report] Force regen — aborting old task %s", existing["task_id"]
@@ -283,12 +367,12 @@ async def start_report_task():
     # Both a review and its rebuttal follow-up are text-only decision documents.
     is_review_kin = is_review or is_rebuttal
 
-    max_text = 120000
+    max_text = PAPER_REPORT_MAX_SOURCE_CHARS
     truncated_text = paper_text[:max_text]
-    if len(paper_text) > max_text:
+    if source_text_length > max_text:
         logger.info(
             "[Paper:Report] Truncating paper text from %d to %d chars",
-            len(paper_text),
+            source_text_length,
             max_text,
         )
 
@@ -619,23 +703,33 @@ async def list_review_venues():
 
 @api_v1_paper_bp.route("/api/v1/paper/report/lookup", methods=["POST"])
 async def lookup_report_task():
-    """Find an existing running task by (paper_hash, lang).
+    """Find live work and optionally resolve a persisted report in one request.
 
     Used by the frontend on tab re-entry / mode re-enter to see whether a
     task is already running server-side for this paper — so it can resume
-    polling without starting a new one.
+    polling without starting a new one. New clients may set ``include_cache``;
+    after live-task precedence, one owner-scoped storage aggregate resolves the
+    requested/other plain-report language and only the selected row's additive
+    artifacts. Composite Review/Rebuttal keys never receive a language fallback.
 
-    Body JSON: {paper_hash: str, lang: str}
-    Returns: {ok: true, task_id: str, status: str} or {ok: false}
+    Body JSON: {paper_hash: str, lang: str, include_cache: bool = false,
+                paper_text: str (cache-resolution fallback)}
+    Returns a task, a cached report with its resolved ``lang``, or {ok: false}.
     """
     owner_user_id = int(request_user_id())
     data = await async_parse_body()
     phash = (data.get("paper_hash") or "").strip()
     lang = data.get("lang", "en") or "en"
+    include_cache = data.get("include_cache") is True
     if not phash:
-        return api_bad_request("paper_hash required")
+        paper_text = (data.get("paper_text") or "").strip()
+        if not include_cache or not paper_text:
+            return api_bad_request("paper_hash required")
+        phash = await asyncio.to_thread(_paper_hash, paper_text)
     task = _report_index_get(phash, lang, user_id=owner_user_id)
-    if task:
+    if task and (
+        not include_cache or task["status"] in ("pending", "running")
+    ):
         return api_ok(
             {
                 "task_id": task["task_id"],
@@ -643,6 +737,29 @@ async def lookup_report_task():
                 "paper_hash": phash,
             }
         )
+    if include_cache:
+        fallback_lang = None
+        if lang in ("en", "zh"):
+            fallback_lang = "zh" if lang == "en" else "en"
+        try:
+            cached_payload = await asyncio.to_thread(
+                _resolve_cached_report_payload,
+                PaperArtifactRepository(owner_user_id),
+                phash,
+                lang,
+                user_id=owner_user_id,
+                fallback_lang=fallback_lang,
+            )
+            if cached_payload:
+                logger.debug(
+                    "[Paper:Report:Lookup] Cache hit — hash=%s requested=%s resolved=%s",
+                    phash,
+                    lang,
+                    cached_payload["lang"],
+                )
+                return api_ok(cached_payload)
+        except Exception as e:
+            logger.warning("[Paper:Report:Lookup] Cache resolution failed: %s", e)
     return api_payload({"ok": False}, 200)
 
 
@@ -719,7 +836,10 @@ async def export_report():
     title = "Paper Report"
     try:
         trow = await asyncio.to_thread(
-            PaperLibraryRepository(owner_user_id).identity, phash)
+            PaperLibraryRepository(owner_user_id).identity,
+            phash,
+            max_text_chars=0,
+        )
         if trow:
             title = trow.title or (
                 f"arXiv:{trow.arxiv_id}" if trow.arxiv_id else title
@@ -949,39 +1069,16 @@ async def get_report_cache():
         phash = _paper_hash(paper_text)
 
     try:
-        row = await asyncio.to_thread(artifacts.get_report, phash, lang)
-        if row and row.report:
+        cached_payload = await asyncio.to_thread(
+            _resolve_cached_report_payload,
+            artifacts,
+            phash,
+            lang,
+            user_id=owner_user_id,
+        )
+        if cached_payload:
             logger.debug("[Paper:Report:Cache] Hit — hash=%s lang=%s", phash, lang)
-            # Server-side enrichment: load the manifest from disk (the client
-            # is no longer trusted to forward image URLs).
-            images = load_image_manifest(phash)
-            _inj_lang = parse_report_lang(lang)["ui_lang"]
-            enriched = inject_images_into_report(
-                row.report,
-                images,
-                lang=_inj_lang,
-                appendix=not is_review_family(lang),
-                allow_images=not is_review_family(lang),
-            )
-            enriched = ensure_title_heading(
-                enriched, phash, user_id=owner_user_id)
-            _insight_payload = await _load_cached_insight_payload(
-                phash, lang, user_id=owner_user_id)
-            enriched = await _append_cached_insight(
-                enriched, phash, lang, user_id=owner_user_id)
-            _cache_meta = _parse_report_meta(row)
-            enriched, _cache_meta = await _merge_cached_termfill(
-                enriched, _cache_meta, phash, lang,
-                user_id=owner_user_id,
-            )
-            _resp = {"report": enriched, "paper_hash": phash, "meta": _cache_meta}
-            if _insight_payload:
-                _resp["insight"] = _insight_payload
-            _cp_payload = await _load_cached_checkpoints_payload(
-                phash, lang, user_id=owner_user_id)
-            if _cp_payload:
-                _resp["checkpoints"] = _cp_payload
-            return api_ok(_resp)
+            return api_ok(cached_payload)
     except Exception as e:
         logger.warning("[Paper:Report:Cache] Lookup failed: %s", e)
 

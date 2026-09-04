@@ -15,6 +15,18 @@ import tempfile
 import threading
 import unittest
 
+import pytest
+
+from tests.support.model_routing import (
+    allow_native_test_endpoint,
+    clear_test_model_routing,
+    native_test_model,
+    reset_native_test_model_route,
+)
+
+
+pytestmark = pytest.mark.unit
+
 
 def _new_loop_run(coro):
     loop = asyncio.new_event_loop()
@@ -25,6 +37,8 @@ def _new_loop_run(coro):
 
 
 class ChatRouteTest(unittest.TestCase):
+
+    ROUTING_OWNER_ID = 1
 
     @classmethod
     def setUpClass(cls):
@@ -45,14 +59,21 @@ class ChatRouteTest(unittest.TestCase):
 
         # Mint a chat-scoped key.
         from lib.api_keys import create_key
-        _row, cls.token = create_key(owner_user_id=1, name='chat-bot', scopes=['chat'])
+        _row, cls.token = create_key(
+            owner_user_id=cls.ROUTING_OWNER_ID,
+            name='chat-bot', scopes=['chat'])
+        cls._endpoint_allowance = allow_native_test_endpoint()
+        cls._endpoint_allowance.__enter__()
 
     @classmethod
     def tearDownClass(cls):
-        from lib import api_keys
+        clear_test_model_routing(owner_user_id=cls.ROUTING_OWNER_ID)
+        cls._endpoint_allowance.__exit__(None, None, None)
         cls._tmp.cleanup()
 
     def setUp(self):
+        reset_native_test_model_route(
+            owner_user_id=self.ROUTING_OWNER_ID)
         # Clear idempotency cache so test order doesn't matter.
         from lib.idempotency import _cache
         _cache.clear()
@@ -86,7 +107,7 @@ class ChatRouteTest(unittest.TestCase):
                 '/api/v1/chat/completions',
                 headers={'Authorization': f'Bearer {self.token}'},
                 json={
-                    'model': 'test-model',
+                    'model': native_test_model(),
                     'messages': [{'role': 'user', 'content': 'Hi'}],
                     'timeout_s': 5,
                 })
@@ -97,7 +118,7 @@ class ChatRouteTest(unittest.TestCase):
             # api_ok(dict) merges fields into the top-level — body IS the
             # OpenAI-shaped completion (with an extra `ok:true` key).
             self.assertEqual(body['object'], 'chat.completion')
-            self.assertEqual(body['model'], 'test-model')
+            self.assertEqual(body['model'], 'stub-model')
             self.assertEqual(body['choices'][0]['message']['content'],
                              'Hello from stub')
             self.assertEqual(body['choices'][0]['finish_reason'], 'stop')
@@ -129,7 +150,7 @@ class ChatRouteTest(unittest.TestCase):
                     '/api/v1/chat/completions',
                     headers={'Authorization': f'Bearer {self.token}'},
                     json={
-                        'model': 'test-model',
+                        'model': native_test_model(),
                         'messages': [{'role': 'user', 'content': 'Hi'}],
                         'timeout_s': 5,
                     },
@@ -222,7 +243,8 @@ class ChatRouteTest(unittest.TestCase):
                 '/api/v1/chat/completions',
                 headers={'Authorization': f'Bearer {self.token}',
                          'Idempotency-Key': 'k-replay-1'},
-                json={'messages': [{'role': 'user', 'content': 'Hi'}],
+                json={'model': native_test_model(),
+                      'messages': [{'role': 'user', 'content': 'Hi'}],
                       'timeout_s': 5})
             self.assertEqual(r1.status_code, 200)
             d1 = await r1.get_json()
@@ -232,7 +254,8 @@ class ChatRouteTest(unittest.TestCase):
                 '/api/v1/chat/completions',
                 headers={'Authorization': f'Bearer {self.token}',
                          'Idempotency-Key': 'k-replay-1'},
-                json={'messages': [{'role': 'user', 'content': 'Hi'}],
+                json={'model': native_test_model(),
+                      'messages': [{'role': 'user', 'content': 'Hi'}],
                       'timeout_s': 5})
             self.assertEqual(r2.status_code, 200)
             self.assertEqual(r2.headers.get('Idempotency-Replay'), 'true')

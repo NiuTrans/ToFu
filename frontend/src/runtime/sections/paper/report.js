@@ -4,13 +4,14 @@
 
    Extracted verbatim from frontend/src/runtime/paper-reader.js (2026-07-11, Epic E
    cut #6 — the biggest, ~2400 L). The Tab-2 Report AND Review-Mode stack:
-   start/poll/apply/paint (parameterized by _reportView `kind`), regen-intent,
-   snapshot cache, model+venue dropdowns, glossary cards, zoomable figures,
-   export. Plus the 7 load-time document.addEventListener wirings (glossary
+   event apply/paint (parameterized by _reportView `kind`), model+venue
+   dropdowns, glossary cards, zoomable figures, export. The typed report owner
+   owns start/restart, polling, reopen, preferences, snapshots, and anchors.
+   Plus the 7 load-time document.addEventListener wirings (glossary
    hover, dropdown-close, figure zoom click/keydown, venue-close) — all only
    CALL document.addEventListener at load; their bodies run at runtime.
-   ALL report/review STATE (_paperReportCache/_paperReviewCache/_paperReportStream
-   /_paperReportSnapshots/_paperReportMeta/_paperReportModel/_paperImages/_paperHash)
+   Retained renderer state (_paperReportCache/_paperReviewCache/_paperReportStream
+   /_paperReportMeta/_paperReportModel/_paperImages/_paperHash)
    STAYS in the core State block (read across many clusters). Only functions +
    listeners move. Window-scope var + runtime cross-refs → loads before paper-reader.js.
    ═════════════════════════════════════════════════ */
@@ -26,9 +27,9 @@
 //   • Flow:
 //       POST /api/paper/report/start  → {task_id} (or {cached, report} if DB hit)
 //       GET  /api/paper/report/poll?task_id=X&cursor=N → {events, next_cursor, …}
-//   • On tab/mode switch, we simply pause the poll timer. On return, we
-//     lookup the task by paper_hash via /api/paper/report/lookup and resume
-//     polling from cursor=0, replaying all events → UI rebuilt from events.
+//   • On tab/mode switch, the typed owner resolves live work plus preferred /
+//     fallback cache through one /api/paper/report/lookup request, then resumes
+//     polling from cursor=0 when a live task wins.
 //   • Tool-round events (tool_start / tool_done) use the same schema as
 //     chat tool events, so `renderToolRoundsHTML(toolRounds)` from ui.js
 //     renders them identically to how they look in the chat bubble.
@@ -124,7 +125,7 @@ function _reportSegmentsForRender(s) {
  * is broadcast on the unified /api/push WebSocket the moment it is appended,
  * and ``report_engine._execute_tool`` appends ``tool_done`` the instant the
  * tool returns. The report view simply never listened: its only transport was
- * ``setTimeout(_pollReportTask, 1200)``. So a search that finished at t=0 kept
+ * ``setTimeout(runtimeScope._pollReportTask, 1200)``. So a search that finished at t=0 kept
  * its spinner until somewhere in t+1.2s…t+3s for no reason other than that
  * nobody subscribed to the channel already carrying the news.
  *
@@ -172,10 +173,10 @@ function _attachReportPush(view, s) {
         // Let the poll do the authoritative terminal fetch (report body,
         // meta, resolvedTitle, DB persistence side-effects). The push frame
         // stops the spinner NOW; the poll fills in the rest.
-        if (typeof _pollReportTask === 'function') _pollReportTask(view);
+        if (typeof runtimeScope._pollReportTask === 'function') runtimeScope._pollReportTask(view);
         dirty = true;
       }
-      if (dirty && s.paperId === _activePaperId) _paintReportFromState(view);
+      if (dirty && s.paperId === runtimeScope._activePaperId) _paintReportFromState(view);
     });
     s._pushTaskId = taskId;
   } catch (e) {
@@ -227,6 +228,76 @@ function _applyReportEvent(s, ev) {
   return _applyReportEventRaw(s, ev);
 }
 
+/* ── Versioned tool_progress replay safety (tofu.tool-progress/v1) ───────
+ * ``tool_progress`` carries a monotonic per-call ``seq`` (1-based) alongside
+ * the ordered ``chunk`` delta. The task-level seq gate in _applyReportEvent
+ * already dedupes whole events across the push/poll transports; this gate is
+ * the per-call defense — it rejects a duplicate or out-of-order chunk for the
+ * same round so the bounded partial-output buffer never double-appends. A
+ * legacy frame without seq still applies unconditionally. */
+var _REPORT_TOOL_PROGRESS_BOUNDED_CHARS = 100000;
+var _REPORT_TOOL_PROGRESS_TRUNCATION_MARKER =
+  '\n\n… [live output truncated] …\n\n';
+var _REPORT_TOOL_PROGRESS_TRUNCATION_TAIL_RE =
+  /… \[live output truncated[^\]]*\] …\n\n([\s\S]*)$/;
+
+function _reportProgressTail(value) {
+  var existing = typeof value === 'string' ? value : '';
+  var match = _REPORT_TOOL_PROGRESS_TRUNCATION_TAIL_RE.exec(existing);
+  return match ? match[1] : existing;
+}
+
+function _reportProgressStatus(truncated, spooling, reason) {
+  if (reason === 'cancelling') return 'cancelling';
+  if (reason === 'cancelled' || reason === 'cancelled-partial') {
+    return 'cancelled-partial';
+  }
+  if (truncated) return 'overflow-loss';
+  if (spooling) return 'spooling';
+  return 'running';
+}
+
+function _reportApplyToolProgress(round, ev) {
+  var seq = typeof ev.seq === 'number' ? ev.seq : null;
+  var lastSeq = typeof round._partialOutputSeq === 'number'
+    ? round._partialOutputSeq : 0;
+  if (seq !== null && seq <= lastSeq) return false;
+
+  var chunk = typeof ev.chunk === 'string' ? ev.chunk : '';
+  var existingTotal = typeof round._partialOutputTotalChars === 'number'
+    ? round._partialOutputTotalChars
+    : _reportProgressTail(round._partialOutput).length;
+  var totalChars = existingTotal + chunk.length;
+  var truncated = round._partialOutputTruncated === true
+    || ev.truncated === true
+    || totalChars > _REPORT_TOOL_PROGRESS_BOUNDED_CHARS;
+  var spooling = ev.spooling === true;
+  var reason = typeof ev.terminalReason === 'string' ? ev.terminalReason : '';
+
+  if (!truncated) {
+    round._partialOutput = (typeof round._partialOutput === 'string'
+      ? round._partialOutput : '') + chunk;
+  } else {
+    var suffixLimit = _REPORT_TOOL_PROGRESS_BOUNDED_CHARS
+      - Math.floor(_REPORT_TOOL_PROGRESS_BOUNDED_CHARS * 3 / 4);
+    var tail = (_reportProgressTail(round._partialOutput) + chunk)
+      .slice(-suffixLimit);
+    round._partialOutput = _REPORT_TOOL_PROGRESS_TRUNCATION_MARKER + tail;
+  }
+  round._partialOutputTotalChars = totalChars;
+  round._partialOutputTruncated = truncated;
+  round._partialOutputStatus = _reportProgressStatus(truncated, spooling, reason);
+  if (seq !== null) round._partialOutputSeq = seq;
+  if (ev.contractVersion != null) {
+    round._partialOutputContractVersion = String(ev.contractVersion);
+  }
+  if (ev.stream != null) round._partialOutputStream = String(ev.stream);
+  if (spooling) round._partialOutputSpooling = true;
+  if (reason) round._partialOutputTerminalReason = reason;
+  if (ev.grepSearchIntercepted === true) round.grepSearchIntercepted = true;
+  return true;
+}
+
 /** Apply a single event to the in-memory stream state. Returns dirty flag. */
 function _applyReportEventRaw(s, ev) {
   switch (ev.type) {
@@ -247,6 +318,8 @@ function _applyReportEventRaw(s, ev) {
         query: ev.query || ev.toolName,
         toolCallId: ev.toolCallId || '',
         toolArgs: ev.toolArgs || '',
+        attentionKind: ev.attentionKind || '',
+        parentToolCallId: ev.parentToolCallId || '',
         status: 'searching',
         results: null,
       });
@@ -279,9 +352,7 @@ function _applyReportEventRaw(s, ev) {
         if (s.toolRounds[j].roundNum === ev.roundNum) { rp = s.toolRounds[j]; break; }
       }
       if (rp) {
-        if (typeof rp._partialOutput !== 'string') rp._partialOutput = '';
-        rp._partialOutput += (ev.chunk || '');
-        if (ev.grepSearchIntercepted === true) rp.grepSearchIntercepted = true;
+        _reportApplyToolProgress(rp, ev);
       }
       return true;
     }
@@ -311,7 +382,7 @@ function _applyReportEventRaw(s, ev) {
       // Only mutate global hash when this stream still belongs to the active paper —
       // a stream that was started for paper A and is now polling in the background
       // must not stomp paper B's hash.
-      if (ev.paperHash && s.paperId === _activePaperId) _paperHash = ev.paperHash;
+      if (ev.paperHash && s.paperId === runtimeScope._activePaperId) _paperHash = ev.paperHash;
       return true;
 
     case 'insight_start':
@@ -342,11 +413,11 @@ function _applyReportEventRaw(s, ev) {
         s.insightText = _ins;
         s.fullText = (s.fullText || '').replace(/\s*$/, '') + '\n\n' + _ins + '\n';
         s._lastRenderedLen = -1;   // force re-render
-        if (s.paperId === _activePaperId) {
+        if (s.paperId === runtimeScope._activePaperId) {
           var _vIns = _reportView(s.kind);
           if (_vIns.cache) {
             _vIns.cache = _vIns.cache.replace(/\s*$/, '') + '\n\n' + _ins + '\n';
-            _rememberReportSnapshot(_vIns, _vIns.cache, _vIns.meta || s.meta);
+            runtimeScope._rememberReportSnapshot(_vIns, _vIns.cache, _vIns.meta || s.meta);
           }
         }
       }
@@ -381,7 +452,7 @@ function _applyReportEventRaw(s, ev) {
       if (ev.meta) {
         s.meta = ev.meta;
         var _vRm = _reportView(s.kind);
-        if (s.paperId === _activePaperId) _vRm.meta = ev.meta;
+        if (s.paperId === runtimeScope._activePaperId) _vRm.meta = ev.meta;
       }
       return true;
 
@@ -400,12 +471,12 @@ function _applyReportEventRaw(s, ev) {
         s.fullText = (s.fullText || '').replace(/\s*$/, '') + '\n\n' + _add + '\n';
         if (s.meta && s.meta.terminologyAudit) s.meta.terminologyAudit = null;
         s._lastRenderedLen = -1;   // force re-render (drops the warning card)
-        if (s.paperId === _activePaperId) {
+        if (s.paperId === runtimeScope._activePaperId) {
           var _vTf = _reportView(s.kind);
           if (_vTf.meta && _vTf.meta.terminologyAudit) _vTf.meta.terminologyAudit = null;
           if (_vTf.cache) {
             _vTf.cache = _vTf.cache.replace(/\s*$/, '') + '\n\n' + _add + '\n';
-            _rememberReportSnapshot(_vTf, _vTf.cache, _vTf.meta || s.meta);
+            runtimeScope._rememberReportSnapshot(_vTf, _vTf.cache, _vTf.meta || s.meta);
           }
         }
       }
@@ -421,17 +492,17 @@ function _applyReportEventRaw(s, ev) {
       var _vDone = _reportView(s.kind);
       if (ev.report) {
         s.fullText = ev.report;
-        if (s.paperId === _activePaperId) {
+        if (s.paperId === runtimeScope._activePaperId) {
           _vDone.cache = ev.report;
-          _rememberReportSnapshot(_vDone, ev.report, ev.meta || s.meta);
+          runtimeScope._rememberReportSnapshot(_vDone, ev.report, ev.meta || s.meta);
           _persistGeneratedReviewVenue(_vDone, _vDone.langKey(), s.paperId);
         }
       }
       if (ev.meta) {
         s.meta = ev.meta;
-        if (s.paperId === _activePaperId) _vDone.meta = ev.meta;
+        if (s.paperId === runtimeScope._activePaperId) _vDone.meta = ev.meta;
       }
-      if (ev.paperHash && s.paperId === _activePaperId) _paperHash = ev.paperHash;
+      if (ev.paperHash && s.paperId === runtimeScope._activePaperId) _paperHash = ev.paperHash;
       if (ev.resolvedTitle) _applyResolvedTitle(ev.resolvedTitle, s.paperId);
       return true;
     }
@@ -1238,7 +1309,8 @@ function _wireReadingTimeTracking(bar, scroller, view) {
     // is a heading index+offset (survives a cross-language re-layout).
     if (now - tracker.lastPersistTs >= 1000) {
       tracker.lastPersistTs = now;
-      _persistReadingPosition(tracker.view, _captureReadingAnchor(scroller));
+      runtimeScope._persistReadingPosition(
+        tracker.view, runtimeScope._captureReadingAnchor(scroller));
     }
   }
 
@@ -1270,7 +1342,8 @@ function _teardownReadingTracker(silent) {
   // Persist the final reading position before detaching (a tab switch / mode
   // exit flushes here) so re-entry restores exactly where the reader stopped.
   try {
-    if (tk.scroller) _persistReadingPosition(tk.view, _captureReadingAnchor(tk.scroller));
+    if (tk.scroller) runtimeScope._persistReadingPosition(
+      tk.view, runtimeScope._captureReadingAnchor(tk.scroller));
   } catch (e) { console.debug('[Paper] persist final reading-pos failed: %s', e && e.message); }
 
   var coveredWords = tk.words * tk.lastProgress;
@@ -1321,7 +1394,8 @@ function _renderFinalReport(container, text, meta, view) {
   // the in-DOM capture returns null — fall back to the position persisted for
   // THIS view+language, restoring the last-read place across tab switches and
   // hard refreshes (see _persistReadingPosition).
-  var _readAnchor = _captureReadingAnchor(container) || _loadReadingPosition(view);
+  var _readAnchor = runtimeScope._captureReadingAnchor(container)
+    || runtimeScope._loadReadingPosition(view);
 
   var article = document.createElement('article');
   article.className = 'paper-report-article';
@@ -1403,7 +1477,7 @@ function _renderFinalReport(container, text, meta, view) {
     container.appendChild(article);
   }
   // Restore the pre-repaint reading position (see _captureReadingAnchor).
-  _restoreReadingAnchor(container, article, _readAnchor);
+  runtimeScope._restoreReadingAnchor(container, article, _readAnchor);
   if (readBar) _wireReadingTimeTracking(readBar, container, view);
   // Reading-experience rail: distribute anchored insight cards + recap
   // (no-op unless view._xpInsight carries a v2 payload). AFTER tracking is
@@ -1414,93 +1488,6 @@ function _renderFinalReport(container, text, meta, view) {
   }
 }
 
-/** Snapshot the reader's place in `scroller` as {index, offset}: the index of
- *  the heading (h2/h3) nearest the top of the viewport and that heading's pixel
- *  distance below the scroller's top edge. Returns null when nothing is
- *  scrolled yet (fresh render) so a first paint is not perturbed. */
-function _captureReadingAnchor(scroller) {
-  try {
-    if (!scroller || scroller.scrollTop <= 2) return null;
-    var heads = scroller.querySelectorAll('.paper-report-article h2, .paper-report-article h3');
-    if (!heads.length) {
-      // No headings — fall back to a scroll FRACTION (best-effort for prose
-      // whose length differs across languages).
-      var max = scroller.scrollHeight - scroller.clientHeight;
-      return max > 0 ? { frac: scroller.scrollTop / max } : null;
-    }
-    var sTop = scroller.getBoundingClientRect().top;
-    var best = 0, bestAbove = -Infinity;
-    for (var i = 0; i < heads.length; i++) {
-      var rel = heads[i].getBoundingClientRect().top - sTop;
-      // The last heading at or above the top edge is the one we're "in".
-      if (rel <= 1 && rel > bestAbove) { bestAbove = rel; best = i; }
-    }
-    var relTop = heads[best].getBoundingClientRect().top - sTop;
-    return { index: best, offset: relTop };
-  } catch (e) {
-    console.debug('[Paper] captureReadingAnchor failed: %s', e && e.message);
-    return null;
-  }
-}
-
-/** Restore a {index,offset} (or {frac}) anchor produced by
- *  _captureReadingAnchor onto the freshly-rebuilt `article` inside `scroller`. */
-function _restoreReadingAnchor(scroller, article, anchor) {
-  if (!scroller || !anchor) return;
-  try {
-    if (anchor.frac != null) {
-      var max = scroller.scrollHeight - scroller.clientHeight;
-      scroller.scrollTop = Math.max(0, Math.round(anchor.frac * max));
-      return;
-    }
-    var heads = article.querySelectorAll('h2, h3');
-    if (!heads.length || anchor.index == null) return;
-    var idx = Math.min(anchor.index, heads.length - 1);
-    var sTop = scroller.getBoundingClientRect().top;
-    var headTop = heads[idx].getBoundingClientRect().top - sTop + scroller.scrollTop;
-    scroller.scrollTop = Math.max(0, Math.round(headTop - (anchor.offset || 0)));
-  } catch (e) {
-    console.debug('[Paper] restoreReadingAnchor failed: %s', e && e.message);
-  }
-}
-
-/** Read the whole persisted reading-position map { '<paperId>::<langKey>':
- *  anchor }. Never throws. */
-function _readReadPosMap() {
-  try {
-    var raw = localStorage.getItem(_PAPER_READ_POS_KEY);
-    return raw ? (JSON.parse(raw) || {}) : {};
-  } catch (e) {
-    console.warn('[Paper] read reading-position map failed:', e);
-    return {};
-  }
-}
-
-/** Persist a `_captureReadingAnchor` anchor for the view's current language so
- *  it survives a tab switch / reload. Keyed by the SAME composite key as the
- *  report snapshots (paper + langKey) so each language keeps its own place.
- *  A null/empty anchor CLEARS the slot (reader is back at the top). */
-function _persistReadingPosition(view, anchor) {
-  view = view || _reportView('report');
-  if (!_activePaperId) return;
-  var key = _reportSnapshotKey(view);
-  try {
-    var map = _readReadPosMap();
-    if (anchor) map[key] = anchor;
-    else delete map[key];
-    localStorage.setItem(_PAPER_READ_POS_KEY, JSON.stringify(map));
-  } catch (e) {
-    console.warn('[Paper] persist reading-position failed:', e);
-  }
-}
-
-/** The persisted anchor for the view's current language, or null. */
-function _loadReadingPosition(view) {
-  view = view || _reportView('report');
-  if (!_activePaperId) return null;
-  return _readReadPosMap()[_reportSnapshotKey(view)] || null;
-}
-
 /** Paint a view's tab DOM from its current stream state. `view` defaults to
  *  the report view (historical callers pass nothing). */
 function _paintReportFromState(view) {
@@ -1509,7 +1496,9 @@ function _paintReportFromState(view) {
   if (!container || !view.stream) return;
   var s = view.stream;
   var px = view.idPrefix;
-  var retryFn = view.kind === 'review' ? '_generatePaperReview()' : '_generatePaperReport()';
+  var retryFn = view.kind === 'review'
+    ? '_generatePaperReview()'
+    : (view.kind === 'rebuttal' ? '_generatePaperRebuttal()' : '_generatePaperReport()');
 
   // Keep the toolbar's Stop/Regenerate affordance in sync with every paint.
   _syncReportToolbar(s.status === 'running', view);
@@ -1613,618 +1602,9 @@ function _paintReportFromState(view) {
   }
 }
 
-/** Start (or join) a server-side report task, begin polling. Parameterized by
- *  `view` so the Review tab reuses this verbatim (only cache key / state slots
- *  / DOM container differ). */
-async function _generatePaperReport(force, view) {
-  view = view || _reportView('report');
-  var container = document.getElementById(view.containerId);
-  if (!container) return;
-
-  // Snapshot which paper this generation is for. If the user switches paper
-  // mid-await, every continuation below must bail — otherwise paper A's
-  // task_id / report / hash leak into paper B's state. (See bug 2026-05-20.)
-  var startPaperId = _activePaperId;
-
-  // Review generation MUST resolve the venue BEFORE building the composite
-  // cache key. An entry that reaches here with _paperReviewVenue==='' (e.g. the
-  // Generate button, which — unlike the venue-race-guarded _switchPaperTab —
-  // does NOT pre-resolve) would build langKey off the `|| 'generic'` fallback
-  // and generate/persist under review:generic:… while a later reload resolves
-  // the real venue → cache-key skew → the finished review re-prompts Generate.
-  // Mirror the tab-switch resolve-then-generate guard so every generation entry
-  // agrees with reload.
-  if (view.kind === 'review') {
-    try { await _resolveReviewVenue(); } catch (e) {
-      console.warn('[Paper:Review] venue resolve before generate failed:', e);
-    }
-    if (_activePaperId !== startPaperId) return;
-  }
-
-  var langKey = view.langKey();
-  var retryFn = view.kind === 'review' ? '_generatePaperReview()' : '_generatePaperReport()';
-
-  // Already polling a live task for this paper and not forcing → just paint
-  if (!force && view.stream
-      && view.stream.paperId === _activePaperId
-      && view.stream.status === 'running') {
-    _paintReportFromState(view);
-    return;
-  }
-
-  // In-memory cache — instant path
-  if (view.cache && !force) {
-    _renderFinalReport(container, view.cache, undefined, view);
-    // Reopen restore: re-apply a persisted Chinese reading view (translate-only,
-    // never regenerates the English review).
-    _restoreReviewReadingLang(view);
-    return;
-  }
-
-  if (!_paperParsedText) {
-    container.innerHTML =
-      '<div class="paper-loading"><div class="paper-loading-spinner"></div>' +
-      '<div>Recovering paper text…</div></div>';
-    var ok = await _ensurePaperText();
-    if (_activePaperId !== startPaperId) return;
-    if (!ok) {
-      container.innerHTML =
-        '<div class="paper-report-empty"><p>' + escapeHtml((typeof t === 'function') ? t('paper.reportNoText') : 'No paper text available.') + '</p>' +
-        '<p style="opacity:0.6;font-size:12px;margin-top:6px">The PDF may be scanned/image-only, or parsing failed. Try re-uploading.</p></div>';
-      return;
-    }
-  }
-
-  var reportLang = view.uiLang();
-  if (!view.model) _populatePaperReportModelDropdown(view);
-  var reportModel = view.model || null;
-
-  // Discard any prior stream state (force path or new paper path)
-  if (force || (view.stream && view.stream.paperId !== _activePaperId)) {
-    _resetReportLocalState(view);
-  }
-
-  _renderReportSkeleton(container, reportLang, view);
-
-  // Show the Stop affordance IMMEDIATELY. The /start round-trip below does
-  // synchronous server prep (image-manifest extraction, injection sanitize,
-  // prompt build) that legitimately runs 10–40s before it returns a task_id.
-  // Without a provisional running stream, only Regenerate shows during that
-  // whole window — so a user who picked the wrong model has NO way to stop
-  // (exactly the reported bug). A Stop pressed now sets `pendingStop`, honoured
-  // the instant the task_id lands.
-  view.stream = _makeReportStreamState(startPaperId, reportLang, '', view.kind);
-  _syncReportToolbar(true, view);
-
-  try {
-    // Title fallback: paper_library may not have been upserted yet (the PUT
-    // is fire-and-forget) so the server can't always look up the title from
-    // paper_hash. Send the active entry's title (without `.pdf`) so the
-    // backend can still prepend `# Title` even when the DB is empty.
-    var entryNow = _getActivePaperEntry();
-    var clientTitle = (entryNow && entryNow.title)
-      || _paperFileName
-      || (_paperPdfFilename || '').replace(/^\d+_/, '');
-    if (clientTitle) clientTitle = String(clientTitle).replace(/\.pdf$/i, '').trim();
-
-    // Images are loaded from the server-side manifest by paper_hash —
-    // the client doesn't forward them. filename is a fallback path the
-    // server can use if no manifest exists yet (rare). `lang` carries the
-    // composite key for reviews (``review:<venue>:<uilang>``), opaquely.
-    var _startBody = {
-      paper_text: _paperParsedText,
-      lang: langKey,
-      model: reportModel,
-      force: !!force,
-      title: clientTitle || '',
-      filename: _paperPdfFilename || '',
-    };
-    // Rebuttal view: ship the author's pasted rebuttal text. The server pairs
-    // it with the stored review row (review:<venue>:<uilang>) for this paper.
-    if (view.kind === 'rebuttal') _startBody.author_rebuttal = _paperRebuttalInputText || '';
-    var data = await Api.paper.reportStart(_startBody);
-    if (_activePaperId !== startPaperId) return;
-    if (!data || !data.ok) throw new Error((data && data.error) || 'Start failed');
-
-    // Did the user press Stop while the (slow) /start was in flight? The
-    // provisional stream created above carries the intent forward.
-    var stopWasPending = !!(view.stream && view.stream.pendingStop);
-
-    // DB cache hit — done in one round-trip. Drop the provisional running
-    // stream first so a later tab re-entry paints the cached report, not a
-    // stuck empty skeleton left behind by the provisional (taskId-less) state.
-    if (data.cached && data.report) {
-      view.stream = null;
-      view.cache = data.report;
-      view.meta = data.meta || null;
-      // v2 insight payload (structured items with anchor_idx) — the
-      // reading-xp rail distributes it in _renderFinalReport's after seam.
-      // Write through the xp store (cross-_reportView-instance) when present.
-      if (typeof runtimeScope._paperXpSet === 'function') {
-        runtimeScope._paperXpSet(view, '_xpInsight', data.insight || null);
-        runtimeScope._paperXpSet(view, '_xpCheckpoints', data.checkpoints || null);
-      } else {
-        view._xpInsight = data.insight || null;
-        view._xpCheckpoints = data.checkpoints || null;
-      }
-      if (data.paper_hash) _paperHash = data.paper_hash;
-      _rememberReportSnapshot(view, data.report, data.meta);
-      _persistGeneratedReviewVenue(view, langKey, startPaperId);
-      _saveActivePaperState();
-      if (data.resolvedTitle) _applyResolvedTitle(data.resolvedTitle, startPaperId);
-      _renderFinalReport(container, data.report, undefined, view);
-      return;
-    }
-
-    // Task started (or joined) — begin polling from cursor 0 so we replay all
-    if (data.paper_hash) _paperHash = data.paper_hash;
-    // Re-entrancy guard: a task is now attached, so the regenerate intent is
-    // fulfilled. Clear it so a refresh can't re-trigger an endless regenerate.
-    _clearReportRegenIntent(view.regenIntentKey);
-    view.stream = _makeReportStreamState(startPaperId, reportLang, data.task_id, view.kind);
-    _syncReportToolbar(true, view);
-    _attachReportPush(view, view.stream);
-    _pollReportTask(view);
-    // Honour a Stop pressed before the task_id existed: now that we know the
-    // id, abort the just-started task instead of silently dropping the intent.
-    if (stopWasPending) {
-      console.warn('[Paper:Report] Stop was pending during start — aborting task ' + data.task_id);
-      _stopPaperReport(view);
-    }
-
-  } catch (e) {
-    if (_activePaperId !== startPaperId) return;
-    console.warn('[Paper:Report] start failed:', e);
-    // Drop the provisional running stream so the error state is terminal — a
-    // later tab re-entry must not resume-poll a task_id-less zombie stream.
-    view.stream = null;
-    // Reset the toolbar to a clean Regenerate-only state. Without this, a Stop
-    // pressed during the (now-failed) start left the Stop button disabled with
-    // the "Stopping…" label (via pendingStop) — the poll loop's terminal
-    // repaint never runs on a start FAILURE, so the toolbar would stay stuck.
-    _syncReportToolbar(false, view);
-    container.innerHTML = '<div class="paper-error">Failed: ' + escapeHtml(e.message) +
-      '<br><button data-tofu-action="' + retryFn + '" class="paper-retry-btn">' + escapeHtml((typeof t === 'function') ? t('paper.retry') : 'Retry') + '</button></div>';
-  }
-}
-
-/** Review-Mode entry: identical pipeline, review view-context. */
-async function _generatePaperReview(force) {
-  return _generatePaperReport(force, _reportView('review'));
-}
-
-/** Rebuttal entry: generate a follow-up reply + score decision from the
- *  author's pasted rebuttal. Requires (a) a non-empty rebuttal text and (b) an
- *  already-generated review for this venue (the server pairs them). The paste
- *  box + guards live in _renderRebuttalPanel; this just kicks the shared pipe. */
-async function _generatePaperRebuttal(force) {
-  var text = (_paperRebuttalInputText || '').trim();
-  if (!text) {
-    if (typeof showToast === 'function') {
-      showToast((typeof t === 'function') ? t('paper.rebuttalNeedText') : 'Paste the author rebuttal first');
-    }
-    return;
-  }
-  // A rebuttal needs the original review to exist. The in-memory review cache
-  // OR a live/finished review stream both count; otherwise nudge the user.
-  var rv = _reportView('review');
-  if (!rv.cache && !(rv.stream && rv.stream.fullText)) {
-    if (typeof showToast === 'function') {
-      showToast((typeof t === 'function') ? t('paper.rebuttalNeedReview') : 'Generate the review first');
-    }
-    return;
-  }
-  return _generatePaperReport(force, _reportView('rebuttal'));
-}
-
-async function _regeneratePaperRebuttal() { return _regeneratePaperReport(_reportView('rebuttal')); }
 
 
-/** The review reading language for the ACTIVE paper: persisted per-paper if
- *  present, else 'en' (English is always the canonical generated language). */
-function _activeReviewLang() {
-  if (!_activePaperId) return 'en';
-  var stored = _readReviewLangMap()[_activePaperId];
-  return (stored === 'zh') ? 'zh' : 'en';
-}
 
-/** Read the per-paper review-reading-language map { paperId: 'en'|'zh' }. */
-function _readReviewLangMap() {
-  try {
-    var raw = localStorage.getItem(_PAPER_REVIEW_LANG_KEY);
-    return raw ? (JSON.parse(raw) || {}) : {};
-  } catch (e) {
-    console.warn('[Paper:Review] read lang map failed:', e);
-    return {};
-  }
-}
-
-/** Persist the review reading language for the active paper. */
-function _persistReviewLang(paperId, lang) {
-  if (!paperId || (lang !== 'en' && lang !== 'zh')) return;
-  try {
-    var map = _readReviewLangMap();
-    map[paperId] = lang;
-    localStorage.setItem(_PAPER_REVIEW_LANG_KEY, JSON.stringify(map));
-  } catch (e) {
-    console.warn('[Paper:Review] persist lang failed:', e);
-  }
-}
-
-/** After the canonical ENGLISH review is (re)rendered on a REOPEN (page reload
- *  or paper switch — both wipe the in-memory translation state via
- *  _resetAllReportViews), restore the per-paper persisted READING language: if
- *  the user last read this paper's review in Chinese, re-apply the translated
- *  view.
- *
- *  This ONLY translates the already-rendered English review — on a warm cache
- *  it is instant, on a cold cache it kicks the Babel translate task. It NEVER
- *  regenerates the English review (no report/start) and is invoked ONLY from
- *  terminal English-render sites (cache hits), so it never fights an in-flight
- *  generation. */
-function _restoreReviewReadingLang(view) {
-  if (!view || view.kind !== 'review') return;
-  if (!view.cache) return;                    // no English review to translate
-  if (_activeReviewLang() !== 'zh') return;   // last read in English → nothing to do
-  // _setReviewLang('zh') translates the current English cache (cache-hit →
-  // instant); it never issues a review generation request.
-  return _setReviewLang('zh');
-}
-
-/** Set the review READING language (bidirectional, always available — NOT
- *  gated on the app UI language).
- *
- *  English is always the canonical generated/cached/exported review (the
- *  language the authors/AC read). Selecting '中' shows an on-demand translated
- *  reading view (produced by the Babel translate task under a DISTINCT
- *  composite key ``review:<venue>:zh`` so it never collides with the
- *  whole-paper Babel cache) and caches it client-side for instant re-toggle;
- *  selecting 'EN' restores the canonical English render. The choice is
- *  persisted per paper so re-opening the Review tab restores the last language. */
-async function _setReviewLang(lang) {
-  if (lang !== 'en' && lang !== 'zh') return;
-  var view = _reportView('review');
-  var container = document.getElementById(view.containerId);
-  if (!container) return;
-  var english = view.cache;
-  if (_activePaperId) _persistReviewLang(_activePaperId, lang);
-
-  // English → restore the canonical render.
-  if (lang === 'en') {
-    _paperReviewShowTranslation = false;
-    if (english) _renderFinalReport(container, english, view.meta, view);
-    _syncReviewTranslateBtn();
-    return;
-  }
-
-  if (!english) { _syncReviewTranslateBtn(); return; }  // nothing generated yet
-
-  // Chinese, already translated → instant.
-  if (_paperReviewTranslatedText) {
-    _paperReviewShowTranslation = true;
-    _renderFinalReport(container, _paperReviewTranslatedText, view.meta, view);
-    _syncReviewTranslateBtn();
-    return;
-  }
-
-  if (_paperReviewTranslating) return;
-  _paperReviewTranslating = true;
-  _syncReviewTranslateBtn();
-
-  // Distinct cache key: venue + target lang, so the translated review is
-  // cached per (paper, venue, target-lang) and never collides with the Babel
-  // whole-paper translation cache keyed on the bare lang. Target is always
-  // 'zh' (English is canonical, so we only ever translate INTO Chinese).
-  var trKey = 'review:' + (_paperReviewVenue || 'generic') + ':zh';
-  var startPaperId = _activePaperId;
-
-  try {
-    // (1) Client-server cache hit → instant.
-    if (_paperHash) {
-      try {
-        var cd = await Api.paper.translateCache(_paperHash, trKey);
-        if (cd && cd.ok && cd.text) {
-          if (_activePaperId !== startPaperId) return;
-          _paperReviewTranslatedText = cd.text;
-          _paperReviewShowTranslation = true;
-          _renderFinalReport(container, cd.text, view.meta, view);
-          return;
-        }
-      } catch (e) { console.warn('[Paper:Review] translate cache lookup failed:', e); }
-    }
-
-    // (2) Start (or join) the translate task on the ENGLISH review markdown.
-    var startData = await Api.paper.translateStart({
-      paper_text: english, lang: trKey, paper_hash: _paperHash || '',
-    });
-    if (!startData || !startData.ok) throw new Error((startData && startData.error) || 'translate start failed');
-    if (startData.cached && startData.text) {
-      if (_activePaperId !== startPaperId) return;
-      _paperReviewTranslatedText = startData.text;
-      _paperReviewShowTranslation = true;
-      _renderFinalReport(container, startData.text, view.meta, view);
-      return;
-    }
-    if (startData.paper_hash) _paperHash = startData.paper_hash;
-    var taskId = startData.task_id;
-    if (!taskId) throw new Error('translate task returned no task_id');
-
-    // (3) Poll to completion. Reuses the Babel event schema (chunk/done/error).
-    var cursor = 0;
-    var parts = [];
-    while (true) {
-      if (_activePaperId !== startPaperId) { try { await Api.paper.translateAbort(taskId); } catch (_) {} return; }
-      var pollResp = await Api.paper.translatePoll(taskId, cursor);
-      if (!pollResp || !pollResp.ok) throw new Error('poll HTTP ' + (pollResp ? pollResp.status : 'none'));
-      var pollData = await pollResp.json();
-      if (!pollData.ok) throw new Error(pollData.error || 'poll failed');
-      cursor = pollData.next_cursor || cursor;
-      var events = pollData.events || [];
-      for (var ei = 0; ei < events.length; ei++) {
-        var ev = events[ei];
-        if (ev.type === 'chunk') {
-          parts.push(ev.text || '');
-        } else if (ev.type === 'done') {
-          if (_activePaperId !== startPaperId) return;
-          _paperReviewTranslatedText = ev.text || parts.join('\n\n');
-          _paperReviewShowTranslation = true;
-          _renderFinalReport(container, _paperReviewTranslatedText, view.meta, view);
-          return;
-        } else if (ev.type === 'error') {
-          var m = (typeof errorEnvelopeMessage === 'function') ? errorEnvelopeMessage(ev.error)
-            : (typeof ev.error === 'string' ? ev.error : '');
-          throw new Error(m || 'translation failed');
-        }
-      }
-      if (pollData.status === 'error') throw new Error('translation failed');
-      if (pollData.status === 'done' && !events.length) return;
-      await new Promise(function(r) { setTimeout(r, 700); });
-    }
-  } catch (e) {
-    console.warn('[Paper:Review] translate failed:', e);
-    if (typeof showToast === 'function') {
-      showToast((typeof t === 'function') ? t('paper.reviewTranslateFailed') : 'Translation failed', 'error');
-    }
-  } finally {
-    _paperReviewTranslating = false;
-    _syncReviewTranslateBtn();
-  }
-}
-
-/** Back-compat: flip the review reading language to the OTHER one. Retained so
- *  any external caller keeps working; the UI now uses the EN/中 segmented
- *  control (_setReviewLang) directly. */
-function _toggleReviewTranslation() {
-  return _setReviewLang(_paperReviewShowTranslation ? 'en' : 'zh');
-}
-
-/** Sync the review EN/中 segmented control: active option reflects the current
- *  reading language; the '中' option shows a spinner + is disabled while a
- *  translation is in flight. The control is ALWAYS available (both directions),
- *  independent of the app UI language — it's only disabled until a review
- *  exists to read. */
-function _syncReviewTranslateBtn() {
-  var wrap = document.getElementById('reviewLangToggle');
-  if (!wrap) return;
-  var view = _reportView('review');
-  var hasReview = !!view.cache;
-  var cur = _activeReviewLang();
-  wrap.style.opacity = hasReview ? '' : '0.5';
-  wrap.querySelectorAll('.paper-report-lang-opt').forEach(function(btn) {
-    var isZh = btn.dataset.lang === 'zh';
-    btn.classList.toggle('active', btn.dataset.lang === cur);
-    // Disable interactions until a review exists; disable '中' while translating.
-    btn.disabled = !hasReview || (isZh && _paperReviewTranslating);
-    if (isZh) {
-      btn.classList.toggle('loading', !!_paperReviewTranslating);
-      btn.title = _paperReviewTranslating
-        ? ((typeof t === 'function') ? t('paper.reviewTranslating') : 'Translating…')
-        : ((typeof t === 'function') ? t('paper.reviewTranslateTitle') : 'Read in Chinese');
-    }
-  });
-}
-
-/** Called when the user opens the Report tab. Priority:
- *   1. Have stream state for active paper → paint + resume poll if running.
- *   2. Look up server-side running task by paper_hash → attach + poll.
- *   3. Try DB cache lookup.
- *   4. Start a new task.
- */
-async function _loadOrGenerateReport(view) {
-  view = view || _reportView('report');
-  var reportLang = view.uiLang();
-  var langKey = view.langKey();
-  var startPaperId = _activePaperId;
-
-  // (1) Existing local stream state for this paper
-  if (view.stream && view.stream.paperId === _activePaperId) {
-    _paintReportFromState(view);
-    if (view.stream.status === 'running' && !view.stream.pollTimer) {
-      _attachReportPush(view, view.stream);
-      _pollReportTask(view);
-    } else if (view.stream.status === 'done') {
-      // Terminal English render on tab re-entry — re-apply a persisted Chinese
-      // reading view (translate-only; cached translation is instant, never
-      // regenerates). Guarded to 'done' so it never fires mid-generation.
-      _restoreReviewReadingLang(view);
-    }
-    return;
-  }
-
-  // (1.5) Pending regenerate intent — MUST take priority over the step-2
-  // lookup-reconnect. The user clicked Regenerate and a refresh interrupted
-  // the force /start before the new task registered. The OLD task is still
-  // RUNNING (cooperative abort) and the dedup index (paper_hash, lang) still
-  // points to it, so step-2's lookup would re-attach to exactly the task the
-  // user asked to REPLACE — silently swallowing the regenerate. Re-issuing
-  // force /start is the right move: it atomically aborts the old task AND
-  // starts a fresh one. _generatePaperReport(true) clears the intent the
-  // moment it attaches the new task_id (re-entrancy guard against a
-  // refresh→endless-regenerate loop).
-  if (_hasReportRegenIntent(_paperHash, reportLang, view.regenIntentKey)) {
-    console.warn('[Paper:Report] pending regenerate intent for hash=' + _paperHash
-                 + ' lang=' + reportLang + ' kind=' + view.kind
-                 + ' — resuming force-start (priority over lookup-reconnect)');
-    _generatePaperReport(true, view);
-    return;
-  }
-
-  // (1.6) In-memory cache for this view → paint instantly, no round-trip. This
-  // is the fast path when the report was already loaded once this session.
-  if (view.cache) {
-    var cEl = document.getElementById(view.containerId);
-    if (cEl) _renderFinalReport(cEl, view.cache, undefined, view);
-    _restoreReviewReadingLang(view);
-    return;
-  }
-
-  // The lookup + cache round-trips below are async. Until they resolve, replace
-  // the static "Generate" empty-state (baked into index.html) with a neutral
-  // loading placeholder — otherwise a paper that ALREADY has a report flashes
-  // the Generate button before the cache hit paints. If every path misses,
-  // step 4 renders the real Generate prompt over this placeholder.
-  var loadEl = document.getElementById(view.containerId);
-  if (loadEl) {
-    loadEl.innerHTML =
-      '<div class="paper-loading"><div class="paper-loading-spinner"></div>' +
-      '<div>' + escapeHtml((typeof t === 'function') ? t('paper.loadingReport') : 'Loading…') + '</div></div>';
-  }
-
-  // (2) Server-side task lookup (survives chat-mode round-trips). Uses the
-  // composite langKey so a review reconnects to the review task, not the
-  // plain report.
-  if (_paperHash) {
-    try {
-      var lookupData = await Api.paper.reportLookup(_paperHash, langKey);
-      if (_activePaperId !== startPaperId) return;
-      if (lookupData && lookupData.ok && lookupData.task_id
-          && (lookupData.status === 'running' || lookupData.status === 'pending')) {
-        // Attach to the running server-side task
-        var container = document.getElementById(view.containerId);
-        if (container) _renderReportSkeleton(container, reportLang, view);
-        view.stream = _makeReportStreamState(startPaperId, reportLang, lookupData.task_id, view.kind);
-        _syncReportToolbar(true, view);
-        _attachReportPush(view, view.stream);
-        _pollReportTask(view);
-        return;
-      }
-    } catch (e) {
-      if (_activePaperId !== startPaperId) return;
-      console.warn('[Paper:Report] lookup failed (non-fatal):', e);
-    }
-  }
-
-  // (3) Try server DB cache by hash (avoids re-sending text)
-  try {
-    var cacheBody = { lang: langKey };
-    if (_paperHash) cacheBody.paper_hash = _paperHash;
-    else cacheBody.paper_text = _paperParsedText;
-    var cacheData = await Api.paper.reportCache(cacheBody);
-    if (_activePaperId !== startPaperId) return;
-    if (cacheData && cacheData.ok && cacheData.report) {
-      view.cache = cacheData.report;
-      view.meta = cacheData.meta || null;
-      if (typeof runtimeScope._paperXpSet === 'function') {
-        runtimeScope._paperXpSet(view, '_xpInsight', cacheData.insight || null);
-        runtimeScope._paperXpSet(view, '_xpCheckpoints', cacheData.checkpoints || null);
-      } else {
-        view._xpInsight = cacheData.insight || null;
-        view._xpCheckpoints = cacheData.checkpoints || null;
-      }
-      if (cacheData.paper_hash) _paperHash = cacheData.paper_hash;
-      _rememberReportSnapshot(view, cacheData.report, cacheData.meta);
-      _persistGeneratedReviewVenue(view, langKey, startPaperId);
-      _saveActivePaperState();
-      var c2 = document.getElementById(view.containerId);
-      if (c2) _renderFinalReport(c2, cacheData.report, undefined, view);
-      // Reopen restore: if the user last read THIS review in Chinese, re-apply
-      // the translated view (translate-only, never regenerates the English).
-      _restoreReviewReadingLang(view);
-      return;
-    }
-  } catch (e) {
-    if (_activePaperId !== startPaperId) return;
-    console.warn('[Paper:Report] Cache lookup failed:', e);
-  }
-
-  // (3.5) The active language has no report — but the OTHER language may
-  // already be generated. Per the "show whatever exists, only offer the manual
-  // trigger when NOTHING exists" rule: probe the other report language and, if
-  // it has a persisted report, adopt that language and paint it instead of the
-  // Generate prompt. Report-only — a review is always English-canonical (its
-  // Chinese view is a translate-only reading of the same English body, so there
-  // is no per-language generated variant to fall back to).
-  if (view.kind === 'report' && _paperHash) {
-    var otherLang = (reportLang === 'zh') ? 'en' : 'zh';
-    try {
-      var otherData = await Api.paper.reportCache({ lang: otherLang, paper_hash: _paperHash });
-      if (_activePaperId !== startPaperId) return;
-      if (otherData && otherData.ok && otherData.report) {
-        // Adopt the generated language as the active report language so the
-        // toggle, snapshot key, and render all resolve to it consistently.
-        _persistReportLang(_activePaperId, otherLang);
-        _syncReportLangToggle(view);
-        view.cache = otherData.report;
-        view.meta = otherData.meta || null;
-        if (typeof runtimeScope._paperXpSet === 'function') {
-          runtimeScope._paperXpSet(view, '_xpInsight', otherData.insight || null);
-          runtimeScope._paperXpSet(view, '_xpCheckpoints', otherData.checkpoints || null);
-        } else {
-          view._xpInsight = otherData.insight || null;
-          view._xpCheckpoints = otherData.checkpoints || null;
-        }
-        if (otherData.paper_hash) _paperHash = otherData.paper_hash;
-        _rememberReportSnapshot(view, otherData.report, otherData.meta);
-        _saveActivePaperState();
-        var c3 = document.getElementById(view.containerId);
-        if (c3) _renderFinalReport(c3, otherData.report, undefined, view);
-        return;
-      }
-    } catch (e) {
-      if (_activePaperId !== startPaperId) return;
-      console.warn('[Paper:Report] other-language cache lookup failed (non-fatal):', e);
-    }
-  }
-
-  // (4) No cache in EITHER language, no running task — DO NOT auto-start. Show
-  // a manual-start prompt so the user can first adjust the model / language /
-  // venue in the toolbar, then click Generate. (User preference: never
-  // auto-generate on tab open, otherwise the settings can't be tuned before
-  // the run begins.)
-  if (_activePaperId !== startPaperId) return;
-  _renderReportStartPrompt(view);
-}
-
-/** Manual-start prompt: rendered when a paper is loaded but no report/review
- *  exists yet (no cache, no running task). The toolbar (model / language /
- *  venue) is already visible and tunable; the user clicks Generate to begin.
- *  This is the seam that keeps generation user-initiated. */
-function _renderReportStartPrompt(view) {
-  view = view || _reportView('report');
-  var container = document.getElementById(view.containerId);
-  if (!container) return;
-  _syncReportToolbar(false, view);
-  var isReview = view.kind === 'review';
-  var genFn = isReview ? '_generatePaperReview()' : '_generatePaperReport()';
-  var _tt = (typeof t === 'function') ? t : function(k) { return k; };
-  var title = _tt(isReview ? 'paper.reviewEmptyTitle' : 'paper.reportEmptyTitle');
-  var hint = _tt(isReview ? 'paper.reviewEmptyHint' : 'paper.reportEmptyHint');
-  var btnLabel = _tt(isReview ? 'paper.reviewGenerate' : 'paper.reportGenerate');
-  container.innerHTML =
-    '<div class="paper-report-empty">' +
-      '<p>' + escapeHtml(title) + '</p>' +
-      '<p class="paper-report-hint">' + escapeHtml(hint) + '</p>' +
-      '<button class="paper-report-generate-btn" data-tofu-action="' + genFn + '">' +
-        '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>' +
-        '<span>' + escapeHtml(btnLabel) + '</span>' +
-      '</button>' +
-    '</div>';
-}
-
-/** Review-Mode entry: load-or-generate against the review view-context. */
-async function _loadOrGenerateReview() {
-  return _loadOrGenerateReport(_reportView('review'));
-}
 
 
 // ── Report Model Picker ──
@@ -2235,14 +1615,23 @@ function _populatePaperReportModelDropdown(view) {
   view = view || _reportView('report');
   var dropdown = document.getElementById(view.modelDropdownId);
   if (!dropdown) return;
-  var models = (typeof _registeredModels !== 'undefined') ? _registeredModels : [];
-  var hiddenSet = (typeof _hiddenModels !== 'undefined') ? _hiddenModels : new Set();
+  var pickerState = typeof _paperModelPickerState === 'function'
+    ? _paperModelPickerState()
+    : {
+        models: globalThis._registeredModels,
+        hiddenModels: globalThis._hiddenModels,
+        selectedModel: (globalThis.config && globalThis.config.model)
+          || globalThis.serverModel || '',
+      };
+  var models = Array.isArray(pickerState.models) ? pickerState.models : [];
+  var hiddenSet = pickerState.hiddenModels instanceof Set
+    ? pickerState.hiddenModels : new Set();
 
   dropdown.innerHTML = '';
 
   // Filter to chat-capable visible models. isChatModel is the SSOT-backed
-  // predicate from core/model_caps.js — falls back to the hardcoded set
-  // {image_gen, embedding, transcription} when the server payload is absent.
+  // predicate from the typed owner; its compiled fallback stays aligned with
+  // the backend until a server taxonomy payload replaces it.
   var chatModels = models.filter(function(m) {
     if (hiddenSet.has(m.model_id)) return false;
     return (typeof runtimeScope.isChatModel === 'function') ? runtimeScope.isChatModel(m) : true;
@@ -2257,9 +1646,7 @@ function _populatePaperReportModelDropdown(view) {
   if (!view.model && chatModels.length > 0) {
     var availableIds = {};
     for (var ci = 0; ci < chatModels.length; ci++) availableIds[chatModels[ci].model_id] = true;
-    var preset = (typeof config !== 'undefined' && config && config.model)
-      ? config.model
-      : ((typeof serverModel !== 'undefined' && serverModel) ? serverModel : '');
+    var preset = String(pickerState.selectedModel || '');
     var seed = (preset && availableIds[preset]) ? preset : chatModels[0].model_id;
     _selectPaperReportModel(seed, view);
   }
@@ -2274,15 +1661,14 @@ function _populatePaperReportModelDropdown(view) {
   }
 
   /* Order both axes the way the user READS them, via the SAME shared
-   * comparator the toolbar picker uses (_compareModelsByDisplayName,
-   * settings/branding.js): provider sections by provider name, in-section
+   * comparator the toolbar picker uses (_compareModelsByDisplayName from the
+   * typed model-display owner): provider sections by provider name, in-section
    * models by display name (_modelShortName — NOT the raw model_id, which
    * sorts `yuju-claude-opus-5-evaDaily` under 'y' while rendering as
    * "Claude Opus 5"). Both pickers read the same _registeredModels, so
    * routing through one comparator keeps the two lists from ever
-   * disagreeing. Guarded: a stale bundle missing branding.js leaves the
-   * list in arrival order rather than throwing and stranding an empty
-   * dropdown (same rationale as the toolbar picker's isChatModel guard). */
+   * disagreeing. The guard keeps isolated alternate entries usable when they
+   * omit the composed policy. */
   var _canSort = (typeof _compareModelsByDisplayName === 'function');
   var pids = Object.keys(grouped);
   if (_canSort) {
@@ -2501,37 +1887,21 @@ function _syncReportToolbar(running, view) {
     if (typeof _syncReviewSegState === 'function') { try { _syncReviewSegState(); } catch (e) {} }
   }
   // Keep the EN/中 segmented control in sync on every paint (both views).
-  if (typeof _syncReportLangToggle === 'function') _syncReportLangToggle(view);
+  if (typeof runtimeScope._syncReportLangToggle === 'function') {
+    runtimeScope._syncReportLangToggle(view);
+  }
   // Review-only: a fresh run invalidates any cached translation reading view;
   // keep the translate toggle's state in sync on every paint.
   if (view.kind === 'review') {
     if (running) {
-      _paperReviewShowTranslation = false;
-      _paperReviewTranslatedText = '';
+      runtimeScope._paperReviewShowTranslation = false;
+      runtimeScope._paperReviewTranslatedText = '';
     }
-    if (typeof _syncReviewTranslateBtn === 'function') _syncReviewTranslateBtn();
+    if (typeof runtimeScope._syncReviewTranslateBtn === 'function') {
+      runtimeScope._syncReviewTranslateBtn();
+    }
   }
 }
-
-async function _regeneratePaperReport(view) {
-  view = view || _reportView('report');
-  // Atomic regenerate: the backend's force=true /start aborts the old task
-  // AND registers the new task_id over the dedup index in ONE transaction
-  // (routes/paper.py). So we do NOT fire a separate /abort — that split the
-  // "stop + restart" into two fire-and-forget requests, and a refresh between
-  // them left the old task half-aborted with no new task registered, so
-  // re-entry reverted to the stale DB cache (orphan running task).
-  var reportLang = view.uiLang();
-  // Persist the regenerate INTENT synchronously, BEFORE the await below, so
-  //   a refresh that interrupts the force /start round-trip still resumes the
-  //   regenerate on re-entry instead of showing the old report.
-  _setReportRegenIntent(_paperHash, reportLang, view.regenIntentKey);
-  _resetReportLocalState(view);
-  view.cache = '';
-  await _generatePaperReport(true, view);
-}
-
-async function _regeneratePaperReview() { return _regeneratePaperReport(_reportView('review')); }
 
 function _copyPaperReport(view) {
   view = view || _reportView('report');
@@ -2550,7 +1920,7 @@ function _copyPaperRebuttal() { return _copyPaperReport(_reportView('rebuttal'))
  *  and (c) the active tab being an OpenReview page — each failure returns a
  *  clear, actionable toast rather than a silent no-op. */
 async function _autofillOpenReview() {
-  if (!_activePaperId || !_paperHash) {
+  if (!runtimeScope._activePaperId || !_paperHash) {
     if (typeof showToast === 'function') showToast((typeof t === 'function') ? t('paper.autofillNoPaper') : 'Open a paper first');
     return;
   }
@@ -2587,22 +1957,6 @@ async function _autofillOpenReview() {
   } finally {
     if (btn) btn.disabled = false;
   }
-}
-
-/** Persist the author-rebuttal paste per paper so it survives tab switches and
- *  reloads (keyed by paper id, like the venue/lang maps). Lives in
- *  report.js next to the other paper-scoped state writers. */
-function _onRebuttalInputChange(val) {
-  _paperRebuttalInputText = val || '';
-  try {
-    if (typeof _activePaperId !== 'undefined' && _activePaperId) {
-      var raw = localStorage.getItem('paper_rebuttal_text_by_id');
-      var map = raw ? JSON.parse(raw) : {};
-      if (_paperRebuttalInputText) map[_activePaperId] = _paperRebuttalInputText;
-      else delete map[_activePaperId];
-      localStorage.setItem('paper_rebuttal_text_by_id', JSON.stringify(map));
-    }
-  } catch (e) { console.warn('[Paper:Rebuttal] persist input failed:', e); }
 }
 
 function _togglePaperReportExportMenu(ev, view) {
@@ -2703,7 +2057,7 @@ function _persistReviewVenue(paperId, venueKey) {
  *  and malformed keys are ignored. */
 function _persistGeneratedReviewVenue(view, langKey, paperId) {
   if (!view || view.kind !== 'review') return;
-  paperId = paperId || _activePaperId;
+  paperId = paperId || runtimeScope._activePaperId;
   if (!paperId) return;
   var parts = String(langKey || '').split(':');
   if (parts[0] !== 'review' || !parts[1]) return;
@@ -2736,7 +2090,7 @@ async function _resolveReviewVenue() {
   await _ensureReviewVenues();
   if (!_paperReviewVenues.length) return _paperReviewVenue;  // nothing to pick from
   if (!_paperReviewVenue) {
-    var stored = _readVenueMap()[_activePaperId];
+    var stored = _readVenueMap()[runtimeScope._activePaperId];
     var valid = stored && _paperReviewVenues.some(function(v) { return v.key === stored; });
     _selectReviewVenue(valid ? stored : _paperReviewVenues[0].key, true);
   }
@@ -2775,7 +2129,7 @@ function _selectReviewVenue(key, silent) {
   // (first-in-registry), so persisting it would (a) pin every merely-viewed
   // paper to the current default and (b) write localStorage on every tab open.
   // We only want to remember a venue the user deliberately picked.
-  if (key && _activePaperId && !silent) _persistReviewVenue(_activePaperId, key);
+  if (key && runtimeScope._activePaperId && !silent) _persistReviewVenue(runtimeScope._activePaperId, key);
   var label = document.getElementById('paperReviewVenueLabel');
   if (label) {
     var found = _paperReviewVenues.find(function(v) { return v.key === key; });
@@ -2792,9 +2146,9 @@ function _selectReviewVenue(key, silent) {
   // newly-selected venue — its cache key differs, so this never clobbers
   // another venue's stored review.
   if (changed && !silent && _paperActiveTab === 'review') {
-    _resetReportLocalState(_reportView('review'));
+    runtimeScope._resetReportLocalState(_reportView('review'));
     _paperReviewCache = '';
-    _loadOrGenerateReview();
+    runtimeScope._loadOrGenerateReport(_reportView('review'));
   }
 }
 
@@ -2820,15 +2174,29 @@ if (typeof window !== 'undefined') {
   runtimeScope._segApplyDeltaReset = _segApplyDeltaReset;
   runtimeScope._reportSegmentsForRender = _reportSegmentsForRender;
   runtimeScope._applyReportEventRaw = _applyReportEventRaw;
+  runtimeScope._attachReportPush = _attachReportPush;
   runtimeScope._detachReportPush = _detachReportPush;
   runtimeScope._paintReportFromState = _paintReportFromState;
   runtimeScope._persistGeneratedReviewVenue = _persistGeneratedReviewVenue;
-  runtimeScope._loadOrGenerateReport = _loadOrGenerateReport;
   runtimeScope._populateReviewVenueDropdown = _populateReviewVenueDropdown;
   runtimeScope._populatePaperReportModelDropdown = _populatePaperReportModelDropdown;
   runtimeScope._teardownReadingTracker = _teardownReadingTracker;
   runtimeScope._renderFinalReport = _renderFinalReport;
-  runtimeScope._setReviewLang = _setReviewLang;
+  runtimeScope._renderReportSkeleton = _renderReportSkeleton;
+  runtimeScope._resolveReviewVenue = _resolveReviewVenue;
+  runtimeScope._syncReportToolbar = _syncReportToolbar;
+  runtimeScope._autofillOpenReview = _autofillOpenReview;
+  runtimeScope._copyPaperRebuttal = _copyPaperRebuttal;
+  runtimeScope._copyPaperReport = _copyPaperReport;
+  runtimeScope._copyPaperReview = _copyPaperReview;
+  runtimeScope._exportPaperReport = _exportPaperReport;
+  runtimeScope._exportPaperReview = _exportPaperReview;
+  runtimeScope._scrollReportToHeading = _scrollReportToHeading;
+  runtimeScope._togglePaperReportExportMenu = _togglePaperReportExportMenu;
+  runtimeScope._togglePaperReportModelDropdown = _togglePaperReportModelDropdown;
+  runtimeScope._togglePaperReviewExportMenu = _togglePaperReviewExportMenu;
+  runtimeScope._togglePaperReviewModelDropdown = _togglePaperReviewModelDropdown;
+  runtimeScope._toggleReviewVenueDropdown = _toggleReviewVenueDropdown;
   // Backing refs: an accessor whose getter reads the property it defines
   // is self-recursive — every read is RangeError (detonated at boot by the
   // tail publish loop's key walk, 2026-08-15). The refs keep the
@@ -2848,4 +2216,3 @@ if (typeof window !== 'undefined') {
     },
   });
 }
-

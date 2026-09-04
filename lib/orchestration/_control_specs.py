@@ -12,8 +12,8 @@ import copy
 from lib.orchestration.field_spec_contract import field_spec
 from lib.orchestration.field_spec_validation import validate_field_specs
 from lib.orchestration.loop_policy import (
-    DEFAULT_EXECUTOR_MAX_ITERATIONS,
     DEFAULT_MAX_ITERATIONS,
+    MAX_EXECUTOR_MAX_ITERATIONS,
 )
 from lib.orchestration._role_specs import MAX_OBJECTIVE_LEN
 
@@ -76,7 +76,7 @@ CONTROL_PARAM_SCHEMA = {
     'loop': [
         _control_field(
             'max_iterations', 'int', 'orch.fld.maxIter', min=1,
-            runtimeMax=DEFAULT_EXECUTOR_MAX_ITERATIONS,
+            runtimeMax=MAX_EXECUTOR_MAX_ITERATIONS,
         ),
         _control_field('stop_condition', 'select', 'orch.fld.stopWhen',
                        options=[

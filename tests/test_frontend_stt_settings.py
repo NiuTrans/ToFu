@@ -1,275 +1,150 @@
-#!/usr/bin/env python3
-"""jsdom test for static/js/settings/speech.js (Speech / STT settings tab).
+"""Speech settings persist through the owner-scoped model-routing v2 API."""
 
-Drives the REAL shipped speech.js under jsdom and asserts the WRITE PATH the
-backend depends on:
-
-  * enabled + a chosen card → _applySttToProviders() pushes ONE dedicated
-    provider (id='stt') into _stgProviders whose model carries an EXPLICIT
-    per-cell key_access[idx].capabilities override — the thing that defeats the
-    DEFAULT_SLOT_CONFIGS trap (see settings/speech.js header + the Python
-    integration test test_stt_settings_write_path.py).
-  * the Omni card writes cap 'audio_chat'; endpoint cards write 'transcription'.
-  * disabling the toggle removes the stt provider entirely (idempotent).
-  * NEUTER: assert key_access is present AND non-empty on the written model —
-    a shape without it is exactly the silently-broken pre-fix bug.
-
-Run: make test-frontend  (skips cleanly when node/jsdom aren't installed)
-"""
+from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
+from tests._paper_vite import compiled_typescript
+
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_TS = ROOT / 'frontend/src/features/settings/speech.ts'
-ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
-_BODY = r'''
+
+@pytest.fixture(scope='module')
+def speech_bundle():
+    with compiled_typescript(
+        MODULE_TS,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        yield built
+
+
+def test_speech_provider_uses_v2_bundle_and_dedicated_secret_channel(
+    speech_bundle,
+):
+    body = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
+const emptyAuthority = () => ({
+  contract_version: 'tofu.model-routing/v2', revision: 4,
+  creators: [], models: [], providers: [], provider_accesses: [],
+  connections: [], credentials: [], offerings: [], deployments: [],
+});
 const { window, document, check, report } = setup({
   root: process.argv[3],
-  html: '<!DOCTYPE html><body>' +
-    '<input type="checkbox" id="settingSttEnabled">' +
-    '<div id="sttProviderFields"></div>' +
-    '<select id="settingSttProvider">' +
-      '<option value="openai">o</option><option value="groq">g</option>' +
-      '<option value="omni">m</option><option value="doubao">d</option>' +
-      '<option value="custom">c</option></select>' +
-    '<div id="sttStatusBanner"></div><span id="sttStatusText"></span>' +
-    // OpenAI card fields
-    '<div id="sttCardOpenai"></div>' +
-    '<select id="settingSttModelOpenai"><option value="gpt-4o-transcribe">x</option></select>' +
-    '<input id="settingSttBaseOpenai"><input id="settingSttKeyOpenai">' +
-    // Groq
-    '<div id="sttCardGroq"></div>' +
-    '<select id="settingSttModelGroq"><option value="whisper-large-v3-turbo">x</option></select>' +
-    '<input id="settingSttBaseGroq"><input id="settingSttKeyGroq">' +
-    // Omni
-    '<div id="sttCardOmni"></div>' +
-    '<input id="settingSttModelOmni"><input id="settingSttBaseOmni"><input id="settingSttKeyOmni">' +
-    // Custom
-    '<div id="sttCardCustom"></div>' +
-    '<input id="settingSttModelCustom"><input id="settingSttBaseCustom"><input id="settingSttKeyCustom">' +
+  html: '<!doctype html><body>' +
+    '<input type="checkbox" id="settingSttEnabled" checked>' +
+    '<select id="settingSttProvider"><option value="openai">openai</option>' +
+      '<option value="omni">omni</option></select>' +
+    '<input id="settingSttModelOpenai" value="gpt-4o-transcribe">' +
+    '<input id="settingSttBaseOpenai" value="https://api.openai.com/v1">' +
+    '<input id="settingSttKeyOpenai" value="sk-new-secret">' +
+    '<div id="sttCardOpenai"></div><div id="sttCardGroq"></div>' +
+    '<div id="sttCardOmni"></div><div id="sttCardCustom"></div>' +
     '</body>',
   targets: [process.argv[2]],
   globals: {
-    _stgProviders: [],
-    // Minimal _setVal (real one lives in core_panel.js, not eval'd here).
-    _setVal: function (id, value, prop) {
-      var el = document.getElementById(id);
-      if (!el) return;
-      if (prop === 'checked') el.checked = !!value; else el.value = value;
-    },
-    Api: { audio: { capabilities: async () => ({ available: false, models: [] }) } },
+    _stgModelRouting: emptyAuthority(),
+    _stgModelRoutingRevision: 4,
   },
 });
-
 for (const name of ['HTMLElement', 'HTMLInputElement', 'HTMLSelectElement',
-                    'AbortController', 'AbortSignal']) {
-  global[name] = window[name];
-}
-// Classic scripts declare globals directly; the native module deliberately
-// exports only its compatibility surface on window.
-for (const name of ['_applySttToProviders', '_switchSttProvider']) {
-  if (typeof window[name] === 'function') global[name] = window[name];
-}
+                    'AbortController', 'AbortSignal']) global[name] = window[name];
 
-const $ = (id) => document.getElementById(id);
-const sttProv = () => _stgProviders.filter((p) => p.id === 'stt')[0] || null;
+let created = null, updated = null, deleted = null;
+window.Api = {
+  modelRouting: {
+    createProvider: async (bundle, revision) => { created = { bundle, revision }; },
+    saveProvider: async (providerId, bundle, revision) => {
+      updated = { providerId, bundle, revision };
+    },
+    deleteProvider: async (providerId, revision) => { deleted = { providerId, revision }; },
+    get: async () => ({ model_routing: window._stgModelRouting,
+                        revision: window._stgModelRoutingRevision }),
+  },
+};
 
 (async () => {
   try {
-    // ── 1. disabled → collect returns null, apply writes nothing ──
-    $('settingSttEnabled').checked = false;
-    _applySttToProviders();
-    check('disabled_no_provider', sttProv() === null);
+    await window._persistSttProvider();
+    const bundle = created && created.bundle;
+    check('create_uses_cas_revision', created && created.revision === 4);
+    check('provider_access_is_owner_scoped',
+      bundle.provider.provider_id === 'stt' && bundle.provider.scope === 'owner' &&
+      bundle.provider_access.provider_access_id === 'stt-access');
+    check('secret_uses_dedicated_bundle_channel',
+      bundle.credential_secrets['stt-credential'] === 'sk-new-secret' &&
+      bundle.credentials[0].secret_reference === '');
+    check('confirmed_model_identity_is_explicit',
+      bundle.offerings[0].identity_state === 'confirmed' &&
+      bundle.offerings[0].model.creator_id === 'tofu-user-stt-transcription' &&
+      bundle.models[0].model_id === 'gpt-4o-transcribe');
+    check('deployment_preserves_wire_id',
+      bundle.deployments[0].wire_model_id === 'gpt-4o-transcribe' &&
+      bundle.deployments[0].probe_status === 'passed');
 
-    // ── 2. enabled + OpenAI card → one stt provider with key_access override ──
-    $('settingSttEnabled').checked = true;
-    $('settingSttProvider').value = 'openai';
-    $('settingSttModelOpenai').value = 'gpt-4o-transcribe';
-    $('settingSttBaseOpenai').value = 'https://api.openai.com/v1';
-    $('settingSttKeyOpenai').value = 'sk-abc';
-    _applySttToProviders();
-    let p = sttProv();
-    check('openai_provider_written', !!p);
-    check('openai_single_stt', _stgProviders.filter((x) => x.id === 'stt').length === 1);
-    const m = p && p.models && p.models[0];
-    check('openai_model', m && m.model_id === 'gpt-4o-transcribe');
-    // THE load-bearing assertion: explicit per-cell key_access capability override.
-    check('openai_key_access_present', !!(m && m.key_access && m.key_access['0']));
-    check('openai_key_access_cap',
-      m && m.key_access['0'].capabilities && m.key_access['0'].capabilities[0] === 'transcription');
-    check('openai_key_index_matches_keys',
-      p && Object.keys(m.key_access).length === (p.api_keys.length || 1));
+    window._stgModelRouting = {
+      contract_version: 'tofu.model-routing/v2', revision: 8,
+      creators: bundle.creators, models: bundle.models,
+      providers: [bundle.provider], provider_accesses: [bundle.provider_access],
+      connections: bundle.connections,
+      credentials: [{ ...bundle.credentials[0], kind: 'api_key',
+        secret_reference: 'mrs_existing', key_hint: '…abcd' }],
+      offerings: bundle.offerings, deployments: bundle.deployments,
+    };
+    window._stgModelRoutingRevision = 8;
+    document.getElementById('settingSttKeyOpenai').value = '';
+    await window._persistSttProvider();
+    check('update_preserves_redacted_secret_reference',
+      updated && updated.providerId === 'stt' && updated.revision === 8 &&
+      updated.bundle.credentials[0].secret_reference === 'mrs_existing' &&
+      Object.keys(updated.bundle.credential_secrets).length === 0);
 
-    // ── 3. re-apply is idempotent (still exactly one stt provider) ──
-    _applySttToProviders();
-    check('reapply_idempotent', _stgProviders.filter((x) => x.id === 'stt').length === 1);
-
-    // ── 4. Omni card writes audio_chat (NOT transcription) ──
-    $('settingSttProvider').value = 'omni';
-    $('settingSttModelOmni').value = 'gemini-3-flash-preview';
-    $('settingSttBaseOmni').value = 'https://aigc.example/v1';
-    $('settingSttKeyOmni').value = 'omni-key';
-    _applySttToProviders();
-    p = sttProv();
-    check('omni_cap_audio_chat',
-      p && p.models[0].key_access['0'].capabilities[0] === 'audio_chat');
-    check('omni_model_cap_matches',
-      p && p.models[0].capabilities[0] === 'audio_chat');
-    // keyed omni → brand '' (normal cloud provider).
-    check('omni_keyed_brand_blank', p && p.brand === '');
-
-    // ── 4b. THE default-gateway path: blank-key Omni → brand:'local' ──
-    // (else _build_slots_from_providers skips it for having no keys → dead).
-    $('settingSttKeyOmni').value = '';
-    _applySttToProviders();
-    p = sttProv();
-    check('omni_blank_key_written', !!p);
-    check('omni_blank_key_no_api_keys', p && p.api_keys.length === 0);
-    check('omni_blank_key_brand_local', p && p.brand === 'local');
-    check('omni_blank_key_still_key_access',
-      p && p.models[0].key_access && p.models[0].key_access['0'].capabilities[0] === 'audio_chat');
-
-    // ── 4c. needsKey contract: blank-key OpenAI card → null (unconfigured) ──
-    $('settingSttProvider').value = 'openai';
-    $('settingSttBaseOpenai').value = 'https://api.openai.com/v1';
-    $('settingSttKeyOpenai').value = '';   // public cloud endpoint needs a key
-    _applySttToProviders();
-    check('openai_blank_key_unconfigured', sttProv() === null);
-
-    // ── 5. incomplete (no base URL) → treated as unconfigured (null) ──
-    $('settingSttProvider').value = 'custom';
-    $('settingSttModelCustom').value = 'whisper-1';
-    $('settingSttBaseCustom').value = '';   // required, empty
-    _applySttToProviders();
-    // custom has a defaultBase of '' → base stays empty → null → removed.
-    check('incomplete_custom_removed', sttProv() === null);
-
-    // ── 6. disabling after a write REMOVES the provider ──
-    $('settingSttProvider').value = 'openai';
-    $('settingSttKeyOpenai').value = 'sk-abc';   // restore (cleared in 4c)
-    $('settingSttEnabled').checked = true;
-    _applySttToProviders();
-    check('re_enabled_written', sttProv() !== null);
-    $('settingSttEnabled').checked = false;
-    _applySttToProviders();
-    check('disable_removes', sttProv() === null);
-
-    // ── 7. _switchSttProvider shows only the selected card ──
-    _switchSttProvider('groq');
-    check('switch_shows_groq', $('sttCardGroq').style.display === '');
-    check('switch_hides_openai', $('sttCardOpenai').style.display === 'none');
-  } catch (e) {
-    check('harness_threw: ' + (e && e.message), false);
+    document.getElementById('settingSttEnabled').checked = false;
+    await window._persistSttProvider();
+    check('disable_deletes_provider_access',
+      deleted && deleted.providerId === 'stt' && deleted.revision === 8);
+  } catch (error) {
+    check('harness_threw_' + String(error && error.message || error), false);
   } finally {
     report();
   }
 })();
 '''
-
-
-def test_stt_settings_frontend():
     run_harness(
-        target_js=os.path.join(JS_DIR, 'settings', 'speech.js'),
-        body_js=_BODY,
-        min_pass=21,
-        label='stt-settings',
+        target_js=speech_bundle,
+        body_js=body,
+        min_pass=7,
+        label='stt-model-routing-v2',
     )
 
 
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
-def test_vite_stt_settings_matches_classic_write_contract(tmp_path):
-    built = tmp_path / 'speech.js'
-    compiled = subprocess.run(
-        [str(ESBUILD), str(MODULE_TS), '--bundle', '--format=iife',
-         '--platform=browser', f'--outfile={built}'],
-        cwd=ROOT, capture_output=True, text=True,
+def test_speech_runtime_has_no_legacy_provider_array_port():
+    source = MODULE_TS.read_text(encoding='utf-8')
+    assert '_stgProviders' not in source
+    assert 'bridge._persistSttProvider = persistSttProvider;' in source
+    assert 'credential_secrets' in source
+
+    manifest = json.loads((
+        ROOT / 'frontend/src/runtime/sections/manifest.json'
+    ).read_text(encoding='utf-8'))
+    settings = next(
+        bundle for bundle in manifest['lazyBundles']
+        if bundle['name'] == 'settings-presenters'
     )
-    assert compiled.returncode == 0, compiled.stderr
-    run_harness(
-        target_js=str(built),
-        body_js=_BODY,
-        min_pass=21,
-        label='vite stt-settings',
+    assert {
+        'name': '_persistSttProvider',
+        'kind': 'function',
+        'providedBy': 'feature',
+    } in settings['runtimeServices']
+    assert not any(
+        binding['name'] == '_stgProviders'
+        for binding in settings['runtimeBindings']
     )
-
-
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
-def test_vite_stt_status_generation_and_panel_lifecycle(tmp_path):
-    built = tmp_path / 'speech-lifecycle.js'
-    compiled = subprocess.run(
-        [str(ESBUILD), str(MODULE_TS), '--bundle', '--format=iife',
-         '--platform=browser', f'--outfile={built}'],
-        cwd=ROOT, capture_output=True, text=True,
-    )
-    assert compiled.returncode == 0, compiled.stderr
-    script = r'''
-const { JSDOM } = require('jsdom');
-const dom = new JSDOM('<!doctype html><body>' +
-  '<input type="checkbox" id="settingSttEnabled">' +
-  '<div id="sttProviderFields"></div>' +
-  '<select id="settingSttProvider"><option value="openai">o</option>' +
-    '<option value="custom">c</option></select>' +
-  '<div id="sttCardOpenai"></div><div id="sttCardGroq"></div>' +
-  '<div id="sttCardOmni"></div><div id="sttCardCustom"></div>' +
-  '<div id="sttStatusBanner"></div><span id="sttStatusText"></span>' +
-  '</body>');
-global.window = dom.window;
-global.document = dom.window.document;
-for (const name of ['HTMLElement', 'HTMLInputElement', 'HTMLSelectElement',
-                    'AbortController', 'AbortSignal']) global[name] = dom.window[name];
-global._stgProviders = [];
-window.t = (key) => key;
-const resolvers = [];
-window.Api = { audio: { capabilities: () => new Promise(
-  (resolve) => resolvers.push(resolve)) } };
-require(BUILT_PATH);
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-(async () => {
-  window._populateSpeechTab();       // probe generation 1
-  const select = document.getElementById('settingSttProvider');
-  select.value = 'custom';
-  select.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-  const switchOwned = document.getElementById('sttCardCustom').style.display === ''
-    && document.getElementById('sttCardOpenai').style.display === 'none';
-
-  window._refreshSttStatus();        // probe generation 2
-  resolvers[1]({ available: false, models: [] });
-  await tick();
-  resolvers[0]({ available: true, models: [{ model: 'STALE' }] });
-  await tick();
-  const staleWon = document.getElementById('sttStatusText').textContent.includes('STALE');
-
-  const fields = document.getElementById('sttProviderFields');
-  window._destroySpeechTab();
-  document.getElementById('settingSttEnabled').checked = true;
-  document.getElementById('settingSttEnabled').dispatchEvent(
-    new dom.window.Event('change', { bubbles: true }));
-  console.log(JSON.stringify({
-    switchOwned,
-    staleWon,
-    listenerSurvivedDestroy: fields.style.display !== 'none',
-  }));
-})().catch((error) => { console.error(error); process.exitCode = 1; });
-'''.replace('BUILT_PATH', json.dumps(str(built)))
-    run = subprocess.run(
-        ['node', '-e', script], cwd=ROOT,
-        capture_output=True, text=True,
-    )
-    assert run.returncode == 0, run.stderr
-    result = json.loads(run.stdout.strip().splitlines()[-1])
-    assert result == {
-        'switchOwned': True,
-        'staleWon': False,
-        'listenerSurvivedDestroy': False,
-    }
+    save = (ROOT / 'frontend/src/runtime/sections/settings/save_export.js').read_text()
+    assert 'await _persistSttProvider();' in save

@@ -68,11 +68,25 @@ def multi_agent_task_shape(text: str) -> bool:
     return bool(_INDEPENDENT.search(value) and _COMPLEX.search(value))
 
 
+def _is_synthetic_user_carrier(message: Any) -> bool:
+    return bool(
+        isinstance(message, dict)
+        and message.get('role') == 'user'
+        and (message.get('_contextComposer')
+             or message.get('_isMeta')
+             or message.get('_isVuDirective')
+             or (message.get('_isInboxInject')
+                 and not message.get('_containsHumanSteer')))
+    )
+
+
 def latest_user_text(messages: Any) -> str:
     if not isinstance(messages, list):
         return ''
     for message in reversed(messages):
         if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if _is_synthetic_user_carrier(message):
             continue
         content = message.get('content')
         if isinstance(content, str):
@@ -82,6 +96,18 @@ def latest_user_text(messages: Any) -> str:
                 str(block.get('text') or '')
                 for block in content if isinstance(block, dict)).strip()
     return ''
+
+
+def genuine_user_message_count(messages: Any) -> int:
+    """Count human-authored user-lane messages in one bounded task history."""
+    if not isinstance(messages, list):
+        return 0
+    return sum(
+        1 for message in messages
+        if isinstance(message, dict)
+        and message.get('role') == 'user'
+        and not _is_synthetic_user_carrier(message)
+    )
 
 
 def _tool_name(tool: Any) -> str:
@@ -147,29 +173,52 @@ def _observed_read_fanout(messages: Any, eligible: set[str]) -> bool:
     return single >= 2 or (messages_with_calls >= 2 and total >= 3)
 
 
-def _observed_serial_chain(messages: Any, eligible: set[str]) -> list[str]:
-    """Return a trailing run of one eligible read call per model round."""
+def observed_single_tool_serial_chain(
+        messages: Any, eligible: set[str], *, minimum: int,
+        maximum: int) -> list[str]:
+    """Return a bounded trailing run of one eligible call per model round.
+
+    Request-local Context Composer/compaction/control carriers use the user
+    role for provider compatibility, but they are not a new human turn and do
+    not break a tool sequence. Genuine user steering remains a hard boundary.
+    """
     if not eligible:
         return []
+    minimum = max(1, int(minimum))
+    maximum = max(minimum, int(maximum))
     chain: list[str] = []
-    for message in reversed(list(messages or ())[-24:]):
+    # Tool results and bounded synthetic carriers can outnumber assistant
+    # messages. Four rows per requested round preserves the intended horizon
+    # without scanning an unbounded resident transcript.
+    for message in reversed(list(messages or ())[-maximum * 4:]):
         if not isinstance(message, dict):
             continue
         role = message.get('role')
         if role == 'tool':
             continue
+        if _is_synthetic_user_carrier(message):
+            continue
         if role != 'assistant':
             break
-        calls = [tc for tc in (message.get('tool_calls') or ())
-                 if isinstance(tc, dict)]
-        if len(calls) != 1:
+        calls = message.get('tool_calls') or ()
+        if (not isinstance(calls, (list, tuple)) or len(calls) != 1
+                or not isinstance(calls[0], dict)):
             break
         name = _tool_name(calls[0])
         if name not in eligible:
             break
         chain.append(name)
+        if len(chain) >= maximum:
+            break
     chain.reverse()
-    return chain[-6:] if len(chain) >= 3 else []
+    return chain if len(chain) >= minimum else []
+
+
+def observed_programmatic_serial_chain(
+        messages: Any, eligible: set[str]) -> list[str]:
+    """Return three to six trailing reviewed read calls, one per round."""
+    return observed_single_tool_serial_chain(
+        messages, eligible, minimum=3, maximum=6)
 
 
 def _multi_agent_stage(text: str) -> str:
@@ -200,7 +249,9 @@ def _composition_mode(programmatic: str, multi_agent: str) -> str:
 def resolve_tool_orchestration(
         *, requested_programmatic: str, requested_multi_agent: str,
         messages: Any, tools: Any, round_num: int,
-        model: str = '', policy_version: str = 'v1') -> dict[str, Any]:
+        model: str = '', policy_version: str = 'v1',
+        requested_programmatic_exposure: str = 'additive',
+) -> dict[str, Any]:
     """Resolve independent, composable lanes for one model round.
 
     The result describes task intent, not provider capability.  In particular,
@@ -266,7 +317,7 @@ def resolve_tool_orchestration(
 
     from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
     serial_chain = (
-        _observed_serial_chain(messages, eligible)
+        observed_programmatic_serial_chain(messages, eligible)
         if programmatic in ACTIVE_PROGRAMMATIC_MODES else [])
 
     composition = _composition_mode(programmatic, multi_agent)
@@ -297,6 +348,9 @@ def resolve_tool_orchestration(
         'programmaticCalling': programmatic,
         'programmaticReason': programmatic_reason,
         'programmaticTier': programmatic_tier,
+        'programmaticExposurePolicy': str(
+            requested_programmatic_exposure or 'additive'),
+        'programmaticSerialChainLength': len(serial_chain),
         'programmaticSerialChain': serial_chain,
         'programmaticStage': (
             _programmatic_stage(text)
@@ -321,7 +375,9 @@ def resolve_tool_orchestration(
 __all__ = [
     'TOOL_ORCHESTRATION_POLICY_VERSION',
     'TOOL_ORCHESTRATION_POLICY_V2',
+    'genuine_user_message_count',
     'latest_user_text',
     'multi_agent_task_shape',
+    'observed_programmatic_serial_chain',
     'resolve_tool_orchestration',
 ]

@@ -85,7 +85,10 @@ def test_bg_write_registers_conv_scoped_not_global():
         cfg.set_conv_roots(conv_id, primary)
 
         target_abs = os.path.join(sibling, 'README.md')
-        resolved = _resolve_write_path(primary, target_abs, conv_id=conv_id)
+        # allow_outside=True = the explicit user confirmation the 2026-08-31
+        # gate requires; this suite exercises post-confirmation registration.
+        resolved = _resolve_write_path(primary, target_abs, conv_id=conv_id,
+                                       allow_outside=True)
         assert os.path.abspath(resolved) == os.path.abspath(target_abs)
 
         # ★ The core assertion: the sibling did NOT leak into the global bar.
@@ -130,7 +133,10 @@ def test_bg_write_attribution_resolves_conv_scoped_root():
         # EXISTING ancestor, so leaving 'sub' absent makes the sibling root
         # itself the registered root (mirrors a first write into a repo root).
         target_abs = os.path.join(sibling, 'sub', 'file.py')
-        resolved = _resolve_write_path(primary, target_abs, conv_id=conv_id)
+        # allow_outside=True = the explicit user confirmation the 2026-08-31
+        # gate requires; this suite exercises post-confirmation registration.
+        resolved = _resolve_write_path(primary, target_abs, conv_id=conv_id,
+                                       allow_outside=True)
 
         mod_base, mod_rel = _mod_attribution(resolved, primary, target_abs, conv_id=conv_id)
         # Attribution must map to the SIBLING root (deepest containing conv
@@ -160,7 +166,8 @@ def test_NC_interactive_write_still_registers_globally():
     try:
         set_project(primary)  # interactive "open folder"
         target_abs = os.path.join(sibling, 'x.py')
-        _resolve_write_path(primary, target_abs, conv_id=None)
+        _resolve_write_path(primary, target_abs, conv_id=None,
+                            allow_outside=True)
 
         extra_paths = [os.path.abspath(r['path']) for r in cfg.get_state().get('extraRoots', [])]
         assert os.path.abspath(sibling) in extra_paths, (

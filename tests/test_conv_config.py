@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
 from lib.conv_config import (
     canonicalise_model_id, extract_legacy_thinking_depth,
     resolve_conv_config, resolve_conv_settings,
 )
+
+
+pytestmark = pytest.mark.unit
 
 
 class ResolveConvConfigTest(unittest.TestCase):
@@ -175,6 +180,7 @@ class ResolveConvConfigTest(unittest.TestCase):
             conv_settings={}, overrides={}, is_active=True)
         expected = {
             'maxTokens', 'thinkingEnabled', 'model', 'preset',
+            'modelRef', 'preferredProviderId', 'routing',
             'systemPrompt', 'systemPromptMode', 'systemPromptBlocks',
             'thinkingDepth', 'temperature', 'searchMode',
             'fetchEnabled', 'codeExecEnabled', 'memoryEnabled',
@@ -190,6 +196,23 @@ class ResolveConvConfigTest(unittest.TestCase):
             'project_remote',
         }
         self.assertEqual(set(out.keys()), expected)
+
+    def test_structured_model_route_is_copied_and_provider_is_orthogonal(self):
+        model_ref = {'creator_id': 'openai', 'model_id': 'gpt-5'}
+        out = resolve_conv_config(
+            conv_settings={},
+            overrides={
+                'modelRef': model_ref,
+                'preferredProviderId': 'owner-openai',
+            },
+            is_active=True,
+        )
+        self.assertEqual(out['modelRef'], model_ref)
+        self.assertEqual(out['routing'], {
+            'preferred_provider_id': 'owner-openai',
+        })
+        out['modelRef']['model_id'] = 'mutated'
+        self.assertEqual(model_ref['model_id'], 'gpt-5')
 
     def test_active_flow_builtin_parsed(self):
         out = resolve_conv_config(
@@ -273,6 +296,23 @@ class ResolveConvSettingsTest(unittest.TestCase):
         out['projectPaths'].append('/b')
         self.assertEqual(paths, ['/a'])
 
+    def test_image_route_selection_is_bounded_and_persisted(self):
+        out = resolve_conv_settings(conv_settings={
+            'imageGenMode': True,
+            'imageGenModel': 'local-image-v1',
+            'imageGenProviderId': 'owner-images',
+            'imageGenCount': 999,
+            'imageGenAspect': 'invalid',
+            'imageGenResolution': '2k',
+        })
+
+        self.assertTrue(out['imageGenMode'])
+        self.assertEqual(out['imageGenModel'], 'local-image-v1')
+        self.assertEqual(out['imageGenProviderId'], 'owner-images')
+        self.assertEqual(out['imageGenCount'], 16)
+        self.assertEqual(out['imageGenAspect'], '1:1')
+        self.assertEqual(out['imageGenResolution'], '2K')
+
     def test_overrides_fill_when_conv_empty(self):
         # When conv has no model, fall back to overrides.
         out = resolve_conv_settings(
@@ -291,11 +331,14 @@ class ResolveConvSettingsTest(unittest.TestCase):
     def test_all_expected_keys_present(self):
         out = resolve_conv_settings(conv_settings={})
         expected = {
-            'model', 'preset', 'thinkingDepth', 'searchMode',
+            'model', 'preset', 'modelRef', 'preferredProviderId',
+            'thinkingDepth', 'searchMode',
             'fetchEnabled', 'codeExecEnabled', 'browserEnabled',
             'desktopEnabled', 'memoryEnabled', 'schedulerEnabled',
             'autopilotEnabled',
-            'imageGenEnabled', 'humanGuidanceEnabled', 'projectPath',
+            'imageGenEnabled', 'imageGenMode', 'imageGenModel',
+            'imageGenProviderId', 'imageGenCount', 'imageGenAspect',
+            'imageGenResolution', 'humanGuidanceEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoTranslate', 'folderId',
             'activeFlow', 'uiLang', 'autoApply', 'planMode',
         }

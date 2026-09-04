@@ -1,20 +1,19 @@
 """lib/message_queue.py — Unified priority turn-source queue for conversations.
 
 The queue holds the *sources* of upcoming conversation turns, ordered by
-priority.  Three kinds of source share one table:
+priority.  Five kinds of source share one table:
 
   • ``real``          — a human message (highest priority).
+  • ``goal_continuation`` — one explicit, cancellable Goal Mode command.
+  • ``peer_msg``      — a turn sent by another conversation.
   • ``workflow_step`` — a turn injected by an orchestration workflow
                         (medium priority; reserved for the workflow engine).
-  • ``autopilot``     — a persistent armed-marker sentinel (lowest priority).
+  • ``autopilot``     — a legacy armed-marker sentinel (lowest priority).
 
-``real`` / ``workflow_step`` rows are *dispatchable*: when the active task
-finishes, the highest-priority dispatchable row is dequeued and started as a
-new task.  The ``autopilot`` row is NOT dispatched as a task — it is a flag
-that the end-of-turn autopilot hook (:mod:`lib.tasks_pkg.autopilot`) consults
-to decide whether the virtual user should take over.  It stays in the queue
-(surviving page reloads) until the VU emits ``[VU: TASK_DONE]`` or the user
-cancels it.
+Every row except the compatibility-only ``autopilot`` sentinel is
+dispatchable. Goal Mode does not use that sentinel: arming behind a live turn
+queues one ``goal_continuation`` command, and disarming can remove precisely
+that intent without deleting queued human or workflow work.
 
 Because a human ``real`` row sorts ahead of the ``autopilot`` sentinel, a
 message the user types while autopilot is armed is ALWAYS processed first;
@@ -39,32 +38,27 @@ import time
 import uuid
 
 from lib.log import get_logger
+from lib.turn_source_queue_contract import (
+    KIND_AUTOPILOT,
+    KIND_GOAL_CONTINUATION,
+    KIND_PEER_MSG,
+    KIND_REAL,
+    KIND_WORKFLOW as KIND_WORKFLOW,
+    QUEUE_REAP_PROBE_CONTRACT,
+    QUEUE_REAP_PROBE_CONVERSATIONS_FIELD,
+    QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD,
+    QUEUE_REAP_PROBE_REQUEST_FIELD,
+    QUEUE_REAP_PROBE_RESPONSE_FIELD,
+    turn_source_priority,
+)
 
 logger = get_logger(__name__)
 
 # Lock for dispatch coordination (prevent double-dispatch races)
 _dispatch_lock = threading.Lock()
 
-# ── Turn-source kinds + their default priorities (lower = higher) ──
-KIND_REAL = "real"
-KIND_PEER_MSG = "peer_msg"
-KIND_WORKFLOW = "workflow_step"
-KIND_AUTOPILOT = "autopilot"
-
-_PRIORITY_FOR_KIND = {
-    KIND_REAL: 10,
-    # A peer message from a sibling conversation is advisory — the target sees
-    # it on its NEXT turn (dispatchable, never interrupts a live turn). It
-    # sorts AFTER a human 'real' turn (so a human always wins) but BEFORE a
-    # brain-dispatch 'workflow_step' kickoff.
-    KIND_PEER_MSG: 40,
-    KIND_WORKFLOW: 50,
-    KIND_AUTOPILOT: 90,
-}
-
-
 def _priority_for_kind(kind: str) -> int:
-    return _PRIORITY_FOR_KIND.get(kind, 100)
+    return turn_source_priority(kind)
 
 
 # ── Dispatch lease () ──
@@ -113,20 +107,20 @@ def enqueue_message(
 
     Args:
         conv_id: Conversation ID.
-        message_data: Dict with keys: text, images, pdfTexts, replyQuotes,
+        message_data: Dict with keys: text, images, attachments, legacy
+                      pdfTexts/videos, replyQuotes,
                       convRefs, convRefTexts, originalContent, timestamp.
                       For an ``autopilot`` sentinel this is an empty/marker
                       dict (the row is never dispatched as a task).
         config: The chat config to use when dispatching this message
                 (model, searchMode, tools, etc.).
-        kind: Turn source — ``KIND_REAL`` (default), ``KIND_WORKFLOW`` or
-              ``KIND_AUTOPILOT``.  Determines the priority bucket.
+        kind: Turn source — ``KIND_REAL`` (default),
+              ``KIND_GOAL_CONTINUATION``, ``KIND_PEER_MSG``,
+              ``KIND_WORKFLOW`` or ``KIND_AUTOPILOT``. Determines the
+              priority bucket.
 
     Returns:
-        Dict with queueId, position, kind. On a COLLAPSED brain kickoff (a row
-        for the same ``(conv_id, boardTaskId)`` already queued) the EXISTING
-        row's id is returned with ``deduped: True`` — never a fresh uuid that
-        no row carries, so a caller storing it cannot hold a dangling id.
+        Dict with queueId, position, and kind.
     """
     queue_id = str(uuid.uuid4())
     result = _queue_client(write=True).command(
@@ -145,79 +139,93 @@ def enqueue_message(
     )
     if kind == KIND_REAL:
         try:
-            _preempt_vu_subtask_for_real_message(conv_id, user_id=int(user_id))
+            _preempt_autonomous_work_for_real_message(
+                conv_id, user_id=int(user_id))
         except Exception as e:
             logger.warning(
-                "[Queue] VU preempt on enqueue failed conv=%s: %s", conv_id[:8], e
+                "[Queue] Goal preempt on enqueue failed conv=%s: %s",
+                conv_id[:8], e,
             )
     return result
 
 
-def _preempt_vu_subtask_for_real_message(
+def _preempt_autonomous_work_for_real_message(
     conv_id: str,
     *,
     user_id: int,
 ) -> bool:
-    """Abort the conv's live autopilot VU sub-task so a just-enqueued REAL
-    message starts generating at the next abort checkpoint instead of
-    waiting out the whole VU LLM call.
+    """Abort live Goal work superseded by a newly durable human message.
 
-    Mirrors the parent→sub-task abort-mirror pattern in
-    ``lib/tasks_pkg/autopilot.run_virtual_user``: the orchestrator polls
-    ``task['aborted']`` per round and the SSE stream loop checks its
-    abort_check PER CHUNK (lib/llm/stream.py:163-166), so the VU unwinds
-    within seconds. ``run_virtual_user`` then routes the deferral
-    (AUTOPILOT_VU_CANCEL + completion-hook dispatch of the queued row).
+    New Goal Mode has one Flow-managed root task; compatibility mode may still
+    have a standalone VU sub-task. Both honor cooperative abort checkpoints.
+    A normal worker or a user-selected non-Goal Flow is never touched.
 
-    Best-effort: any probe failure logs and returns False (the row is
-    already enqueued — the post-call deferral still applies, so the
-    worst case is the OLD wait-for-completion behaviour, never a loss).
-
-    Returns True iff a VU sub-task was preempted.
+    Best-effort failure cannot lose the already committed human queue row. A
+    Goal continuation also performs a durable preflight before execution, so
+    the registration race cannot restore a stale objective.
     """
     try:
         from lib.tasks_pkg.manager.runtime import chat_task_runtime
 
-        vus = [
-            task
-            for task in chat_task_runtime.snapshot_owned(user_id=int(user_id))
-            if task.get("convId") == conv_id
-            and task.get("_vu_subtask")
-            and task.get("status") in ("pending", "running")
-            and not task.get("aborted")
-        ]
-        if not vus:
+        candidates = []
+        for task in chat_task_runtime.snapshot_owned(user_id=int(user_id)):
+            config = task.get("config")
+            config = config if isinstance(config, dict) else {}
+            is_goal_root = bool(task.get("_goalRunId")) or bool(
+                task.get("_flow_managed")
+                and task.get("flow_mode")
+                and config.get("autopilot") is True
+            )
+            is_compatibility_vu = bool(task.get("_vu_subtask"))
+            if (
+                task.get("convId") == conv_id
+                and task.get("status") in ("pending", "running")
+                and not task.get("aborted")
+                and (is_goal_root or is_compatibility_vu)
+            ):
+                candidates.append((task, is_goal_root))
+        if not candidates:
             return False
         from lib.log import audit_log
 
-        for t in vus:
-            task_id = str(t.get("id") or "")
+        preempted = False
+        for task, is_goal_root in candidates:
+            task_id = str(task.get("id") or "")
             if not chat_task_runtime.abort_owned(task_id, user_id=int(user_id)):
                 continue
+            reason = (
+                "superseded_by_human"
+                if is_goal_root else "real_message_preempts_vu"
+            )
             chat_task_runtime.update_fields(
                 task_id,
                 fields={
                     "aborted": True,
                     "_abort_timestamp": time.time(),
-                    "_abort_reason": "real_message_preempts_vu",
+                    "_abort_reason": reason,
                 },
                 only_if_status=("pending", "running"),
             )
+            preempted = True
             audit_log(
-                "vu_preempted_by_real_message",
+                (
+                    "goal_run_preempted_by_real_message"
+                    if is_goal_root else "vu_preempted_by_real_message"
+                ),
                 conv_id=conv_id,
-                vu_task_id=t.get("id", ""),
+                task_id=task_id,
             )
             logger.info(
-                "[Queue] Real message preempts autopilot VU sub-task %s "
-                "for conv=%s — the queued turn starts at the next abort "
-                "checkpoint instead of after the full VU call",
-                t.get("id", "?")[:8],
+                "[Queue] Real message supersedes %s task %s for conv=%s; "
+                "the queued human turn owns the next lane",
+                "GoalRun" if is_goal_root else "compatibility VU",
+                task_id[:8],
                 conv_id[:8],
             )
-        return True
+        return preempted
     except Exception as e:
-        logger.warning("[Queue] VU preempt probe failed conv=%s: %s", conv_id[:8], e)
+        logger.warning(
+            "[Queue] Goal preempt probe failed conv=%s: %s", conv_id[:8], e)
         return False
 
 
@@ -294,15 +302,59 @@ def list_orphaned_dispatchable_conversations() -> list[dict]:
         return []
 
 
-def reap_expired_queue_leases(force_reclaim: bool = False) -> list[str]:
-    """Repair leases, then drain every currently orphaned queue conversation.
+def _validated_reap_probe(response) -> tuple[bool, list[dict]] | None:
+    """Decode only the exact additive Sidecar capability response."""
+    if (not isinstance(response, dict)
+            or response.get(QUEUE_REAP_PROBE_RESPONSE_FIELD)
+            != QUEUE_REAP_PROBE_CONTRACT
+            or not isinstance(
+                response.get(QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD), bool,
+            )):
+        return None
+    raw_conversations = response.get(QUEUE_REAP_PROBE_CONVERSATIONS_FIELD)
+    if not isinstance(raw_conversations, list):
+        return None
+    conversations: list[dict] = []
+    for raw in raw_conversations:
+        if not isinstance(raw, dict):
+            return None
+        conv_id = raw.get("convId")
+        user_id = raw.get("userId")
+        if (not isinstance(conv_id, str)
+                or not conv_id
+                or len(conv_id) > 256
+                or isinstance(user_id, bool)
+                or not isinstance(user_id, int)
+                or user_id < 1):
+            return None
+        conversations.append({"convId": conv_id, "userId": user_id})
+    return (
+        response[QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD], conversations,
+    )
 
-    ``queue.reap`` atomically releases expired leases (or every lease during
-    startup recovery).  The following read deliberately scans *all* durable
-    dispatchable rows, not only rows whose lease was just repaired.  That
-    distinction closes the submit-failure window: a failed submit releases
-    its lease immediately, so it would never appear in an expired-lease-only
-    result even though no completion hook exists to retry it.
+
+def _reap_queue_leases(*, now_ms: int, force_reclaim: bool) -> None:
+    reclaim_mode = "force" if force_reclaim else "normal"
+    _queue_client(write=True).command(
+        "queue.reap",
+        {
+            "now_ms": now_ms,
+            "force_reclaim": bool(force_reclaim),
+        },
+        command_id=f"queue-reap:{now_ms}:{reclaim_mode}",
+    ) or {}
+
+
+def reap_expired_queue_leases(force_reclaim: bool = False) -> list[str]:
+    """Probe/repair leases, then drain every orphaned queue conversation.
+
+    Normal maintenance gets its ordered dispatch list and exact
+    ``hasExpiredLeases`` bit from one read-pool query. ``queue.reap`` enters the
+    writer only when that exact capability echo proves repair is useful;
+    startup still force-reclaims every predecessor lease. The list deliberately
+    includes *all* durable dispatchable rows, not only rows whose lease needs
+    repair. That closes the submit-failure window: an immediately released row
+    still needs a consumer even though it never becomes expired.
 
     ``dispatch_next_queued`` remains the single consumer.  Its live-task guard
     and lease-taking operation prevent double dispatch; this maintenance pass
@@ -317,16 +369,35 @@ def reap_expired_queue_leases(force_reclaim: bool = False) -> list[str]:
     """
     spawned: list[str] = []
     now_ms = int(time.time() * 1000)
-    reclaim_mode = "force" if force_reclaim else "normal"
-    _queue_client(write=True).command(
-        "queue.reap",
-        {
-            "now_ms": now_ms,
-            "force_reclaim": bool(force_reclaim),
-        },
-        command_id=f"queue-reap:{now_ms}:{reclaim_mode}",
-    ) or {}
-    conversations = list_orphaned_dispatchable_conversations()
+    conversations = None
+    probe_response = None
+    if not force_reclaim:
+        probe_response = _queue_client().query(
+            "queue.conversations.list_all",
+            {
+                QUEUE_REAP_PROBE_REQUEST_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+                "now_ms": now_ms,
+            },
+        )
+        reap_probe = _validated_reap_probe(probe_response)
+        if reap_probe is not None:
+            has_expired_leases, conversations = reap_probe
+            if has_expired_leases:
+                _reap_queue_leases(
+                    now_ms=now_ms, force_reclaim=False,
+                )
+    if conversations is None:
+        # Old Sidecars ignore the additive selector and return the legacy bare
+        # list. Keep their writer repair, but reuse that already-read list so
+        # rolling compatibility still costs only the former two RPCs.
+        _reap_queue_leases(
+            now_ms=now_ms, force_reclaim=force_reclaim,
+        )
+        conversations = (
+            probe_response
+            if isinstance(probe_response, list)
+            else list_orphaned_dispatchable_conversations()
+        )
     limit = _reaper_max_dispatch_per_tick()
     attempts = 0
     for conversation in conversations:
@@ -689,12 +760,16 @@ _QUEUE_PREVIEW_KEYS = (
     "sourceMessageId",
     "hasImages",
     "hasPdfs",
+    "hasAttachments",
     "hasRefs",
     "hasQuotes",
     "timestamp",
     "isPeerMessage",
     "fromConv",
     "isPeerHuman",
+    "inputTurnId",
+    "outputTurnId",
+    "attemptId",
 )
 
 
@@ -725,6 +800,23 @@ def remove_from_queue(
     Returns:
         True if removed, False if not found.
     """
+    queued = _queue_client().query(
+        "queue.list", {"conv_id": conv_id, "user_id": int(user_id)}
+    ) or []
+    item = next((row for row in queued if row.get("queueId") == queue_id), None)
+    if not item:
+        return False
+    if item.get("attemptId"):
+        # Conversation Sync v3 accepts a real input/output Turn pair before
+        # placing it in the lane.  Its cancellation boundary must remove that
+        # pair and the queue row in one transaction; deleting only the legacy
+        # source row would strand an unclaimable pending Attempt forever.
+        from lib.turn_lifecycle import cancel_queued_turn_pair
+
+        result = cancel_queued_turn_pair(
+            conv_id, queue_id, user_id=int(user_id),
+        )
+        return bool(result.get("cancelled"))
     result = _queue_client(write=True).command(
         "queue.remove",
         {
@@ -795,13 +887,53 @@ def clear_queue(conv_id: str, *, user_id: int) -> int:
     )
     if not queued:
         return 0
+    linked = [row for row in queued if row.get("attemptId")]
+    cancelled = sum(
+        1 for row in linked
+        if remove_from_queue(conv_id, row["queueId"], user_id=int(user_id))
+    )
+    queued = [row for row in queued if not row.get("attemptId")]
+    if not queued:
+        return cancelled
     result = _queue_client(write=True).command(
         "queue.clear",
         {"conv_id": conv_id, "user_id": int(user_id)},
         command_id="queue-clear:%s:%s"
         % (conv_id, ",".join(row["queueId"] for row in queued)),
     )
-    return int(result.get("cleared", 0))
+    return cancelled + int(result.get("cleared", 0))
+
+
+def clear_queue_kind(conv_id: str, kind: str, *, user_id: int) -> int:
+    """Clear one source kind while preserving every other queued intent."""
+    queued = [
+        row for row in get_queue(conv_id, user_id=int(user_id))
+        if row.get("kind") == kind
+    ]
+    if not queued:
+        return 0
+    linked = [row for row in queued if row.get("attemptId")]
+    cancelled = sum(
+        1 for row in linked
+        if remove_from_queue(conv_id, row["queueId"], user_id=int(user_id))
+    )
+    queued = [row for row in queued if not row.get("attemptId")]
+    if not queued:
+        return cancelled
+    result = _queue_client(write=True).command(
+        "queue.kind.clear",
+        {
+            "conv_id": conv_id,
+            "kind": kind,
+            "user_id": int(user_id),
+        },
+        command_id="queue-kind-clear:%s:%s:%s" % (
+            conv_id,
+            kind,
+            ",".join(row["queueId"] for row in queued),
+        ),
+    )
+    return cancelled + int(result.get("cleared", 0))
 
 
 def dequeue_next(conv_id: str, *, user_id: int) -> dict | None:
@@ -883,10 +1015,9 @@ def _stamp_queued_turn_initiator(user_msg: dict, payload: dict) -> None:
     """Project one queue payload onto the canonical turn-initiator field.
 
     Keeping attribution at the queue-to-turn boundary prevents an
-    engine-injected brain/peer turn from becoming human-authored input.
+    engine-injected peer turn from becoming human-authored input.
     """
     from lib.turn_initiation import (
-        INITIATOR_BRAIN,
         INITIATOR_OPERATOR,
         INITIATOR_PEER,
         stamp_initiator,
@@ -897,16 +1028,14 @@ def _stamp_queued_turn_initiator(user_msg: dict, payload: dict) -> None:
             user_msg,
             INITIATOR_OPERATOR if payload.get("_peerHuman") else INITIATOR_PEER,
         )
-    if payload.get("_brainDispatch"):
-        # Preserve the historical precedence if a malformed payload carries
-        # both markers: the workflow/brain identity is the more specific lane.
-        stamp_initiator(user_msg, INITIATOR_BRAIN)
 
 
 def _submit_queued_turn_command(
     conv_id: str,
     user_id,
     command_body: dict,
+    *,
+    trusted_goal_objective: str | None = None,
 ) -> dict:
     """Submit through the shared application service and return its value.
 
@@ -921,6 +1050,7 @@ def _submit_queued_turn_command(
         user_id,
         command_body,
         request_started_at=time.time(),
+        trusted_goal_objective=trusted_goal_objective,
     ).value
 
 
@@ -948,7 +1078,7 @@ def _dispatch_queued_turn(
     if pre_built_user_msg:
         user_msg = dict(pre_built_user_msg)
     else:
-        # Engine-built rows (brain kickoff / peer inject) carry no _user_msg.
+        # Engine-built peer rows carry no _user_msg.
         # The manual-enqueue API that once needed dispatch-time translation
         # was deleted 2026-05-29, so every row arriving here has final text.
         user_msg = {
@@ -958,6 +1088,8 @@ def _dispatch_queued_turn(
         }
         for key in (
             "images",
+            "attachments",
+            "videos",
             "pdfTexts",
             "replyQuotes",
             "convRefs",
@@ -966,18 +1098,10 @@ def _dispatch_queued_turn(
             "_peerMessage",
             "_fromConv",
             "_peerHuman",
-            "_brainDispatch",
-            "_boardTaskId",
-            "_brainEpic",
             "_msgId",
         ):
             if payload.get(key):
                 user_msg[key] = payload[key]
-        # The durable queue/board contract uses ``boardTaskId`` while the
-        # canonical conversation-turn projection intentionally uses the
-        # private attribution key consumed by the UI and recovery lanes.
-        if payload.get("boardTaskId"):
-            user_msg["_boardTaskId"] = payload["boardTaskId"]
     _stamp_queued_turn_initiator(user_msg, payload)
 
     command_body = {
@@ -991,8 +1115,29 @@ def _dispatch_queued_turn(
         "actor": "assistant",
     }
     start_error = None
+    linked_turn_pair = bool(item.get("attemptId"))
     try:
-        result = _submit_queued_turn_command(conv_id, user_id, command_body)
+        if linked_turn_pair:
+            from lib.conversation_sync.runtime import conversation_turn_commands
+
+            result = conversation_turn_commands.activate_queued_turn(
+                conv_id,
+                user_id,
+                str(item["queueId"]),
+                config=config,
+                request_data=command_body,
+            ).value
+        elif item.get("kind") == KIND_GOAL_CONTINUATION:
+            result = _submit_queued_turn_command(
+                conv_id,
+                user_id,
+                command_body,
+                trusted_goal_objective=str(
+                    config.get("_goalObjective") or ""
+                ).strip() or None,
+            )
+        else:
+            result = _submit_queued_turn_command(conv_id, user_id, command_body)
         if result.get("aborted"):
             # A Stop won the internal command's start window before a pair was
             # allocated. The durable row still owns the input; release it for
@@ -1014,6 +1159,20 @@ def _dispatch_queued_turn(
             or item["queueId"]
         )
     except LifecycleConflict as exc:
+        if (
+            item.get("kind") == KIND_GOAL_CONTINUATION
+            and exc.code == "superseded_by_human"
+        ):
+            # Permanent intent supersession: retrying this leased synthetic
+            # command could only restore its stale stamped objective.
+            _finalize_queue_dispatch(
+                conv_id, item["queueId"], user_id=user_id)
+            logger.info(
+                "[Queue] retired Goal continuation %s superseded by a "
+                "newer human turn for conv=%s",
+                str(item["queueId"])[:8], conv_id[:8],
+            )
+            return None
         # The lane filled between the settlement hook and this drain (a
         # human submit wins, an autopilot/continuation successor claimed it,
         # …). Release the row; the occupying attempt's own settlement hook
@@ -1065,12 +1224,13 @@ def _dispatch_queued_turn(
     # killed-task recovery) for the died-before/during-start windows the
     # stamp exists to detect.
 
-    try:
-        _finalize_queue_dispatch(conv_id, item["queueId"], user_id=user_id)
-    except Exception as e:
-        logger.warning(
-            "[Queue] deferred delete failed for %s: %s", item["queueId"][:8], e
-        )
+    if not linked_turn_pair:
+        try:
+            _finalize_queue_dispatch(conv_id, item["queueId"], user_id=user_id)
+        except Exception as e:
+            logger.warning(
+                "[Queue] deferred delete failed for %s: %s", item["queueId"][:8], e
+            )
 
     logger.info(
         "[Queue] dispatched queued message → attempt %s for conv=%s",
@@ -1096,73 +1256,6 @@ def _dispatch_queued_turn(
     # by callers — the attempt id is the honest public identity of the
     # dispatched work (no public task id exists).
     return attempt_id
-
-
-def _brain_kickoff_still_wanted(
-    project_path: str | None, board_task_id: str, conv_id: str, *, user_id: int
-) -> bool:
-    """True iff a brain kickoff for ``board_task_id`` is still worth spawning.
-
-    Consume-time re-check for the produce/consume gap ().
-    A kickoff is dropped when its epic is no longer waiting for work:
-
-      • the epic row is GONE (deleted board entry), or
-      • its effective status is ``done`` (finished while the kickoff queued —
-        THE incident: done at 21:01:55, drained at 21:03:07), or
-      • it is effectively ``claimed`` by a DIFFERENT conversation (a sibling
-        legitimately took it over; spawning here would duplicate the work).
-
-    Fails OPEN: any lookup error returns True, so an unrelated DB hiccup can
-    never silently swallow a legitimate kickoff — the failure mode we accept is
-    "a stale kickoff occasionally slips through" (recoverable, costs one task),
-    never "brain dispatch stops working" (invisible, stalls the whole project).
-    """
-    if not project_path or not board_task_id:
-        return True
-    try:
-        from lib.conversations.project_board import read_board
-
-        board = read_board(project_path, user_id=user_id)
-        epic = next(
-            (t for t in board.get("tasks", []) if t.get("id") == board_task_id), None
-        )
-        if epic is None:
-            logger.info(
-                "[Queue] discarding brain kickoff conv=%s epic=%s — board row is gone",
-                conv_id[:8],
-                board_task_id,
-            )
-            return False
-        status = epic.get("status") or ""
-        if status == "done":
-            logger.info(
-                "[Queue] discarding brain kickoff conv=%s epic=%s — "
-                "epic already DONE (finished while the kickoff sat in "
-                "the queue; spawning would re-verify finished work)",
-                conv_id[:8],
-                board_task_id,
-            )
-            return False
-        owner = epic.get("owner_conv_id") or ""
-        if status == "claimed" and owner and owner != conv_id:
-            logger.info(
-                "[Queue] discarding brain kickoff conv=%s epic=%s — "
-                "now live-claimed by conv=%s",
-                conv_id[:8],
-                board_task_id,
-                owner[:8],
-            )
-            return False
-        return True
-    except Exception as e:
-        logger.warning(
-            "[Queue] brain-kickoff board re-check failed conv=%s "
-            "epic=%s (dispatching anyway): %s",
-            conv_id[:8],
-            board_task_id,
-            e,
-        )
-        return True
 
 
 def dispatch_next_queued(
@@ -1218,32 +1311,20 @@ def dispatch_next_queued(
         config = item["config"]
         text = payload.get("text", "")
 
-        # ── Stale brain-kickoff discard () ──
-        # A brain kickoff is PRODUCED when the board says an epic is dispatchable,
-        # but it is CONSUMED here — possibly much later. In the 2026-07-27
-        # incident the epic was marked done at 21:01:55 and this drain ran at
-        # 21:03:07, spawning an Opus-5 task that re-verified finished work
-        # (¥26, conv ms34yw0k74o2lq task 2ef5fcaa). Worse, that kickoff was
-        # itself a re-dispatch of an epic whose 30-min claim lease had expired
-        # under an 88-min task, so the board read it as open.
-        #
-        # The invariant that fixes ALL of those shapes at once: never trust the
-        # produce-time decision — re-check at consume time. It holds regardless
-        # of lease semantics, which is why lease renewal was ruled out as the
-        # fix (it would only shrink the window, not close it).
-        #
-        # Only brain-dispatched rows are gated. A human turn has no boardTaskId
-        # and must NEVER be discardable.
-        #
-        # The filter itself lives in ``_row_is_dispatchable`` — the SINGLE
-        #   consume-time predicate this function shares with the autopilot
-        #   hook's yield gate. Do NOT re-inline a filter here: a filter that
-        #   only one of the two readers applies is exactly what let a queued
-        #   kickoff read as "a turn is waiting" to autopilot and as "discard
-        #   me" to this dispatcher, destroying a finished VU turn and spawning
-        #   nothing (conv ms3s8s0kjlvq18, 2026-07-28).
-        if not _row_is_dispatchable(conv_id, payload, config, user_id=user_id):
-            _finalize_queue_dispatch(conv_id, item["queueId"], user_id=user_id)
+        if (
+            item.get("kind") == KIND_GOAL_CONTINUATION
+            and not str(config.get("_goalObjective") or "").strip()
+        ):
+            # Never turn a corrupted continuation into a new objective whose
+            # text merely says "continue". The durable queue row is invalid
+            # and cannot become correct through retry, so retire it once.
+            _finalize_queue_dispatch(
+                conv_id, item["queueId"], user_id=user_id)
+            logger.error(
+                "[Queue] discarded Goal Mode continuation without an "
+                "authoritative objective conv=%s row=%s",
+                conv_id[:8], str(item["queueId"])[:8],
+            )
             return None
 
         # ── Pillar #6 REVERSE-race de-dup ──
@@ -1301,56 +1382,11 @@ def get_queue_depth(conv_id: str, *, user_id: int) -> int:
     return int(result.get("depth", 0))
 
 
-# ── THE single consume-time dispatchability predicate ────────────────
-#
-# Both readers of this queue MUST route through here:
-#   • ``dispatch_next_queued`` — decides whether a leased row becomes a task;
-#   • ``next_dispatchable_turn`` / ``has_pending_human_turn`` — let the
-#     autopilot hook ask "will a turn really take over from me?".
-#
-# WHY THE SEAM EXISTS (conv ms3s8s0kjlvq18, 2026-07-28): the dispatch side
-# applied the board re-check while the autopilot side counted rows with a
-# WEAKER filter (kind only). A brain kickoff whose epic had finished while it
-# sat queued therefore read as "a human is waiting" to autopilot (which threw
-# away a completed 24-round VU turn) and as "discard me" to the dispatcher
-# (which spawned nothing). Two correct-looking gates, opposite verdicts on the
-# SAME row, and the conversation died with no signal.
-#
-# Narrowing the kind check alone would have fixed that ONE instance and left
-# the cause: every future filter would again land on only one side. Adding a
-# filter HERE moves both readers at once — that is the entire point.
-
-
-def _row_is_dispatchable(
-    conv_id: str, payload: dict, config: dict, *, user_id: int
-) -> bool:
-    """True iff this queued row would really be dispatched as a turn.
-
-    Args:
-        conv_id: Owning conversation id.
-        payload: The row's decoded payload dict.
-        config: The row's decoded config dict.
-
-    Returns:
-        ``False`` only when a consume-time filter rejects the row. Fails OPEN
-        (see ``_brain_kickoff_still_wanted``): an unrelated lookup error must
-        never silently swallow a legitimate turn.
-    """
-    board_task_id = (payload or {}).get("boardTaskId")
-    if board_task_id and not _brain_kickoff_still_wanted(
-        (config or {}).get("projectPath"), board_task_id, conv_id, user_id=user_id
-    ):
-        return False
-    return True
-
-
 def _dispatchable_rows(conv_id: str, *, user_id: int) -> list[dict]:
     """Queued rows that would REALLY be dispatched, in dispatch order.
 
-    Mirrors ``dequeue_next``'s row selection (non-autopilot kinds, lease-aware,
-    ``priority ASC, position ASC``) and then applies ``_row_is_dispatchable``
-    to each — but takes NO lease and mutates nothing, so it is safe to ask
-    from a decision gate.
+    Mirrors ``dequeue_next``'s non-autopilot selection without taking a lease,
+    so it is safe to ask from a decision gate.
 
     Returns a list of ``{'queueId', 'kind', 'isHuman'}``.
     """
@@ -1364,10 +1400,6 @@ def _dispatchable_rows(conv_id: str, *, user_id: int) -> list[dict]:
     for row in rows:
         kind = row.get("kind") or KIND_REAL
         if kind == KIND_AUTOPILOT:
-            continue
-        payload = row.get("payload") or {}
-        config = row.get("config") or {}
-        if not _row_is_dispatchable(conv_id, payload, config, user_id=user_id):
             continue
         out.append(
             {"queueId": row["queueId"], "kind": kind, "isHuman": kind == KIND_REAL}
@@ -1393,7 +1425,7 @@ def has_pending_human_turn(conv_id: str, *, user_id: int) -> bool:
 
     The autopilot yield gate. The judgement is "is there a person waiting on
     this conversation" — NOT "is there a non-autopilot row". Machine work items
-    (``KIND_WORKFLOW`` brain kickoffs, ``KIND_PEER_MSG`` sibling messages) do
+    (``KIND_WORKFLOW`` jobs and ``KIND_PEER_MSG`` notifications) do
     NOT preempt a run that is actively working: they are picked up by the
     existing idle drain once the run ends. Only a human outranks the loop.
 

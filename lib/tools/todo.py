@@ -29,6 +29,7 @@ unit-testable without a task/LLM; the dispatch handler in
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import uuid
 
@@ -39,25 +40,25 @@ logger = get_logger(__name__)
 VALID_STATUSES = ('pending', 'in_progress', 'blocked', 'completed')
 VALID_OPERATIONS = ('sync', 'push', 'replan')
 TODO_STATE_VERSION = 2
+TODO_MAX_ITEMS = 24
+TODO_MAX_ID_CHARS = 64
+TODO_MAX_CONTENT_CHARS = 512
+TODO_MAX_REPLAN_REASON_CHARS = 2048
+TODO_MAX_STACK_DEPTH = 6
+TODO_MAX_HISTORY_ENTRIES = 8
+TODO_MAX_STATE_BYTES = 1_500_000
 
 TODO_WRITE_TOOL = {
     'type': 'function',
     'function': {
         'name': 'todo_write',
         'description': (
-            'Maintain the CURRENT task checklist. The default operation is '
-            '`sync`: send the FULL current list; it creates a new REVISION of '
-            'the active checklist, not a new checklist. Combine transitions '
-            '(for example complete A and start B) into one sync. A sync cannot '
-            'delete unfinished items or reopen completed items. Use `replan` '
-            'with a reason when unfinished work must be replaced. Use `push` '
-            'with parent_todo_id ONLY when decomposing one active parent item '
-            'into a child checklist. The runtime automatically returns to the '
-            'parent and completes that parent item when the child is complete; '
-            'do not recreate the parent list yourself. Keep at most one item '
-            'in_progress per checklist. A task with pending, in_progress, or '
-            'blocked items cannot finish successfully. Do not use this for a '
-            'single trivial step.'
+            'Revisioned checklists for nontrivial work. sync (default) sends the '
+            'FULL active list and combines transitions; cannot drop unfinished or '
+            'reopen completed. replan replaces unfinished work and requires reason. '
+            'push decomposes one active unfinished parent_todo_id; child completion '
+            'auto-pops and completes the parent—never resend the parent list. Max one '
+            'in_progress; incomplete or blocked items prevent success.'
         ),
         'parameters': {
             'type': 'object',
@@ -65,34 +66,35 @@ TODO_WRITE_TOOL = {
                 'operation': {
                     'type': 'string',
                     'enum': list(VALID_OPERATIONS),
-                    'description': ('sync (default) revises the active list; '
-                                    'push enters a child list; replan replaces '
-                                    'unfinished work and requires reason.'),
                 },
                 'parent_todo_id': {
                     'type': 'string',
-                    'description': 'Required for push; an unfinished item in the active parent list.',
+                    'minLength': 1,
+                    'maxLength': TODO_MAX_ID_CHARS,
                 },
                 'reason': {
                     'type': 'string',
-                    'description': 'Required for replan; explains why unfinished work is being replaced.',
+                    'minLength': 1,
+                    'maxLength': TODO_MAX_REPLAN_REASON_CHARS,
                 },
                 'todos': {
                     'type': 'array',
-                    'description': 'The complete desired checklist for this operation.',
+                    'maxItems': TODO_MAX_ITEMS,
+                    'description': 'FULL list; max 24.',
                     'items': {
                         'type': 'object',
                         'properties': {
                             'id': {
                                 'type': 'string',
-                                'description': 'Stable short id for the item '
-                                               '(e.g. "1", "read-config").',
+                                'minLength': 1,
+                                'maxLength': TODO_MAX_ID_CHARS,
+                                'description': 'Stable id.',
                             },
                             'content': {
                                 'type': 'string',
-                                'description': 'Imperative description of the '
-                                               'step (e.g. "Add retry to '
-                                               'fetch_page").',
+                                'minLength': 1,
+                                'maxLength': TODO_MAX_CONTENT_CHARS,
+                                'description': 'Imperative step.',
                             },
                             'status': {
                                 'type': 'string',
@@ -104,6 +106,26 @@ TODO_WRITE_TOOL = {
                 },
             },
             'required': ['todos'],
+            'anyOf': [
+                {
+                    'properties': {'operation': {'enum': ['sync']}},
+                },
+                {
+                    'properties': {
+                        'operation': {'const': 'push'},
+                        'parent_todo_id': {'type': 'string'},
+                        'todos': {'minItems': 1},
+                    },
+                    'required': ['parent_todo_id'],
+                },
+                {
+                    'properties': {
+                        'operation': {'const': 'replan'},
+                        'reason': {'type': 'string'},
+                    },
+                    'required': ['reason'],
+                },
+            ],
         },
     },
 }
@@ -166,7 +188,12 @@ def incomplete_todos(todos) -> list[dict]:
 
 
 def render_todo_list(todos) -> str:
-    """Render a checklist as GitHub-style markdown checkboxes for a reminder."""
+    """Render the model-facing checklist with recoverable stable identities.
+
+    Tool results and runtime reminders are model protocol, not browser copy.
+    Compaction can fold the original tool arguments, so every surviving row
+    must repeat the item id that a later ``sync`` call is required to preserve.
+    """
     lines = []
     for t in (todos or []):
         if not isinstance(t, dict):
@@ -175,8 +202,14 @@ def render_todo_list(todos) -> str:
         box = '[x]' if status == 'completed' else '[ ]'
         marker = (' ⏳' if status == 'in_progress' else
                   (' [blocked]' if status == 'blocked' else ''))
-        lines.append(f'- {box} {t.get("content", "")}{marker}')
-    return '\n'.join(lines)
+        raw_id = t.get('id')
+        identity = (f' · id={json.dumps(str(raw_id), ensure_ascii=False)}'
+                    if raw_id not in (None, '') else '')
+        lines.append(f'- {box} {t.get("content", "")}{marker}{identity}')
+    if not lines:
+        return ''
+    return ('Stable item IDs: reuse each id exactly in later sync calls.\n'
+            + '\n'.join(lines))
 
 
 def apply_todo_write(fn_args: dict) -> tuple[list[dict], str]:
@@ -213,6 +246,7 @@ def _empty_state() -> dict:
         'version': TODO_STATE_VERSION,
         'stack': [],
         'history': [],
+        'history_dropped': 0,
         'update_count': 0,
         'root_completed': False,
     }
@@ -243,7 +277,11 @@ def _normalise_state(raw, legacy_todos=None) -> dict:
     state['root_completed'] = bool(raw.get('root_completed'))
     history = raw.get('history')
     if isinstance(history, list):
-        state['history'] = copy.deepcopy([h for h in history if isinstance(h, dict)])
+        retained = [h for h in history if isinstance(h, dict)]
+        state['history'] = copy.deepcopy(retained[-TODO_MAX_HISTORY_ENTRIES:])
+        state['history_dropped'] = max(
+            0, int(raw.get('history_dropped') or 0),
+        ) + max(0, len(history) - len(state['history']))
     for i, item in enumerate(raw.get('stack') or []):
         if not isinstance(item, dict):
             continue
@@ -305,13 +343,27 @@ def _rejection(state: dict, operation: str, reason: str) -> dict:
     }
 
 
+def _append_history(state: dict, entry: dict) -> None:
+    """Append one reconstructible audit summary with an observable hard cap.
+
+    Raw ``todo_write`` tool rounds remain the durable full audit log. This
+    current-state sidecar retains only the recent tail needed for debugging.
+    """
+    history = state['history']
+    history.append(entry)
+    overflow = max(0, len(history) - TODO_MAX_HISTORY_ENTRIES)
+    if overflow:
+        del history[:overflow]
+        state['history_dropped'] += overflow
+
+
 def _cascade_completed(state: dict) -> list[str]:
     """Pop completed children and atomically complete their bound parent."""
     popped = []
     stack = state['stack']
     while len(stack) > 1 and not incomplete_todos(stack[-1]['todos']):
         child = stack.pop()
-        state['history'].append({
+        _append_history(state, {
             'kind': 'child_completed',
             'checklist_id': child['checklist_id'],
             'revision': child['revision'],
@@ -345,7 +397,31 @@ def apply_todo_operation(current_state: dict | None, fn_args: dict | None) -> di
     if operation not in VALID_OPERATIONS:
         return _rejection(state, str(operation), 'operation must be sync, push, or replan')
 
-    todos = _normalize_todos(args.get('todos'))
+    raw_todos = args.get('todos')
+    if isinstance(raw_todos, list) and len(raw_todos) > TODO_MAX_ITEMS:
+        return _rejection(
+            state, operation,
+            f'a checklist may contain at most {TODO_MAX_ITEMS} items; '
+            'use push to decompose an active item',
+        )
+    for raw_item in raw_todos if isinstance(raw_todos, list) else ():
+        if not isinstance(raw_item, dict):
+            continue
+        raw_id = raw_item.get('id')
+        if isinstance(raw_id, str) and len(raw_id) > TODO_MAX_ID_CHARS:
+            return _rejection(
+                state, operation,
+                f'todo id exceeds {TODO_MAX_ID_CHARS} characters',
+            )
+        raw_content = raw_item.get('content')
+        if (isinstance(raw_content, str)
+                and len(raw_content) > TODO_MAX_CONTENT_CHARS):
+            return _rejection(
+                state, operation,
+                f'todo content exceeds {TODO_MAX_CONTENT_CHARS} characters',
+            )
+
+    todos = _normalize_todos(raw_todos)
     dupes = _duplicate_ids(todos)
     if dupes:
         return _rejection(state, operation,
@@ -358,8 +434,18 @@ def apply_todo_operation(current_state: dict | None, fn_args: dict | None) -> di
                               'push requires an active parent checklist; create it with sync first')
         if state.get('root_completed'):
             return _rejection(state, operation, 'the root checklist is already completed')
+        if len(state['stack']) >= TODO_MAX_STACK_DEPTH:
+            return _rejection(
+                state, operation,
+                f'checklist nesting is limited to {TODO_MAX_STACK_DEPTH} levels',
+            )
         parent_id = args.get('parent_todo_id')
         parent_id = parent_id.strip() if isinstance(parent_id, str) else ''
+        if len(parent_id) > TODO_MAX_ID_CHARS:
+            return _rejection(
+                state, operation,
+                f'parent_todo_id exceeds {TODO_MAX_ID_CHARS} characters',
+            )
         parent_item = next((t for t in active['todos'] if t.get('id') == parent_id), None)
         if not parent_item or parent_item.get('status') == 'completed':
             return _rejection(state, operation,
@@ -424,11 +510,16 @@ def apply_todo_operation(current_state: dict | None, fn_args: dict | None) -> di
         reason = reason.strip() if isinstance(reason, str) else ''
         if not reason:
             return _rejection(state, operation, 'replan requires a non-empty reason')
+        if len(reason) > TODO_MAX_REPLAN_REASON_CHARS:
+            return _rejection(
+                state, operation,
+                f'replan reason exceeds {TODO_MAX_REPLAN_REASON_CHARS} characters',
+            )
         old = copy.deepcopy(active['todos'])
         new_ids = {t['id'] for t in todos}
         superseded = [copy.deepcopy(t) for t in old
                       if t.get('status') != 'completed' and t['id'] not in new_ids]
-        state['history'].append({
+        _append_history(state, {
             'kind': 'replan',
             'checklist_id': active['checklist_id'],
             'revision': active['revision'],
@@ -497,12 +588,14 @@ def apply_todo_write_to_task(task: dict, fn_args: dict | None) -> tuple[list[dic
 
 
 def compact_todo_rounds_for_replay(rounds: list[dict] | None) -> list[dict]:
-    """Keep one effective ``todo_write`` carrier in model-visible replay.
+    """Keep bounded state plus the latest ``todo_write`` causal fact.
 
     The original list is never mutated and remains the durable audit history.
-    Prefer the newest accepted state-changing revision; if a turn contains
-    only rejected/no-op todo calls, retain the newest receipt so the protocol
-    still has a valid assistant/tool pair.
+    The newest accepted state-changing revision is the state snapshot. If a
+    later call failed, was rejected, or was a no-op, keep that newest receipt
+    too: deleting it hides the exact error the model just observed and invites
+    the same checklist submission again. A later successful revision subsumes
+    older failures. Thus replay retains at most two checklist occurrences.
     """
     source = list(rounds or [])
     todo_indexes = [i for i, row in enumerate(source)
@@ -511,11 +604,28 @@ def compact_todo_rounds_for_replay(rounds: list[dict] | None) -> list[dict]:
         return source
     effective = []
     for idx in todo_indexes:
-        results = source[idx].get('results') or []
+        row = source[idx]
+        # A transport/execution failure never changed checklist state.  Treat
+        # it like a rejected operation even when it predates the structured
+        # todo result metadata; otherwise a newest ``status='error'`` row can
+        # evict the last authoritative accepted revision from model replay.
+        status = str(row.get('status') or '')
+        if status and status != 'done':
+            continue
+        results = row.get('results') or []
         meta = results[0] if results and isinstance(results[0], dict) else {}
+        result_status = str(meta.get('status') or '').lower()
+        if (meta.get('isError') or meta.get('is_error')
+                or str(meta.get('type') or '').lower() == 'error'
+                or result_status in {
+                    'error', 'failed', 'failure', 'rejected', 'aborted',
+                }):
+            continue
         if not meta.get('todoRejected') and not meta.get('todoNoop'):
             effective.append(idx)
-    keep = effective[-1] if effective else todo_indexes[-1]
+    keep_indexes = {todo_indexes[-1]}
+    if effective:
+        keep_indexes.add(effective[-1])
     todo_set = set(todo_indexes)
     return [row for idx, row in enumerate(source)
-            if idx not in todo_set or idx == keep]
+            if idx not in todo_set or idx in keep_indexes]

@@ -6,6 +6,97 @@ let _riOpen = false;
 const _riSel = { taskId: null, fold: null };
 const _riTaskRows = {};
 
+let _riConvId = null;
+let _riPollTimer = null;
+/* Poll cadence: fast while any row is live, slow when idle. The drawer's
+ * by-conv list is a point-in-time read — without a poll, a RUNNING row
+ * (and its fold) freezes at whatever it was when the drawer opened. */
+const _RI_POLL_LIVE_MS = 3000;
+const _RI_POLL_IDLE_MS = 15000;
+
+/* Accumulated level-1 rows (first page + user-paged earlier rows) and the
+ * pagination cursor state. Silent polls MERGE the newest page into this
+ * list instead of replacing it, so a user-expanded history never
+ * collapses back on the next tick. */
+let _riTaskList = [];
+let _riHasMore = false;
+let _riListConvId = null;
+let _riLoadingEarlier = false;
+
+/* Real-time drive: the poll alone made the drawer lag up to 3s (live) /
+ * 15s (idle) behind reality, and a task that STARTED and FINISHED between
+ * two ticks never showed its transitions at all. Subscribing to the
+ * conversation's TurnStore flips that: any attempt/turn STATUS dispatch
+ * (not content deltas — those fire per token) triggers a throttled silent
+ * refresh. The poll stays as the cross-process backstop. */
+let _riStoreUnsub = null;
+let _riStoreFp = '';
+let _riStoreRefreshTimer = null;
+
+function _riStoreFingerprint() {
+  try {
+    const read = runtimeScope.ConversationTurnRead;
+    if (!read || !_riConvId || !read.state) return '';
+    const state = read.state(_riConvId);
+    if (!state) return '';
+    const parts = [];
+    const attempts = state.attemptsById || {};
+    for (const id of Object.keys(attempts).sort()) {
+      const a = attempts[id] || {};
+      parts.push(id + ':' + (a.status || ''));
+    }
+    const turns = state.turnsById || {};
+    let running = 0;
+    for (const id of Object.keys(turns)) {
+      if (turns[id] && turns[id].status === 'running') running += 1;
+    }
+    return parts.join(';') + '|r' + running;
+  } catch (_) { return ''; }
+}
+
+function _riOnStoreEvent() {
+  if (!_riOpen) return;
+  const fp = _riStoreFingerprint();
+  if (fp === _riStoreFp) return;  // content delta — not task activity
+  _riStoreFp = fp;
+  if (_riStoreRefreshTimer) return;
+  _riStoreRefreshTimer = setTimeout(async () => {
+    if (typeof _riStoreRefreshTimer.unref === 'function') {
+      _riStoreRefreshTimer.unref();
+    }
+    _riStoreRefreshTimer = null;
+    if (!_riOpen) return;
+    await _riRefreshTasks({ silent: true });
+    const live = Object.keys(_riTaskRows).some(
+      (id) => _riRowIsLive(_riTaskRows[id]));
+    _riSchedulePoll(live ? _RI_POLL_LIVE_MS : _RI_POLL_IDLE_MS);
+  }, 800);
+}
+
+function _riBindStore(convId) {
+  _riUnbindStore();
+  if (!convId) return;
+  try {
+    const rt = runtimeScope.ConversationTurnStore;
+    const store = rt && rt.ensureRuntimeStore && rt.ensureRuntimeStore(convId);
+    if (!store || typeof store.subscribe !== 'function') return;
+    _riStoreFp = _riStoreFingerprint();
+    _riStoreUnsub = store.subscribe(_riOnStoreEvent);
+  } catch (_) { /* store unavailable — poll remains the drive */ }
+}
+
+function _riUnbindStore() {
+  if (_riStoreUnsub) {
+    try { _riStoreUnsub(); } catch (_) { /* already gone */ }
+    _riStoreUnsub = null;
+  }
+  _riStoreFp = '';
+  if (_riStoreRefreshTimer) {
+    clearTimeout(_riStoreRefreshTimer);
+    _riStoreRefreshTimer = null;
+  }
+}
+
 function toggleRequestInspector() {
   if (_riOpen) closeRequestInspector();
   else openRequestInspector();
@@ -15,19 +106,23 @@ function openRequestInspector() {
   _riOpen = true;
   _riSel.taskId = null;
   _riSel.fold = null;
-  /* Keep the legacy debugVisible flag in sync — other readers (restore
-   * paths, the _applyDebugModeVisibility helper) key off it. */
-  if (typeof debugVisible !== 'undefined') debugVisible = true;
+  DebugShellState.visible = true;
   document.body.classList.add('ri-open');
   const d = document.getElementById('riDrawer');
   if (d) d.style.display = 'flex';
   _riResetDetail();
-  _riLoadTasks(typeof activeConvId !== 'undefined' ? activeConvId : null);
+  const convId = DebugShellState.activeConversationId;
+  _riLoadTasks(convId);
+  _riBindStore(convId);
+  _riSchedulePoll(_RI_POLL_IDLE_MS);
 }
 
 function closeRequestInspector() {
   _riOpen = false;
-  if (typeof debugVisible !== 'undefined') debugVisible = false;
+  _riStopPoll();
+
+  _riUnbindStore();
+  DebugShellState.visible = false;
   document.body.classList.remove('ri-open');
   const d = document.getElementById('riDrawer');
   if (d) d.style.display = 'none';
@@ -46,6 +141,60 @@ function _riOnConvSwitch(convId) {
   _riSel.fold = null;
   _riResetDetail();
   _riLoadTasks(convId);
+  _riBindStore(convId);
+}
+
+function _riStopPoll() {
+  if (_riPollTimer) { clearTimeout(_riPollTimer); _riPollTimer = null; }
+}
+
+function _riSchedulePoll(delayMs) {
+  _riStopPoll();
+  _riPollTimer = setTimeout(_riPollTick, delayMs);
+  /* Node/jsdom harnesses: a pending poll must not keep the event loop
+   * alive once the test body finished (browsers ignore unref). */
+  if (_riPollTimer && typeof _riPollTimer.unref === 'function') {
+    _riPollTimer.unref();
+  }
+}
+
+async function _riPollTick() {
+  _riPollTimer = null;
+  if (!_riOpen) return;
+  if (document.hidden) { _riSchedulePoll(_RI_POLL_IDLE_MS); return; }
+  await _riRefreshTasks({ silent: true });
+  const live = Object.keys(_riTaskRows).some((id) => _riRowIsLive(_riTaskRows[id]));
+  _riSchedulePoll(live ? _RI_POLL_LIVE_MS : _RI_POLL_IDLE_MS);
+}
+
+function _riRowIsLive(row) {
+  return !!(row && (row.live ||
+    ['running', 'queued', 'pending'].includes(
+      String(row.status || '').toLowerCase())));
+}
+
+/* Refresh the task list; when the SELECTED task is still live, refresh its
+ * level-2 fold as well — silently, so the detail pane the user is reading
+ * (round payload / trace) is never reset by a background tick. */
+async function _riRefreshTasks(opts) {
+  const silent = !!(opts && opts.silent);
+  await _riLoadTasks(_riConvId, { silent });
+  if (_riSel.taskId && _riRowIsLive(_riTaskRows[_riSel.taskId])) {
+    await _riSelectTask(_riSel.taskId, { silent: true });
+  }
+  if (!silent) _riSchedulePoll(_RI_POLL_IDLE_MS);
+}
+
+/* data-tofu-action targets (header refresh button / inline retry). */
+function riRefreshTasks() {
+  if (!_riOpen) return undefined;
+  return _riRefreshTasks({ silent: false });
+}
+
+function riRetryTask() {
+  if (!_riOpen) return undefined;
+  if (_riSel.taskId) return _riSelectTask(_riSel.taskId);
+  return _riRefreshTasks({ silent: false });
 }
 
 /* Turn badge label for a request row (P4): Flow node phases read through
@@ -64,13 +213,85 @@ function _riEsc(s) {
     ? escapeHtml(s == null ? '' : String(s)) : String(s == null ? '' : s);
 }
 
-function _riTimeLabel(ts) {
+function _riAbsTime(ts) {
   if (!ts) return '';
   try {
-    const d = new Date(ts);
+    const d = new Date(Number(ts));
     const p = (n) => String(n).padStart(2, '0');
-    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+      `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   } catch (_) { return ''; }
+}
+
+/* Task-list primary timestamp: "3 分钟前" reads far better than a bare
+ * HH:MM:SS when rows span a whole session; the absolute stamp stays on
+ * the title tooltip. */
+function _riRelTime(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - Number(ts);
+  if (diff < 0) return _riAbsTime(ts);
+  const s = Math.floor(diff / 1000);
+  if (s < 45) return t('ri.timeJustNow');
+  const m = Math.floor(s / 60);
+  if (m < 60) return t('ri.timeMinAgo', { n: Math.max(1, m) });
+  const h = Math.floor(m / 60);
+  if (h < 24) return t('ri.timeHoursAgo', { n: h });
+  const d = Math.floor(h / 24);
+  if (d < 7) return t('ri.timeDaysAgo', { n: d });
+  return _riAbsTime(ts).slice(5, 16);
+}
+
+/* Map a task row to its reply bubble: live rows carry turnId from the
+ * server; otherwise the conversation's attempt records know which task
+ * produced which turn. The ordinal counts assistant replies only, so it
+ * matches what the user reads as "reply #N". */
+function _riTurnOrdinal(row) {
+  try {
+    const read = runtimeScope.ConversationTurnRead;
+    if (!read || !_riConvId || !row) return null;
+    let turnId = row.turnId || '';
+    if (!turnId) {
+      const state = read.state && read.state(_riConvId);
+      const attempts = (state && state.attemptsById) || {};
+      for (const att of Object.values(attempts)) {
+        if (att && att.taskId === row.taskId && att.turnId) {
+          turnId = att.turnId;
+          break;
+        }
+      }
+    }
+    if (!turnId) return null;
+    let n = 0;
+    const ordered = (read.ordered && read.ordered(_riConvId)) || [];
+    for (const turn of ordered) {
+      if (!turn || !turn.turnId) continue;
+      if (turn.actor === 'assistant') n += 1;
+      if (turn.turnId === turnId) {
+        return n > 0 ? { turnId, ordinal: n } : null;
+      }
+    }
+    return null;
+  } catch (_) { return null; }
+}
+
+function _riTurnChip(row) {
+  const ref = _riTurnOrdinal(row);
+  if (!ref) return null;
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'ri-turn-chip';
+  chip.dataset.turnId = ref.turnId;
+  chip.textContent = t('ri.turnChip', { n: ref.ordinal });
+  chip.title = t('ri.turnChipTip');
+  return chip;
+}
+
+function _riScrollToTurn(turnId) {
+  const node = (typeof _findRenderedNativeTurnNode === 'function')
+    ? _findRenderedNativeTurnNode(turnId) : null;
+  if (node && node.scrollIntoView) {
+    node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
 }
 
 function _riEl(id) { return document.getElementById(id); }
@@ -108,98 +329,301 @@ function _riRevealTechnical() {
   if (details) details.open = true;
 }
 
-function _riSummaryCard(taskId, taskRow, fold) {
-  const status = _riStatusInfo(taskRow || {});
-  const operationCount = Number(fold && fold.operationCount);
-  const hasOperationCount = !!fold && fold.eventsAvailable !== false &&
-    fold.operationCountAvailable !== false &&
-    Object.prototype.hasOwnProperty.call(fold, 'operationCount') &&
-    Number.isFinite(operationCount) && operationCount >= 0;
-  let operationLabel = t('ri.operationUnavailable');
-  if (hasOperationCount) {
-    if (operationCount > 0) {
-      const key = fold.operationCountApproximate
-        ? (operationCount === 1
-          ? 'ri.operationCountApproxOne' : 'ri.operationCountApprox')
-        : (operationCount === 1 ? 'ri.operationCountOne' : 'ri.operationCount');
-      operationLabel = t(key, { n: operationCount });
-    } else operationLabel = t('ri.noOperations');
-  }
-  const el = document.createElement('section');
-  el.className = 'ri-summary';
-  el.setAttribute('aria-label', t('ri.summaryLabel'));
-  el.innerHTML =
-    `<div class="ri-summary-status ri-tone-${_riEsc(status.tone)}">` +
-    `<span class="ri-summary-dot" aria-hidden="true"></span>` +
-    `<span>${_riEsc(status.label)}</span></div>` +
-    `<div class="ri-summary-count">${_riEsc(operationLabel)}</div>` +
-    `<div class="ri-summary-help">${_riEsc(t('ri.operationHelp'))}</div>` +
-    `<div class="ri-summary-task">${_riEsc(t('ri.taskLabel', {
-      id: String(taskId || '').slice(0, 8) }))}</div>`;
-  return el;
-}
-
 /* ── Level 1: task rows for the active conversation ── */
-async function _riLoadTasks(convId) {
+async function _riLoadTasks(convId, opts) {
+  const silent = !!(opts && opts.silent);
   const list = _riEl('riTaskList');
   const rounds = _riEl('riRoundList');
   if (!list) return;
-  if (rounds) rounds.innerHTML = '';
-  for (const key of Object.keys(_riTaskRows)) delete _riTaskRows[key];
-  if (!convId) {
+  _riConvId = convId || null;
+  if (!silent && rounds) rounds.innerHTML = '';
+  if (_riListConvId !== _riConvId || !silent) {
+    /* A fresh explicit load (open / conv switch / manual refresh) resets
+     * the accumulated pagination; silent polls merge into it. */
+    _riTaskList = [];
+    _riHasMore = false;
+  }
+  _riListConvId = _riConvId;
+  if (!_riConvId) {
     list.innerHTML = `<div class="ri-empty">${_riEsc(t('ri.empty'))}</div>`;
     return;
   }
-  list.innerHTML = `<div class="ri-empty">${_riEsc(t('ri.loading'))}</div>`;
+  /* Silent polls keep the current DOM (and its scroll position) while the
+   * fetch is in flight — no loading-flash every few seconds. */
+  if (!silent) {
+    list.innerHTML = `<div class="ri-empty">${_riEsc(t('ri.loading'))}</div>`;
+  }
   const data = (typeof Api !== 'undefined' && Api.tasks)
     ? await Api.tasks.byConv(convId) : null;
   if (!_riOpen) return;  // drawer closed while fetching
-  const tasks = (data && Array.isArray(data.tasks)) ? data.tasks : [];
-  if (!tasks.length) {
-    list.innerHTML = `<div class="ri-empty">${_riEsc(t('ri.empty'))}</div>`;
+  if (convId !== _riConvId) return;  // conversation switched mid-flight
+  if (!data) {
+    /* byConv resolves null on ANY failure (network error, 404, 500).
+     * Never present that as "no tasks" — say it failed and offer retry. */
+    list.innerHTML = `<div class="ri-empty">${_riEsc(t('ri.loadFailed'))} ` +
+      `<button type="button" class="ri-retry" ` +
+      `data-tofu-action="riRefreshTasks()">${_riEsc(t('ri.retry'))}</button></div>`;
     return;
   }
-  if (rounds && !_riSel.taskId) {
+  const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+  _riHasMore = !!data.hasMore;
+  _riMergeFirstPage(tasks);
+  if (!_riTaskList.length) {
+    /* readError = the STORAGE read failed: an empty list is only honest
+     * when the read succeeded. Failure gets the retry affordance, never
+     * the "no tasks recorded" empty state. */
+    list.innerHTML = data.readError
+      ? `<div class="ri-empty">${_riEsc(t('ri.loadFailed'))} ` +
+        `<button type="button" class="ri-retry" ` +
+        `data-tofu-action="riRefreshTasks()">${_riEsc(t('ri.retry'))}</button></div>`
+      : `<div class="ri-empty">${_riEsc(t('ri.empty'))}</div>`;
+    return;
+  }
+  if (!silent && rounds && !_riSel.taskId) {
     rounds.innerHTML = `<div class="ri-empty ri-select-task">` +
       `${_riEsc(t('ri.selectTask'))}</div>`;
   }
-  list.innerHTML = '';
-  for (const row of tasks) {
-    _riTaskRows[row.taskId] = row;
-    const el = document.createElement('div');
-    el.className = 'ri-task' + (_riSel.taskId === row.taskId ? ' ri-sel' : '') +
-      (row.isSwarmAgent ? ' ri-task-agent' : '');
-    el.dataset.taskId = row.taskId;
-    const status = _riStatusInfo(row);
-    const expired = !row.hasEvents && !row.live;
-    const agentBadge = row.isSwarmAgent
-      ? `<span class="ri-agent-badge">${_riEsc(row.agentId || 'agent')}</span> · ` : '';
-    el.innerHTML =
-      `<div class="ri-task-top">` +
-      `<span class="ri-task-status ri-tone-${_riEsc(status.tone)}">` +
-      `<span class="ri-task-status-dot" aria-hidden="true"></span>` +
-      `${_riEsc(status.label)}</span>` +
-      `<span class="ri-task-time">${_riEsc(_riTimeLabel(row.createdAt))}</span>` +
-      `</div>` +
-      `<div class="ri-task-sub">` +
-      agentBadge +
-      (expired
-        ? `<span class="ri-expired">${_riEsc(t('ri.expired'))}</span>`
-        : `<span>${_riEsc(t('ri.viewProcess'))}</span>`) +
-      `<span class="ri-task-id">${_riEsc(t('ri.taskLabel', {
-        id: String(row.taskId).slice(0, 8) }))}</span>` +
-      `</div>`;
-    el.onclick = () => _riSelectTask(row.taskId);
-    list.appendChild(el);
+  _riRenderTaskList({ keepScroll: silent });
+  if (data.readError) {
+    /* Partial failure: live rows made it, the persisted read did not —
+     * warn on top instead of silently presenting a truncated history. */
+    const warn = document.createElement('div');
+    warn.className = 'ri-warn-line';
+    warn.innerHTML = `${_riEsc(t('ri.loadFailed'))} ` +
+      `<button type="button" class="ri-retry" ` +
+      `data-tofu-action="riRefreshTasks()">${_riEsc(t('ri.retry'))}</button>`;
+    list.prepend(warn);
   }
 }
 
+/* Merge the newest page into the accumulated list. Persisted rows are
+ * immutable and stay; a LIVE row missing from the newest page vanished
+ * from the registry (finished → its persisted twin is in this page, or
+ * evicted) and must not linger as forever-running. */
+function _riMergeFirstPage(rows) {
+  const fresh = {};
+  for (const r of rows) fresh[r.taskId] = true;
+  const kept = _riTaskList.filter((r) => fresh[r.taskId] === undefined && !r.live);
+  _riTaskList = kept.concat(rows)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  for (const key of Object.keys(_riTaskRows)) delete _riTaskRows[key];
+  for (const r of _riTaskList) _riTaskRows[r.taskId] = r;
+}
+
+/* Group task rows by the reply they produced. The old flat newest-first
+ * list mixed retries, swarm agents and unrelated replies into one strip
+ * ("任务顺序看不懂"). Grouped: one header per reply (chip + question
+ * preview + latest time), runs inside a group in CHRONOLOGICAL order
+ * (run 1, run 2…), swarm children nested right after their parent. Rows
+ * whose turn is not loaded (old pages, pre-TurnStore history) cluster in
+ * one trailing "earlier" group; when NOTHING resolves the list renders
+ * headerless, exactly like before. */
+function _riGroupTaskRows(tasks) {
+  const childrenByParent = {};
+  const parents = [];
+  const parentIds = {};
+  for (const row of tasks) {
+    if (row.parentTaskId) {
+      (childrenByParent[row.parentTaskId] =
+        childrenByParent[row.parentTaskId] || []).push(row);
+    } else {
+      parents.push(row);
+      parentIds[row.taskId] = true;
+    }
+  }
+  /* Orphaned swarm children (parent paged out) render standalone rather
+   * than vanishing. */
+  for (const pid of Object.keys(childrenByParent)) {
+    if (parentIds[pid]) continue;
+    for (const child of childrenByParent[pid]) parents.push(child);
+    delete childrenByParent[pid];
+  }
+  const groups = [];
+  const byKey = {};
+  for (const row of parents) {
+    const ref = _riTurnOrdinal(row);
+    const key = ref ? ref.turnId : '__none__';
+    let g = byKey[key];
+    if (!g) {
+      g = { ref, key, rows: [], latest: 0, preview: '' };
+      byKey[key] = g;
+      groups.push(g);
+    }
+    g.rows.push(row);
+    if ((row.createdAt || 0) > g.latest) g.latest = row.createdAt || 0;
+    if (!g.preview && row.userPreview) g.preview = row.userPreview;
+  }
+  groups.sort((a, b) => b.latest - a.latest);
+  for (const g of groups) {
+    /* A resolved group holds retries of ONE reply: chronological reads as
+     * run 1, run 2…. The unresolved bucket mixes unrelated tasks — keep it
+     * newest-first like the pre-grouping flat list. */
+    g.rows.sort(g.ref
+      ? (a, b) => (a.createdAt || 0) - (b.createdAt || 0)
+      : (a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    g.childrenByParent = childrenByParent;
+  }
+  return groups;
+}
+
+function _riGroupHeaderEl(group) {
+  const head = document.createElement('div');
+  head.className = 'ri-group-head';
+  const label = document.createElement('span');
+  label.className = 'ri-group-preview';
+  if (group.ref) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'ri-turn-chip';
+    chip.textContent = t('ri.turnChip', { n: group.ref.ordinal });
+    chip.title = t('ri.turnChipTip');
+    chip.onclick = (ev) => {
+      ev.stopPropagation();
+      _riScrollToTurn(group.ref.turnId);
+    };
+    head.appendChild(chip);
+    label.textContent = group.preview || '';
+    label.title = group.preview || '';
+  } else {
+    label.textContent = t('ri.groupOlder');
+  }
+  head.appendChild(label);
+  const time = document.createElement('span');
+  time.className = 'ri-group-time';
+  time.textContent = _riRelTime(group.latest);
+  time.title = _riAbsTime(group.latest);
+  head.appendChild(time);
+  return head;
+}
+
+function _riTaskRowEl(row, opts) {
+  const runIndex = (opts && opts.runIndex) || 0;
+  const showTurnChip = !!(opts && opts.showTurnChip);
+  const el = document.createElement('div');
+  el.className = 'ri-task' + (_riSel.taskId === row.taskId ? ' ri-sel' : '') +
+    (row.isSwarmAgent ? ' ri-task-agent' : '') +
+    (row.parentTaskId ? ' ri-task-child' : '');
+  el.dataset.taskId = row.taskId;
+  const status = _riStatusInfo(row);
+  const expired = !row.hasEvents && !row.live;
+  const agentBadge = row.isSwarmAgent
+    ? `<span class="ri-agent-badge">${_riEsc(row.agentId || 'agent')}</span> · ` : '';
+  const runBadge = runIndex
+    ? `<span class="ri-run-badge">${_riEsc(t('ri.runIndex', { n: runIndex }))}</span>`
+    : '';
+  const preview = row.userPreview
+    ? `<div class="ri-task-preview">${_riEsc(row.userPreview)}</div>` : '';
+  el.innerHTML =
+    `<div class="ri-task-top">` +
+    `<span class="ri-task-status ri-tone-${_riEsc(status.tone)}">` +
+    `<span class="ri-task-status-dot" aria-hidden="true"></span>` +
+    `${_riEsc(status.label)}</span>` +
+    runBadge +
+    `<span class="ri-task-time" title="${_riEsc(_riAbsTime(row.createdAt))}">` +
+    `${_riEsc(_riRelTime(row.createdAt))}</span>` +
+    `</div>` +
+    preview +
+    `<div class="ri-task-sub">` +
+    agentBadge +
+    (expired
+      ? `<span class="ri-expired">${_riEsc(t('ri.expired'))}</span>`
+      : `<span>${_riEsc(t('ri.viewProcess'))}</span>`) +
+    `<span class="ri-task-id">${_riEsc(t('ri.taskLabel', {
+      id: String(row.taskId).slice(0, 8) }))}</span>` +
+    `</div>`;
+  /* Flat fallback (no turn resolved anywhere): keep the per-row anchor
+   * chip. Grouped mode carries the anchor on the group header instead. */
+  if (showTurnChip) {
+    const chip = _riTurnChip(row);
+    if (chip) {
+      chip.onclick = (ev) => {
+        ev.stopPropagation();
+        _riScrollToTurn(chip.dataset.turnId);
+      };
+      el.querySelector('.ri-task-sub').prepend(chip);
+    }
+  }
+  el.onclick = () => _riSelectTask(row.taskId);
+  return el;
+}
+
+function _riRenderTaskList(opts) {
+  const list = _riEl('riTaskList');
+  if (!list) return;
+  const keepScroll = !!(opts && opts.keepScroll);
+  const scrollTop = keepScroll ? list.scrollTop : 0;
+  list.innerHTML = '';
+  const groups = _riGroupTaskRows(_riTaskList);
+  const anyResolved = groups.some((g) => !!g.ref);
+  for (const g of groups) {
+    if (anyResolved) list.appendChild(_riGroupHeaderEl(g));
+    /* run badges only make sense on true retry runs (same reply); the
+     * unresolved bucket's rows are unrelated tasks, not numbered runs. */
+    const multi = !!g.ref && g.rows.length > 1;
+    g.rows.forEach((row, i) => {
+      list.appendChild(_riTaskRowEl(row, {
+        runIndex: multi ? i + 1 : 0,
+        showTurnChip: !anyResolved,
+      }));
+      const children = (g.childrenByParent[row.taskId] || [])
+        .slice()
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      for (const child of children) {
+        list.appendChild(_riTaskRowEl(child, { showTurnChip: false }));
+      }
+    });
+  }
+  if (_riHasMore) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'ri-load-earlier';
+    more.disabled = _riLoadingEarlier;
+    more.textContent = t(_riLoadingEarlier ? 'ri.loading' : 'ri.loadEarlier');
+    more.onclick = () => _riLoadEarlierTasks();
+    list.appendChild(more);
+  }
+  if (keepScroll) list.scrollTop = scrollTop;
+}
+
+/* Page OLDER persisted rows in (cursor = oldest accumulated createdAt).
+ * Live rows never participate: they are always first-page citizens. */
+async function _riLoadEarlierTasks() {
+  if (!_riOpen || !_riConvId || !_riHasMore || _riLoadingEarlier) return;
+  const persisted = _riTaskList.filter((r) => !r.live);
+  const cursor = persisted.length
+    ? persisted[persisted.length - 1].createdAt || 0 : 0;
+  if (!cursor) { _riHasMore = false; _riRenderTaskList(); return; }
+  _riLoadingEarlier = true;
+  _riRenderTaskList({ keepScroll: true });
+  const data = (typeof Api !== 'undefined' && Api.tasks)
+    ? await Api.tasks.byConv(_riConvId, { before: cursor }) : null;
+  _riLoadingEarlier = false;
+  if (!_riOpen) return;
+  if (!data) { _riRenderTaskList({ keepScroll: true }); return; }
+  _riHasMore = !!data.hasMore;
+  const known = {};
+  for (const r of _riTaskList) known[r.taskId] = true;
+  const older = (Array.isArray(data.tasks) ? data.tasks : [])
+    .filter((r) => r && r.taskId && !known[r.taskId]);
+  if (older.length) {
+    _riTaskList = _riTaskList.concat(older)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    for (const r of older) _riTaskRows[r.taskId] = r;
+  }
+  _riRenderTaskList({ keepScroll: true });
+}
+
 /* ── Level 2: request rows (metadata) for the selected task ── */
-async function _riSelectTask(taskId) {
+async function _riSelectTask(taskId, opts) {
+  const silent = !!(opts && opts.silent);
   _riSel.taskId = taskId;
-  _riSel.fold = null;
-  _riSel.traceOpen = false;
-  _riResetDetail();
+  if (!silent) {
+    _riSel.fold = null;
+    _riSel.traceOpen = false;
+    /* A silent background refresh must NOT reset the detail pane — the
+     * user may be reading a round payload or the trace right now. */
+    _riResetDetail();
+  }
   /* Re-mark the selected task row. */
   const list = _riEl('riTaskList');
   if (list) {
@@ -209,24 +633,43 @@ async function _riSelectTask(taskId) {
   }
   const rounds = _riEl('riRoundList');
   if (!rounds) return;
-  rounds.innerHTML = `<div class="ri-empty">${_riEsc(t('ri.loading'))}</div>`;
+  const scrollTop = silent ? rounds.scrollTop : 0;
+  if (!silent) {
+    rounds.innerHTML = `<div class="ri-empty">${_riEsc(t('ri.loading'))}</div>`;
+  }
   const fold = (typeof Api !== 'undefined' && Api.tasks)
     ? await Api.tasks.getRequests(taskId) : null;
   if (!_riOpen || _riSel.taskId !== taskId) return;  // stale response
   _riSel.fold = fold;
   rounds.innerHTML = '';
   if (!fold || !fold.eventsAvailable) {
-    rounds.appendChild(_riSummaryCard(taskId, _riTaskRows[taskId], fold));
-    const expired = document.createElement('div');
-    expired.className = 'ri-empty';
-    expired.textContent = t('ri.expired');
-    rounds.appendChild(expired);
+    const note = document.createElement('div');
+    note.className = 'ri-empty';
+    if (!fold) {
+      /* getRequests resolves null on ANY failure (network, 404, 500) —
+       * a load error is NOT "records cleaned up"; offer a retry. */
+      note.innerHTML = `<span>${_riEsc(t('ri.loadFailed'))}</span> ` +
+        `<button type="button" class="ri-retry" ` +
+        `data-tofu-action="riRetryTask()">${_riEsc(t('ri.retry'))}</button>`;
+    } else if (fold.readError) {
+      /* Storage read FAILED — the honest "expired" empty state would be a
+       * lie; say so and offer a retry. */
+      note.innerHTML = `<span>${_riEsc(t('ri.loadFailed'))}</span> ` +
+        `<button type="button" class="ri-retry" ` +
+        `data-tofu-action="riRetryTask()">${_riEsc(t('ri.retry'))}</button>`;
+    } else if (_riRowIsLive(_riTaskRows[taskId])) {
+      /* Live task before its first persisted snapshot: honest "starting" —
+       * the poll and the TurnStore subscription fill rows in as they land. */
+      note.textContent = t('ri.starting');
+    } else {
+      note.textContent = t('ri.expiredHint');
+    }
+    rounds.appendChild(note);
     return;
   }
-  rounds.appendChild(_riSummaryCard(taskId, _riTaskRows[taskId], fold));
-  /* Turn Trace entry (耗时分析): sits between the summary and the
-   * technical details — the ONE click that answers "where did the time
-   * go" for this task, folded server-side (docs/TURN_TRACE_CONTRACT.md). */
+  /* Turn Trace entry (耗时分析): the drawer's top-level plain-language
+   * entry — the ONE click that answers "where did the time go" for this
+   * task, folded server-side (docs/TURN_TRACE_CONTRACT.md). */
   const traceEntry = document.createElement('div');
   traceEntry.className = 'ri-trace-entry';
   traceEntry.setAttribute('role', 'button');
@@ -237,9 +680,12 @@ async function _riSelectTask(taskId) {
   rounds.appendChild(traceEntry);
   const technical = document.createElement('details');
   technical.className = 'ri-technical';
+  /* The round list IS the drawer's payload — open by default; collapsing
+   * is the opt-out for very long tasks, not the other way round. */
+  technical.open = true;
   const technicalHead = document.createElement('summary');
   technicalHead.innerHTML = `<span>${_riEsc(t('ri.technicalDetails'))}</span>` +
-    `<span class="ri-technical-count">${_riEsc(t('ri.modelTurns', {
+    `<span class="ri-technical-count">${_riEsc(t('ri.roundTotal', {
       n: fold.requestCount || 0 }))}</span>`;
   technical.appendChild(technicalHead);
   const technicalBody = document.createElement('div');
@@ -272,16 +718,19 @@ async function _riSelectTask(taskId) {
     el.dataset.round = String(row.roundNum);
     el.dataset.turn = row.turn || '';
     const attempts = Array.isArray(row.attempts) ? row.attempts : [];
-    const tok = row.approxTokens >= 1000
-      ? (row.approxTokens / 1000).toFixed(1) + 'K' : String(row.approxTokens || 0);
     const attemptBits = attempts.map((a) => {
       const el2 = (a.streamElapsedMs / 1000).toFixed(1) + 's';
       const fb = /FALLBACK|REACTIVE|DISCARDED/.test(a.tag || '') ? ' ⚠' : '';
       return `<span class="ri-attempt" title="${_riEsc(a.traceId || '')}">` +
         `${_riEsc(a.tag || a.model)} ${a.tokensIn}→${a.tokensOut} · ${el2}${fb}</span>`;
     }).join('');
-    const visibleToolCount = row.wireToolsCount != null
-      ? row.wireToolsCount : row.toolsCount;
+    /* Tool-name chips — the SAME glanceability contract as the chat
+     * timeline's turn blocks: which tools this round invoked, nothing
+     * else. Counts (messages/tokens/schema) stay inside the round's
+     * detail pane. */
+    const toolNames = Array.isArray(row.toolNames) ? row.toolNames : [];
+    const toolChips = toolNames.map((name) =>
+      `<span class="ri-tool-chip">${_riEsc(name)}</span>`).join('');
     const turnBadge = row.turn
       ? `<span class="ri-turn-badge">${_riEsc(_riTurnLabel(row))}</span>` : '';
     el.innerHTML =
@@ -289,37 +738,13 @@ async function _riSelectTask(taskId) {
       turnBadge +
       `<span class="ri-round-n">${_riEsc(t('ri.roundNumber', {
         n: row.roundNum }))}</span>` +
-      `<span class="ri-round-model">${_riEsc(row.model || '?')}</span>` +
-      `<span class="ri-round-meta">${_riEsc(t('ri.roundMeta', {
-        messages: row.messageCount, tokens: tok }))}` +
-      (visibleToolCount ? ` · ${_riEsc(t('ri.availableTools', {
-        n: visibleToolCount }))}` : '') + `</span>` +
       `</div>` +
+      (toolChips ? `<div class="ri-round-tools">${toolChips}</div>` : '') +
       (attemptBits ? `<div class="ri-round-attempts">${attemptBits}</div>` : '');
     el.onclick = () => _riSelectRound(taskId, row.roundNum, el, row.turn || '');
     technicalBody.appendChild(el);
   }
-  /* State mirrors (NOT requests) — collapsed at the bottom, clearly labeled. */
-  const states = Array.isArray(fold.states) ? fold.states : [];
-  if (states.length) {
-    const head = document.createElement('div');
-    head.className = 'ri-states-head';
-    head.textContent = `${t('ri.states')} (${states.length}) — ${t('ri.stateNote')}`;
-    technicalBody.appendChild(head);
-    for (const s of states) {
-      const el = document.createElement('div');
-      el.className = 'ri-state-row';
-      el.setAttribute('role', 'button');
-      el.tabIndex = 0;
-      el.title = t('ri.stateRowTip');
-      el.textContent = `${s.label || s.roundNum} · ${s.messageCount} msgs`;
-      /* State rows are NAVIGATION (the drawer's quick-jump list): open the
-       * state mirror INLINE next to the tool call that produced it; falls
-       * back to the drawer detail when the tool row isn't in the DOM. */
-      el.onclick = () => openStateInspector(taskId, s.roundNum);
-      technicalBody.appendChild(el);
-    }
-  }
+  if (silent) rounds.scrollTop = scrollTop;
 }
 
 function _riShowWireProjection(projection) {
@@ -350,25 +775,103 @@ function _riShowWireProjection(projection) {
   content.prepend(details);
 }
 
+function _riRawArchiveText(dataBase64) {
+  try {
+    const binary = atob(String(dataBase64 || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch (_) {
+    return t('ri.rawUnavailable');
+  }
+}
+
+function _riShowRawArchives(taskId, archives) {
+  if (!Array.isArray(archives) || !archives.length) return;
+  const content = _riEl('debugContent');
+  if (!content) return;
+  const owner = document.createElement('details');
+  owner.className = 'ri-coverage-chip ri-raw-archives';
+  const summary = document.createElement('summary');
+  summary.textContent = t('ri.rawArchive', { n: archives.length });
+  owner.appendChild(summary);
+  for (const archive of archives) {
+    const item = document.createElement('section');
+    item.className = 'ri-raw-archive';
+    const meta = document.createElement('div');
+    meta.className = 'ri-raw-archive-meta';
+    const partial = archive.integrity === 'partial'
+      ? ' · ' + t('ri.rawPartial', {
+        reason: archive.truncationReason || 'partial' }) : '';
+    meta.textContent = `#${archive.transportAttempt || 0} · ` +
+      `${archive.storedBytes || 0}/${archive.byteCount || 0} B${partial}`;
+    item.appendChild(meta);
+    for (const part of ['request', 'response']) {
+      const row = document.createElement('div');
+      row.className = 'ri-raw-part';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'ri-raw-load';
+      button.textContent = t(part === 'request'
+        ? 'ri.rawRequest' : 'ri.rawResponse');
+      const body = document.createElement('pre');
+      body.hidden = true;
+      let offset = 0;
+      button.onclick = async () => {
+        button.disabled = true;
+        const chunk = (typeof Api !== 'undefined' && Api.tasks)
+          ? await Api.tasks.getRawArchiveChunk(
+            taskId, archive.archiveId, part, offset) : null;
+        button.disabled = false;
+        if (!chunk) {
+          body.hidden = false;
+          body.textContent = t('ri.rawUnavailable');
+          return;
+        }
+        // Replace, never append: browser residency stays one 256 KiB window
+        // even when the durable archive is multi-MiB.
+        body.hidden = false;
+        body.textContent = _riRawArchiveText(chunk.dataBase64);
+        offset = chunk.nextOffset || 0;
+        button.textContent = chunk.hasMore
+          ? t('ri.rawNext')
+          : t(part === 'request' ? 'ri.rawRequest' : 'ri.rawResponse');
+        button.disabled = !chunk.hasMore && offset > 0;
+      };
+      row.append(button, body);
+      item.appendChild(row);
+    }
+    owner.appendChild(item);
+  }
+  content.prepend(owner);
+}
+
 /* ── Level 3: detail — REUSES showMessagesInDebug (no second renderer) ── */
 
 /* Bounded payload cache; live SSE snapshots win over server reads. */
 const _riPayloadCache = {};
 const _RI_PAYLOAD_CACHE_MAX = 40;
+function _riCachePayload(key, payload) {
+  if (!_riPayloadCache[key]) {
+    const ids = Object.keys(_riPayloadCache);
+    if (ids.length >= _RI_PAYLOAD_CACHE_MAX) delete _riPayloadCache[ids[0]];
+  }
+  _riPayloadCache[key] = payload;
+  return payload;
+}
 async function _riFetchPayload(taskId, roundNum, turn, kind) {
   turn = turn || '';
   kind = kind || 'request';
   const key = taskId + ':' + kind + ':' + turn + ':' + roundNum;
   /* Prefer live snapshots; Flow phases are keyed by turn|roundNum. */
-  const _acc = (typeof _debugRequests !== 'undefined') && _debugRequests[taskId];
+  const _acc = DebugShellState.requests[taskId];
   if (kind === 'state') {
     const st = _acc && (_acc.states || []).filter((s) => s && s.messages &&
       String(s.roundNum) === String(roundNum)).pop();
     if (st) {
       const payload = { messages: st.messages, tools: st.tools,
         label: st.label, model: st.model, params: st.params, kind: 'state' };
-      _riPayloadCache[key] = payload;
-      return payload;
+      return _riCachePayload(key, payload);
     }
   } else {
     const _accKey = turn ? turn + '|' + roundNum : String(roundNum);
@@ -377,18 +880,22 @@ async function _riFetchPayload(taskId, roundNum, turn, kind) {
       const payload = { messages: acc.messages, tools: acc.tools,
         label: acc.label, model: acc.model, params: acc.params,
         turn: acc.turn || turn };
-      _riPayloadCache[key] = payload;
-      return payload;
+      return _riCachePayload(key, payload);
     }
   }
-  if (_riPayloadCache[key]) return _riPayloadCache[key];
+  /* A live task keeps appending: a cached server read from an earlier
+   * poll would freeze the round mid-flight. (Live SSE snapshots above
+   * still win — they ARE the newest state.) */
+  if (!_riRowIsLive(_riTaskRows[taskId]) && _riPayloadCache[key]) {
+    return _riPayloadCache[key];
+  }
   const data = (typeof Api !== 'undefined' && Api.tasks)
     ? await Api.tasks.getRequestPayload(taskId, roundNum, turn || undefined,
         kind === 'state' ? 'state' : undefined) : null;
   if (data && data.messages) {
-    const ids = Object.keys(_riPayloadCache);
-    if (ids.length >= _RI_PAYLOAD_CACHE_MAX) delete _riPayloadCache[ids[0]];
-    _riPayloadCache[key] = data;
+    if (!_riRowIsLive(_riTaskRows[taskId])) {
+      _riCachePayload(key, data);
+    }
     return data;
   }
   return null;
@@ -466,30 +973,12 @@ async function _riSelectRound(taskId, roundNum, el, turn) {
   if (typeof showMessagesInDebug === 'function') {
     _riSetDetailActive(true);
     showMessagesInDebug(payload.messages, payload.label || '', false,
-      typeof activeConvId !== 'undefined' ? activeConvId : null,
+      DebugShellState.activeConversationId,
       payload.tools || undefined, false, undefined,
       Object.assign(opts, { contextManifest: payload.contextManifest || [] }));
     _riShowWireProjection(payload.wireProjection);
+    _riShowRawArchives(taskId, payload.rawArchives);
   }
-}
-
-/* Resolve a tool row's producing task from its stable Turn/attempt identity. */
-function _riTaskIdForRound(round) {
-  try {
-    if (round?._taskId) return String(round._taskId);
-    const turnId = String(round?._turnId || '');
-    const state = runtimeScope.ConversationTurnRead?.state?.(activeConvId);
-    const turn = turnId ? state?.turnsById?.[turnId] : null;
-    if (!turn || turn.actor === 'virtual_user') return '';
-    const attempts = Object.values(state.attemptsById || {}).filter(
-      (attempt) => attempt?.turnId === turnId && attempt.taskId,
-    );
-    attempts.sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0));
-    return attempts[0]?.taskId || '';
-  } catch (e) {
-    console.warn('[ri] taskId-for-round resolve failed:', e);
-  }
-  return '';
 }
 
 /* Open the request that produced a tool call. */
@@ -569,7 +1058,7 @@ async function openToolDebugPanel(taskId, roundNum, anchorEl) {
         typeof showMessagesInDebug === 'function') {
       _riSetDetailActive(true);
       showMessagesInDebug(view.payload.messages, view.payload.label || '', false,
-        typeof activeConvId !== 'undefined' ? activeConvId : null,
+        DebugShellState.activeConversationId,
         view.payload.tools || undefined, false, undefined,
         { resetScroll: true,
           contextManifest: view.payload.contextManifest || [] });
@@ -586,12 +1075,6 @@ async function openToolDebugPanel(taskId, roundNum, anchorEl) {
     return;
   }
   _riMountToolPanel(slot, taskId, roundNum);
-}
-
-/* Back-compat entry: the drawer's state list addresses a round's state
- * mirror directly, which is what the panel now shows outright. */
-async function openStateInspector(taskId, roundNum, anchorEl) {
-  return openToolDebugPanel(taskId, roundNum, anchorEl);
 }
 
 /* Resolve the ONE view a tool row's debug entry shows, and say which axis it
@@ -700,9 +1183,10 @@ async function _riRenderToolPanel(panel, taskId, roundNum) {
 
 /* ── Turn Trace (耗时分析) — the flame-graph view of ONE task ───────────
  * docs/TURN_TRACE_CONTRACT.md. The drawer renders ONLY what
- * /api/v1/tasks/<id>/trace folds SERVER-side from the persisted event
- * log: the client is a reducer over the returned span tree and never
- * derives timing from its own clocks (the charter invariant).
+ * /api/v1/tasks/<id>/trace folds SERVER-side spans from authoritative events
+ * and returns the durable terminal snapshot when reconstructible rows expire.
+ * The browser contributes only explicit received/painted/transport receipts;
+ * it never rewrites server span clocks or lifecycle facts.
  * Layout: one row per span depth (turn / rounds & waits / llm & tools /
  * sub-segments) + a final gray row for the explicitly-unattributed gaps.
  */
@@ -756,6 +1240,39 @@ function _trBarTitle(sp, elapsed) {
   return lines.join('\n');
 }
 
+function _trStatusLabel(status) {
+  const key = String((status && status.detailKey) || '');
+  if (key) {
+    const translated = t(key, (status && status.detailArgs) || {});
+    if (translated && translated !== key) return translated;
+  }
+  return String((status && (status.detail || status.phase)) || '');
+}
+
+function _trObservationLabel(observation) {
+  const o = observation || {};
+  if (o.kind === 'phase_painted') {
+    return t('ri.tracePhasePainted', {
+      phase: o.phase || o.detailKey || '—',
+      render: _trFmtMs(o.renderMs),
+    });
+  }
+  if (o.kind === 'terminal_painted') {
+    return t('ri.traceTerminalPainted', { render: _trFmtMs(o.renderMs) });
+  }
+  if (o.kind === 'transport_degraded') {
+    return t('ri.traceTransportDegraded', {
+      state: o.healthState || 'degraded', reason: o.reason || '—',
+    });
+  }
+  if (o.kind === 'transport_recovered') {
+    return t('ri.traceTransportRecovered', {
+      duration: _trFmtMs(o.durationMs),
+    });
+  }
+  return String(o.kind || '');
+}
+
 async function _riOpenTrace(taskId) {
   _riSel.traceOpen = true;
   const rounds = _riEl('riRoundList');
@@ -785,13 +1302,19 @@ function _riRenderTrace(doc) {
   if (!content) return;
   if (title) title.textContent = t('ri.traceTitle');
   if (!doc || !doc.eventsAvailable) {
+    /* null = the fetch failed (retry via the entry); eventsAvailable:false
+     * = the event log really is gone (30d retention). Say which one it is. */
     content.innerHTML = `<div class="ri-main-empty">` +
-      `${_riEsc(t('ri.expired'))}</div>`;
+      `${_riEsc(t(doc ? 'ri.expiredHint' : 'ri.loadFailed'))}</div>`;
     return;
   }
   const t0 = Number(doc.tStart) || 0;
   const total = Math.max(1, Number(doc.totalMs) || 1);
   const s = doc.summary || {};
+  const observations = Array.isArray(doc.clientObservations)
+    ? doc.clientObservations : [];
+  const hasServerTimeline = doc.tStart != null && doc.totalMs != null &&
+    doc.summary && typeof doc.summary === 'object';
 
   /* Summary chips — the disjoint bucket partition (sums to totalMs by
    * contract), each chip colored like its flame kind. */
@@ -825,6 +1348,13 @@ function _riRenderTrace(doc) {
   if (doc.running) {
     html += `<div class="tr-note">${_riEsc(t('ri.traceLive'))}</div>`;
   }
+  if (doc.source === 'turn-snapshot') {
+    html += `<div class="tr-note">${_riEsc(t('ri.traceDurable'))}</div>`;
+  }
+  if (doc.source === 'attempt-receipts' && !hasServerTimeline) {
+    html += `<div class="tr-note tr-note-warn">` +
+      `${_riEsc(t('ri.traceReceiptsOnly'))}</div>`;
+  }
   if (doc.coverage === 'partial') {
     const key = doc.coverageReason === 'flow'
       ? 'ri.tracePartialFlow' : 'ri.tracePartialLegacy';
@@ -838,63 +1368,139 @@ function _riRenderTrace(doc) {
     html += `<div class="tr-note tr-note-over">` +
       `${_riEsc(t('ri.traceOverBudget', { n: over.length }))}: ${items}</div>`;
   }
+  const compactedCount = ['droppedSpans', 'droppedGaps',
+    'statusDroppedCount', 'clientObservationDroppedCount',
+    'overBudgetDroppedCount']
+    .reduce((sum, key) => sum + Math.max(0, Number(doc[key]) || 0), 0);
+  if (doc.compacted || compactedCount) {
+    html += `<div class="tr-note tr-note-warn">` +
+      `${_riEsc(t('ri.traceCompacted', { n: compactedCount }))}</div>`;
+  }
+  const clientReportedDrops = observations.reduce((maximum, observation) =>
+    Math.max(maximum, Math.max(0, Number(
+      observation && observation.clientDroppedBefore) || 0)), 0);
+  if (clientReportedDrops) {
+    html += `<div class="tr-note tr-note-warn">` +
+      `${_riEsc(t('ri.traceClientDropped', { n: clientReportedDrops }))}</div>`;
+  }
 
-  /* Flame rows: depth 0..N + the gap row. */
-  const spans = Array.isArray(doc.spans) ? doc.spans : [];
-  const gaps = Array.isArray(doc.gaps) ? doc.gaps : [];
-  let maxDepth = 0;
-  for (const sp of spans) maxDepth = Math.max(maxDepth, sp.depth || 0);
-  maxDepth = Math.min(maxDepth, 3);
-  const rowLabelKeys = ['ri.trRowTurn', 'ri.trRowPhase', 'ri.trRowDetail',
-    'ri.trRowSub'];
-  const barHtml = (sp) => {
-    const a = sp.tStart == null ? t0 : sp.tStart;
-    const b = sp.tEnd == null ? (t0 + total) : sp.tEnd;
-    const elapsed = Math.max(0, b - a);
-    const left = Math.min(100, Math.max(0, (a - t0) / total * 100));
-    const width = Math.min(100 - left,
-      Math.max(0.15, (b - a) / total * 100));
-    const cls = 'tr-bar tr-k-' + (sp.kind || 'unknown') +
-      (sp.status === 'error' || sp.status === 'aborted' ? ' tr-err' : '') +
-      (sp.overBudget ? ' tr-over' : '') +
-      (sp.status === 'running' ? ' tr-live' : '') +
-      (sp.truncated ? ' tr-trunc' : '');
-    const inner = width > 7
-      ? `<span class="tr-bar-txt">${_riEsc(sp.name || '')} ` +
-        `${_riEsc(_trFmtMs(elapsed))}</span>` : '';
-    return `<div class="${cls}" style="left:${left.toFixed(3)}%;` +
-      `width:${width.toFixed(3)}%" title="${_riEsc(_trBarTitle(sp, elapsed))}">` +
-      `${inner}</div>`;
-  };
-  html += '<div class="tr-flame">';
-  for (let d = 0; d <= maxDepth; d++) {
-    html += `<div class="tr-row"><span class="tr-row-label">` +
-      `${_riEsc(t(rowLabelKeys[d]))}</span><div class="tr-track">`;
-    for (const sp of spans) {
-      if ((sp.depth || 0) === d) html += barHtml(sp);
-    }
-    html += '</div></div>';
-  }
-  /* The unattributed row — ALWAYS rendered when gaps exist, so a hole in
-   * the accounting is visible, never silent (contract invariant #2). */
-  if (gaps.length) {
-    html += `<div class="tr-row"><span class="tr-row-label">` +
-      `${_riEsc(t('ri.trKindGap'))}</span><div class="tr-track">`;
-    for (const g of gaps) {
-      const left = Math.min(100, Math.max(0, (g.tStart - t0) / total * 100));
+  /* Flame rows require server clocks. A receipt-only durable document must
+   * show its browser evidence without inventing a 0ms server timeline. */
+  if (hasServerTimeline) {
+    const spans = Array.isArray(doc.spans) ? doc.spans : [];
+    const gaps = Array.isArray(doc.gaps) ? doc.gaps : [];
+    let maxDepth = 0;
+    for (const sp of spans) maxDepth = Math.max(maxDepth, sp.depth || 0);
+    maxDepth = Math.min(maxDepth, 3);
+    const rowLabelKeys = ['ri.trRowTurn', 'ri.trRowPhase', 'ri.trRowDetail',
+      'ri.trRowSub'];
+    const barHtml = (sp) => {
+      const a = sp.tStart == null ? t0 : sp.tStart;
+      const b = sp.tEnd == null ? (t0 + total) : sp.tEnd;
+      const elapsed = Math.max(0, b - a);
+      const left = Math.min(100, Math.max(0, (a - t0) / total * 100));
       const width = Math.min(100 - left,
-        Math.max(0.15, (g.tEnd - g.tStart) / total * 100));
-      html += `<div class="tr-bar tr-k-gap" style="left:${left.toFixed(3)}%;` +
-        `width:${width.toFixed(3)}%" title="` +
-        `${_riEsc(t('ri.trKindGap') + ' · ' + _trFmtMs(g.tEnd - g.tStart))}">` +
-        `</div>`;
+        Math.max(0.15, (b - a) / total * 100));
+      const cls = 'tr-bar tr-k-' + (sp.kind || 'unknown') +
+        (sp.status === 'error' || sp.status === 'aborted' ? ' tr-err' : '') +
+        (sp.overBudget ? ' tr-over' : '') +
+        (sp.status === 'running' ? ' tr-live' : '') +
+        (sp.truncated ? ' tr-trunc' : '');
+      const inner = width > 7
+        ? `<span class="tr-bar-txt">${_riEsc(sp.name || '')} ` +
+          `${_riEsc(_trFmtMs(elapsed))}</span>` : '';
+      return `<div class="${cls}" style="left:${left.toFixed(3)}%;` +
+        `width:${width.toFixed(3)}%" title="${_riEsc(_trBarTitle(sp, elapsed))}">` +
+        `${inner}</div>`;
+    };
+    html += '<div class="tr-flame">';
+    for (let d = 0; d <= maxDepth; d++) {
+      html += `<div class="tr-row"><span class="tr-row-label">` +
+        `${_riEsc(t(rowLabelKeys[d]))}</span><div class="tr-track">`;
+      for (const sp of spans) {
+        if ((sp.depth || 0) === d) html += barHtml(sp);
+      }
+      html += '</div></div>';
     }
-    html += '</div></div>';
+    /* The unattributed row — ALWAYS rendered when gaps exist, so a hole in
+     * the accounting is visible, never silent (contract invariant #2). */
+    if (gaps.length) {
+      html += `<div class="tr-row"><span class="tr-row-label">` +
+        `${_riEsc(t('ri.trKindGap'))}</span><div class="tr-track">`;
+      for (const g of gaps) {
+        const left = Math.min(100, Math.max(0, (g.tStart - t0) / total * 100));
+        const width = Math.min(100 - left,
+          Math.max(0.15, (g.tEnd - g.tStart) / total * 100));
+        html += `<div class="tr-bar tr-k-gap" style="left:${left.toFixed(3)}%;` +
+          `width:${width.toFixed(3)}%" title="` +
+          `${_riEsc(t('ri.trKindGap') + ' · ' + _trFmtMs(g.tEnd - g.tStart))}">` +
+          `</div>`;
+      }
+      html += '</div></div>';
+    }
+    /* Axis: 0 / mid / total. */
+    html += `<div class="tr-axis"><span>0</span>` +
+      `<span>${_riEsc(_trFmtMs(total / 2))}</span>` +
+      `<span>${_riEsc(_trFmtMs(total))}</span></div>`;
+    html += '</div>';
   }
-  /* Axis: 0 / mid / total. */
-  html += `<div class="tr-axis"><span>0</span>` +
-    `<span>${_riEsc(_trFmtMs(total / 2))}</span>` +
-    `<span>${_riEsc(_trFmtMs(total))}</span></div>`;
-  html += '</div></div>';
+
+  /* Exact user-visible phase prompts. Repeated heartbeats are coalesced by
+   * the server, while count and lastObservedAt preserve the fact that the
+   * same prompt remained active. */
+  const statuses = Array.isArray(doc.statusHistory) ? doc.statusHistory : [];
+  if (statuses.length) {
+    const statusList = statuses.map((status) => {
+      const end = status.tEnd == null
+        ? (status.lastObservedAt == null ? t0 + total : status.lastObservedAt)
+        : status.tEnd;
+      const duration = Math.max(0, Number(end) - Number(status.tStart || end));
+      const repeated = Number(status.count) > 1
+        ? ` ${t('ri.traceStatusRepeated', { n: status.count })}` : '';
+      return `${_trStatusLabel(status)} ${_trFmtMs(duration)}${repeated}`;
+    });
+    html += `<div class="tr-note"><b>${_riEsc(t('ri.traceStatusHistory'))}</b> ` +
+      `${statusList.map(_riEsc).join(' → ')}</div>`;
+    html += `<div class="tr-flame"><div class="tr-row">` +
+      `<span class="tr-row-label">${_riEsc(t('ri.tracePromptRow'))}</span>` +
+      `<div class="tr-track">`;
+    for (const status of statuses) {
+      const a = Number(status.tStart) || t0;
+      const b = status.tEnd == null
+        ? (Number(status.lastObservedAt) || t0 + total) : Number(status.tEnd);
+      const elapsed = Math.max(0, b - a);
+      const left = Math.min(100, Math.max(0, (a - t0) / total * 100));
+      const width = Math.min(100 - left,
+        Math.max(0.15, elapsed / total * 100));
+      const cls = status.attention === 'stall'
+        ? 'tr-bar tr-k-retry_wait tr-err'
+        : status.attention === 'wait'
+          ? 'tr-bar tr-k-retry_wait' : 'tr-bar tr-k-round';
+      const label = _trStatusLabel(status);
+      const inner = width > 7
+        ? `<span class="tr-bar-txt">${_riEsc(label)}</span>` : '';
+      html += `<div class="${cls}" style="left:${left.toFixed(3)}%;` +
+        `width:${width.toFixed(3)}%" title="${_riEsc(label + ' · ' +
+          _trFmtMs(elapsed))}">${inner}</div>`;
+    }
+    html += '</div></div></div>';
+  }
+
+  /* Browser evidence is intentionally content-free: it says when a known
+   * phase/terminal/connection state was painted, never what the answer said. */
+  if (observations.length) {
+    const evidence = observations.map((observation) => {
+      let label = _trObservationLabel(observation);
+      if (observation.transportMs != null) {
+        label += ` · ${t('ri.traceClientTransport', {
+          duration: _trFmtMs(observation.transportMs),
+        })}`;
+      }
+      return label;
+    });
+    html += `<div class="tr-note"><b>${_riEsc(t('ri.traceClientEvidence'))}</b> ` +
+      `${evidence.map(_riEsc).join(' · ')}</div>`;
+  }
+  html += '</div>';
   content.innerHTML = html;
 }

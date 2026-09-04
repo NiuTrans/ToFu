@@ -78,6 +78,18 @@ class TestBuildAndAcquire:
         assert set(entry.paths) == on_disk
         assert list(entry.sizes) and all(isinstance(s, int) for s in entry.sizes)
 
+    def test_disk_load_restarts_from_conservative_refresh_interval(
+            self, proj, monkeypatch):
+        _build(proj)
+        _build(proj)
+        assert tree_index._mem[proj].refresh_after_s > tree_index._stale_after_s()
+
+        monkeypatch.setattr(tree_index, '_mem', {})
+        loaded = tree_index.acquire(proj)
+        assert loaded is not None
+        assert loaded.refresh_after_s == tree_index._stale_after_s()
+        assert loaded.unchanged_refreshes == 0
+
     def test_oversized_disk_index_is_rejected_before_body_read(
             self, monkeypatch):
         header = tree_index.struct.pack(
@@ -112,6 +124,50 @@ class TestBuildAndAcquire:
         # Age the entry past STALE_AFTER but below MAX_AGE.
         entry.built_at = time.time() - tree_index._stale_after_s() - 1
         assert tree_index.acquire(proj) is entry  # stale-while-revalidate
+
+    def test_unchanged_snapshots_back_off_and_candidate_change_resets(
+            self, proj, monkeypatch):
+        monkeypatch.setenv('TOFU_TREE_INDEX_STABLE_REFRESH_MAX_S', '180')
+        _build(proj)
+        first = tree_index._mem[proj]
+        assert first.refresh_after_s == tree_index._stale_after_s()
+        assert first.unchanged_refreshes == 0
+
+        _build(proj)
+        second = tree_index._mem[proj]
+        assert second.refresh_after_s == 90.0
+        assert second.unchanged_refreshes == 1
+
+        _build(proj)
+        third = tree_index._mem[proj]
+        assert third.refresh_after_s == 180.0
+        assert third.unchanged_refreshes == 2
+        _build(proj)
+        assert tree_index._mem[proj].refresh_after_s == 180.0
+
+        with open(os.path.join(proj, 'src', 'top.py'), 'a') as f:
+            f.write('candidate-size-change\n')
+        _build(proj)
+        changed = tree_index._mem[proj]
+        assert changed.refresh_after_s == tree_index._stale_after_s()
+        assert changed.unchanged_refreshes == 0
+
+    def test_warm_respects_entry_specific_refresh_interval(
+            self, proj, monkeypatch):
+        _build(proj)
+        _build(proj)
+        entry = tree_index._mem[proj]
+        assert entry.refresh_after_s == 90.0
+
+        entry.built_at = time.time() - 60
+        tree_index.warm(proj)
+        assert proj not in tree_index._building
+
+        monkeypatch.setattr(tree_index, '_builder', _NullBuilder())
+        monkeypatch.setattr(tree_index, '_scanner', _NullBuilder())
+        entry.built_at = time.time() - 91
+        tree_index.warm(proj)
+        assert proj in tree_index._building
 
     def test_ancient_entry_not_served(self, proj, monkeypatch):
         _build(proj)
@@ -271,10 +327,13 @@ def test_tree_index_resource_overrides_are_hard_bounded(monkeypatch):
     monkeypatch.setenv('TOFU_TREE_INDEX_WALK_JOBS', '999999')
     monkeypatch.setenv('TOFU_TREE_INDEX_MAX_ENTRIES', '999999999')
     monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '999999')
+    monkeypatch.setenv('TOFU_TREE_INDEX_MAX_AGE_S', '5000')
+    monkeypatch.setenv('TOFU_TREE_INDEX_STABLE_REFRESH_MAX_S', '999999')
 
     assert tree_index._walk_jobs() == 16
     assert tree_index._max_entries() == 600_000
     assert tree_index._mem_roots() == 8
+    assert tree_index._stable_refresh_max_s() == 900.0
 
 
 def test_memory_entry_budget_is_process_wide(monkeypatch):
@@ -290,6 +349,204 @@ def test_memory_entry_budget_is_process_wide(monkeypatch):
 
     assert tuple(tree_index._mem) == ('middle', 'newest')
     assert sum(len(entry.paths) for entry in tree_index._mem.values()) == 8_000
+
+
+def test_lru_eviction_checkpoints_write_fresh_entry(proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    new_file = os.path.join(proj, 'src', 'fresh.py')
+    with open(new_file, 'w') as f:
+        f.write('fresh\n')
+    tree_index.note_write(new_file)
+    disk_path = tree_index._disk_path(proj)
+    assert not os.path.exists(disk_path)
+    assert (tree_index._mem[proj].mutation_revision
+            > tree_index._mem[proj].persisted_revision)
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+
+    assert proj not in tree_index._mem
+    assert os.path.isfile(disk_path)
+    tree_index._mem.clear()
+    loaded = tree_index.acquire(proj)
+    assert loaded is not None
+    assert 'src/fresh.py' in loaded.paths
+    assert loaded.mutation_revision == loaded.persisted_revision
+    assert proj not in tree_index._building
+
+
+def test_lru_eviction_does_not_rewrite_clean_snapshot(
+        proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    persisted_calls = []
+    monkeypatch.setattr(
+        tree_index, '_persist', lambda entry: persisted_calls.append(entry))
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+
+    assert proj not in tree_index._mem
+    assert persisted_calls == []
+
+
+def test_lru_eviction_overwrites_stale_blob_when_invalidation_unlink_fails(
+        proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    disk_path = tree_index._disk_path(proj)
+    real_unlink = tree_index.os.unlink
+
+    def fail_canonical_unlink(path):
+        if path == disk_path:
+            raise OSError('injected canonical unlink failure')
+        return real_unlink(path)
+
+    monkeypatch.setattr(tree_index.os, 'unlink', fail_canonical_unlink)
+    new_file = os.path.join(proj, 'src', 'unlink-failed.py')
+    with open(new_file, 'w') as f:
+        f.write('fresh despite stale blob\n')
+    tree_index.note_write(new_file)
+    assert os.path.isfile(disk_path)
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+    tree_index._mem.clear()
+    loaded = tree_index.acquire(proj)
+
+    assert loaded is not None
+    assert 'src/unlink-failed.py' in loaded.paths
+
+
+def test_async_persist_cannot_reinstall_snapshot_older_than_note_write(
+        proj, monkeypatch):
+    _build(proj)
+    entry = tree_index._mem[proj]
+    disk_path = tree_index._disk_path(proj)
+    new_file = os.path.join(proj, 'src', 'persist-race.py')
+    with open(new_file, 'w') as f:
+        f.write('newer revision\n')
+
+    real_open = open
+    temp_written = threading.Event()
+    release_persist = threading.Event()
+
+    class BlockingWrite:
+        def __init__(self, path, mode):
+            self._handle = real_open(path, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def write(self, data):
+            written = self._handle.write(data)
+            temp_written.set()
+            release_persist.wait(2)
+            return written
+
+    monkeypatch.setattr(
+        tree_index, 'open', lambda path, mode: BlockingWrite(path, mode),
+        raising=False,
+    )
+    persist_results = []
+    persist_thread = threading.Thread(
+        target=lambda: persist_results.append(tree_index._persist(entry)))
+    persist_thread.start()
+    try:
+        assert temp_written.wait(2)
+        tree_index.note_write(new_file)
+    finally:
+        release_persist.set()
+        persist_thread.join(2)
+
+    assert not persist_thread.is_alive()
+    assert persist_results == [False]
+    assert not os.path.exists(disk_path)
+    assert entry.mutation_revision > entry.persisted_revision
+
+
+def test_lru_eviction_preserves_rebuild_fallback_when_checkpoint_fails(
+        proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    changed_file = os.path.join(proj, 'src', 'top.py')
+    with open(changed_file, 'a') as f:
+        f.write('changed\n')
+    tree_index.note_write(changed_file)
+    disk_path = tree_index._disk_path(proj)
+    monkeypatch.setattr(tree_index, '_persist', lambda _entry: False)
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+
+    assert proj not in tree_index._mem
+    assert not os.path.exists(disk_path)
+    monkeypatch.setattr(tree_index, '_builder', _NullBuilder())
+    monkeypatch.setattr(tree_index, '_scanner', _NullBuilder())
+    assert tree_index.acquire(proj) is None
+    assert proj in tree_index._building
+
+
+def test_lru_eviction_does_not_persist_entry_over_current_budget(monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MAX_ENTRIES', '10000')
+    oversized = tree_index.TreeIndex(
+        '/oversized', ['path'] * 10_001,
+        tree_index.array.array('q', [0]) * 10_001,
+        tree_index.array.array('q', [0]) * 10_001,
+        time.time(), True,
+    )
+    monkeypatch.setattr(tree_index, '_mem', {'oversized': oversized})
+    persisted_calls = []
+    monkeypatch.setattr(
+        tree_index, '_persist', lambda entry: persisted_calls.append(entry))
+
+    tree_index._evict_mem_over_cap()
+
+    assert tree_index._mem == {}
+    assert persisted_calls == []
+
+
+def test_background_warm_restores_fresh_disk_without_project_walk(
+        proj, monkeypatch):
+    _build(proj)
+    tree_index._mem.clear()
+    monkeypatch.setattr(
+        tree_index, '_build_sync',
+        lambda *_args, **_kwargs: pytest.fail('fresh blob must avoid tree walk'),
+    )
+    tree_index._building.add(proj)
+
+    tree_index._run_builder_job(proj, None, None)
+
+    assert tree_index._mem.get(proj) is not None
+    assert proj not in tree_index._building
+
+
+def test_background_warm_serves_stale_disk_while_refreshing(
+        proj, monkeypatch):
+    _build(proj)
+    entry = tree_index._mem[proj]
+    entry.built_at = time.time() - tree_index._stale_after_s() - 1
+    assert tree_index._persist(entry)
+    tree_index._mem.clear()
+    build_observations = []
+
+    def observe_build(root, *, scan_executor=None):
+        build_observations.append((root, tree_index._mem.get(root)))
+
+    monkeypatch.setattr(tree_index, '_build_sync', observe_build)
+    tree_index._building.add(proj)
+
+    tree_index._run_builder_job(proj, None, None)
+
+    assert len(build_observations) == 1
+    assert build_observations[0][0] == proj
+    assert build_observations[0][1] is not None
+    assert proj not in tree_index._building
 
 
 class TestFind:
@@ -335,6 +592,17 @@ class TestFind:
         assert '(3 found)' in exact
         assert 'results capped' not in exact
         assert 'No files matching' in read_tools.tool_find_files(proj, '*.rs')
+
+    def test_adaptive_snapshot_age_is_visible_even_for_no_match(self, proj):
+        _build(proj)
+        _build(proj)
+        entry = tree_index._mem[proj]
+        entry.built_at = time.time() - 60
+
+        out = read_tools.tool_find_files(proj, '*.rs')
+        assert 'tree index age ' in out and 's/90s' in out
+        assert 'external path/size changes may not yet be reflected' in out
+        assert '(0 found)' in out
 
     def test_shell_compatible_search_does_not_use_filtered_index(
             self, proj, monkeypatch):
@@ -459,6 +727,18 @@ class TestGrep:
         _build(proj)
         out = read_tools.tool_grep(proj, 'definitely-absent-xyz')
         assert 'No matches found' in out
+
+    def test_adaptive_snapshot_age_is_visible_while_contents_stay_live(
+            self, proj):
+        _build(proj)
+        _build(proj)
+        entry = tree_index._mem[proj]
+        entry.built_at = time.time() - 60
+
+        out = read_tools.tool_grep(proj, 'needle-one')
+        assert 'tree index age ' in out and 's/90s' in out
+        assert 'existing contents are read live' in out
+        assert 'src/pkg/alpha.py:2:' in out
 
     def test_case_insensitive_via_index(self, proj):
         """Pins the rg-flag regression class: GNU `-s` (no-messages) vs rg `-s`

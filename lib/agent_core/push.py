@@ -19,19 +19,65 @@ Channels in use:
   - ``translate``  — translation status (running, done, error)
   - ``notify``     — server notifications (config change, health, etc.)
   - ``timer``      — timer-list invalidations (created/progress/terminal)
+  - ``oauth``      — owner-scoped passive account-state completion receipts
   - ``chat``       — chat task lifecycle for headless API/webhook clients.
                      Native conversation state uses Conversation Sync v3;
                      task-event SSE replay uses ``/api/v1/tasks/<task_id>/stream``.
 """
 
 import asyncio
+import json
 import threading
+import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from weakref import WeakSet
 
+from lib.agent_core.push_policy import resolve_push_budget
 from lib.log import get_logger
 
+try:
+    import orjson as _orjson
+except ImportError:  # pragma: no cover - exported minimal installations
+    _orjson = None
+
 logger = get_logger(__name__)
+
+
+# One slow WebSocket must not retain a permanent 1,000-frame hot queue while
+# every publisher keeps paying fan-out, queue churn, and warning costs.  A
+# short burst remains lossy-but-connected (the historical drop-oldest
+# contract); sustained loss disconnects the socket so its declared reconnect
+# reconciliation can run.  These are code-owned resource safety ceilings, not
+# deployment tuning knobs.
+_PUSH_BUDGET = resolve_push_budget()
+_EVENT_QUEUE_CAPACITY = _PUSH_BUDGET.event_queue_capacity
+_EVENT_QUEUE_BYTE_CAPACITY = _PUSH_BUDGET.event_queue_byte_capacity
+_EVENT_MAX_BYTES = _PUSH_BUDGET.event_max_bytes
+_EVENT_OVERFLOW_GRACE_SECONDS = 15.0
+_EVENT_OVERFLOW_MIN_DROPS = 256
+_EVENT_OVERFLOW_RESET_SECONDS = 5.0
+
+
+def _serialized_frame_bytes(frame: dict) -> int:
+    """Return compact JSON bytes, or an over-limit sentinel on bad payloads."""
+    try:
+        if _orjson is not None:
+            return len(_orjson.dumps(frame))
+        return len(json.dumps(
+            frame, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+    except (TypeError, ValueError, OverflowError):
+        # An unencodable frame cannot be delivered by WebSocket either. Treat
+        # it as oversized so the client reconnects through durable authority.
+        return _EVENT_MAX_BYTES + 1
+
+
+@dataclass(frozen=True, slots=True)
+class _QueuedPushEvent:
+    """Keep byte accounting inseparable from the queued frame."""
+
+    frame: dict
+    retained_bytes: int
 
 
 class PushHub:
@@ -42,8 +88,19 @@ class PushHub:
     the asyncio event loop.
     """
 
-    def __init__(self):
+    def __init__(
+            self, *, client_capacity: int | None = None,
+            owner_client_capacity: int | None = None):
         self._clients: WeakSet = WeakSet()
+        resolved_client_capacity = (
+            _PUSH_BUDGET.client_capacity
+            if client_capacity is None else client_capacity)
+        resolved_owner_capacity = (
+            _PUSH_BUDGET.owner_client_capacity
+            if owner_client_capacity is None else owner_client_capacity)
+        self._client_capacity = max(1, int(resolved_client_capacity))
+        self._owner_client_capacity = max(
+            1, min(self._client_capacity, int(resolved_owner_capacity)))
         self._subscriptions: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
         self._listeners: list = []  # in-process observers; see add_listener
         # Replica-local observers for frames *received* from the fan-out bus.
@@ -101,13 +158,30 @@ class PushHub:
         """Return a non-blocking transport snapshot for metrics/support data."""
         bus = self._bus
         if bus is None:
-            return {'backend': 'not_started', 'publisher_available': True,
-                    'subscriber_available': True, 'reconnect_in_s': 0.0}
-        health = getattr(bus, 'health', None)
-        if callable(health):
-            return health()
-        return {'backend': 'inproc', 'publisher_available': True,
-                'subscriber_available': True, 'reconnect_in_s': 0.0}
+            result = {'backend': 'not_started', 'publisher_available': True,
+                      'subscriber_available': True, 'reconnect_in_s': 0.0}
+        else:
+            health = getattr(bus, 'health', None)
+            result = (health() if callable(health) else {
+                'backend': 'inproc', 'publisher_available': True,
+                'subscriber_available': True, 'reconnect_in_s': 0.0})
+        with self._lock:
+            clients = tuple(self._clients)
+        result.update({
+            'local_clients': len(clients),
+            'client_capacity': self._client_capacity,
+            'owner_client_capacity': self._owner_client_capacity,
+            'event_queue_items': sum(
+                client._queue.qsize() for client in clients
+                if hasattr(client, '_queue')),
+            'event_retained_bytes': sum(
+                int(getattr(client, 'event_retained_bytes', 0) or 0)
+                for client in clients),
+            'event_queue_byte_capacity_per_client':
+                _EVENT_QUEUE_BYTE_CAPACITY,
+            'event_max_bytes': _EVENT_MAX_BYTES,
+        })
+        return result
 
     # ── In-process observers ───────────────────────────────────
     # Listeners receive every event the hub processes. Used by the
@@ -139,17 +213,31 @@ class PushHub:
             if fn not in self._delivery_listeners:
                 self._delivery_listeners.append(fn)
 
-    def remove_delivery_listener(self, fn) -> None:
+    def register(self, client: 'PushClient') -> bool:
         with self._lock:
-            try:
-                self._delivery_listeners.remove(fn)
-            except ValueError:
-                pass
-
-    def register(self, client: 'PushClient'):
-        with self._lock:
-            self._clients.add(client)
-        logger.debug('[Push] Client registered (total=%d)', len(self._clients))
+            if client in self._clients:
+                return True
+            existing_clients = tuple(self._clients)
+            owner_clients = sum(
+                existing.user_id == client.user_id
+                for existing in existing_clients)
+            if (len(existing_clients) >= self._client_capacity
+                    or owner_clients >= self._owner_client_capacity):
+                total = len(existing_clients)
+                accepted = False
+            else:
+                self._clients.add(client)
+                total = len(self._clients)
+                accepted = True
+        if not accepted:
+            logger.warning(
+                '[Push] Client capacity rejected (total=%d/%d owner=%s '
+                'owner_clients=%d/%d)',
+                total, self._client_capacity, client.user_id,
+                owner_clients, self._owner_client_capacity)
+            return False
+        logger.debug('[Push] Client registered (total=%d)', total)
+        return True
 
     def unregister(self, client: 'PushClient'):
         emptied = []
@@ -347,16 +435,33 @@ class PushHub:
             logger.debug('[Push] no local subscriber for channel=%s task=%s type=%s',
                          channel, task_id, frame.get('type'))
             return
+        retained_bytes = _serialized_frame_bytes(frame)
         loop = self._loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(self._deliver, targets, frame)
+            loop.call_soon_threadsafe(
+                self._deliver, targets, frame, retained_bytes)
         else:
             for client in targets:
-                client.enqueue(frame)
+                self._enqueue_target(client, frame, retained_bytes)
 
-    def _deliver(self, targets: set, frame: dict):
+    @staticmethod
+    def _enqueue_target(client, frame: dict, retained_bytes: int) -> None:
+        """Use byte-aware delivery when a client advertises that capability."""
+        enqueue_sized = getattr(client, 'enqueue_sized', None)
+        if callable(enqueue_sized):
+            enqueue_sized(frame, retained_bytes)
+            return
+        # Keep PushHub's historical duck-typed client protocol for plugin and
+        # transport test clients that implement only ``enqueue(frame)``.
+        client.enqueue(frame)
+
+    def _deliver(self, targets: set, frame: dict,
+                 retained_bytes: int | None = None):
         for client in targets:
-            client.enqueue(frame)
+            if retained_bytes is None:
+                client.enqueue(frame)
+            else:
+                self._enqueue_target(client, frame, retained_bytes)
 
     @property
     def client_count(self) -> int:
@@ -385,7 +490,11 @@ class PushClient:
     """
 
     def __init__(self, *, user_id: int | str, req_id: str = ''):
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self._queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_EVENT_QUEUE_CAPACITY)
+        self._event_retained_bytes = 0
+        self._event_queue_byte_capacity = _EVENT_QUEUE_BYTE_CAPACITY
+        self._event_max_bytes = _EVENT_MAX_BYTES
         # ── Control lane () ──────────────────────────────────
         # Pongs (and future control frames) must JUMP the data backlog: under
         # event-loop congestion (e.g. a 176 MB HTTP response being serialized
@@ -406,19 +515,132 @@ class PushClient:
         self._connected = True
         self.user_id = _require_owner_user_id(user_id)
         self.req_id: str = str(req_id or '')
+        self._event_overflow_started_at: float | None = None
+        self._event_overflow_last_at: float | None = None
+        self._event_overflow_drops = 0
+        self._event_overflow_clock = time.monotonic
+        self._event_overflow_grace_seconds = _EVENT_OVERFLOW_GRACE_SECONDS
+        self._event_overflow_min_drops = _EVENT_OVERFLOW_MIN_DROPS
+        self._event_overflow_reset_seconds = _EVENT_OVERFLOW_RESET_SECONDS
 
-    def enqueue(self, frame: dict):
+    def _reset_event_overflow(self) -> None:
+        self._event_overflow_started_at = None
+        self._event_overflow_last_at = None
+        self._event_overflow_drops = 0
+
+    def _record_event_overflow(
+            self, frame: dict, *, incoming_bytes: int) -> bool:
+        """Return False after sustained loss makes reconnect safer than churn."""
+        now = self._event_overflow_clock()
+        last_at = self._event_overflow_last_at
+        new_episode = (
+            self._event_overflow_started_at is None
+            or last_at is None
+            or now - last_at >= self._event_overflow_reset_seconds
+        )
+        if new_episode:
+            self._event_overflow_started_at = now
+            self._event_overflow_drops = 0
+            logger.warning(
+                '[Push] Client event queue saturated; dropping oldest frames '
+                'during bounded grace (client=%s channel=%s task=%s type=%s '
+                'capacity=%d retained_bytes=%d byte_capacity=%d '
+                'incoming_bytes=%d)',
+                self.req_id or '?', str(frame.get('channel') or '?')[:48],
+                str(frame.get('taskId') or '?')[:12],
+                str(frame.get('type') or '?')[:48], self._queue.maxsize,
+                self._event_retained_bytes,
+                self._event_queue_byte_capacity, incoming_bytes,
+        )
+        self._event_overflow_last_at = now
+        self._event_overflow_drops += 1
+        started_at = self._event_overflow_started_at
+        elapsed = now - started_at if started_at is not None else 0.0
+        if (
+            self._event_overflow_drops >= self._event_overflow_min_drops
+            and elapsed >= self._event_overflow_grace_seconds
+        ):
+            logger.warning(
+                '[Push] Client event queue remained saturated for %.1fs '
+                '(%d dropped); disconnecting slow client for reconnect '
+                'reconciliation (client=%s channel=%s task=%s type=%s)',
+                elapsed, self._event_overflow_drops, self.req_id or '?',
+                str(frame.get('channel') or '?')[:48],
+                str(frame.get('taskId') or '?')[:12],
+                str(frame.get('type') or '?')[:48],
+            )
+            self.disconnect()
+            return False
+        return True
+
+    def _release_oldest_event(self) -> bool:
+        try:
+            queued = self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return False
+        size = (queued.retained_bytes
+                if isinstance(queued, _QueuedPushEvent) else 0)
+        self._event_retained_bytes = max(
+            0, self._event_retained_bytes - size)
+        return True
+
+    def _release_dequeued_event_size(self, queued: object) -> None:
+        size = (queued.retained_bytes
+                if isinstance(queued, _QueuedPushEvent) else 0)
+        self._event_retained_bytes = max(
+            0, self._event_retained_bytes - size)
+
+    @property
+    def event_retained_bytes(self) -> int:
+        return self._event_retained_bytes
+
+    def enqueue(self, frame: dict, *, retained_bytes: int | None = None):
         if not self._connected:
             return
+        incoming_bytes = (
+            _serialized_frame_bytes(frame)
+            if retained_bytes is None else max(1, int(retained_bytes)))
+        if incoming_bytes > self._event_max_bytes:
+            logger.warning(
+                '[Push] Client event frame oversized or unencodable; '
+                'disconnecting for durable reconciliation '
+                '(client=%s channel=%s task=%s type=%s incoming_bytes=%d '
+                'max_bytes=%d)',
+                self.req_id or '?', str(frame.get('channel') or '?')[:48],
+                str(frame.get('taskId') or '?')[:12],
+                str(frame.get('type') or '?')[:48], incoming_bytes,
+                self._event_max_bytes)
+            self.disconnect()
+            return
+        saturated = (
+            self._queue.full()
+            or self._event_retained_bytes + incoming_bytes
+            > self._event_queue_byte_capacity)
+        if saturated:
+            if not self._record_event_overflow(
+                    frame, incoming_bytes=incoming_bytes):
+                return
+            while (self._queue.full()
+                   or self._event_retained_bytes + incoming_bytes
+                   > self._event_queue_byte_capacity):
+                if not self._release_oldest_event():
+                    break
+            if (self._queue.full()
+                    or self._event_retained_bytes + incoming_bytes
+                    > self._event_queue_byte_capacity):
+                # The remaining frame may already belong to the active sender
+                # Future and cannot be evicted from the queue. Drop this new
+                # lossy event rather than exceeding the byte envelope.
+                return
         try:
-            self._queue.put_nowait(frame)
+            self._queue.put_nowait(_QueuedPushEvent(frame, incoming_bytes))
+            self._event_retained_bytes += incoming_bytes
         except asyncio.QueueFull:
-            logger.warning('[Push] Client queue full — dropping oldest frame')
-            try:
-                self._queue.get_nowait()
-                self._queue.put_nowait(frame)
-            except Exception as e:
-                logger.debug('[Push] drop-and-replace failed (frame lost): %s', e)
+            logger.debug('[Push] bounded event enqueue raced with saturation')
+
+    def enqueue_sized(self, frame: dict, retained_bytes: int) -> None:
+        """Byte-aware PushHub capability; external clients may omit it."""
+        self.enqueue(frame, retained_bytes=retained_bytes)
 
     def enqueue_control(self, frame: dict):
         """Enqueue a control frame (pong) that jumps the data backlog.
@@ -498,12 +720,26 @@ class PushClient:
             if not done:
                 return {'channel': 'system', 'type': 'ping'}
             if get_fut in done:
-                return get_fut.result()
+                queued = get_fut.result()
+                self._release_dequeued_event_size(queued)
+                frame = (queued.frame
+                         if isinstance(queued, _QueuedPushEvent) else queued)
+                # A half-drained data lane has genuinely recovered.  A later
+                # burst receives a fresh grace window instead of inheriting an
+                # old episode's elapsed time/drop count.
+                if self._queue.qsize() <= self._queue.maxsize // 2:
+                    self._reset_event_overflow()
+                return frame
             # Only the control waiter fired — loop back; the ctl check at the
             # top returns the control frame.
 
     def disconnect(self):
         self._connected = False
+        while self._release_oldest_event():
+            pass
+        self._event_retained_bytes = 0
+        self._ctl.clear()
+        self._rpc.clear()
         waiter = self._ctl_waiter
         if waiter is not None and not waiter.done():
             waiter.set_result(None)

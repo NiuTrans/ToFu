@@ -5,8 +5,7 @@ WHY THIS EXISTS (the criterion this file replaces)
 --------------------------------------------------
 An earlier ratchet asserted ``fn_name in _APPROVAL_META_ENRICHERS`` — i.e. "an
 enricher exists". That was the WRONG criterion and it was measurably green while
-the product was broken: the renderer
-(``_renderPendingApprovalBlock`` in static/js/ui/tool_rounds.js) only draws a
+the product was broken: the renderer only drew a
 detail block for shapes it recognises, so an enricher writing some other key
 produced a dialog with NO detail at all. 8 of the first 15 enrichers were in
 that state, including ``browser_execute_js``, whose own docstring promised the
@@ -20,13 +19,10 @@ frontend function, and assert the risk-bearing argument appears in the HTML.
 
 DISCIPLINE (charter: "绿着的守卫在测一段从未存在过的代码")
 --------------------------------------------------------
-* The renderer is **spliced verbatim from the shipped source at run time** —
-  never re-implemented here. A copy would decouple on the first refactor and
-  keep asserting a world that no longer ships.
-* The renderer's module is **resolved by SEARCH, not a hardcoded path**, and the
-  three outcomes are separately diagnosable: 0 hits → "implementation deleted"
-  (a real regression), >1 hits → "single source of truth was duplicated",
-  1 hit → use it.
+* The renderer is bundled from the real typed owner and its real dependencies
+  at run time — never re-implemented or sliced out of a retained source file.
+  A copy would decouple on the first refactor and keep asserting a world that
+  no longer ships.
 * The tool list comes from the LIVE write partition ∩ ``provides``, so a newly
   partitioned write tool joins this guard automatically instead of needing a
   literal added here.
@@ -36,69 +32,23 @@ from __future__ import annotations
 
 import json
 import os
-import re
+from pathlib import Path
 import shutil
 import subprocess
 
 import pytest
 
+from tests._runtime_sections import native_module_path
+
 pytestmark = pytest.mark.unit
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_JS_DIR = os.path.join(_REPO, 'frontend', 'src', 'runtime')
-_FN = '_renderPendingApprovalBlock'
-
-
-def _resolve_renderer_source() -> tuple[str, str]:
-    """Find the ONE module defining the approval renderer; return (path, src).
-
-    Searched rather than hardcoded: this project has already turned a legitimate
-    module split into an unreadable ``substring not found`` failure once.
-    """
-    needle = f'function {_FN}('
-    hits = []
-    for root, _dirs, files in os.walk(_JS_DIR):
-        for f in files:
-            if not f.endswith('.js') or f.startswith(('bundle-', 'feature-', 'i18n-')):
-                continue
-            if f == 'app-runtime.js':
-                continue
-            p = os.path.join(root, f)
-            try:
-                with open(p, encoding='utf-8') as fh:
-                    src = fh.read()
-            except OSError:
-                continue
-            if needle in src:
-                hits.append((p, src))
-    assert hits, (
-        f'{_FN} not found anywhere under frontend/src/runtime — the approval-dialog '
-        f'renderer appears to have been DELETED. If it was renamed, update '
-        f'this guard; if it was removed, the write-approval UI is gone.'
-    )
-    assert len(hits) == 1, (
-        f'{_FN} defined in {len(hits)} modules: '
-        f'{[os.path.relpath(p, _REPO) for p, _ in hits]} — the renderer must '
-        f'have a single source of truth (charter: no second JSON renderer).'
-    )
-    return hits[0]
-
-
-def _slice_function(src: str, name: str) -> str:
-    """Extract ``function name(...) { ... }`` by brace balance."""
-    start = src.index(f'function {name}(')
-    i = src.index('{', start)
-    depth, j = 0, i
-    while j < len(src):
-        c = src[j]
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth -= 1
-            if depth == 0:
-                return src[start:j + 1]
-        j += 1
-    raise AssertionError(f'unbalanced braces slicing {name}')
+_OWNER_JS = Path(native_module_path(
+    '.native/tool-approval-risk-contract.js',
+    Path(_REPO)
+    / 'frontend/src/conversation/presentation/'
+    / 'tool-approval-presentation.ts',
+))
 
 
 def _write_partition_tools() -> list[str]:
@@ -194,10 +144,16 @@ CASES: dict[str, tuple[dict, str]] = {
     'timer_create': ({'check_command': 'grep DONE f',
                       'continuation_message': 'CONT_X'}, 'CONT_X'),
     'timer_manage': ({'action': 'cancel', 'timer_id': 'timer-X'}, 'timer-X'),
+    'local_serve_deploy': ({
+        'model_path': '/models/Acme-X',
+        'engine': 'vllm',
+    }, '/models/Acme-X'),
+    'local_serve_stop': ({'instance_id': 'local-stop-X'}, 'local-stop-X'),
+    'local_serve_remove': ({'instance_id': 'local-remove-X'}, 'local-remove-X'),
     'project_charter_commit': ({'decision': 'DECISION_X'}, 'DECISION_X'),
-    'update_search_settings': ({'fetch_top_n': 5, 'llm_content_filter': False,
-                                'block_domain': 'pinterest.com'},
-                               'pinterest.com'),
+    'update_search_settings': ({'profile': 'deep',
+                                'overrides': {'fetch_top_n': 9}},
+                               'fetch_top_n'),
     'call_mcp_write_tool': ({
         'name': 'mcp__github__delete_issue',
         'arguments': {'issue_id': 'issue-DELETE-X'},
@@ -243,6 +199,7 @@ def _live_schema_properties() -> dict[str, set[str]]:
                       ('lib.tools.project', 'PROJECT_TOOLS_LEGACY'),
                       ('lib.tools.project', 'PROJECT_TOOLS_UNIFIED'),
                       ('lib.tools.motion_video', 'MOTION_VIDEO_TOOLS'),
+                      ('lib.local_serve.tool_defs', 'LOCAL_SERVE_TOOLS'),
                       ('lib.memory', 'ALL_MEMORY_TOOLS'),
                       ('lib.scheduler.tool_defs', 'SCHEDULER_TOOLS')):
         try:
@@ -276,44 +233,38 @@ def _build_meta(tool: str, args: dict) -> dict:
 
 
 def _render(metas: dict[str, dict]) -> dict[str, str]:
-    """Render each meta with the SHIPPED renderer under node."""
+    """Render each meta with the bundled typed owner under node."""
     node = shutil.which('node')
     if not node:
         pytest.skip('node not available')
-    path, src = _resolve_renderer_source()
-    fn_src = _slice_function(src, _FN)
 
     harness = """
 'use strict';
-// Minimal stand-ins for the renderer's ambient deps. These are NOT the logic
-// under test — the logic is spliced verbatim below.
-function escapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-function Icon() { return '<svg></svg>'; }
-__RENDERER__
-
-const INPUT = __INPUT__;
+eval(process.env.OWNER_SOURCE);
+const presentation = createToolApprovalPresentation({
+  translate: (key) => key,
+});
+const INPUT = JSON.parse(process.env.APPROVAL_METAS);
 const out = {};
 for (const [tool, meta] of Object.entries(INPUT)) {
   const round = { status: 'pending_approval', approvalId: meta.approvalId,
                   approvalMeta: meta, toolName: tool };
-  out[tool] = __FN__(round, { svg: '<svg></svg>', q: tool });
+  out[tool] = presentation.renderApprovalHtml(round, {
+    iconHtml: '<svg></svg>', queryHtml: tool,
+  });
 }
 process.stdout.write(JSON.stringify(out));
 """
-    harness = (harness
-               .replace('__RENDERER__', fn_src)
-               .replace('__FN__', _FN)
-               .replace('__INPUT__', json.dumps(metas, ensure_ascii=False)))
-
     proc = subprocess.run([node, '-e', harness], capture_output=True,
-                          text=True, timeout=120)
+                          text=True, timeout=120, env={
+                              **os.environ,
+                              'OWNER_SOURCE': _OWNER_JS.read_text(encoding='utf-8'),
+                              'APPROVAL_METAS': json.dumps(
+                                  metas, ensure_ascii=False),
+                          })
     assert proc.returncode == 0, (
-        f'node failed rendering with the shipped {_FN} '
-        f'(from {os.path.relpath(path, _REPO)}):\n{proc.stderr[-3000:]}'
+        'node failed rendering with the bundled typed approval owner '
+        f'({os.path.relpath(_OWNER_JS, _REPO)}):\n{proc.stderr[-3000:]}'
     )
     return json.loads(proc.stdout)
 
@@ -457,18 +408,5 @@ class TestEveryWriteToolShowsItsRisk:
         Recovered-from-restart rounds can carry the id without the meta blob;
         the dialog must still offer Approve/Reject rather than throwing.
         """
-        node = shutil.which('node')
-        if not node:
-            pytest.skip('node not available')
-        path, src = _resolve_renderer_source()
-        fn_src = _slice_function(src, _FN)
-        harness = ("'use strict';\n"
-                   "function escapeHtml(s){return String(s==null?'':s);}\n"
-                   "function Icon(){return '';}\n"
-                   + fn_src +
-                   "\nconst r={status:'pending_approval',approvalId:'a1'};\n"
-                   f"process.stdout.write({_FN}(r,{{svg:'',q:'run_command'}}));\n")
-        proc = subprocess.run([node, '-e', harness], capture_output=True,
-                              text=True, timeout=120)
-        assert proc.returncode == 0, proc.stderr[-2000:]
-        assert 'ptool-approval-btns' in proc.stdout
+        rendered = _render({'run_command': {'approvalId': 'a1'}})
+        assert 'ptool-approval-btns' in rendered['run_command']

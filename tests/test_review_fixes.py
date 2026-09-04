@@ -77,10 +77,11 @@ class TestSlotInflightRelease:
 
     def test_dispatch_handlers_call_release(self):
         """Guard against the original leak: the payload-reject except blocks
-        in api.py must call slot.release() before re-raising."""
+        in the dispatch shards must call slot.release() before re-raising."""
         import inspect
-        from lib.llm_dispatch import api
-        src = inspect.getsource(api)
+        import lib.llm_dispatch._api_chat as chat_shard
+        import lib.llm_dispatch._api_stream as stream_shard
+        src = inspect.getsource(chat_shard) + '\n' + inspect.getsource(stream_shard)
         # Every payload-level reject handler raises; each must release first.
         assert src.count('slot.release()') >= 6, (
             'expected slot.release() in both dispatch_chat and dispatch_stream '
@@ -143,42 +144,19 @@ class TestContentRefSlice:
 
 
 # ═══════════════════════════════════════════════════════════
-#  5. RateLimiter — backoff before permit
+#  5. RateLimiter — acquire never sleeps
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
 class TestRateLimiterOrdering:
-    def test_backoff_waited_before_acquiring_permit(self, monkeypatch):
-        import lib.swarm.rate_limiter as rl_mod
-        from lib.swarm.rate_limiter import RateLimiter
+    def test_acquire_never_sleeps(self, monkeypatch):
+        import time as time_mod
 
-        order = []
-        rl = RateLimiter(max_concurrent=1)
-
-        real_acquire = rl._semaphore.acquire
-
-        def _tracked_acquire(*a, **k):
-            order.append('permit')
-            return real_acquire(*a, **k)
-
-        monkeypatch.setattr(rl._semaphore, 'acquire', _tracked_acquire)
-        monkeypatch.setattr(rl_mod.time, 'sleep', lambda s: order.append('sleep'))
-
-        # Force an active backoff window.
-        rl._rate_limit_until = rl_mod.time.monotonic() + 100
-        rl.acquire()
-
-        # The backoff sleep must happen BEFORE the semaphore permit is taken,
-        # otherwise a permit is held hostage for the whole backoff.
-        assert order == ['sleep', 'permit'], order
-
-    def test_no_backoff_means_no_sleep(self, monkeypatch):
-        import lib.swarm.rate_limiter as rl_mod
         from lib.swarm.rate_limiter import RateLimiter
 
         slept = []
         rl = RateLimiter(max_concurrent=2)
-        monkeypatch.setattr(rl_mod.time, 'sleep', lambda s: slept.append(s))
+        monkeypatch.setattr(time_mod, 'sleep', lambda s: slept.append(s))
         rl.acquire()
         assert slept == []
         assert rl.active == 1

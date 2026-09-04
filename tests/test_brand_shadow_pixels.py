@@ -55,6 +55,14 @@ ICON = os.path.join(ROOT, 'static', 'icons', 'tofu-welcome.svg')
 _CONDA_LIB = ('/path/to/your/data'
               'your-username/miniforge3/envs/tofu/lib')
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.skipif(
+        not os.path.isdir(_CONDA_LIB) and not shutil.which('google-chrome') and not shutil.which('chromium'),
+        reason='conda tofu lib and chromium unavailable on this machine'
+    )
+]
+
 _THEMES = ('tofu', 'dark', 'light')
 
 # The worker runs in a subprocess: LD_LIBRARY_PATH must be set BEFORE the

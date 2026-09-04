@@ -71,7 +71,7 @@ class SessionManagerInteractiveSsoTest {
     private fun profile(cookieHost: String? = null) = Profile(
         id = 1, alias = "sso server", baseUrl = base,
         authType = AuthType.INTERACTIVE_SSO, cookieHost = cookieHost,
-        projectPath = "/home/dev/chatui",
+        projectPath = "/home/dev/tofu",
     )
 
     /**

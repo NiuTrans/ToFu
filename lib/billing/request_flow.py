@@ -9,8 +9,8 @@ adapters) all follow the same three-step billing dance for multi-user
    caller's ``max_tokens`` cap and hold it as a ledger reservation under
    ``ref_id=task_id`` BEFORE dispatching. If the wallet can't cover the
    estimate, the route returns 402.
-2. **Spawn-fail release** — if ``spawn_task`` blows up, refund the hold
-   immediately instead of waiting for the janitor sweep.
+2. **Pre-dispatch release** — if admission, stream setup, or ``spawn_task``
+   fails, refund the hold immediately instead of waiting for the janitor sweep.
 3. **Post-terminal settle** — once the task is terminal, settle the
    reservation against the actual token usage (or, when no reservation
    was placed, debit directly).
@@ -91,24 +91,30 @@ def reserve_for_task(task: dict, *, user_id: str, model: str,
 
 
 def release_reservation(task: dict, *, user_id: str,
-                        reservation_micro: int) -> None:
+                        reservation_micro: int,
+                        raise_on_error: bool = False) -> bool:
     """Refund a pre-flight reservation (best-effort).
 
-    Called when ``spawn_task`` fails after a reservation was placed so
-    the caller isn't left holding credits until the janitor sweep. Any
-    failure here is logged, never raised — the janitor is the safety net.
+    Called when a request cannot start after a reservation was placed so the
+    caller isn't left holding credits until the janitor sweep. Any failure here
+    is logged, never raised — the janitor is the safety net.
     """
     if not user_id or reservation_micro <= 0:
-        return
+        return True
     try:
         from lib.billing import reserve_release
         reserve_release(user_id, reservation_micro, ref_id=task['id'],
-                        note='spawn_task failed; reserve released')
+                        note='request did not dispatch; reserve released')
+        return True
     except Exception as e:
         logger.error('[Billing] reserve release failed: %s', e, exc_info=True)
+        if raise_on_error:
+            raise
+        return False
 
 
-def settle_task(task: dict, *, user_id: str, model: str) -> Optional[dict]:
+def settle_task(task: dict, *, user_id: str, model: str,
+                raise_on_error: bool = False) -> Optional[dict]:
     """Settle (or debit) ``task`` against its actual token usage.
 
     Reads ``task['usage']`` tolerating both the native
@@ -129,6 +135,17 @@ def settle_task(task: dict, *, user_id: str, model: str) -> Optional[dict]:
         return None
     from lib.relay_config import billing_enabled
     if not billing_enabled():
+        # A deployment can disable billing after this request reserved funds.
+        # The reservation is still a durable debt and must be released instead
+        # of waiting for a janitor that may also be disabled with billing.
+        reserved = int(task.get('_billing_reservation_micro') or 0)
+        if reserved > 0:
+            release_reservation(
+                task,
+                user_id=user_id,
+                reservation_micro=reserved,
+                raise_on_error=raise_on_error,
+            )
         return None
     try:
         from lib.billing import (
@@ -180,6 +197,8 @@ def settle_task(task: dict, *, user_id: str, model: str) -> Optional[dict]:
                 logger.warning('[Billing] debit failed: %s', e)
     except Exception as e:
         logger.error('[Billing] settle error: %s', e, exc_info=True)
+        if raise_on_error:
+            raise
     return None
 
 

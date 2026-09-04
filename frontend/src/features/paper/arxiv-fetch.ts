@@ -1,20 +1,15 @@
+import { readSSEStream } from '../../core/sse-reader';
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 type JsonObject = Record<string, unknown>;
 
 interface PaperEntry extends JsonObject { id: string }
 interface ArxivFetchApi {
   fetchArxivStream(reference: string, paperId: string): Promise<Response | null>;
 }
-interface SseOptions {
-  flushTail: boolean;
-  onLine(line: string): boolean;
-}
-
 type ArxivFetchWindow = Window & {
   Api?: { paper?: ArxivFetchApi };
   apiUrl?: (url: string) => string;
-  readSSEStream?: (response: Response, options: SseOptions) => Promise<unknown>;
-  escapeHtml?: (value: unknown) => string;
   debugLog?: (message: string, level?: string) => void;
   _paperLibrary?: PaperEntry[];
   _activePaperId?: string;
@@ -55,14 +50,6 @@ function globals(): ArxivFetchWindow {
   return featureRegistry as unknown as ArxivFetchWindow;
 }
 
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (helper) return helper(value);
-  const node = document.createElement('span');
-  node.textContent = value == null ? '' : String(value);
-  return node.innerHTML;
-}
-
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? '');
 }
@@ -73,6 +60,14 @@ function stringField(row: JsonObject, field: string): string {
 
 function isCurrent(generation: number): boolean {
   return globals()._arxivFetchGeneration === generation;
+}
+
+function renderFetchProgress(event: JsonObject): void {
+  const renderer = globals()._renderArxivFetchProgress;
+  if (typeof renderer !== 'function') {
+    throw new Error('Paper arXiv progress-renderer port is unavailable');
+  }
+  renderer(event);
 }
 
 export async function fetchArxivPaper(
@@ -87,16 +82,15 @@ export async function fetchArxivPaper(
     return;
   }
   const api = state.Api?.paper;
-  const readStream = state.readSSEStream;
   const newId = state._newPaperEntryId;
-  if (!api || !readStream || !newId) {
+  if (!api || !newId) {
     throw new Error('arXiv ingest dependencies unavailable');
   }
 
   const generation = (state._arxivFetchGeneration ?? 0) + 1;
   state._arxivFetchGeneration = generation;
   state._paperLoading = true;
-  state._renderArxivFetchProgress?.({ stage: 'resolve' });
+  renderFetchProgress({ stage: 'resolve' });
   const library = state._paperLibrary ?? [];
   const reusing = Boolean(reuseId && library.some((paper) => paper.id === reuseId));
   const paperId = reuseId || newId();
@@ -116,7 +110,7 @@ export async function fetchArxivPaper(
     let done: JsonObject | null = null;
     let streamError = '';
     let currentArxivId = '';
-    await readStream(response, {
+    await readSSEStream(response, {
       flushTail: false,
       onLine(line) {
         if (!isCurrent(generation)) return true;
@@ -135,7 +129,7 @@ export async function fetchArxivPaper(
           streamError = stringField(event, 'error') || 'Fetch failed';
           return true;
         }
-        state._renderArxivFetchProgress?.(event);
+        renderFetchProgress(event);
         if (event.stage === 'done') done = event;
         return false;
       },

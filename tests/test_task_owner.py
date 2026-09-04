@@ -81,3 +81,33 @@ def test_conv_abort_is_scoped_by_owner(isolated_registry):
     ) == 1
     assert first["aborted"] is True
     assert second["aborted"] is False
+
+
+def test_conv_abort_reclaims_a_pending_scheduler_entry(
+        isolated_registry, monkeypatch):
+    registry = isolated_registry
+    task = registry.create_task(
+        "queued-conv", [], {}, user_id=41, supersede=False
+    )
+    cancelled = []
+    finalized = []
+    terminal_floors = []
+    monkeypatch.setattr(
+        "lib.tasks_pkg.spawn.cancel_queued_task",
+        lambda task_id: cancelled.append(task_id) or True,
+    )
+    monkeypatch.setattr(
+        "lib.tasks_pkg.manager._terminal.finalize_chat_task_aborted",
+        lambda owner: finalized.append(owner) or {"type": "done"},
+    )
+    monkeypatch.setattr(
+        registry, "_write_aborted_terminal_floor",
+        lambda owner: terminal_floors.append(owner),
+    )
+
+    assert registry.abort_running_tasks_for_conv(
+        "queued-conv", user_id=41
+    ) == 1
+    assert cancelled == [task["id"]]
+    assert finalized == [task]
+    assert terminal_floors == []

@@ -1,15 +1,9 @@
 """lib/llm_dispatch/autodiscover_local.py — Auto-discovery of well-known local engine ports.
 
-The Settings flow for local engines is user-driven: pick a preset (vLLM /
-SGLang / Ollama), paste a URL, probe. But the three engines have canonical
-default ports, and a box on loopback costs one TCP connect to find. The shared
-local-endpoint monitor probes those ports shortly after startup (and
-periodically, so an engine started AFTER Tofu — or a model pulled later — is
-still picked up) and, when an endpoint answers with a non-empty model list,
-registers it as a normal ``brand: 'local'`` provider in
-``server_config.json``. From that moment the regular machinery owns it: the
-dispatcher gets slots, ``health_local.py`` tracks model drift, and Settings
-renders the card exactly like a user-created one (engine icon included).
+The shared local-endpoint monitor probes canonical loopback ports shortly after
+startup and periodically. When an endpoint exposes models, this module sends
+the observed facts to the owner-scoped model-routing v2 registration service;
+it never constructs or writes a legacy ``server_config.providers`` row.
 
 Safety rails
 ------------
@@ -22,10 +16,11 @@ Safety rails
   off full HTTP discovery to a bounded fifteen minutes.
 * **Idempotent.** A port already covered by ANY provider's
   ``endpoints``/``base_url`` (any spelling of localhost) is skipped.
-* **No zombies.** If the user deletes an auto-created provider, the port
-  moves to a ``dismissed`` list in ``data/config/local_autodiscover.json``
-  and is never re-added. Accidental resurrection after deletion is the
-  classic failure mode of config auto-provisioning.
+* **No zombies.** If the user deletes an auto-created Provider, the port moves
+  to a per-owner ``dismissed`` list and is never re-added.
+* **Explicit owner.** The production monitor runs only in personal mode. The
+  callable sweep accepts an explicit owner/repository seam so a future
+  distributed scheduler can enumerate owners without a module-global user.
 * **Opt-out.** ``TOFU_LOCAL_AUTODISCOVER=0`` disables the worker and makes
   :func:`sweep_once` a no-op.
 """
@@ -39,6 +34,13 @@ from urllib.parse import urlparse
 from lib.config_dir import config_path
 from lib.json_store import read_json, update_json_atomic
 from lib.log import audit_log, get_logger
+from lib.model_routing import (
+    ModelRoutingError,
+    ModelRoutingRepository,
+    OwnerBoundary,
+    connection_urls,
+    upsert_local_provider,
+)
 from lib.proxy import register_no_proxy_url
 
 from .discovery import discover_models, normalize_base_url
@@ -55,12 +57,13 @@ __all__ = [
 ]
 
 
-# Mirrors the frontend `_LOCAL_ENGINE_PRESETS` (static/js/settings/
-# local_endpoints.js) — a parity test keeps the two tables in sync.
+# Sole well-known-port authority. The retired browser presets no longer mirror
+# this table; Settings renders any discovered ProviderAccess from v2.
 WELL_KNOWN_ENGINES = (
     {'engine': 'ollama', 'name': 'Ollama', 'host': '127.0.0.1', 'port': 11434},
     {'engine': 'vllm',   'name': 'vLLM',   'host': '127.0.0.1', 'port': 8000},
     {'engine': 'sglang', 'name': 'SGLang', 'host': '127.0.0.1', 'port': 30000},
+    {'engine': 'llamacpp', 'name': 'llama.cpp', 'host': '127.0.0.1', 'port': 8080},
 )
 
 _CONNECT_TIMEOUT = 1.0   # closed loopback port refuses instantly; this is the firewall-drop guard
@@ -90,7 +93,8 @@ _STATE_PATH = config_path('local_autodiscover.json')
 
 # Auto-discovery is a cooperative job of health_local's single monitor thread,
 # not a second resident worker. These fields hold only bounded in-process
-# scheduling state; provider/dismissal authority remains the atomic JSON store.
+# scheduling state. Provider authority is model-routing v2; the small per-owner
+# dismissal ledger prevents deleted auto-providers from resurrecting.
 _schedule_lock = threading.Lock()
 _runtime_enabled = True
 _next_sweep_at: float | None = None
@@ -155,18 +159,22 @@ def _candidates() -> list:
     return out
 
 
-def _covered_port_keys(providers) -> set:
-    """``host:port`` keys every configured provider already points at."""
+def _runtime_context() -> tuple[OwnerBoundary, ModelRoutingRepository] | None:
+    """Return the personal monitor owner, or refuse implicit enumeration."""
+    from runtime_guards import load_deployment_configuration
+
+    deployment = load_deployment_configuration()
+    if deployment.mode != 'personal':
+        return None
+    from lib.identity import PERSONAL_USER_ID
+
+    return OwnerBoundary.create(PERSONAL_USER_ID), ModelRoutingRepository()
+
+
+def _covered_port_keys(document: dict) -> set:
+    """``host:port`` keys every configured v2 Connection points at."""
     keys = set()
-    for prov in providers or []:
-        if not isinstance(prov, dict):
-            continue
-        urls = []
-        eps = prov.get('endpoints')
-        if isinstance(eps, list):
-            urls.extend(u for u in eps if isinstance(u, str) and u.strip())
-        if prov.get('base_url'):
-            urls.append(prov['base_url'])
+    for urls in connection_urls(document).values():
         for raw in urls:
             norm = normalize_base_url(raw.strip())
             host, port = _parse_host_port(
@@ -176,19 +184,54 @@ def _covered_port_keys(providers) -> set:
     return keys
 
 
-def _load_state() -> dict:
+def _state_owner_key(boundary: OwnerBoundary) -> str:
+    return '%s:%d' % (boundary.tenant_id, boundary.owner_user_id)
+
+
+def _normalized_state(value) -> dict:
+    if not isinstance(value, dict):
+        return {'added': {}, 'dismissed': []}
+    added = value.get('added') if isinstance(value.get('added'), dict) else {}
+    dismissed = (
+        value.get('dismissed')
+        if isinstance(value.get('dismissed'), list)
+        else []
+    )
+    return {
+        'added': {
+            str(key): str(provider_id)
+            for key, provider_id in added.items()
+            if isinstance(key, str) and isinstance(provider_id, str)
+        },
+        'dismissed': [item for item in dismissed if isinstance(item, str)],
+    }
+
+
+def _load_state(boundary: OwnerBoundary) -> dict:
     st = read_json(_STATE_PATH, default=None)
     if not isinstance(st, dict):
         return {'added': {}, 'dismissed': []}
-    added = st.get('added') if isinstance(st.get('added'), dict) else {}
-    dismissed = st.get('dismissed') if isinstance(st.get('dismissed'), list) else []
-    return {'added': dict(added),
-            'dismissed': [d for d in dismissed if isinstance(d, str)]}
+    owners = st.get('owners')
+    if isinstance(owners, dict):
+        return _normalized_state(owners.get(_state_owner_key(boundary)))
+    # One-time personal-mode read compatibility. Saving rewrites this old
+    # unscoped shape under the explicit owner key.
+    return _normalized_state(st)
 
 
-def _save_state(state: dict) -> None:
+def _save_state(boundary: OwnerBoundary, state: dict) -> None:
     try:
-        update_json_atomic(_STATE_PATH, lambda _: dict(state), default={})
+        owner_key = _state_owner_key(boundary)
+
+        def _mutate(current):
+            current = current if isinstance(current, dict) else {}
+            owners = current.get('owners')
+            if not isinstance(owners, dict):
+                owners = {}
+            owners[owner_key] = _normalized_state(state)
+            return {'version': 2, 'owners': owners}
+
+        update_json_atomic(_STATE_PATH, _mutate, default={})
     except Exception as e:
         logger.warning('[AutoDiscover] state persist failed: %s', e)
 
@@ -210,60 +253,8 @@ def _discover(base_url: str):
                            return_effective=True, quiet_not_found=True)
 
 
-def _build_provider(cand: dict, effective_url: str, models: list) -> dict:
-    ids = sorted(m['model_id'] for m in models if m.get('model_id'))
-    return {
-        # Deterministic id: re-adding the same engine+port after a state-file
-        # loss collides with the existing row instead of duplicating it.
-        'id': 'auto_%s_%d' % (cand['engine'], cand['port']),
-        'name': '%s (auto)' % cand['name'],
-        'brand': 'local',
-        'engine': cand['engine'],
-        'enabled': True,
-        'base_url': effective_url,
-        'endpoints': [effective_url],
-        'endpoint_models': {effective_url: ids},
-        'api_keys': [''],
-        'models': models,
-        'thinking_format': '',
-        'auto_discovered': True,
-        'created_at': time.time(),
-    }
-
-
-def _persist_provider(prov: dict) -> bool:
-    """Append *prov* to server_config.json, re-checking coverage under the lock.
-
-    A concurrent Settings save may have added a provider for the same port
-    between our config read and this write; the mutator re-computes coverage
-    on the FRESH dict and returns None (no write) when covered.
-    """
-    try:
-        import lib as _lib
-        prov_keys = _covered_port_keys([prov])
-        wrote = {'ok': False}
-
-        def _mutate(cfg):
-            if not isinstance(cfg, dict):
-                cfg = {}
-            providers = cfg.get('providers')
-            if not isinstance(providers, list):
-                providers = cfg['providers'] = []
-            if any(p.get('id') == prov['id'] for p in providers
-                   if isinstance(p, dict)):
-                return None
-            if prov_keys & _covered_port_keys(providers):
-                return None
-            providers.append(prov)
-            wrote['ok'] = True
-            return cfg
-
-        update_json_atomic(_lib._SERVER_CONFIG_PATH, _mutate, default={})
-        return wrote['ok']
-    except Exception as e:
-        logger.error('[AutoDiscover] persist failed for %s: %s',
-                     prov.get('id'), e, exc_info=True)
-        return False
+def _provider_id(candidate: dict) -> str:
+    return 'auto_%s_%d' % (candidate['engine'], candidate['port'])
 
 
 def _rebuild_slots() -> None:
@@ -271,8 +262,15 @@ def _rebuild_slots() -> None:
     _rebuild_dispatcher_slots()
 
 
-def sweep_once(port_open=None, discover=None, rebuild=None,
-               probe_due=None) -> dict:
+def sweep_once(
+    port_open=None,
+    discover=None,
+    rebuild=None,
+    probe_due=None,
+    *,
+    boundary: OwnerBoundary | None = None,
+    repository=None,
+) -> dict:
     """One auto-discovery pass over the well-known ports.
 
     Dependency-injected seams (``port_open`` / ``discover`` / ``rebuild``)
@@ -290,36 +288,48 @@ def sweep_once(port_open=None, discover=None, rebuild=None,
         'failed': [],
         'unpersisted': [],
         'added': [],
-        'config_loaded': False,
+        'authority_loaded': False,
     }
     if _disabled():
         stats['disabled'] = True
         return stats
     port_open = port_open or _port_open
     discover = discover or _discover
+    if boundary is None or repository is None:
+        runtime_context = _runtime_context()
+        if runtime_context is None:
+            stats['owner_enumeration_required'] = True
+            return stats
+        runtime_boundary, runtime_repository = runtime_context
+        boundary = boundary or runtime_boundary
+        repository = repository or runtime_repository
     try:
-        import lib as _lib
-        cfg = _lib._load_server_config() or {}
-    except Exception as e:
-        logger.warning('[AutoDiscover] cannot load server config: %s', e)
+        authority = repository.get(boundary)
+    except ModelRoutingError as e:
+        logger.warning('[AutoDiscover] cannot load model-routing authority: %s', e)
         return stats
-    stats['config_loaded'] = True
-    providers = cfg.get('providers') or []
-    covered = _covered_port_keys(providers)
-    state = _load_state()
+    if authority.revision <= 0:
+        stats['authority_inactive'] = True
+        return stats
+    stats['authority_loaded'] = True
+    covered = _covered_port_keys(authority.document)
+    state = _load_state(boundary)
 
     # ── Reconcile deletions: an auto-added provider whose id vanished from
-    # the config was removed BY THE USER — mark the port dismissed so the
-    # provider never resurrects. (Disabled-but-present still counts as
-    # covered above, so merely toggling it off does NOT trigger this.)
-    provider_ids = {p.get('id') for p in providers if isinstance(p, dict)}
+    # the aggregate was removed BY THE USER — mark the port dismissed so the
+    # provider never resurrects. Disabled-but-present still counts as covered.
+    provider_ids = {
+        row.get('provider_id')
+        for row in authority.document['providers']
+        if isinstance(row, dict)
+    }
     gone = [k for k, pid in state['added'].items() if pid not in provider_ids]
     if gone:
         for key in gone:
             state['added'].pop(key, None)
             if key not in covered and key not in state['dismissed']:
                 state['dismissed'].append(key)
-        _save_state(state)
+        _save_state(boundary, state)
         logger.info('[AutoDiscover] %d auto provider(s) deleted by user — '
                     'dismissed: %s', len(gone), sorted(gone))
 
@@ -356,23 +366,43 @@ def sweep_once(port_open=None, discover=None, rebuild=None,
             stats['empty'].append(key)
             logger.debug('[AutoDiscover] %s answers but serves no models', key)
             continue
-        prov = _build_provider(cand, effective, models)
-        if not _persist_provider(prov):
+        provider_id = _provider_id(cand)
+        try:
+            mutation = upsert_local_provider(
+                repository,
+                boundary,
+                provider_id=provider_id,
+                display_name='%s (auto)' % cand['name'],
+                base_url=effective,
+                models=models,
+                require_unclaimed_connection=True,
+            )
+        except ModelRoutingError as e:
+            logger.error(
+                '[AutoDiscover] model-routing persist failed for %s: %s',
+                provider_id, e, exc_info=True)
             stats['unpersisted'].append(key)
             continue
-        state['added'][key] = prov['id']
-        _save_state(state)
+        if not mutation.changed:
+            # A concurrent owner edit claimed the endpoint before our CAS.
+            # It is already covered, so discovery has nothing to publish.
+            continue
+        state['added'][key] = provider_id
+        _save_state(boundary, state)
         covered.add(key)
         stats['added'].append({
             'engine': cand['engine'], 'endpoint': effective,
-            'n_models': len(models), 'provider_id': prov['id'], 'key': key,
+            'n_models': len(models), 'provider_id': provider_id, 'key': key,
+            'model_routing_revision': mutation.authority.revision,
         })
         logger.info('[AutoDiscover] %s (%s) serves %d model(s) — provider %r '
                     'auto-configured', cand['name'], effective, len(models),
-                    prov['id'])
+                    provider_id)
         audit_log('local_provider_autodiscovered', engine=cand['engine'],
                   endpoint=effective, n_models=len(models),
-                  provider_id=prov['id'])
+                  provider_id=provider_id,
+                  owner_user_id=boundary.owner_user_id,
+                  model_routing_revision=mutation.authority.revision)
 
     if stats['added']:
         try:
@@ -406,7 +436,7 @@ def _record_poll_result(stats: dict, *, clock_now: float, generation: int,
         if generation != _schedule_generation:
             stats['next_poll_s'] = _remaining_poll_delay_locked(clock_now)
             return stats
-        if not stats.get('config_loaded'):
+        if not stats.get('authority_loaded'):
             stats['next_poll_s'] = _remaining_poll_delay_locked(clock_now)
             return stats
 
@@ -447,7 +477,7 @@ def _record_poll_result(stats: dict, *, clock_now: float, generation: int,
 
 
 def poll_if_due(*, now: float | None = None, port_open=None,
-                discover=None, rebuild=None) -> dict:
+                discover=None, rebuild=None, boundary=None, repository=None) -> dict:
     """Run one due topology sweep from the shared local-endpoint monitor.
 
     TCP topology remains sampled every ``_SWEEP_INTERVAL`` so a newly started
@@ -494,6 +524,8 @@ def poll_if_due(*, now: float | None = None, port_open=None,
         discover=discover,
         rebuild=rebuild,
         probe_due=_probe_is_due,
+        boundary=boundary,
+        repository=repository,
     )
     stats['scheduled'] = True
     return _record_poll_result(
@@ -532,6 +564,11 @@ def start_local_autodiscovery() -> bool:
     global _schedule_generation
     if _disabled():
         logger.info('[AutoDiscover] disabled via TOFU_LOCAL_AUTODISCOVER=0')
+        return False
+    if _runtime_context() is None:
+        logger.info(
+            '[AutoDiscover] disabled outside personal mode; distributed mode '
+            'must enumerate owner boundaries explicitly')
         return False
     with _schedule_lock:
         was_enabled = _runtime_enabled

@@ -37,6 +37,11 @@ def _bounded_float(name: str, default: float, minimum: float, maximum: float) ->
     return value
 
 
+def _default_idle_trim_cooldown_seconds(deployment_mode: str) -> float:
+    """Return the allocator-return cadence owned by each resource profile."""
+    return 300.0 if deployment_mode == 'distributed' else 60.0
+
+
 @dataclass(frozen=True, slots=True)
 class SidecarConfig:
     project_root: Path
@@ -54,9 +59,12 @@ class SidecarConfig:
     read_pool_size: int
     write_pool_size: int
     rpc_capacity: int = 8
+    rpc_inflight_max_mib: int = 128
     acquire_timeout_s: float = 2.0
     transaction_timeout_s: float = 5.0
+    sqlite_writer_queue_capacity: int = 32
     sqlite_writer_cache_mib: int = 32
+    turn_projection_cache_mib: int = 16
     fastpath_wal_rebase_max_mib: int = 512
     idle_trim_rss_mib: int = 256
     idle_trim_cooldown_s: float = 300.0
@@ -220,13 +228,31 @@ class SidecarConfig:
             8,
             256,
         )
+        turn_projection_cache_mib = _bounded_int(
+            'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB',
+            deployment_resource_default(
+                'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB', os.environ),
+            8,
+            1024,
+        )
+        sqlite_writer_queue_capacity = _bounded_int(
+            'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY',
+            deployment_resource_default(
+                'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY', os.environ),
+            4,
+            1024,
+        )
         # The writer cache is already derived from the launch-time memory
         # probe.  Scale the Sidecar's idle heap-return threshold from that same
         # observable budget instead of assuming the process owns the host.
         idle_trim_default_mib = (
             max(1024, min(4096, sqlite_writer_cache_mib * 16))
             if deployment.mode == 'distributed'
-            else max(128, min(512, sqlite_writer_cache_mib * 8))
+            # Measured high-memory personal runs otherwise oscillate between
+            # a 250..370 MiB post-trim floor and 550..756 MiB before the old
+            # 512 MiB trigger. Returning already-free arenas at 384 MiB keeps
+            # host/cgroup headroom without shrinking SQLite's cache.
+            else max(128, min(384, sqlite_writer_cache_mib * 8))
         )
         idle_trim_rss_mib = _bounded_int(
             'TOFU_STORAGE_IDLE_TRIM_RSS_MIB',
@@ -234,6 +260,13 @@ class SidecarConfig:
             64,
             16 * 1024,
         )
+        # A frozen busy personal generation climbed from a 304.6 MiB median
+        # post-trim floor to 826.6 MiB before each five-minute trim. Rechecking
+        # at one minute bounds that allocator sawtooth without trimming below
+        # the RSS threshold or racing an active RPC. Distributed replicas keep
+        # the wider cadence to avoid synchronized allocator work across pods.
+        idle_trim_cooldown_default_s = (
+            _default_idle_trim_cooldown_seconds(deployment.mode))
         writer_stall_grace_s = _bounded_float(
             'TOFU_STORAGE_WRITER_STALL_GRACE_S', 15.0, 1.0, 120.0)
         writer_hard_kill_s = _bounded_float(
@@ -303,23 +336,32 @@ class SidecarConfig:
             read_pool_size=read_pool_size,
             write_pool_size=write_pool_size,
             rpc_capacity=rpc_capacity,
+            rpc_inflight_max_mib=_bounded_int(
+                'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB',
+                deployment_resource_default(
+                    'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB', os.environ),
+                128,
+                8192,
+            ),
             # Bulk maintenance (e.g. conversation imports of multi-MiB
             # transcripts) cannot commit inside the 5s user-latency watchdog;
             # operators running a migration window may raise it explicitly.
             transaction_timeout_s=_bounded_float(
                 'TOFU_STORAGE_TRANSACTION_TIMEOUT_S', 5.0, 1.0, 120.0),
+            sqlite_writer_queue_capacity=sqlite_writer_queue_capacity,
             sqlite_writer_cache_mib=sqlite_writer_cache_mib,
+            turn_projection_cache_mib=turn_projection_cache_mib,
             fastpath_wal_rebase_max_mib=_bounded_int(
                 'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB',
                 deployment_resource_default(
                     'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB', os.environ),
                 64,
-                8192,
+                16_384,
             ),
             idle_trim_rss_mib=idle_trim_rss_mib,
             idle_trim_cooldown_s=_bounded_float(
                 'TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS',
-                300.0,
+                idle_trim_cooldown_default_s,
                 30.0,
                 3600.0,
             ),

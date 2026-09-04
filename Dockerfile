@@ -75,7 +75,7 @@ RUN /opt/tofu-worker/bin/python -m playwright install chromium --with-deps --onl
 USER tofu:tofu
 
 # Public headless runtime: wheel + agent dependencies only. It contains no
-# repository checkout, ChatUI application bundle, database driver, or app data.
+# repository checkout, full Tofu application bundle, database driver, or app data.
 FROM ${PYTHON_IMAGE} AS agent
 ARG TOFU_UID=10001
 ARG TOFU_GID=10001

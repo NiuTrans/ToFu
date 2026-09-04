@@ -86,6 +86,54 @@ class TestStreamingToolAccumulator:
         assert hits == 1
         assert len(task['_tool_result_cache']) == 1
 
+    @pytest.mark.parametrize('caller', [
+        'program',
+        {},
+        {'type': 'unknown'},
+        {'type': 'multi_agent'},
+    ])
+    def test_callback_never_prefetches_invalid_attributed_call(self, caller):
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = self._make_task()
+        task.update({'toolRounds': [], 'events': [],
+                     'events_lock': threading.Lock()})
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._execute_one = MagicMock(return_value='private read')
+
+        acc.on_tool_call_ready({
+            'id': 'invalid-caller',
+            'caller': caller,
+            'function': {
+                'name': 'list_dir',
+                'arguments': json.dumps({'path': '.'}),
+            },
+        })
+
+        assert acc.submitted_count == 0
+        assert task['toolRounds'] == []
+        acc._execute_one.assert_not_called()
+
+    def test_prefetch_pool_failure_never_escapes_provider_callback(self):
+        """A broken speculative lane falls back after stream, not into LLM."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._pool = MagicMock()
+        acc._pool.submit.side_effect = RuntimeError('injected pool shutdown')
+
+        acc.on_tool_call_ready({
+            'id': 'tc_submit_failure',
+            'function': {
+                'name': 'list_dir',
+                'arguments': json.dumps({'path': '.'}),
+            },
+        })
+
+        assert acc.submitted_count == 0
+        assert acc._futures == {}
+
     def test_callback_contract_rejection_never_preexecutes(self):
         """Speculative reads cannot bypass the request execution contract."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
@@ -187,6 +235,30 @@ class TestStreamingToolAccumulator:
         })
         assert acc.submitted_count == 0
 
+    def test_callback_defers_scalar_json_arguments_without_crashing(self):
+        """JSON-valid non-objects belong to the typed post-stream rejection."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        task.update({
+            'convId': 'scalar-args-conv', 'status': 'running',
+            'toolRounds': [], 'events': [],
+            'events_lock': threading.Lock(),
+        })
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._execute_one = MagicMock(return_value='must not execute')
+
+        acc.on_tool_call_ready({
+            'id': 'scalar-args',
+            'function': {
+                'name': 'fetch_url',
+                'arguments': '["https://example.com"]',
+            },
+        })
+
+        assert acc.submitted_count == 0
+        assert len(task['toolRounds']) == 1
+        acc._execute_one.assert_not_called()
+
     def test_callback_submits_fetch_url_with_real_url(self):
         """A fetch_url with a real url IS still pre-executed (guard doesn't over-reject)."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
@@ -208,9 +280,11 @@ class TestStreamingToolAccumulator:
         assert h('fetch_url', {'url': 'https://x.com'}) is True
         assert h('fetch_url', {'urls': [{'url': 'https://x.com'}]}) is True
         assert h('fetch_url', {'urls': ['https://x.com']}) is True
+        assert h('fetch_url', {'url': ['https://x.com']}) is False
         assert h('web_search', {'query': ''}) is False
         assert h('web_search', {'query': 'hello'}) is True
         assert h('web_search', {'queries': [{'query': 'hi'}]}) is True
+        assert h('web_search', {'query': 17}) is False
         # Project tools are always allowed (their handler validates).
         assert h('grep_search', {'pattern': 'x'}) is True
 
@@ -253,6 +327,57 @@ class TestStreamingToolAccumulator:
         hits = acc.inject_into_cache(task)
         assert hits == 0
 
+    def test_inject_into_cache_does_not_block_on_timed_out_straggler(
+            self, monkeypatch):
+        """A worker that outlives its per-future timeout must not make the
+        final shutdown re-block the round past the deadline."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+
+        def _slow():
+            time.sleep(0.7)
+            return 'slow result'
+
+        acc._submitted_count = 1
+        future = acc._pool.submit(_slow)
+        acc._futures['tc_slow'] = (
+            future, 'grep_search', {'pattern': 'x'}, time.time())
+
+        # Force the per-future wait to ~0.2s so the 0.7s worker times out
+        # without making the test itself wait the real 60s.
+        monkeypatch.setattr(
+            'lib.project_mod.read_tools._get_io_timeout',
+            lambda *args, **kwargs: -9.8)
+
+        start = time.time()
+        hits = acc.inject_into_cache(task)
+        elapsed = time.time() - start
+
+        assert hits == 0
+        assert elapsed < 0.5, (
+            'shutdown re-blocked on a timed-out straggler: %.3fs' % elapsed)
+
+    def test_prefetch_workers_are_lazy_and_memoized(self, monkeypatch):
+        """The worker probe runs once at first use, not at import time."""
+        import lib.tasks_pkg.streaming_tool_executor as ste
+
+        monkeypatch.setattr(ste, '_stream_prefetch_workers_cache', None)
+        calls = []
+
+        def _fake(*args, **kwargs):
+            calls.append(1)
+            return 2
+
+        monkeypatch.setattr('runtime_guards.resolve_resource_budget', _fake)
+
+        assert ste._stream_prefetch_workers() == 2
+        assert ste._stream_prefetch_workers() == 2
+        assert len(calls) == 1, (
+            'worker probe must be memoized after first use; got %d calls'
+            % len(calls))
+
     def test_multiple_tools_pre_executed(self):
         """Multiple read-only tools can be pre-executed in parallel."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
@@ -276,6 +401,249 @@ class TestStreamingToolAccumulator:
 
         hits = acc.inject_into_cache(task)
         assert hits == 5
+
+    def test_prefetch_queue_is_bounded_without_dropping_occurrences(self):
+        """Excess calls stay visible and fall through to normal dispatch."""
+        from lib.tasks_pkg.streaming_tool_executor import (
+            _MAX_STREAM_PREFETCH_CALLS,
+            StreamingToolAccumulator,
+        )
+
+        task = self._make_task()
+        task.update({'toolRounds': [], 'events': [],
+                     'events_lock': threading.Lock()})
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._execute_one = MagicMock(return_value='result')
+
+        for index in range(_MAX_STREAM_PREFETCH_CALLS + 9):
+            acc.on_tool_call_ready({
+                'id': f'bounded-{index}',
+                'function': {
+                    'name': 'list_dir',
+                    'arguments': json.dumps({'path': f'dir-{index}'}),
+                },
+            })
+
+        assert len(task['toolRounds']) == _MAX_STREAM_PREFETCH_CALLS + 9
+        assert acc.submitted_count == _MAX_STREAM_PREFETCH_CALLS
+        assert len(acc._futures) == _MAX_STREAM_PREFETCH_CALLS
+        assert acc.inject_into_cache(task) == _MAX_STREAM_PREFETCH_CALLS
+
+    def test_prefetch_budget_reuses_launch_tool_workers(self):
+        from lib.tasks_pkg.streaming_tool_executor import (
+            _MAX_STREAM_PREFETCH_CALLS,
+            _stream_prefetch_worker_limit,
+        )
+
+        assert _stream_prefetch_worker_limit({
+            'TOOL_MAX_PARALLEL_WORKERS': '2',
+        }) == 2
+        assert _stream_prefetch_worker_limit({
+            'TOOL_MAX_PARALLEL_WORKERS': '999999',
+        }) == 4
+        assert _MAX_STREAM_PREFETCH_CALLS == 8
+
+    def test_close_cancels_queued_futures_and_is_idempotent(self):
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        acc = StreamingToolAccumulator(self._make_task(), project_path='/tmp')
+        acc._pool.shutdown(wait=False)
+        pool = MagicMock()
+        acc._pool = pool
+        active = Future()
+        discarded = Future()
+        acc._futures['active'] = (
+            active, 'list_dir', {'path': '.'}, time.time())
+        acc._discarded_futures.append(discarded)
+
+        acc.close(cancel_futures=True, wait=False)
+        acc.close(cancel_futures=True, wait=False)
+
+        assert active.cancelled() is True
+        assert discarded.cancelled() is True
+        assert acc._futures == {}
+        assert acc._discarded_futures == []
+        pool.shutdown.assert_called_once_with(
+            wait=False, cancel_futures=True)
+
+    def test_equal_calls_with_distinct_ids_prefetch_independently(self):
+        """Content equality never collapses distinct response occurrences."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = self._make_task()
+        task.update({
+            'convId': 'stream-twins-conv', 'status': 'running',
+            'toolRounds': [], 'events': [],
+            'events_lock': threading.Lock(),
+        })
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._execute_one = MagicMock(return_value='same directory')
+        call = {
+            'function': {
+                'name': 'list_dir',
+                'arguments': json.dumps({'path': '.'}),
+            },
+        }
+
+        acc.on_tool_call_ready({**call, 'id': 'twin-a'})
+        acc.on_tool_call_ready({**call, 'id': 'twin-b'})
+
+        assert len(task['toolRounds']) == 2  # both protocol calls stay visible
+        assert acc.submitted_count == 2
+        assert acc.inject_into_cache(task) == 2
+        assert acc._execute_one.call_count == 2
+
+    def test_duplicate_stream_call_id_is_announced_once_and_parsed_once(self):
+        """One early mutable row must never be shared by two parsed calls."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        from lib.tasks_pkg.tool_dispatch._parse import parse_tool_calls
+
+        task = self._make_task()
+        task.update({
+            'convId': 'stream-reused-id-conv', 'status': 'running',
+            'toolRounds': [], 'events': [],
+            'events_lock': threading.Lock(),
+        })
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        tool_call = {
+            'id': 'provider-reused-id',
+            'type': 'function',
+            'function': {
+                'name': 'write_file',
+                'arguments': json.dumps({'path': 'a.txt', 'content': 'x'}),
+            },
+        }
+        acc.on_tool_call_ready(tool_call)
+        acc.on_tool_call_ready(dict(tool_call))
+        assert len(task['toolRounds']) == 1
+        assert acc.submitted_count == 0
+
+        assistant = {
+            'content': '',
+            'tool_calls': [tool_call, {
+                **tool_call,
+                'function': dict(tool_call['function']),
+            }],
+        }
+        parsed, _ = parse_tool_calls(
+            assistant, task, round_num=0,
+            tool_round_num=acc.tool_round_num,
+            project_enabled=False,
+            early_announced=acc.announced_tc_map,
+        )
+        acc.inject_into_cache(task)  # deterministic pool shutdown
+
+        assert len(parsed) == 2
+        assert len(task['toolRounds']) == 2
+        assert parsed[0][5] is not parsed[1][5]
+        assert parsed[0][5]['toolCallId'] == 'provider-reused-id'
+        assert parsed[1][5]['toolCallId'] == 'provider-reused-id'
+
+    def test_conflicting_same_attempt_call_id_is_reminted_before_announce(self):
+        """Different response positions may never share one early mutable row."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = self._make_task()
+        task.update({'toolRounds': [], 'events': [],
+                     'events_lock': threading.Lock()})
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        first = {
+            'id': 'provider-reused-id',
+            'function': {
+                'name': 'write_file',
+                'arguments': json.dumps({'path': 'a.txt', 'content': 'one'}),
+            },
+        }
+        second = {
+            'id': 'provider-reused-id',
+            'function': {
+                'name': 'write_file',
+                'arguments': json.dumps({'path': 'b.txt', 'content': 'two'}),
+            },
+        }
+
+        acc.on_tool_call_ready(first)
+        acc.on_tool_call_ready(second)
+
+        assert second['id'] != first['id']
+        assert [row['toolCallId'] for row in task['toolRounds']] == [
+            first['id'], second['id'],
+        ]
+        assert acc.reconcile_announced_rounds({
+            'role': 'assistant', 'tool_calls': [first, second],
+        }) == 0
+        assert set(acc.announced_tc_map) == {first['id'], second['id']}
+        acc.inject_into_cache(task)  # deterministic pool shutdown
+
+    def test_provider_restart_quarantines_same_id_prefetch_and_row(self):
+        """A discarded response can never lend state to its replacement."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
+
+        task = self._make_task()
+        task.update({'toolRounds': [], 'events': [],
+                     'events_lock': threading.Lock()})
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._execute_one = MagicMock(
+            side_effect=lambda _name, args: f"listing:{args['path']}")
+        first = {
+            'id': 'list_dir_0',
+            'function': {
+                'name': 'list_dir',
+                'arguments': json.dumps({'path': 'discarded'}),
+            },
+        }
+        replacement = {
+            'id': 'list_dir_0',
+            'function': {
+                'name': 'list_dir',
+                'arguments': json.dumps({'path': 'adopted'}),
+            },
+        }
+
+        acc.on_tool_call_ready(first)
+        acc.on_provider_attempt_restart(reason='injected transport retry')
+        acc.on_tool_call_ready(replacement)
+        assert replacement['id'] != first['id']
+
+        assert acc.reconcile_announced_rounds({
+            'role': 'assistant', 'tool_calls': [replacement],
+        }) == 1
+        assert task['toolRounds'][0]['status'] == 'aborted'
+        assert task['toolRounds'][1]['status'] == 'searching'
+        assert set(acc.announced_tc_map) == {replacement['id']}
+
+        assert acc.inject_into_cache(task) == 1
+        cache = task['_tool_result_cache']
+        assert _make_cache_key('list_dir', {'path': 'discarded'}) not in cache
+        assert cache[_make_cache_key('list_dir', {'path': 'adopted'})][0] \
+            == 'listing:adopted'
+
+    def test_same_id_payload_mismatch_is_orphaned_even_without_restart_hook(self):
+        """Identity comparison is a fail-closed backstop for missed callbacks."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+
+        task = self._make_task()
+        task.update({'toolRounds': [], 'events': [],
+                     'events_lock': threading.Lock()})
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._emit_tool_start(
+            'write_file', {'path': 'old.txt', 'content': 'old'}, 'same-id',
+            json.dumps({'path': 'old.txt', 'content': 'old'}))
+        final = {
+            'id': 'same-id',
+            'function': {
+                'name': 'write_file',
+                'arguments': json.dumps({'path': 'new.txt', 'content': 'new'}),
+            },
+        }
+
+        assert acc.reconcile_announced_rounds({
+            'role': 'assistant', 'tool_calls': [final],
+        }) == 1
+        assert task['toolRounds'][0]['status'] == 'aborted'
+        assert acc.announced_tc_map == {}
+        acc.inject_into_cache(task)  # deterministic pool shutdown
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -338,13 +706,15 @@ class TestReconcileAnnouncedRounds:
         assistant_msg = {'role': 'assistant',
                          'tool_calls': [{'id': 'tc_final', 'type': 'function',
                                          'function': {'name': 'read_files',
-                                                      'arguments': '{}'}}]}
+                                                      'arguments': json.dumps({
+                                                          'reads': [{
+                                                              'path': 'x.py',
+                                                          }],
+                                                      })}}]}
         n = acc.reconcile_announced_rounds(assistant_msg)
         assert n == 1
 
-        by_id = {}
-        for tc_id, (rn, entry) in acc.announced_tc_map.items():
-            by_id[tc_id] = entry
+        by_id = {entry['toolCallId']: entry for entry in task['toolRounds']}
         # Orphan settled to a terminal state (renders as interrupted, NOT a spinner).
         assert by_id['tc_orphan']['status'] == 'aborted'
         assert by_id['tc_orphan']['results']  # has a terminal result meta
@@ -361,8 +731,14 @@ class TestReconcileAnnouncedRounds:
         self._announce(acc, 'tc_a')
         self._announce(acc, 'tc_b')
         assistant_msg = {'role': 'assistant', 'tool_calls': [
-            {'id': 'tc_a', 'type': 'function', 'function': {'name': 'read_files', 'arguments': '{}'}},
-            {'id': 'tc_b', 'type': 'function', 'function': {'name': 'read_files', 'arguments': '{}'}},
+            {'id': 'tc_a', 'type': 'function', 'function': {
+                'name': 'read_files',
+                'arguments': json.dumps({'reads': [{'path': 'x.py'}]}),
+            }},
+            {'id': 'tc_b', 'type': 'function', 'function': {
+                'name': 'read_files',
+                'arguments': json.dumps({'reads': [{'path': 'x.py'}]}),
+            }},
         ]}
         n = acc.reconcile_announced_rounds(assistant_msg)
         assert n == 0
@@ -583,8 +959,14 @@ class TestMemoryPrefetch:
 
         assert 'Prefetched project context here' in self._all_text(messages)
 
-    def test_prefetch_fallback_on_failure(self):
-        """When prefetch future failed, fallback function is called."""
+    def test_prefetch_failure_suppresses_duplicate_read(self):
+        """A failed prefetch must NOT trigger a second synchronous read.
+
+        lib/tasks_pkg/context_composer/_providers.py deliberately returns ''
+        when the task-owned prefetch future failed: falling through to
+        lib.project_mod.get_context_for_prompt would race the same FUSE tree
+        and inflate preparation-tail latency.
+        """
         from lib.tasks_pkg.context_composer import compose_task_context
 
         future = Future()
@@ -607,11 +989,12 @@ class TestMemoryPrefetch:
                 conv_id='',
                 task=task,
             )
-        assert mock_fn.called
-        assert 'Fallback project ctx' in self._all_text(messages)
+        assert not mock_fn.called
+        assert 'Fallback project ctx' not in self._all_text(messages)
 
-    def test_prefetch_fallback_when_not_done(self):
-        """When prefetch future is not done, fallback function is called."""
+    def test_prefetch_deadline_suppresses_duplicate_read(self):
+        """A still-running prefetch hits the provider deadline, returns '',
+        and must NOT trigger a second synchronous read."""
         from lib.tasks_pkg.context_composer import compose_task_context
 
         future = Future()  # not set_result'd, never done
@@ -624,7 +1007,10 @@ class TestMemoryPrefetch:
         messages = [{'role': 'system', 'content': 'Base prompt'}]
 
         with patch('lib.project_mod.get_context_for_prompt',
-                   return_value='Sync fallback ctx') as mock_fn:
+                   return_value='Sync fallback ctx') as mock_fn, \
+                patch(
+                    'lib.tasks_pkg.context_composer._providers'
+                    '._CONTEXT_PROVIDER_DEADLINE_SECONDS', 0.05):
             compose_task_context(
                 messages, user_id=1, project_path='/tmp/project',
                 project_enabled=True, memory_enabled=False,
@@ -633,8 +1019,8 @@ class TestMemoryPrefetch:
                 conv_id='',
                 task=task,
             )
-        assert mock_fn.called
-        assert 'Sync fallback ctx' in self._all_text(messages)
+        assert not mock_fn.called
+        assert 'Sync fallback ctx' not in self._all_text(messages)
 
     def test_no_prefetch_when_task_is_none(self):
         """When task is None, normal synchronous loading is used."""
@@ -653,73 +1039,6 @@ class TestMemoryPrefetch:
             )
 
         mock_fn.assert_called_once()
-
-    def test_digest_header_tool_free_when_conv_tools_absent(self):
-        """The project-digest reminder must NOT advertise list_conversations /
-        get_conversation when those tools are not registered for the turn.
-
-        Regression for the dual-gate bug: the digest injected on every project
-        turn (project_enabled) but the conv-ref tools only register on an
-        @-attach (has_conv_ref) — so a plain project turn told the model to
-        call tools absent from its schema. The header is now tool-aware.
-        """
-        from lib.tasks_pkg.context_composer import compose_task_context
-        from lib.conversations.project_summary import ProjectDigestProjection
-
-        messages = [{'role': 'system', 'content': 'Base'}]
-        with patch('lib.project_mod.get_context_for_prompt', return_value=''), \
-             patch(
-                 'lib.conversations.project_summary.build_project_digest_projection'
-             ) as mock_digest:
-            mock_digest.return_value = ProjectDigestProjection(
-                'For ambient awareness: this project has 2 related conversation(s).',
-                (),
-            )
-            compose_task_context(
-                messages, user_id=0, project_path='/tmp/proj',
-                project_enabled=True, memory_enabled=False,
-                search_enabled=False,
-                has_real_tools=True,
-                conv_id='',
-                task=None,
-                tool_names={'read_files', 'web_search'},  # NO conv-ref tools
-            )
-        # The shared projection must be tool-free for this turn.
-        assert mock_digest.called
-        _, kwargs = mock_digest.call_args
-        assert kwargs.get('conv_tools_available') is False
-        # And the injected text names no phantom tool.
-        text = self._all_text(messages)
-        assert 'list_conversations' not in text
-        assert 'get_conversation' not in text
-
-    def test_digest_header_advertises_tools_when_conv_tools_present(self):
-        """When the conv-ref tools ARE registered, the digest is built with
-        conv_tools_available=True so the header can instruct their use."""
-        from lib.tasks_pkg.context_composer import compose_task_context
-        from lib.conversations.project_summary import ProjectDigestProjection
-
-        messages = [{'role': 'system', 'content': 'Base'}]
-        with patch('lib.project_mod.get_context_for_prompt', return_value=''), \
-             patch(
-                 'lib.conversations.project_summary.build_project_digest_projection'
-             ) as mock_digest:
-            mock_digest.return_value = ProjectDigestProjection(
-                'This project has 1 related conversation(s) you can consult.',
-                (),
-            )
-            compose_task_context(
-                messages, user_id=0, project_path='/tmp/proj',
-                project_enabled=True, memory_enabled=False,
-                search_enabled=False,
-                has_real_tools=True,
-                conv_id='',
-                task=None,
-                tool_names={'read_files', 'list_conversations', 'get_conversation'},
-            )
-        assert mock_digest.called
-        _, kwargs = mock_digest.call_args
-        assert kwargs.get('conv_tools_available') is True
 
     def test_memory_guidance_composed(self):
         """Memory guidance is composed into the system message.

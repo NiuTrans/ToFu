@@ -146,7 +146,7 @@ _FAT_SNAPSHOT = """{
     {label:'MCP: overleaf ×21', tone:'mcp'}, {label:'MCP: xuecheng ×32', tone:'mcp'}
   ],
   roots: [
-    {short:'INS/chatui', path:'/path/to/your/project', ro:false},
+    {short:'INS/tofu', path:'/path/to/your/project', ro:false},
     {short:'team/lib', path:'/path/to/your/data', ro:false},
     {short:'data/sets', path:'/path/to/your/data', ro:true},
     {short:'scratch/tmp', path:'/path/to/your/data', ro:false},
@@ -476,8 +476,8 @@ def _sweep(page):
         page.wait_for_timeout(120)
         for drawer in (False, True):
             page.evaluate(
-                "(name) => window.TofuModules.resolveAction(name)()",
-                'openRequestInspector' if drawer else 'closeRequestInspector')
+                "async (name) => window.TofuModules.invokeFeature(name, [], () => {})",
+                'toggleDebug' if drawer else 'closeDebug')
             page.wait_for_timeout(200)
             for sb_label, setup in _SIDEBAR_STATES:
                 page.evaluate("() => { const s = document.querySelector('.sidebar');"
@@ -492,6 +492,16 @@ def _sweep(page):
                             page.evaluate(_COLLAPSE)
                         page.wait_for_timeout(50)
                         m = page.evaluate(_PROBE)
+                        if m is None:
+                            # The probe is deliberately synthetic. Lazy panel
+                            # activation can finish an authoritative chat
+                            # repaint after it was planted, so restore the
+                            # fixture and measure the same production markup.
+                            replanted = page.evaluate(_PLANT)
+                            assert replanted == 'ok', (
+                                f'could not restore geometry probe: {replanted}')
+                            page.wait_for_timeout(50)
+                            m = page.evaluate(_PROBE)
                         assert m is not None, 'probe turn vanished from the DOM'
                         m['drawer'] = drawer
                         m['sidebar'] = sb_label

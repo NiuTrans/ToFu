@@ -10,7 +10,8 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _AUDIT_SYNTHETIC_REPO_PATHS = {
-    'lib/a.py', 'lib/b.py', 'lib/parser.py', 'tests/test_a.py',
+    'lib/a.py', 'lib/b.py', 'lib/first.py', 'lib/parser.py',
+    'tests/test_a.py', 'tests/test_second.py',
 }
 
 
@@ -33,6 +34,7 @@ def test_context_flags_ship_resident_ptc_default_and_remain_strict():
         'cache': {'gpt56BreakpointMode': 'explicit'},
         'tools': {
             'nativeExposure': 'routed', 'programmaticCalling': 'on',
+            'programmaticExposure': 'additive',
             'toolSearch': 'auto', 'executionScope': 'available',
             'schemaBudgetTokens': 0, 'resultEnvelope': 'v2',
         },
@@ -126,16 +128,28 @@ def test_gpt56_explicit_only_cache_wire_field_and_implicit_compatibility():
 
 def test_context_experiment_internal_fields_never_leak_to_chat_completions():
     from lib.llm._sse_core import prepare_request
+    from lib.llm.anthropic_outbound import openai_body_to_anthropic
+    from lib.llm.responses_outbound import openai_body_to_responses
+    from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
 
-    plan = prepare_request({
+    canonical = {
         'model': 'gpt-4o',
         'messages': [{'role': 'user', 'content': 'hello'}],
         '_gpt56_breakpoint_mode': 'explicit',
         '_programmatic_tool_calling': 'auto',
-    }, api_key='k', base_url='https://example.test/v1',
-       api_protocol='openai')
+        ADMITTED_INPUT_TOKENS_KEY: 12_345,
+    }
+    plan = prepare_request(
+        canonical, api_key='k', base_url='https://example.test/v1',
+        api_protocol='openai')
     assert '_gpt56_breakpoint_mode' not in plan.body
     assert '_programmatic_tool_calling' not in plan.body
+    assert ADMITTED_INPUT_TOKENS_KEY not in plan.body
+    assert canonical[ADMITTED_INPUT_TOKENS_KEY] == 12_345
+    responses, _ = openai_body_to_responses(canonical)
+    anthropic = openai_body_to_anthropic(canonical)
+    assert ADMITTED_INPUT_TOKENS_KEY not in responses
+    assert ADMITTED_INPUT_TOKENS_KEY not in anthropic
 
 
 def test_programmatic_calling_only_enables_native_read_tools_and_replays_caller():
@@ -226,12 +240,70 @@ def test_routed_native_exposure_reduces_catalog_but_keeps_discovery_floor():
     routed, _ = assemble_tool_list(routed_ctx)
     names = {tool['function']['name'] for tool in routed}
     assert len(routed) < len(full)
-    assert {'web_search', 'fetch_url', 'read_files', 'inspect_image'} <= names
+    assert {
+        'web_search', 'fetch_url', 'browser_download_url_to_server',
+        'read_files', 'inspect_image',
+    } <= names
     assert routed_ctx.omitted_spec_keys
 
 
+def test_run_command_schema_stays_within_coding_round_budget():
+    """The shared shell contract is paid on every coding round; guidance must
+    stay complete without re-expanding its former repeated usage matrix."""
+    from lib.tools.code_exec import CODE_EXEC_TOOL
+    from lib.tools.gateway import tool_schema_tokens
+    from lib.tools.project import PROJECT_TOOL_RUN_COMMAND
+
+    for tool in (PROJECT_TOOL_RUN_COMMAND, CODE_EXEC_TOOL):
+        wire = json.dumps(tool, ensure_ascii=False, sort_keys=True)
+        for guidance in (
+            'Never use a shell no-op as a placeholder', 'NO default timeout',
+            'no persistent shell', 'read_files', 'grep_search', 'find_files',
+            'edit_file', 'write_file', 'browser_download_url_to_server',
+            'FUSE-safe', 'credentials', '`sd`', '`mlr`', '`goawk',
+        ):
+            assert guidance in wire
+        assert tool_schema_tokens([tool], model='kimi-k3') <= 750
+
+
+def test_core_read_search_schemas_stay_semantic_and_bounded():
+    from lib.tools.gateway import tool_schema_tokens
+    from lib.tools.project import PROJECT_TOOL_GREP, READ_FILES_TOOL
+
+    expectations = (
+        (PROJECT_TOOL_GREP, 475, (
+            'persistent file index', 'FUSE', 'Rust/ripgrep', 'max 20 entries',
+            'context_lines', 'count_only mode',
+        )),
+        (READ_FILES_TOOL, 450, (
+            'Read WIDE', '200+ lines', '512 KB', '24k tokens', 'max 20',
+            'authoritative and never widened', 'Images', 'PDFs', 'Office',
+        )),
+    )
+    for tool, budget, guidance in expectations:
+        wire = json.dumps(tool, ensure_ascii=False, sort_keys=True)
+        assert all(item in wire for item in guidance)
+        assert tool_schema_tokens([tool], model='kimi-k3') <= budget
+
+
+def test_multiroot_path_guidance_has_bounded_schema_multiplier():
+    from lib.tools.gateway import tool_schema_tokens
+    from lib.tools.project import (
+        READ_FILES_TOOL, project_tools_for_runtime, with_multiroot_hint,
+    )
+
+    base = [READ_FILES_TOOL, *project_tools_for_runtime()]
+    projected = with_multiroot_hint(base)
+    wire = json.dumps(projected, ensure_ascii=False, sort_keys=True)
+    assert 'absolute path' in wire
+    assert 'rootname:subdir' in wire
+    assert 'bare relative path uses the primary root' in wire
+    assert (tool_schema_tokens(projected, model='kimi-k3')
+            - tool_schema_tokens(base, model='kimi-k3')) <= 200
+
+
 def test_routed_exposure_never_retracts_frontend_enabled_families():
-    from lib.tools.registry import ToolContext
+    from lib.tools.registry import ToolContext, all_specs
     from lib.tools.routing import routed_native_spec_keys
 
     ctx = ToolContext(
@@ -243,11 +315,51 @@ def test_routed_exposure_never_retracts_frontend_enabled_families():
         human_guidance_enabled=True, scheduler_enabled=True,
         messages=[{'role': 'user', 'content': 'hello'}],
     )
-    selected = routed_native_spec_keys(ctx)
+    selected = routed_native_spec_keys(ctx, specs=all_specs())
     assert {
         'browser', 'desktop', 'swarm', 'image_gen', 'human_guidance',
-        'scheduler', 'memory', 'mcp',
+        'scheduler', 'memory', 'mcp', 'browser_download',
     } <= selected
+
+
+def test_download_intent_uses_tool_owned_router_declaration():
+    from lib.tools.registry import ToolContext, all_specs
+    from lib.tools.routing import routed_native_spec_keys
+
+    ctx = ToolContext(
+        cfg={'memoryEnabled': False, 'mcpEnabled': False},
+        task_id='route-download', project_path='', project_enabled=False,
+        search_mode='off', search_enabled=False, fetch_enabled=False,
+        code_exec_enabled=False, browser_enabled=False, desktop_enabled=False,
+        messages=[{'role': 'user', 'content': '把最新版压缩包下载到服务器本地'}],
+    )
+    specs = all_specs()
+    owner = next(spec for spec in specs if spec.key == 'browser_download')
+    assert 'download' in owner.native_route_groups
+    assert 'browser_download' in routed_native_spec_keys(ctx, specs=specs)
+
+
+@pytest.mark.parametrize(('user_text', 'expected_spec'), (
+    ('给我做一份新品发布会 PPT', 'produce'),
+    ('make a launch-review presentation deck', 'produce'),
+    ('生成一张新品封面图', 'image_gen'),
+    ('把前端页面放到真实浏览器里渲染看看效果', 'page_preview'),
+))
+def test_capability_vocabulary_routes_non_obvious_builtin_families(
+        user_text, expected_spec):
+    from lib.tools.registry import ToolContext, all_specs
+    from lib.tools.routing import routed_native_spec_keys
+
+    ctx = ToolContext(
+        cfg={'memoryEnabled': False, 'mcpEnabled': False},
+        task_id='route-capability', project_path='',
+        project_enabled=False, search_mode='off', search_enabled=False,
+        fetch_enabled=False, code_exec_enabled=False, browser_enabled=False,
+        desktop_enabled=False, image_gen_enabled=False,
+        human_guidance_enabled=False, scheduler_enabled=False,
+        messages=[{'role': 'user', 'content': user_text}],
+    )
+    assert expected_spec in routed_native_spec_keys(ctx, specs=all_specs())
 
 
 def test_l1_evidence_arm_archives_exact_cold_tool_result(monkeypatch):
@@ -342,6 +454,39 @@ def test_evidence_ledger_deduplicates_exact_calls_not_distinct_queries():
     assert a_query['source'].endswith(':a2')  # newest recovery handle wins
 
 
+def test_evidence_ledger_pairs_recycled_ids_by_adjacent_occurrence():
+    """A later positional id must not relabel an earlier result."""
+    from lib.tasks_pkg.compaction._evidence import build_evidence_ledger
+
+    messages = [
+        {'role': 'assistant', 'tool_calls': [{
+            'id': 'position_0', 'type': 'function',
+            'function': {'name': 'read_files', 'arguments': json.dumps({
+                'path': 'lib/first.py'})},
+        }]},
+        {'role': 'tool', 'tool_call_id': 'position_0',
+         'content': 'ordinary source bytes'},
+        {'role': 'assistant', 'tool_calls': [{
+            'id': 'position_0', 'type': 'function',
+            'function': {'name': 'run_command', 'arguments': json.dumps({
+                'cmd': 'pytest -q tests/test_second.py'})},
+        }]},
+        {'role': 'tool', 'tool_call_id': 'position_0',
+         'content': '1 passed'},
+    ]
+
+    ledger = build_evidence_ledger(messages)
+    query_results = [entry for entry in ledger['entries']
+                     if entry['type'] == 'query_result']
+    test_results = [entry for entry in ledger['entries']
+                    if entry['type'] == 'test_result']
+
+    assert [entry['value'] for entry in query_results] == [
+        'ordinary source bytes']
+    assert [entry['value'] for entry in test_results] == ['1 passed']
+    assert test_results[0]['command'] == 'pytest -q tests/test_second.py'
+
+
 def test_l2_summary_always_sees_bounded_tool_working_state(monkeypatch):
     """Default L2 must not summarize an agentic turn from prose alone.
 
@@ -362,7 +507,7 @@ def test_l2_summary_always_sees_bounded_tool_working_state(monkeypatch):
     monkeypatch.setattr(dispatch, 'dispatch_chat', fake_dispatch)
     monkeypatch.setattr(summary, '_codex_subscription_provider',
                         lambda task: '')
-    task = {'convId': 'evidence-default', 'config': {}}
+    task = {'convId': 'evidence-default', '_userId': 1, 'config': {}}
     messages = [
         {'role': 'user', 'content': 'fix the parser'},
         {'role': 'assistant', 'content': None, 'tool_calls': [{

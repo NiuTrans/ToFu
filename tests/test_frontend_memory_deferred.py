@@ -19,22 +19,10 @@ MEMORY_PANEL = ROOT / 'frontend/src/features/memory/panel.ts'
 MEMORY_PREFS = ROOT / 'frontend/src/features/memory/preferences.ts'
 
 MEMORY_STUBS = (
-    'toggleMemory', 'openMemoryModal', 'openMemoryCreateForm',
+    'toggleMemory', 'openMemoryModal', 'toggleMemoryAddForm',
     'closeMemoryModal', 'toggleMemoryFromModal',
     'refreshPreferences', 'savePreferences',
 )
-
-
-def test_memory_duo_deferred_installer_stays_core():
-    names = runtime_section_names()
-    assert MEMORY_PANEL.is_file() and MEMORY_PREFS.is_file()
-    assert 'memory.js' not in names and 'preferences.js' not in names
-    assert names.count('memory_skill_install.js') == 1
-
-
-def test_esc_promoted_to_escape_html():
-    src = runtime_section('core/escape_html.js')
-    assert re.search(r'(?m)^function _esc\(s\) \{\s*\n?\s*return escapeHtml\(s\);', src)
 
 
 def test_esc_removed_from_memory():
@@ -42,13 +30,10 @@ def test_esc_removed_from_memory():
     assert not re.search(r'(?m)^function _esc\(', src)
 
 
-def test_esc_position_before_consumers():
+def test_classic_html_safety_sections_are_retired():
     names = runtime_section_names()
-    escape_index = names.index('core/escape_html.js')
-    for consumer in ('artifacts.js', 'compaction-viewer.js', 'core/toast.js',
-                     'log-clean.js', 'ui/streaming_render.js',
-                     'ui/tool_rounds.js'):
-        assert names.index(consumer) > escape_index
+    assert 'core/escape_html.js' not in names
+    assert 'core/safe_html.js' not in names
 
 
 def test_loadguard_drops_toggle_memory():

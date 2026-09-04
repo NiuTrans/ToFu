@@ -177,6 +177,37 @@ def test_recovered_failure_in_an_earlier_batch_is_covered():
     assert _uncovered_failure(task) is None
 
 
+def test_resumed_attempt_counter_reset_does_not_reorder_the_final_batch():
+    """Append order + attempt identity outrank executor-local counters."""
+    older_failure = _r35_error_as_content()
+    older_failure.update({
+        'attemptId': 'attempt-old', 'taskId': 'task-old',
+        'llmRound': 9, 'roundNum': 40,
+    })
+    resumed_success = _r36_real_success()
+    resumed_success.update({
+        'attemptId': 'attempt-new', 'taskId': 'task-new',
+        'llmRound': 0, 'roundNum': 1,
+    })
+
+    task = {'toolRounds': [older_failure, resumed_success]}
+    assert _uncovered_failure(task) is None
+
+
+def test_equal_local_round_numbers_from_two_attempts_are_not_one_batch():
+    older_failure = _r35_error_as_content()
+    older_failure.update({
+        'attemptId': 'attempt-old', 'taskId': 'task-old', 'llmRound': 0,
+    })
+    resumed_success = _r36_real_success()
+    resumed_success.update({
+        'attemptId': 'attempt-new', 'taskId': 'task-new', 'llmRound': 0,
+    })
+
+    task = {'toolRounds': [older_failure, resumed_success]}
+    assert _uncovered_failure(task) is None
+
+
 def test_a_failure_in_the_FINAL_batch_is_uncovered_even_beside_a_success():
     """Batch-awareness: one llmRound is ONE model decision.
 

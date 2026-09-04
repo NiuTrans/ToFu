@@ -13,13 +13,15 @@ disabling HEALTHY keys for the day.
 Pinned here:
 
   1. The narrow classifier: a 429 body naming a project-level TPM limit
-     (``reached project`` + ``tpm rate limit``) → is_shared_contention.
-     Generic 429s and quota 429s are NOT laundered into contention
-     (quota precedence is asserted with a BOTH-patterns body).
+     (``reached project`` + ``tpm rate limit``), or an app/model-level RPM
+     limit (``App:`` + model scope + the explicit per-minute request limit)
+     → is_shared_contention. Generic 429s and quota 429s are NOT laundered
+     into contention (quota precedence is asserted with matching bodies).
   2. Slot accounting: contention increments ``contention_errors`` (not
      ``total_errors``) and compensates the attempt out of
      ``total_requests`` — the success-rate column reflects genuine
-     outcomes only; consecutive_errors still bumps (brief steer-away).
+     outcomes only; slot-local error scoring/cooldown remains untouched so a
+     warm prompt-cache key is not displaced by project-wide contention.
   3. Contention feeds NEITHER key_stats path (no consecutive-429 streak,
      no failure stats) — the dead-key safety nets stay reserved for
      genuine key health.
@@ -47,6 +49,12 @@ MOONSHOT_BODY = (
     'https://platform.moonshot.cn/docs/pricing/limits'
 )
 
+APP_MODEL_RPM_BODY = (
+    'API HTTP 429: {"status":429,"message":"App:**62518在模型:kimi-k3'
+    '每分钟请求次数超过限制","data":null,"ext":{"error":{"source":"AIGC",'
+    '"service":"aigc","stage":"validation"}}}'
+)
+
 
 def _classify(err_msg):
     from lib.llm_errors import _classify_http_error, RateLimitError
@@ -64,6 +72,12 @@ class TestContentionClassification:
         assert e.is_quota is False
         assert e.is_gateway is False
 
+    def test_app_model_rpm_body_is_contention(self):
+        e = _classify(APP_MODEL_RPM_BODY)
+        assert e.is_shared_contention is True
+        assert e.is_quota is False
+        assert e.is_gateway is False
+
     def test_generic_429_is_not_contention(self):
         e = _classify('API HTTP 429: rate limit exceeded, slow down')
         assert e.is_shared_contention is False
@@ -76,12 +90,24 @@ class TestContentionClassification:
         assert e.is_quota is True
         assert e.is_shared_contention is False
 
+        app_error = _classify(APP_MODEL_RPM_BODY + ' insufficient_quota')
+        assert app_error.is_quota is True
+        assert app_error.is_shared_contention is False
+
     def test_single_pattern_alone_is_not_contention(self):
         """Narrowness: ONE of the two phrases is not enough."""
         e = _classify('API HTTP 429: request reached project quota')
         assert e.is_shared_contention is False
         e2 = _classify('API HTTP 429: account TPM rate limit hit')
         assert e2.is_shared_contention is False
+
+    @pytest.mark.parametrize('body', [
+        'API HTTP 429: 在模型:kimi-k3每分钟请求次数超过限制',
+        'API HTTP 429: App:**62518每分钟请求次数超过限制',
+        'API HTTP 429: App:**62518在模型:kimi-k3请求过快',
+    ])
+    def test_app_model_limit_requires_all_scope_markers(self, body):
+        assert _classify(body).is_shared_contention is False
 
 
 def _make_slot():
@@ -119,8 +145,10 @@ class TestContentionAccounting:
         assert slot.total_requests == 0, (
             'the contention attempt is compensated out of total_requests — '
             'it is neither a success nor a failure of THIS key')
-        assert slot.consecutive_errors == 1, (
-            'the brief steer-away cooldown ladder still applies')
+        assert slot.consecutive_errors == 0, (
+            'shared contention must not penalize this key in slot scoring')
+        assert slot.cooldown_until == 0
+        assert slot.cooldown_reason == ''
         assert key_stats_recorders['rate_limit'] == [], (
             'contention must NOT feed the consecutive-429 auto-exhaust '
             'streak — a saturated shared project must not disable a '

@@ -8,13 +8,19 @@ code ownership only and must not redefine backend authority.
 
 | Package | Runs in | Responsibility |
 |---|---|---|
-| `lib/storage/` | Web, worker, task, plugin parent | `storage.v1` framing, semantic client, structured errors, supervision, readiness/write fence, declarative manifest validation |
+| `lib/storage/` | Web, worker, task, plugin parent | `storage.v1` framing, process-wide response-frame admission, semantic client, structured errors, supervision, readiness/write fence, declarative manifest validation |
 | `lib/storage_sidecar/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
 | `lib/storage_sidecar/adapters/sqlite.py` | Sidecar only | One writer connection, fair priority lanes, query-only pool, WAL/full-sync, progress watchdog, result-code retry classification |
 | `lib/storage_sidecar/adapters/postgres.py` | Sidecar only | External TLS PostgreSQL connections, durability/schema validation, Psycopg 3 isolated read/write pools, connection budget, SQLSTATE retry classification |
+| `lib/storage_metric_policy.py` | Shared dependency-light policy | Launch-probed recent latency sample window for application and Sidecar metrics |
+| `lib/storage_event_policy.py` | Application process | Launch-derived durable-event waiting-object, serialized-byte, and Sidecar frame ceilings |
+| `lib/conversations/repository.py` | Application process | Owner-scoped conversation projections; metadata-first lazy transcript scans with recursive frame splitting; validated interval-count projection |
 | `lib/storage_sidecar/fastpath.py`, `shipper.py` | Sidecar only | Opt-in measured-local SQLite write front, deployment lineage, capacity preflight, bounded-RPO durable shadow shipping and recovery |
 | `lib/storage_sidecar/storage_capabilities.py` | Sidecar/control plane | Bounded filesystem capability report and pure, conservative adaptive backend/front policy; never moves authority bytes |
 | `lib/storage_sidecar/turn_search_projection.py` | Sidecar only | Transactional dirty-set consumer; independent local SQLite/shared PostgreSQL conversation-search projection; corruption recovery, generation fencing, bounded backfill |
+| `lib/storage_sidecar/operations_pkg/_conversations.py` | Sidecar only | Owner-scoped metadata/full/window/activity projections; SQL paging/scalar timestamps for active Turns; bounded compatibility decoding for frozen archives |
+| `lib/storage_sidecar/archived_message_codec.py`, `offline_compaction_archive_maintenance.py` | Sidecar archive boundary / stopped-server window | Backend-neutral lossless per-message storage codec; bounded owner-resolved consolidation of retired compaction snapshots |
+| `lib/storage_sidecar/task_result_field_codec.py`, `operations_pkg/_records.py`, `offline_task_result_maintenance.py` | Sidecar task-result boundary / stopped-server window | Selective backend-neutral field codec; public hydration, compact projections, and bounded version-neutral historical backfill |
 | `lib/storage_sidecar/logical_outbox.py`, `logical_shadow.py` | Sidecar only, explicit opt-in | Same-transaction bounded logical outbox; asynchronous backend-neutral publisher; private checksummed filesystem sink; publisher health and backpressure |
 | `lib/storage_sidecar/logical_replay.py` | Offline verifier / future projection worker | Authenticated bounded mutation replay to SQLite/PostgreSQL with an atomic durable checkpoint, ordered projection digests, deterministic canary sampling, explicit fail-closed cutover/rollback evidence |
 | `scripts/storage_deep_clean.py` | Explicit stopped-server window | Lease-owned retention, verified compaction, deferred performance-index installation, integrity/parity gates, atomic publication and rollback retention |
@@ -50,6 +56,29 @@ checkpoints deliberately bypass the receipt table because the authority row
 itself resolves identical replay and rejects stale divergent replay. Clean
 no-write results are not receipts. Both adapters execute the same catalog
 contract and return the same wire shapes and error codes.
+
+`task_results.checkpoint` has an additive guarded-v1 mode for independently
+deployed task managers. The response echoes the exact contract only after the
+Sidecar has atomically taken the conversation lifecycle and task-key locks and
+enforced parent/owner/status/tombstone fences. The manager may cache the
+returned version and remove its two compatibility queries only after that
+echo; old clients and old Sidecars continue through the unguarded contract.
+Running diagnostics use a short maintenance-lane deadline, while task birth
+and terminal diagnostics retain bounded user-lane retries.
+
+An independent additive cache-settings-v1 echo may join the staged positive
+`cachePrefixHWM` and `lastTurnCacheRead` facts to that same guarded transaction.
+HWM merges by maximum. A new checkpoint applies last-read LWW, while an
+identical ambiguous replay preserves a different value already written by a
+newer task. Without the exact echo, the manager retains the legacy per-fact
+settings RMW; no cache fact depends on synchronized process-local state.
+
+Turn-event persistence compares canonical projections at this semantic
+boundary. An equal full projection, or a slim text update that leaves the full
+projection equal, advances the same CAS revision and durable event sequence
+without assigning the unchanged large `projection_json` value. SQLite and
+PostgreSQL share that branch; process-lifetime per-event metrics count the
+skipped assignments and canonical stored bytes.
 
 ## Schema evolution boundary
 

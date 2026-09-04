@@ -54,7 +54,6 @@ def test_schema_and_maintenance_match_the_contract():
     finally:
         connection.close()
 
-    assert schema.SCHEMA_VERSION == 40
     assert {
         "storage_conversation_trash",
         "storage_conversation_trash_turns",

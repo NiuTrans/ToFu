@@ -38,6 +38,11 @@ registry in `lib/log_policy.py`, the incident record schema in
    string-only 500 callers record their call stack. Public 500 responses never
    include the private exception text, traceback, SQL, path, or provider body.
 
+HTTP route registration retains only the bounded adapters. The log-clean regex
+pipeline, tool-round file-change projection, and text-language cascade import
+when their corresponding endpoint is called; diagnostics startup does not pay
+for unrelated interactive analysis policies.
+
 ## Data flow
 
 ```text
@@ -83,6 +88,22 @@ GET /api/v1/logs/diagnostics?task_id=<id>
 GET /api/v1/logs/diagnostics?trace_id=<id>
 ```
 
+When storage is healthy and the investigation centers on one conversation, read
+the durable transcript itself before correlating log slices:
+
+```bash
+python3 debug/inspect_conversation.py <conversation_id>
+```
+
+The read-only inspector renders turn-native conversations through the same
+projection the running sidecar serves, reports which stores reference the ID,
+lists compaction receipts, and appends matching `logs/app.log` /
+`logs/access.log` lines (`--full`, `--raw`, `--logs N`). It complements, never
+replaces, the DB-independent evidence plane above. Per-phase timing and
+user-perceived paint evidence for a live or finished run are owned by the
+turn-trace contract (`GET /api/v1/tasks/<task_id>/trace`; see
+[TURN_TRACE_CONTRACT.md](TURN_TRACE_CONTRACT.md)).
+
 Inspect retention without mutation, then apply it explicitly if needed:
 
 ```bash
@@ -126,6 +147,8 @@ file.
 - Do not log request/response bodies, authorization headers, cookies, provider
   keys, full prompts, or base64 data. Log sizes, counts, hashes, status,
   operation names, and safe identifiers instead.
+- Message-wire repair warnings follow the same rule: retain role/index and
+  content shape or length, never a user/assistant text preview.
 - If a subprocess must retain an append-only stdout file, add its stream to
   `lib/log_policy.py` and register the exact path with
   `register_external_log` before opening/spawning it.

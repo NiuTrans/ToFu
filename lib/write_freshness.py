@@ -27,7 +27,7 @@ Deliberate failure directions:
 
 Fingerprint — why content, not mtime (MEASURED, do not "simplify" back):
 
-  This deployment's filesystem (dolphinfs, FUSE) has **1-SECOND mtime
+  This deployment's filesystem (network FUSE) has **1-SECOND mtime
   granularity**: ``st_mtime_ns % 1_000_000_000 == 0`` for every file,
   ctime is equally coarse, and inode does not change on rewrite. A
   ``(mtime_ns, size)`` fingerprint is therefore BLIND to the edit class

@@ -10,9 +10,10 @@ Fidelity posture (deliberate, documented):
     major/minor fonts (latin + ea), text boxes (position, runs, sizes,
     colors, bold/italic, alignment), pictures (bytes → media/), autoshapes
     (preset name, fill, border), native tables.
-  * NOT imported (logged, never silent): charts (their XML stays a chart
-    only in the source), groups (flattened one level), SmartArt, media,
-    freeform geometry (approximated by its bounding box + fill), animations.
+  * Supported category charts remain native/editable: bar, column, line, pie,
+    area, doughnut and radar. Unsupported charts are logged, never flattened.
+  * NOT imported (logged, never silent): groups, SmartArt, media, freeform
+    geometry (approximated by its bounding box + fill), animations.
   * Everything unmapped lands in ``page.notes`` so no content is LOST even
     when it is not re-layoutable.
 """
@@ -201,6 +202,48 @@ def _shape_element(shape) -> dict:
     return el
 
 
+def _chart_element(shape) -> dict | None:
+    """Translate one supported python-pptx category chart into PPTD."""
+    chart = shape.chart
+    token = str(chart.chart_type or '').split(' ', 1)[0].upper()
+    chart_type = ''
+    for prefix, pptd_type in (
+            ('COLUMN', 'column'), ('BAR', 'bar'), ('LINE', 'line'),
+            ('PIE', 'pie'), ('AREA', 'area'), ('DOUGHNUT', 'doughnut'),
+            ('RADAR', 'radar')):
+        if token.startswith(prefix):
+            chart_type = pptd_type
+            break
+    if not chart_type or not chart.plots:
+        return None
+    try:
+        categories = [str(category.label)
+                      for category in chart.plots[0].categories]
+        series = []
+        for item in chart.series:
+            values = list(item.values)
+            if len(values) != len(categories):
+                return None
+            series.append({
+                'name': str(item.name or ''),
+                'values': [float(value or 0) for value in values],
+            })
+    except Exception as exc:
+        logger.debug('[Slides←PPTX] chart data read failed: %s', exc)
+        return None
+    if not categories or not series:
+        return None
+    return {
+        'elementId': shape.name or 'chart',
+        'elementType': 'chart',
+        'bounds': [_pt(shape.left), _pt(shape.top),
+                   _pt(shape.width), _pt(shape.height)],
+        'chartType': chart_type,
+        'data': {'categories': categories, 'series': series},
+        'options': {'legend': bool(chart.has_legend)},
+    }
+
+
 def import_pptx(pptx_path: str, out_dir: str, *, title: str = '') -> dict:
     """Convert a PPTX into a PPTD project directory. Returns ImportReport."""
     import yaml
@@ -250,8 +293,13 @@ def import_pptx(pptx_path: str, out_dir: str, *, title: str = '') -> dict:
                         'rowHeights': [round(1.0 / len(tbl.rows), 4)]
                                       * len(tbl.rows),
                         'rows': rows})
-                elif st in (MSO_SHAPE_TYPE.CHART, MSO_SHAPE_TYPE.MEDIA,
-                            MSO_SHAPE_TYPE.GROUP):
+                elif st == MSO_SHAPE_TYPE.CHART:
+                    chart_element = _chart_element(shape)
+                    if chart_element is not None:
+                        elements.append(chart_element)
+                    else:
+                        dropped.append(f'{shape.name}(unsupported chart)')
+                elif st in (MSO_SHAPE_TYPE.MEDIA, MSO_SHAPE_TYPE.GROUP):
                     dropped.append(f'{shape.name}({st})')
                 elif st == MSO_SHAPE_TYPE.AUTO_SHAPE:
                     text_el = _text_element(shape)

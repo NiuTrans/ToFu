@@ -15,6 +15,7 @@ rebuild the schema per call — no server needed.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import sys
 
@@ -87,3 +88,28 @@ class TestFetchUrlToolFilterFlag:
         poll_src = inspect.getsource(timer_poll._build_poll_tools)
         assert 'build_fetch_url_tool()' in poll_src
         assert 'FETCH_URL_TOOL' not in poll_src
+
+    @pytest.mark.parametrize(('flag', 'budget'), ((True, 400), (False, 300)))
+    def test_runtime_schema_is_semantic_and_bounded(
+            self, monkeypatch, flag, budget):
+        from lib.tools.gateway import tool_schema_tokens
+
+        monkeypatch.setattr(
+            _lib, 'LLM_CONTENT_FILTER_ENABLED', flag, raising=False)
+        schema = search_tools.build_fetch_url_tool()
+        wire = json.dumps(schema, ensure_ascii=False, sort_keys=True)
+        for guidance in (
+            'HTTP(S)', 'file://', 'read_files', 'server staging',
+            'selected browser', 'browser Downloads', 'authorized filesystem',
+            'verify its own receipt', 'Page Links', 'Concurrent batch',
+        ):
+            assert guidance in wire
+        if flag:
+            for guidance in (
+                'relevance GATE', 'Failed to fetch',
+                'does not select passages or summarize', 'batches bypass',
+            ):
+                assert guidance in wire
+        else:
+            assert 'relevance GATE' not in wire
+        assert tool_schema_tokens([schema], model='kimi-k3') <= budget

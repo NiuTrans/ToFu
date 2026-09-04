@@ -35,7 +35,6 @@ of a directive and flags it.
 """
 
 import re
-import unicodedata
 
 from lib.log import get_logger
 
@@ -53,6 +52,66 @@ _INVISIBLE_CHARS = (
     '\ufeff'                            # BOM / ZWNBSP
 )
 _INVISIBLE_RE = re.compile('[' + re.escape(_INVISIBLE_CHARS) + ']')
+
+# ``sanitize_paper_text`` used to call ``unicodedata.category`` once per
+# character to replace the remaining Unicode Control/Format categories. A
+# one-million-character Q&A source therefore paid one million Python calls on
+# every question. These are the complete Cc/Cf ranges in the runtime's Unicode
+# 15.0 database, excluding TAB/LF/CR which the historical contract preserves.
+# The functional parity test derives the reference from ``unicodedata`` across
+# every code point, so a future Unicode database addition fails visibly until
+# this compact plan is updated. ASCII ``str.translate`` and the equivalent
+# wide-Unicode regex range both execute the hot traversal in C; the resident
+# map has only 232 integer entries.
+_CONTROL_OR_FORMAT_TO_SPACE_RANGES = (
+    (0x0000, 0x0008),
+    (0x000B, 0x000C),
+    (0x000E, 0x001F),
+    (0x007F, 0x009F),
+    (0x00AD, 0x00AD),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+)
+_CONTROL_OR_FORMAT_TO_SPACE = {
+    codepoint: 0x20
+    for first, last in _CONTROL_OR_FORMAT_TO_SPACE_RANGES
+    for codepoint in range(first, last + 1)
+}
+
+
+def _unicode_regex_escape(codepoint: int) -> str:
+    """Encode one ordinal for a compact regex range without literal controls."""
+    if codepoint <= 0xFFFF:
+        return f'\\u{codepoint:04x}'
+    return f'\\U{codepoint:08x}'
+
+
+_CONTROL_OR_FORMAT_PATTERN = re.compile(
+    '[' + ''.join(
+        (_unicode_regex_escape(first)
+         if first == last else
+         f'{_unicode_regex_escape(first)}-{_unicode_regex_escape(last)}')
+        for first, last in _CONTROL_OR_FORMAT_TO_SPACE_RANGES
+    ) + ']'
+)
 
 # The imperative injection patterns most seen in the wild against LLM
 # reviewers. Matching is case-insensitive and tolerant of internal whitespace.
@@ -85,6 +144,32 @@ _INJECTION_PATTERNS = [
     (re.compile(r'highest\s+(?:possible\s+)?(?:score|rating|grade)', re.IGNORECASE),
      'demand-highest-score'),
 ]
+
+# Every true match above must contain the corresponding lowercase literal/stem
+# groups. Cheap C-level substring gates therefore avoid running eight
+# backtracking regex scans over a long benign source. Python's Unicode
+# ``re.IGNORECASE`` gives four non-ASCII characters special ASCII-letter
+# equivalence; a source containing any of them deliberately takes the full
+# regex path so the security contract cannot acquire a Unicode blind spot.
+_REGEX_ASCII_CASE_EXCEPTIONS = 'İıſK'
+_INJECTION_REQUIRED_GROUPS = {
+    'ignore-previous-instructions': (('ignore',),),
+    'disregard-previous': (('disregard',),),
+    'give-positive-review': (('positive',),),
+    'recommend-acceptance': (('recommend',),),
+    'suppress-weaknesses': (
+        ('weakness', 'flaw', 'limitation', 'problem', 'negative'),
+    ),
+    'ai-role-directive': (
+        ('ai', 'language model', 'llm', 'assistant'),
+        ('must', 'should', 'required'),
+    ),
+    'role-prompt-reference': (
+        ('system', 'assistant', 'developer'),
+        ('prompt', 'message', 'instruction'),
+    ),
+    'demand-highest-score': (('highest',),),
+}
 
 # Cap on how many distinct findings we log/return — a paper that trips dozens
 # is either an attack or a study OF injection; either way the notice fires once.
@@ -129,17 +214,33 @@ def sanitize_paper_text(text: str) -> tuple[str, list[str]]:
         text = _INVISIBLE_RE.sub('', text)
         findings.append(f'invisible-chars({n_invisible})')
 
-    # 2) Normalize other Unicode format/control chars to spaces (keep \n, \t).
-    #    Catches exotic separators used to break up trigger words.
-    def _strip_format(ch: str) -> str:
-        if ch in '\n\t':
-            return ch
-        cat = unicodedata.category(ch)
-        return ' ' if cat in ('Cf', 'Cc') and ch not in '\r' else ch
-    text = ''.join(_strip_format(c) for c in text)
+    # 2) Normalize other Unicode format/control chars to spaces (keep LF/TAB
+    #    and historical CR semantics). ``translate`` is the exact old mapping
+    #    in a C-level traversal instead of one Python/category call per char.
+    if text.isascii():
+        # ASCII strings use CPython's particularly cheap translation loop.
+        text = text.translate(_CONTROL_OR_FORMAT_TO_SPACE)
+    else:
+        # A wide Unicode string makes dict-based ``translate`` substantially
+        # more expensive even when no control exists. The same compact range
+        # set in one regex traversal returns the original object on a miss.
+        text = _CONTROL_OR_FORMAT_PATTERN.sub(' ', text)
 
-    # 3) Defang the high-signal imperative directives.
+    # 3) Defang the high-signal imperative directives. ASCII extraction is the
+    #    common paper path and can safely use exact lowercase substring gates.
+    #    The four special Unicode case-equivalence characters retain the full
+    #    regex behavior; ordinary math/CJK characters do not disable the fast
+    #    path for the rest of a real-world paper.
+    required_text = (
+        None if any(char in text for char in _REGEX_ASCII_CASE_EXCEPTIONS)
+        else text.lower()
+    )
     for pattern, label in _INJECTION_PATTERNS:
+        required_groups = _INJECTION_REQUIRED_GROUPS[label]
+        if required_text is not None and any(
+                not any(needle in required_text for needle in alternatives)
+                for alternatives in required_groups):
+            continue
         if pattern.search(text):
             text = pattern.sub(_defang, text)
             if label not in findings:

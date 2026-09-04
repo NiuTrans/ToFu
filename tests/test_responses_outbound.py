@@ -195,6 +195,112 @@ class TestRequestConversion:
                           'call_id': 'call_1', 'output': 'FILE'}
         assert inp[5]['role'] == 'user'
 
+    def test_recycled_call_id_uses_occurrence_local_tool_name(self):
+        from lib.llm.responses_outbound._to_responses import _messages_to_input
+
+        messages = [
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': 'call_0', 'type': 'function',
+                'function': {'name': 'run_command', 'arguments': '{}'},
+            }]},
+            {'role': 'tool', 'tool_call_id': 'call_0', 'content': 'plain'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': 'call_0', 'type': 'function',
+                'function': {'name': 'read_files', 'arguments': '{}'},
+            }]},
+            {'role': 'tool', 'tool_call_id': 'call_0', 'content': 'file'},
+        ]
+
+        items = _messages_to_input(
+            messages, {}, programmatic_tool_names={'read_files'})
+        outputs = [item['output'] for item in items
+                   if item.get('type') == 'function_call_output']
+        assert outputs[0] == 'plain'
+        assert json.loads(outputs[1]) == {
+            'content': 'file', 'truncated': False,
+        }
+
+    def test_nonadjacent_recycled_result_does_not_borrow_tool_name(self):
+        from lib.llm.responses_outbound._to_responses import _messages_to_input
+
+        messages = [
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': 'call_0', 'type': 'function',
+                'function': {'name': 'read_files', 'arguments': '{}'},
+            }]},
+            {'role': 'user', 'content': 'protocol interruption'},
+            {'role': 'tool', 'tool_call_id': 'call_0', 'content': 'orphan'},
+        ]
+
+        items = _messages_to_input(
+            messages, {}, programmatic_tool_names={'read_files'})
+        output = next(item['output'] for item in items
+                      if item.get('type') == 'function_call_output')
+        assert output == 'orphan'
+
+    def test_program_result_recovers_occurrence_caller_after_body_clean(self):
+        from lib.llm import build_body
+
+        caller = {'type': 'program', 'caller_id': 'program_1'}
+        messages = [
+            {'role': 'user', 'content': 'go'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': 'child_1', 'type': 'function', 'caller': caller,
+                'function': {'name': 'read_files', 'arguments': '{}'},
+            }]},
+            {'role': 'tool', 'tool_call_id': 'child_1', 'caller': caller,
+             'content': 'file'},
+        ]
+        canonical = build_body('gpt-5.6-sol', messages, stream=True)
+        # The generic OpenAI cleaner intentionally removes top-level private
+        # fields; the adjacent assistant occurrence remains the authority.
+        assert 'caller' not in canonical['messages'][2]
+
+        wire, _reverse = openai_body_to_responses(
+            canonical, profile='default')
+        output = next(item for item in wire['input']
+                      if item.get('type') == 'function_call_output')
+        assert output['caller'] == caller
+
+    def test_recycled_id_result_callers_are_paired_by_occurrence(self):
+        from lib.llm.responses_outbound._to_responses import _messages_to_input
+
+        messages = []
+        for parent_id in ('program_1', 'program_2'):
+            caller = {'type': 'program', 'caller_id': parent_id}
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': 'call_0', 'type': 'function', 'caller': caller,
+                    'function': {'name': 'read_files', 'arguments': '{}'},
+                }]},
+                {'role': 'tool', 'tool_call_id': 'call_0', 'content': parent_id},
+            ])
+
+        items = _messages_to_input(messages, {})
+        outputs = [item for item in items
+                   if item.get('type') == 'function_call_output']
+        assert [item['caller']['caller_id'] for item in outputs] == [
+            'program_1', 'program_2']
+
+    def test_invalid_outbound_caller_is_not_promoted_to_root(self):
+        from lib.llm.responses_outbound._to_responses import _messages_to_input
+
+        items = _messages_to_input([
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': 'call_1', 'type': 'function',
+                'caller': 'not-an-object',
+                'function': {'name': 'run_command', 'arguments': '{}'},
+            }]},
+            {'role': 'tool', 'tool_call_id': 'call_1',
+             'caller': 'also-not-an-object', 'content': 'rejected'},
+        ], {})
+        function_call = next(item for item in items
+                             if item.get('type') == 'function_call')
+        output = next(item for item in items
+                      if item.get('type') == 'function_call_output')
+        assert function_call['caller'] == 'not-an-object'
+        assert output['caller'] == 'also-not-an-object'
+
     def test_tools_flatten_and_tool_choice(self):
         body = {'model': 'm', 'messages': [],
                 'tools': [{'type': 'function',
@@ -222,6 +328,7 @@ class TestRequestConversion:
     def test_internal_keys_never_leak(self):
         body = {'model': 'm', 'messages': [], '_task_id': 't123',
                 '_conv_id': 'c123', '_working_set_tokens': 128000,
+                '_admitted_input_tokens': 12345,
                 '_tool_search_mode': 'auto',
                 '_frontend_selected_tool_names': ['x'],
                 '_tool_namespace_by_name': {'x': 'custom'},
@@ -531,6 +638,227 @@ class TestSSETranslation:
         msg, finish, _u = acc.finalize()
         assert msg['tool_calls'][0]['function']['arguments'] == '{"path":"a.py"}'
 
+    def test_unknown_explicit_item_id_never_borrows_current_call(self):
+        acc = _acc(ResponsesSSETranslator())
+        with pytest.raises(RetryableAPIError, match='unknown.*item_id'):
+            _feed(acc, [
+                _fn_added('call_1', 'read_files', item_id='fc_1'),
+                _fn_args('{"wrong":true}', item_id='fc_missing'),
+            ])
+
+    def test_output_index_routes_parallel_arguments_without_item_ids(self):
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            {'type': 'response.output_item.added', 'output_index': 0,
+             'item': {'type': 'function_call', 'call_id': 'call_1',
+                      'name': 'read_files'}},
+            {'type': 'response.output_item.added', 'output_index': 1,
+             'item': {'type': 'function_call', 'call_id': 'call_2',
+                      'name': 'read_files'}},
+            {'type': 'response.function_call_arguments.delta',
+             'output_index': 0, 'delta': '{"path":"a"}'},
+            {'type': 'response.function_call_arguments.delta',
+             'output_index': 1, 'delta': '{"path":"b"}'},
+            _completed(),
+        ])
+        msg, _finish, _usage = acc.finalize()
+        assert [call['function']['arguments']
+                for call in msg['tool_calls']] == [
+            '{"path":"a"}', '{"path":"b"}']
+
+    def test_arguments_done_fills_only_missing_stream_suffix(self):
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            _fn_added('call_1', 'read_files', item_id='fc_1'),
+            _fn_args('{"path":', item_id='fc_1'),
+            {'type': 'response.function_call_arguments.done',
+             'item_id': 'fc_1', 'arguments': '{"path":"a.py"}'},
+            _completed(),
+        ])
+        msg, _finish, _usage = acc.finalize()
+        assert msg['tool_calls'][0]['function']['arguments'] == (
+            '{"path":"a.py"}')
+
+    def test_arguments_done_disagreement_fails_closed(self):
+        acc = _acc(ResponsesSSETranslator())
+        with pytest.raises(RetryableAPIError, match='disagree'):
+            _feed(acc, [
+                _fn_added('call_1', 'read_files', item_id='fc_1'),
+                _fn_args('{"path":"wrong"}', item_id='fc_1'),
+                {'type': 'response.function_call_arguments.done',
+                 'item_id': 'fc_1', 'arguments': '{"path":"right"}'},
+            ])
+
+    def test_terminal_output_reconciles_missing_argument_suffix(self):
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            _fn_added('call_1', 'read_files', item_id='fc_1'),
+            _fn_args('{"path":', item_id='fc_1'),
+            {'type': 'response.completed', 'response': {
+                'status': 'completed',
+                'output': [{
+                    'type': 'function_call', 'id': 'fc_1',
+                    'call_id': 'call_1', 'name': 'read_files',
+                    'arguments': '{"path":"a.py"}',
+                }],
+                'usage': {},
+            }},
+        ])
+        msg, _finish, _usage = acc.finalize()
+        assert msg['tool_calls'][0]['function']['arguments'] == (
+            '{"path":"a.py"}')
+
+    def test_initial_function_arguments_are_not_discarded(self):
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            {'type': 'response.output_item.added',
+             'item': {'type': 'function_call', 'id': 'fc_1',
+                      'call_id': 'call_1', 'name': 'read_files',
+                      'arguments': '{"path":"a.py"}'}},
+            _completed(),
+        ])
+        msg, _finish, _usage = acc.finalize()
+        assert msg['tool_calls'][0]['function']['arguments'] == (
+            '{"path":"a.py"}')
+
+    def test_replayed_function_start_same_position_does_not_mint_call(self):
+        acc = _acc(ResponsesSSETranslator())
+        start = _fn_added('call_1', 'read_files', item_id='fc_1')
+        _feed(acc, [start, start, _fn_args('{}', item_id='fc_1'), _completed()])
+        msg, finish, _usage = acc.finalize()
+        assert finish == 'tool_calls'
+        assert [(call['id'], call['function']['name'])
+                for call in msg['tool_calls']] == [('call_1', 'read_files')]
+
+    def test_equal_calls_at_distinct_response_positions_remain_distinct(self):
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            _fn_added('call_1', 'read_files', item_id='fc_1'),
+            _fn_added('call_2', 'read_files', item_id='fc_2'),
+            _fn_args('{}', item_id='fc_1'),
+            _fn_args('{}', item_id='fc_2'),
+            _completed(),
+        ])
+        msg, _finish, _usage = acc.finalize()
+        assert [call['id'] for call in msg['tool_calls']] == [
+            'call_1', 'call_2']
+
+    def test_recycled_item_id_at_distinct_output_positions_is_not_collapsed(self):
+        acc = _acc(ResponsesSSETranslator())
+        starts = [
+            {
+                'type': 'response.output_item.added', 'output_index': index,
+                'item': {
+                    'type': 'function_call', 'id': 'recycled-item',
+                    'call_id': 'recycled-call', 'name': 'read_files',
+                },
+            }
+            for index in (0, 1)
+        ]
+        _feed(acc, [
+            *starts,
+            {'type': 'response.function_call_arguments.delta',
+             'item_id': 'recycled-item', 'output_index': 0,
+             'delta': '{"path":"a"}'},
+            {'type': 'response.function_call_arguments.delta',
+             'item_id': 'recycled-item', 'output_index': 1,
+             'delta': '{"path":"b"}'},
+            {'type': 'response.completed', 'response': {
+                'status': 'completed',
+                'output': [
+                    {**starts[0]['item'], 'arguments': '{"path":"a"}'},
+                    {**starts[1]['item'], 'arguments': '{"path":"b"}'},
+                ],
+                'usage': {},
+            }},
+        ])
+
+        msg, finish, _usage = acc.finalize()
+        assert finish == 'tool_calls'
+        assert [call['function']['arguments']
+                for call in msg['tool_calls']] == [
+            '{"path":"a"}', '{"path":"b"}',
+        ]
+
+    def test_ambiguous_recycled_item_id_cannot_route_without_position(self):
+        acc = _acc(ResponsesSSETranslator())
+        with pytest.raises(RetryableAPIError, match='ambiguous.*output_index'):
+            _feed(acc, [
+                {'type': 'response.output_item.added', 'output_index': 0,
+                 'item': {'type': 'function_call', 'id': 'recycled',
+                          'call_id': 'call', 'name': 'read_files'}},
+                {'type': 'response.output_item.added', 'output_index': 1,
+                 'item': {'type': 'function_call', 'id': 'recycled',
+                          'call_id': 'call', 'name': 'read_files'}},
+                {'type': 'response.function_call_arguments.delta',
+                 'item_id': 'recycled', 'delta': '{}'},
+            ])
+
+    def test_reused_response_position_with_changed_identity_fails(self):
+        acc = _acc(ResponsesSSETranslator())
+        with pytest.raises(RetryableAPIError, match='response position'):
+            _feed(acc, [
+                _fn_added('call_1', 'read_files', item_id='fc_1'),
+                _fn_added('call_2', 'run_command', item_id='fc_1'),
+            ])
+
+    def test_stream_preserves_invalid_caller_for_common_rejection(self):
+        translator = ResponsesSSETranslator()
+        chunks = translator.translate(json.dumps({
+            'type': 'response.output_item.added',
+            'output_index': 0,
+            'item': {
+                'type': 'function_call', 'id': 'fc_1',
+                'call_id': 'call_1', 'name': 'run_command',
+                'caller': 'not-an-object',
+                'agent': {'agent_name': '/subagent'},
+            },
+        }))
+        call = chunks[0]['choices'][0]['delta']['tool_calls'][0]
+        assert call['caller'] == 'not-an-object'
+
+    def test_null_caller_does_not_mask_valid_agent_attribution(self):
+        chunks = ResponsesSSETranslator().translate(json.dumps({
+            'type': 'response.output_item.added',
+            'output_index': 0,
+            'item': {
+                'type': 'function_call', 'id': 'fc_1',
+                'call_id': 'call_1', 'name': 'read_files',
+                'caller': None,
+                'agent': {'agent_name': '/subagent'},
+            },
+        }))
+        call = chunks[0]['choices'][0]['delta']['tool_calls'][0]
+        assert call['caller'] == {
+            'type': 'multi_agent', 'agent_name': '/subagent'}
+
+    @pytest.mark.parametrize('event', [
+        [],
+        {'type': []},
+        {'type': 'response.output_text.delta', 'delta': {}},
+        {'type': 'response.output_text.delta', 'delta': 'x',
+         'output_index': {}},
+        {'type': 'response.output_text.delta', 'delta': 'x',
+         'agent': {'agent_name': []}},
+        {'type': 'response.output_item.added', 'item': []},
+        {'type': 'response.output_item.added', 'item': {
+            'type': 'message', 'agent': {}}},
+        {'type': 'response.output_item.added', 'item': {
+            'type': 'function_call', 'id': [], 'call_id': 'c', 'name': 'f'}},
+        {'type': 'response.output_item.added', 'item': {
+            'type': 'function_call', 'id': 'x', 'call_id': 'c', 'name': []}},
+        {'type': 'response.function_call_arguments.delta',
+         'item_id': {}, 'delta': '{}'},
+        {'type': 'response.completed', 'response': []},
+        {'type': 'response.completed', 'response': {'output': {}}},
+        {'type': 'response.incomplete', 'response': {
+            'output': [], 'incomplete_details': []}},
+    ])
+    def test_malformed_stream_shapes_return_typed_protocol_error(self, event):
+        chunks = ResponsesSSETranslator().translate(json.dumps(event))
+        assert chunks[0]['error']['type'] == 'server_error'
+        assert chunks[0]['error']['http_code'] == '500'
+
     def test_failed_rate_limit_raises_typed_error(self):
         acc = _acc(ResponsesSSETranslator())
         with pytest.raises(RateLimitError):
@@ -607,6 +935,51 @@ class TestSSETranslation:
         msg, _finish, _usage = acc.finalize()
         assert msg['_responses_items'] == [reasoning, compact]
 
+    def test_terminal_opaque_items_preserve_equal_occurrences_and_recycled_ids(self):
+        idless = {'type': 'reasoning', 'encrypted_content': 'same'}
+        recycled_a = {'type': 'compaction', 'id': 'recycled',
+                      'encrypted_content': 'first'}
+        recycled_b = {'type': 'compaction', 'id': 'recycled',
+                      'encrypted_content': 'second'}
+        expected = [idless, idless, recycled_a, recycled_b]
+        acc = _acc(ResponsesSSETranslator(model='gpt-5.6-sol'),
+                   model='gpt-5.6-sol')
+
+        _feed(acc, [{
+            'type': 'response.completed',
+            'response': {
+                'status': 'completed', 'output': expected,
+                'usage': {'input_tokens': 2, 'output_tokens': 1},
+            },
+        }])
+
+        msg, _finish, _usage = acc.finalize()
+        assert msg['_responses_items'] == expected
+
+    def test_provisional_retransmit_replaces_only_the_same_output_position(self):
+        first = {'type': 'reasoning', 'id': 'same-id',
+                 'encrypted_content': 'first'}
+        replacement = {'type': 'reasoning', 'id': 'same-id',
+                       'encrypted_content': 'replacement'}
+        other_position = {'type': 'reasoning', 'id': 'same-id',
+                          'encrypted_content': 'other position'}
+        translator = ResponsesSSETranslator(model='gpt-5.6-sol')
+
+        translator.translate(json.dumps({
+            'type': 'response.output_item.done',
+            'output_index': 3, 'item': first,
+        }))
+        translator.translate(json.dumps({
+            'type': 'response.output_item.done',
+            'output_index': 3, 'item': replacement,
+        }))
+        translator.translate(json.dumps({
+            'type': 'response.output_item.done',
+            'output_index': 4, 'item': other_position,
+        }))
+
+        assert translator.response_items == [replacement, other_position]
+
     def test_tool_search_and_multi_agent_items_survive_stream(self):
         searched = {'type': 'tool_search_call', 'id': 'ts_1',
                     'status': 'completed'}
@@ -673,6 +1046,84 @@ class TestFromResponses:
             'error': {'code': 'rate_limit_exceeded', 'message': 'slow down'}})
         assert 'error' in out
         assert 'slow down' in out['error']['message']
+
+    @pytest.mark.parametrize('data', [
+        {'status': []},
+        {'status': 'queued'},
+        {'status': 'completed', 'output': {}},
+        {'status': 'completed', 'output': ['bad-item']},
+        {'status': 'completed', 'output': [
+            {'type': 'message', 'content': {}}]},
+        {'status': 'completed', 'output': [
+            {'type': 'message', 'content': [
+                {'type': 'output_text', 'text': {}}]}]},
+        {'status': 'completed', 'output': [
+            {'type': 'reasoning', 'summary': {}}]},
+        {'status': 'completed', 'output': [
+            {'type': 'message', 'agent': {}, 'content': []}]},
+        {'status': 'completed', 'output': [
+            {'type': 'function_call', 'call_id': [],
+             'name': 'read_files', 'arguments': '{}'}]},
+        {'status': 'completed', 'output': [
+            {'type': 'function_call', 'call_id': 'call',
+             'name': [], 'arguments': '{}'}]},
+        {'status': 'completed', 'output': [
+            {'type': 'function_call', 'call_id': 'call',
+             'name': 'read_files', 'arguments': {}}]},
+        {'status': 'incomplete', 'output': [], 'incomplete_details': []},
+        {'status': 'incomplete', 'output': [], 'incomplete_details': {}},
+        {'status': 'incomplete', 'output': [],
+         'incomplete_details': {'reason': 'content_filter'}},
+    ])
+    def test_malformed_or_nonterminal_response_fails_closed(self, data):
+        out = responses_response_to_openai(data)
+        assert out['error']['type'] == 'invalid_response'
+
+    def test_malformed_failed_error_is_still_a_typed_failure(self):
+        out = responses_response_to_openai({
+            'status': 'failed', 'error': ['malformed'],
+        })
+        assert out['error'] == {
+            'message': 'response_failed: response failed',
+            'type': 'response_failed',
+        }
+
+    def test_invalid_caller_is_preserved_for_common_ingress_rejection(self):
+        out = responses_response_to_openai({
+            'status': 'completed',
+            'output': [{
+                'type': 'function_call',
+                'call_id': 'call_1',
+                'name': 'run_command',
+                'arguments': '{}',
+                'caller': 'not-an-object',
+                'agent': {'agent_name': '/subagent'},
+            }],
+        })
+        call = out['choices'][0]['message']['tool_calls'][0]
+        assert call['caller'] == 'not-an-object'
+
+    def test_malformed_usage_counts_are_bounded_to_numbers(self):
+        out = responses_response_to_openai({
+            'status': 'completed',
+            'output': [],
+            'usage': {
+                'input_tokens': {'bad': 'count'},
+                'output_tokens': '7',
+                'input_tokens_details': {
+                    'cached_tokens': [], 'cache_write_tokens': '3'},
+                'output_tokens_details': {'reasoning_tokens': '2'},
+            },
+        })
+        assert out['usage'] == {
+            'prompt_tokens': 0,
+            'completion_tokens': 7,
+            'total_tokens': 7,
+            'cache_write_tokens': 3,
+            'prompt_tokens_details': {
+                'cached_tokens': 0, 'cache_write_tokens': 3},
+            'completion_tokens_details': {'reasoning_tokens': 2},
+        }
 
     def test_incomplete_max_tokens_finish_length(self):
         out = responses_response_to_openai({
@@ -873,7 +1324,7 @@ class TestPrepareRequestGate:
         include) — token resolution mocked out."""
         monkeypatch.setattr(
             'lib.oauth.outbound.resolve_oauth_request',
-            lambda oauth, body, extra_headers: ('TOK', {}, body))
+            lambda oauth, body, extra_headers, **_kwargs: ('TOK', {}, body))
         from lib.llm._sse_core import prepare_request
         body = {'model': 'gpt-5.2-codex',
                 'messages': [{'role': 'user', 'content': 'hi'}],
@@ -911,15 +1362,6 @@ class TestPrepareRequestGate:
         assert plan.url == 'https://api.anthropic.com/v1/messages'
         assert plan.wire_translator is not None
         assert 'messages' in plan.body   # anthropic keeps messages key
-
-    def test_dispatcher_coerces_codex_oauth_to_responses(self):
-        from lib.llm_dispatch.dispatcher import _oauth_wire_protocol
-        assert _oauth_wire_protocol({'oauth': 'codex'}) == 'responses'
-        assert _oauth_wire_protocol({'oauth': 'claude'}) == ''
-        assert _oauth_wire_protocol({}) == ''
-        assert _oauth_wire_protocol({'oauth': 'codex',
-                                     'protocol': 'openai'}) == 'responses'
-
 
 # ──────────────────────────────────────────────────────────────
 #  chat() non-stream wiring

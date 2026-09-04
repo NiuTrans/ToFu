@@ -7,6 +7,9 @@ specific live SSE event sequence:
       assistant(planner, _isFlowPlanner, _flowPlannerIteration=N)
       assistant(worker,  _flowIteration=N)
       user(critic, _isFlowReview, _flowNextPhase='worker'|'planner', _flowApproved)
+      Any producer turn may also carry ``toolRounds`` — the node's bounded
+      SubAgent tool_log projected into the standard settled-round shape, so
+      goal-mode/flow turns render their tool calls like a normal chat turn.
 
     Live SSE (streaming UI):
       flow_iteration(phase=planning|working|reviewing, iteration=N)  ← opens the bubble
@@ -47,10 +50,12 @@ from collections.abc import Callable
 
 from lib.log import get_logger
 from lib.orchestration._execution_projection import _PLANNER_ROLES
+from lib.orchestration_runner_result import normalize_orchestration_model_route
 from lib.orchestration_chat_flow_projection import (
     flow_emits_for_role,
     project_flow_next_phase,
     project_flow_phase_event,
+    project_flow_tool_rounds,
     project_flow_turn_metadata,
 )
 
@@ -183,6 +188,15 @@ class FlowEventAdapter:
                               ev.get('role') or self._cur_role,
                               ev.get('emits') or '')})
 
+    def _on_step_tool_event(self, ev: dict):
+        """Project one isolated leaf-tool occurrence onto its parent turn."""
+        inner = ev.get('event')
+        if not isinstance(inner, dict):
+            return
+        role = ev.get('role') or self._cur_role
+        emits = ev.get('emits') or self._derive_emits(role)
+        self._stream({**inner, **self._turn_meta(role, emits)})
+
     def _on_step_phase(self, ev: dict):
         """Surface a transient producer status as a wire ``phase`` event.
 
@@ -219,6 +233,21 @@ class FlowEventAdapter:
         # this adapter keeps working against an un-upgraded engine.
         emits = ev.get('emits') or self._derive_emits(role)
         self._cur_role = ''
+        route_fields = self._completion_route_fields(ev)
+        # Settled tool display for this node's turn: the engine's SubAgent
+        # runner records a bounded tool_log; project it into the standard
+        # toolRounds shape so goal-mode/flow turns render their tool calls
+        # exactly like a normal chat turn. Absent log → key omitted, so
+        # tool-less turns (and normal conversations) are byte-identical.
+        round_fields = {}
+        tool_rounds = project_flow_tool_rounds(ev.get('tool_log'))
+        if tool_rounds:
+            round_fields['toolRounds'] = tool_rounds
+        # A failed leaf (e.g. the worker's LLM call died) must surface its
+        # real error on the durable message: finish_info renders msg.error
+        # as the terminal error tag instead of a bare ✓ over placeholder
+        # text. Absent error → key omitted, healthy turns are byte-identical.
+        error_fields = {'error': ev['error']} if ev.get('error') else {}
 
         if role in _PLANNER_ROLES:
             self._planner_iteration += 1
@@ -229,6 +258,9 @@ class FlowEventAdapter:
                 'timestamp': _now(),
                 '_isFlowPlanner': True,
                 '_flowPlannerIteration': self._planner_iteration,
+                **route_fields,
+                **round_fields,
+                **error_fields,
             })
             self._pending_replan = False
             # Finalize the planner bubble live.
@@ -285,6 +317,9 @@ class FlowEventAdapter:
                 'content': out,
                 'thinking': thinking,
                 'timestamp': _now(),
+                **route_fields,
+                **round_fields,
+                **error_fields,
             }
             self._mark_user_side(msg, role, next_phase=next_phase)
             self._push(msg)
@@ -307,6 +342,9 @@ class FlowEventAdapter:
                 'timestamp': _now(),
                 '_flowIteration': self._iteration,
                 '_flowStateChangingCount': ev.get('state_changing', 0),
+                **route_fields,
+                **round_fields,
+                **error_fields,
             })
 
     def _mark_user_side(self, msg: dict, role: str, *, next_phase: str,
@@ -341,6 +379,17 @@ class FlowEventAdapter:
             msg['_flowNextPhase'] = next_phase
 
     _derive_emits = staticmethod(flow_emits_for_role)
+
+    @staticmethod
+    def _completion_route_fields(event: dict) -> dict:
+        """Project one leaf's model route onto its durable visible message."""
+        route = normalize_orchestration_model_route(event.get('modelRoute'))
+        if not route.resolved_model:
+            return {}
+        return {
+            'model': route.resolved_model,
+            'orchestration': {'modelRoute': route.to_projection()},
+        }
 
     def _turn_meta(self, role: str, emits: str) -> dict:
         """Wire metadata that keeps live and persisted turn identity equal."""

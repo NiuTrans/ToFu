@@ -25,6 +25,7 @@ Run:  python -B -m pytest -p no:napari tests/test_compaction_intra_turn_auto.py
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -107,11 +108,100 @@ def stub_summary(monkeypatch):
         conv_id='',
         task=None,
         usage_out=None,
+        anchor_text='',
     ):
         return '### 1. Primary Request\n[folded earlier tool rounds summarized]'
     monkeypatch.setattr(l2, '_generate_query_aware_summary', _fake)
     monkeypatch.setattr(l2, '_archive_transcript', lambda *a, **k: None)
     return _fake
+
+
+def test_summary_dispatch_receives_durable_goal_separately_from_login_steer(
+    monkeypatch,
+):
+    """Incident regression: the anchor reaches the model as verbatim evidence.
+
+    mtbb5cqdk6itfp's first receipt named ``Unable to log in?`` as its entire
+    objective because the verbatim anchor had been removed from the summary
+    input with no evidence re-supplied. The anchor is now re-supplied as
+    verbatim evidence while the model authors the Objective itself. Pin the
+    dispatch boundary, not model behavior.
+    """
+    original_goal = (
+        'Download the latest HOPE and LLM skills, then use their capabilities '
+        'and npm CLIs to improve both corresponding MCP tools.')
+    messages = [
+        _sys(),
+        _user(original_goal),
+        {'role': 'assistant', 'content': 'download investigation ' + 'x' * 8_000},
+        {'role': 'user', 'content': 'Unable to log in?',
+         '_isInboxInject': True, '_containsHumanSteer': True},
+        {'role': 'assistant', 'content': 'checking a non-login path'},
+    ]
+    captured = {}
+
+    def summarize(old_messages, current_query, _prefix='', **kwargs):
+        captured['old_messages'] = old_messages
+        captured['current_query'] = current_query
+        captured['anchor_text'] = kwargs['anchor_text']
+        return '### Objective\nContinue the two-skill MCP improvement audit.'
+
+    monkeypatch.setattr(l2, '_generate_query_aware_summary', summarize)
+    monkeypatch.setattr(l2, '_archive_transcript', lambda *args, **kwargs: None)
+
+    l2.execute_compact_tool(
+        messages,
+        task={'id': 'incident', 'convId': 'mtbb5cqdk6itfp',
+              '_userId': 1, 'config': {}},
+        preserve_budget_tokens=1,
+        _compaction_skip_archive=True,
+    )
+
+    assert captured['anchor_text'] == original_goal
+    assert captured['current_query'] == 'Unable to log in?'
+    assert all(message.get('content') != original_goal
+               for message in captured['old_messages'])
+    assert any(message.get('role') == 'user'
+               and message.get('content') == original_goal
+               for message in messages)
+
+
+def test_compact_repins_autopilot_objective_from_receipt(monkeypatch):
+    """Goal-replacement wiring: an accepted receipt whose model-authored
+    Objective differs from the autopilot pin re-pins it. The re-pin helper is
+    fail-safe and never mints a pin for non-autopilot conversations; this
+    pins only that compaction HANDS the receipt's Objective over."""
+    import lib.tasks_pkg.autopilot_state as ap_state
+    original_goal = 'Build the UTF-8 CSV exporter.'
+    new_goal = 'Rewrite the report as a press release.'
+    messages = [
+        _sys(),
+        _user(original_goal),
+        {'role': 'assistant', 'content': 'exporter done ' + 'x' * 8_000},
+        {'role': 'user', 'content': f'Actually, scrap that — {new_goal}'},
+        {'role': 'assistant', 'content': 'on it'},
+    ]
+    captured = {}
+
+    def summarize(old_messages, current_query, _prefix='', **kwargs):
+        return f'### Objective\n{new_goal}'
+
+    def fake_repin(conv_id, objective, *, user_id):
+        captured['repin'] = (conv_id, objective, user_id)
+        return True
+
+    monkeypatch.setattr(l2, '_generate_query_aware_summary', summarize)
+    monkeypatch.setattr(l2, '_archive_transcript', lambda *args, **kwargs: None)
+    monkeypatch.setattr(ap_state, '_update_objective_from_receipt', fake_repin)
+
+    l2.execute_compact_tool(
+        messages,
+        task={'id': 'repin', 'convId': 'conv-repin', '_userId': 1, 'config': {}},
+        preserve_budget_tokens=1,
+        _compaction_skip_archive=True,
+    )
+
+    assert captured['repin'] == ('conv-repin', new_goal, 1)
 
 
 @pytest.mark.unit
@@ -604,6 +694,146 @@ def test_unexpected_summary_failure_keeps_warning(monkeypatch, caplog):
         record.levelno >= logging.WARNING
         and 'Compaction did not mutate messages' in record.getMessage()
         for record in caplog.records)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('failure_mode', 'fallback_reason'),
+    [
+        ('empty', 'model_summary_unavailable'),
+        ('exception', 'summary_pipeline_exception'),
+    ],
+)
+def test_dispatch_guard_uses_deterministic_receipt_when_summary_unavailable(
+    monkeypatch, failure_mode, fallback_reason,
+):
+    """The final guard survives both an empty result and a pipeline defect."""
+    import lib.tasks_pkg.commit_round._turn_diff as turn_diff
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    def unavailable_summary(*_args, **_kwargs):
+        if failure_mode == 'exception':
+            raise TypeError('fault-injected summary pipeline defect')
+        return None
+
+    monkeypatch.setattr(
+        layer2, '_generate_query_aware_summary', unavailable_summary)
+    monkeypatch.setattr(
+        layer2, '_archive_transcript', lambda *a, **k: None)
+    monkeypatch.setattr(
+        layer2, '_extract_recently_accessed_files',
+        lambda _messages: ['/oversized/' + ('f' * 30_000)],
+    )
+    monkeypatch.setattr(
+        turn_diff, 'build_turn_diff_block',
+        lambda *a, **k: 'oversized diff ' + ('d' * 30_000),
+    )
+    receipt_calls = []
+    real_build_receipt = layer2.build_compaction_receipt
+
+    def capture_receipt(**kwargs):
+        receipt_calls.append(kwargs)
+        return real_build_receipt(**kwargs)
+
+    monkeypatch.setattr(layer2, 'build_compaction_receipt', capture_receipt)
+
+    objective = r'Finish the parser for C:\users\name and preserve \u003cplan.'
+    messages = [
+        _sys(),
+        _user(objective),
+        {'role': 'assistant', 'content': 'old state ' + ('x' * 20_000)},
+        _user('Continue with the remaining tests.'),
+        {'role': 'assistant', 'content': 'current state'},
+    ]
+    task = {
+        'id': 't',
+        'convId': 'deterministic-recovery',
+        'config': {'model': 'kimi-k3'},
+    }
+    meta = {}
+
+    compacted = layer2.force_compact_if_needed(
+        messages,
+        task=task,
+        preserve_budget_tokens=1,
+        force=True,
+        _allow_deterministic_summary_fallback=True,
+        _compaction_skip_archive=True,
+        _result_meta=meta,
+    )
+
+    assert compacted is True
+    assert meta['compacted'] is True
+    assert meta['summaryFallback'] is True
+    assert meta['summaryFallbackReason'] == fallback_reason
+    assert len(meta['summary_text']) <= layer2._DETERMINISTIC_RECOVERY_MAX_CHARS
+    assert meta['turn_diff_included'] is False
+    assert any(message.get('content') == objective for message in messages)
+    assert any(message.get('content') == 'Continue with the remaining tests.'
+               for message in messages)
+    receipt_text = messages[-1]['content']
+    assert '## Deterministic Compaction Recovery' in receipt_text
+    assert '## TaskStateSnapshotV1' in receipt_text
+    assert receipt_calls[-1]['implementation'] == (
+        'deterministic_recovery_receipt')
+    assert receipt_calls[-1]['summary_generated'] is False
+    assert receipt_calls[-1]['outcome_reason'] == fallback_reason
+
+
+@pytest.mark.unit
+def test_deterministic_task_state_projection_is_valid_json_and_bounded():
+    """Recovery state has one global request-size budget, not per-field caps."""
+    class OversizedSnapshot:
+        def to_dict(self):
+            return {
+                'contract_version': 'tofu.task-state/v1',
+                'goal': 'g' * 20_000,
+                'hard_constraints': tuple('c' * 2_000 for _ in range(40)),
+                'decisions': tuple('d' * 2_000 for _ in range(40)),
+                'completed_work': tuple('w' * 2_000 for _ in range(40)),
+                'files': tuple('/path/' + ('f' * 2_000) for _ in range(40)),
+                'tests': tuple('t' * 2_000 for _ in range(40)),
+                'errors': tuple('e' * 2_000 for _ in range(40)),
+                'todos': tuple('o' * 2_000 for _ in range(40)),
+                'world_version': 'v' * 20_000,
+                'source_digest': 'digest',
+            }
+
+    rendered = l2._bounded_task_state_text(
+        OversizedSnapshot(), max_chars=12_000)
+
+    assert len(rendered) <= 12_000
+    payload = json.loads(rendered)
+    assert payload['contract_version'] == 'tofu.task-state/v1'
+    assert isinstance(payload['decisions'], list)
+
+
+@pytest.mark.unit
+def test_deterministic_recovery_receipt_has_one_global_character_ceiling():
+    messages = [_sys(), _user('goal')]
+    task = {
+        '_contextEvidenceLedger': {
+            'version': 1,
+            'entries': [
+                {
+                    'id': f'ev-{index}',
+                    'type': 'error',
+                    'source': 'fault-injection',
+                    'value': 'e' * 10_000,
+                }
+                for index in range(96)
+            ],
+            'evidenceIds': [f'ev-{index}' for index in range(96)],
+        },
+        '_todos': ['t' * 10_000 for _ in range(96)],
+        '_nextSteps': ['n' * 10_000 for _ in range(96)],
+    }
+
+    rendered = l2._deterministic_recovery_summary(messages, task)
+
+    assert len(rendered) <= l2._DETERMINISTIC_RECOVERY_MAX_CHARS
+    assert '## Deterministic Compaction Recovery' in rendered
+    assert '## TaskStateSnapshotV1' in rendered
 
 
 @pytest.mark.unit

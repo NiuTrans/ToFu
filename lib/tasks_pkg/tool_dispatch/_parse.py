@@ -16,6 +16,7 @@ from lib.log import audit_log, get_logger
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
+from lib.tool_caller_identity import normalize_tool_caller
 from lib.tool_input_repair import HALLUCINATION_ABORT_THRESHOLD, ingest_tool_call
 from lib.tool_rejection import stamp_tool_rejection
 
@@ -25,8 +26,48 @@ from lib.tasks_pkg.tool_dispatch._repair import _apply_repair_to_round, _build_r
 logger = get_logger(__name__)
 
 
+def _stamp_presentation_parent(target: dict[str, Any],
+                               tool_call: dict[str, Any]) -> None:
+    """Attach a non-authority parent edge for nested/recovery presentation."""
+    parent_id = str(tool_call.get('_presentationParentToolCallId') or '')
+    caller = tool_call.get('caller')
+    if (not parent_id and isinstance(caller, dict)
+            and caller.get('type') == 'program'):
+        parent_id = str(caller.get('caller_id') or '')
+    if parent_id:
+        target['parentToolCallId'] = parent_id
+
+
+def _invalid_caller_rejection(
+    tool_call: dict[str, Any], tool_name: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Reject attributed calls whose authority envelope is not trustworthy."""
+    if 'caller' not in tool_call or tool_call.get('caller') is None:
+        return None
+    normalized_caller, reason = normalize_tool_caller(
+        tool_call.get('caller'), require_program_identity=False)
+    if reason is None:
+        if normalized_caller is not None:
+            tool_call['caller'] = normalized_caller
+        # Parent identity/budget validation belongs to the programmatic
+        # execution boundary below.
+        return None
+    message = (
+        '[SYSTEM: ATTRIBUTED TOOL CALL DID NOT RUN]\n'
+        f'Tool call `{tool_name}` carried an invalid caller authority '
+        f'envelope ({reason}). It was rejected instead of being promoted to '
+        'a direct root call. Re-issue it with valid provider attribution.')
+    return message, {
+        'kind': 'invalid_tool_caller',
+        'attempted': tool_name,
+        'reason': reason,
+        'retryable': True,
+    }
+
+
 def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
-                         task, tool_round_num, round_num, project_enabled):
+                         task, tool_round_num, round_num, project_enabled,
+                         early_entry=None):
     """Give an UNDELIVERABLE tool call a rejected round + a model-facing receipt.
 
     Rides the exact lane hallucinated tools already use: a ``status='rejected'``
@@ -42,30 +83,46 @@ def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
 
     Returns ``(parsed_tuple, tool_round_num)``.
     """
-    tool_round_num, round_entry, event_payload = _build_tool_round_entry(
-        display_name, {}, tc_id, '{}', tool_round_num, project_enabled,
-        conv_id=task.get('convId') or task.get('id'), task=task)
-    rn = round_entry['roundNum']
-    round_entry['llmRound'] = round_num
-    event_payload['llmRound'] = round_num
+    if early_entry is not None:
+        rn, round_entry = early_entry
+        # The streaming callback may have announced a malformed/raw name.
+        # Canonicalize the durable row; its already-emitted start frame is only
+        # provisional and the terminal rejection event carries these facts.
+        round_entry['toolName'] = display_name
+        round_entry['toolCallId'] = tc_id
+        round_entry['toolArgs'] = '{}'
+        event_payload = None
+    else:
+        tool_round_num, round_entry, event_payload = _build_tool_round_entry(
+            display_name, {}, tc_id, '{}', tool_round_num, project_enabled,
+            conv_id=task.get('convId') or task.get('id'), task=task)
+        rn = round_entry['roundNum']
+        round_entry['llmRound'] = round_num
+        event_payload['llmRound'] = round_num
     round_entry['status'] = 'rejected'
-    event_payload['status'] = 'rejected'
     rejection = stamp_tool_rejection(
         round_entry, rejected_meta, tool_name=display_name,
         reason=receipt_msg,
     )
-    stamp_tool_rejection(event_payload, rejection)
     _source = str(tc.get('source') or 'native_direct')
     round_entry['source'] = _source
-    event_payload['source'] = _source
     if isinstance(tc.get('caller'), dict):
         round_entry['caller'] = dict(tc['caller'])
-        event_payload['caller'] = dict(tc['caller'])
         if tc['caller'].get('type') == 'program' and tc['caller'].get('caller_id'):
             round_entry['_programCallId'] = tc['caller']['caller_id']
-            event_payload['programCallId'] = tc['caller']['caller_id']
-    task['toolRounds'].append(round_entry)
-    append_event(task, event_payload)
+    _stamp_presentation_parent(round_entry, tc)
+    if event_payload is not None:
+        event_payload['status'] = 'rejected'
+        stamp_tool_rejection(event_payload, rejection)
+        event_payload['source'] = _source
+        if isinstance(tc.get('caller'), dict):
+            event_payload['caller'] = dict(tc['caller'])
+            if (tc['caller'].get('type') == 'program'
+                    and tc['caller'].get('caller_id')):
+                event_payload['programCallId'] = tc['caller']['caller_id']
+        _stamp_presentation_parent(event_payload, tc)
+        task['toolRounds'].append(round_entry)
+        append_event(task, event_payload)
     return ((tc, display_name, tc_id, {}, rn, round_entry, receipt_msg),
             tool_round_num)
 
@@ -114,37 +171,151 @@ def parse_tool_calls(
         _args_parse_error)``.
     """
     tid = task['id'][:8]
+    raw_tool_calls = assistant_msg.get('tool_calls')
+    if isinstance(raw_tool_calls, list):
+        tool_calls = raw_tool_calls
+    elif isinstance(raw_tool_calls, tuple):
+        tool_calls = list(raw_tool_calls)
+    elif raw_tool_calls is None:
+        tool_calls = []
+    else:
+        # A compatibility provider occasionally returns one call object
+        # instead of the required array. Preserve that recoverable occurrence;
+        # other scalar shapes become one independently rejected receipt.
+        tool_calls = [raw_tool_calls]
+    assistant_msg['tool_calls'] = tool_calls
     parsed_tcs = []
     _early = early_announced or {}
+    _early_claimed: set[str] = set()
+
+    def _take_early(tc_id: str):
+        """Claim at most one streamed row for each provider call id.
+
+        Duplicate ids in one assistant response are reminted later by the
+        dispatch pipeline. Reusing one mutable row for both tuples lets the
+        remint of the second call silently rewrite the first call's identity.
+        """
+        if tc_id in _early_claimed:
+            return None
+        candidate = _early.get(tc_id)
+        if not (isinstance(candidate, tuple) and len(candidate) == 2):
+            return None
+        _early_claimed.add(tc_id)
+        return candidate
     # Capture per-round assistant content (text LLM emitted alongside tool calls)
-    _assistant_content = (assistant_msg.get('content') or '').strip()
+    raw_assistant_content = assistant_msg.get('content')
+    _assistant_content = (
+        raw_assistant_content.strip()
+        if isinstance(raw_assistant_content, str) else ''
+    )
     _ac_tagged = False  # only tag the first entry per round
     # Capture per-round reasoning/thinking text so Continue can replay it
     #   against APIs that accept thinking continuity (Claude extended-thinking).
     #   Currently sourced from OpenAI-compat `reasoning_content`; if an upstream
     #   proxy surfaces the block-level signature separately we can extend the
     #   key set below (`thinkingSignature`).
-    _assistant_thinking = (assistant_msg.get('reasoning_content') or '').strip()
-    _assistant_thinking_signature = assistant_msg.get('thinking_signature') or ''
-    _assistant_responses_items = assistant_msg.get('_responses_items') or []
+    raw_assistant_thinking = assistant_msg.get('reasoning_content')
+    _assistant_thinking = (
+        raw_assistant_thinking.strip()
+        if isinstance(raw_assistant_thinking, str) else ''
+    )
+    raw_thinking_signature = assistant_msg.get('thinking_signature')
+    _assistant_thinking_signature = (
+        raw_thinking_signature if isinstance(raw_thinking_signature, str)
+        else ''
+    )
+    raw_responses_items = assistant_msg.get('_responses_items')
+    _assistant_responses_items = (
+        raw_responses_items if isinstance(raw_responses_items, list) else []
+    )
+    raw_anthropic_blocks = assistant_msg.get('_anthropic_content_blocks')
     _assistant_anthropic_blocks = (
-        assistant_msg.get('_anthropic_content_blocks') or [])
+        raw_anthropic_blocks if isinstance(raw_anthropic_blocks, list) else []
+    )
 
-    _total_tcs = len(assistant_msg['tool_calls'])
+    _total_tcs = len(tool_calls)
     # Live set of REAL tool names for this turn (built-ins + MCP + swarm +
     # memory + custom). Source of truth for both alias resolution (so an MCP
     # tool wins the exact check and is never aliased over) and hallucination
     # classification (an unknown name not in this set is a fake tool).
     _known = _known_tool_names(task)
-    # Build set of function names that have non-empty arguments,
-    # so we can identify phantom duplicates (same name, empty args).
-    _names_with_real_args = set()
-    for _tc in assistant_msg['tool_calls']:
-        _fn = (_tc.get('function') or {})
-        if (_fn.get('arguments', '') or '').strip():
-            _names_with_real_args.add(_fn.get('name', ''))
-    for tc in assistant_msg['tool_calls']:
-        fn_obj = tc.get('function') or {}
+    for tool_call_index, raw_tc in enumerate(tool_calls):
+        if not isinstance(raw_tc, dict):
+            tc_id = f'call_{uuid.uuid4().hex[:12]}'
+            tc = {
+                'id': tc_id,
+                'type': 'function',
+                'function': {
+                    'name': _UNNAMED_TOOL_NAME,
+                    'arguments': '{}',
+                },
+            }
+            tool_calls[tool_call_index] = tc
+            _shape = type(raw_tc).__name__
+            _malformed_msg = (
+                '[SYSTEM: TOOL CALL DID NOT RUN]\n'
+                f'The provider returned tool_calls[{tool_call_index}] as '
+                f'{_shape}, but each entry must be an object. This malformed '
+                'occurrence was isolated and not executed; any valid sibling '
+                'calls continue normally.')
+            _receipt, tool_round_num = _reject_undispatched(
+                tc, '(malformed tool call)', tc_id, _malformed_msg,
+                {'kind': 'malformed_tool_call_shape', 'attempted': '',
+                 'suggestions': [], 'drop_reason': 'malformed_shape'},
+                task, tool_round_num, round_num, project_enabled)
+            parsed_tcs.append(_receipt)
+            continue
+
+        tc = raw_tc
+        raw_tc_id = tc.get('id')
+        tc_id = str(raw_tc_id or '').strip()[:200]
+        if not tc_id:
+            tc_id = f'call_{uuid.uuid4().hex[:12]}'
+        if raw_tc_id != tc_id:
+            tc['id'] = tc_id
+
+        raw_fn_obj = tc.get('function')
+        if raw_fn_obj is not None and not isinstance(raw_fn_obj, dict):
+            _shape = type(raw_fn_obj).__name__
+            tc['function'] = {
+                'name': _UNNAMED_TOOL_NAME,
+                'arguments': '{}',
+            }
+            _malformed_msg = (
+                '[SYSTEM: TOOL CALL DID NOT RUN]\n'
+                f'Tool call {tc_id} had a `{_shape}` function field; an '
+                'object with name and arguments is required. This occurrence '
+                'was isolated and not executed.')
+            _receipt, tool_round_num = _reject_undispatched(
+                tc, '(malformed tool call)', tc_id, _malformed_msg,
+                {'kind': 'malformed_tool_call_shape', 'attempted': '',
+                 'suggestions': [], 'drop_reason': 'malformed_shape'},
+                task, tool_round_num, round_num, project_enabled,
+                early_entry=_take_early(tc_id))
+            parsed_tcs.append(_receipt)
+            continue
+
+        fn_obj = raw_fn_obj or {}
+        tc['function'] = fn_obj
+        raw_fn_name = fn_obj.get('name')
+        if raw_fn_name is not None and not isinstance(raw_fn_name, str):
+            _shape = type(raw_fn_name).__name__
+            fn_obj['name'] = _UNNAMED_TOOL_NAME
+            fn_obj['arguments'] = '{}'
+            tc['function'] = fn_obj
+            _malformed_msg = (
+                '[SYSTEM: TOOL CALL DID NOT RUN]\n'
+                f'Tool call {tc_id} had a `{_shape}` function name; a string '
+                'is required. This occurrence was isolated and not executed.')
+            _receipt, tool_round_num = _reject_undispatched(
+                tc, '(malformed tool call)', tc_id, _malformed_msg,
+                {'kind': 'malformed_tool_call_shape', 'attempted': '',
+                 'suggestions': [], 'drop_reason': 'malformed_shape'},
+                task, tool_round_num, round_num, project_enabled,
+                early_entry=_take_early(tc_id))
+            parsed_tcs.append(_receipt)
+            continue
+
         fn_name = fn_obj.get('name', '')
         # NOTE: the name-drop guards (missing / internal-artefact / malformed)
         # are NOT duplicated here anymore — ``ingest_tool_call``'s stage-1 drop
@@ -161,7 +332,7 @@ def parse_tool_calls(
         # ``tool_registry``) is the membership oracle so MCP / swarm / memory /
         # custom tools are recognised — never aliased over nor mis-flagged.
         # The chat-specific PRESENTATION layered on the result below (UI
-        # auto-fixed badge, phantom-empty-args skip, autopilot loop-break, raw-
+        # auto-fixed badge, autopilot loop-break, raw-
         # args diagnostic log) stays here — it's not shared behaviour.
         _ingested = ingest_tool_call(
             tool_call=tc, known_tools=_known,
@@ -228,7 +399,8 @@ def parse_tool_calls(
                 tc, fn_name or '(unnamed tool call)', tc_id, _drop_msg,
                 {'kind': 'dropped_artifact', 'attempted': fn_name or '',
                  'suggestions': [], 'drop_reason': _drop_reason},
-                task, tool_round_num, round_num, project_enabled)
+                task, tool_round_num, round_num, project_enabled,
+                early_entry=_take_early(tc_id))
             parsed_tcs.append(_receipt)
             continue
         _tool_name_aliased = _ingested.raw_name if _ingested.alias_kind else None
@@ -249,37 +421,6 @@ def parse_tool_calls(
                 tid, task.get('convId', '') or '', fn_name,
                 _hallucinated.get('suggestions'), _ingested.repeat_count)
 
-        # Guard against phantom tool calls: valid name but empty arguments,
-        # AND another tool call with the SAME name has real arguments.
-        # This avoids dropping legitimate no-arg tools
-        # that appear alongside other tool calls.
-        _raw_check = (fn_obj.get('arguments', '') or '').strip()
-        if not _raw_check and fn_name in _names_with_real_args and not _hallucinated:
-            logger.warning('[Task %s] Skipping phantom tool call %s (tc_id=%s) '
-                           'with empty arguments — duplicate of another %s call '
-                           'with real args',
-                           tid, fn_name, tc.get('id', '?')[:12], fn_name)
-            # Same no-silent-discard contract as the drop guard above: the
-            # empty duplicate is rejected WITH a receipt, so the model never
-            # has to guess why one of its two calls produced no result.
-            tc_id = tc.get('id') or f'call_{uuid.uuid4().hex[:12]}'
-            if not tc.get('id'):
-                tc['id'] = tc_id
-            _phantom_msg = (
-                '[SYSTEM: TOOL CALL DID NOT RUN]\n'
-                f'Your tool call for `{fn_name}` (tool_call id={tc_id}) had '
-                f'EMPTY arguments and duplicated another `{fn_name}` call in '
-                f'the same message that carried real arguments. The empty '
-                'duplicate was discarded and never executed; the sibling '
-                'call proceeds normally. Do not re-issue the empty call — '
-                'this is NOT a tool-call limit.')
-            _receipt, tool_round_num = _reject_undispatched(
-                tc, fn_name, tc_id, _phantom_msg,
-                {'kind': 'phantom_empty_args', 'attempted': fn_name,
-                 'suggestions': [], 'drop_reason': 'phantom_empty_args'},
-                task, tool_round_num, round_num, project_enabled)
-            parsed_tcs.append(_receipt)
-            continue
         tc_id = tc.get('id') or f'call_{uuid.uuid4().hex[:12]}'
         if not tc.get('id'):
             tc['id'] = tc_id
@@ -354,6 +495,29 @@ def parse_tool_calls(
             tool_name_aliased=_tool_name_aliased, resolved_tool_name=fn_name,
         )
 
+        # Caller attribution is an authority boundary. An invalid/unknown
+        # envelope must not disappear and silently turn a program/worker call
+        # into a direct root invocation.
+        _caller_rejection = _invalid_caller_rejection(tc, fn_name)
+        if _caller_rejection:
+            _caller_msg, _caller_meta = _caller_rejection
+            _early_entry = _take_early(tc_id)
+            if _early_entry is not None:
+                rn, round_entry = _early_entry
+                round_entry['status'] = 'rejected'
+                stamp_tool_rejection(
+                    round_entry, _caller_meta, tool_name=fn_name,
+                    reason=_caller_msg,
+                )
+                parsed_tcs.append((
+                    tc, fn_name, tc_id, {}, rn, round_entry, _caller_msg))
+            else:
+                _receipt, tool_round_num = _reject_undispatched(
+                    tc, fn_name, tc_id, _caller_msg, _caller_meta,
+                    task, tool_round_num, round_num, project_enabled)
+                parsed_tcs.append(_receipt)
+            continue
+
         # Hosted PTC schemas are an upstream routing hint, not an application
         # authorization boundary. Enforce Tofu's explicit allow-list and hard
         # per-program call ceiling before any early-cache reuse or execution.
@@ -361,10 +525,11 @@ def parse_tool_calls(
             reject_programmatic_call,
         )
         _program_rejection = reject_programmatic_call(task, tc, fn_name)
+        _early_entry = _take_early(tc_id)
         if _program_rejection:
             _program_msg, _program_meta = _program_rejection
-            if tc_id in _early:
-                rn, round_entry = _early[tc_id]
+            if _early_entry is not None:
+                rn, round_entry = _early_entry
                 round_entry['status'] = 'rejected'
                 stamp_tool_rejection(
                     round_entry, _program_meta, tool_name=fn_name,
@@ -380,8 +545,8 @@ def parse_tool_calls(
             continue
 
         # ── Check if this tool was already announced during streaming ──
-        if tc_id in _early:
-            rn, round_entry = _early[tc_id]
+        if _early_entry is not None:
+            rn, round_entry = _early_entry
             round_entry['source'] = str(
                 tc.get('source') or round_entry.get('source')
                 or 'native_direct')
@@ -390,6 +555,7 @@ def parse_tool_calls(
                 if (tc['caller'].get('type') == 'program'
                         and tc['caller'].get('caller_id')):
                     round_entry['_programCallId'] = tc['caller']['caller_id']
+            _stamp_presentation_parent(round_entry, tc)
             # Harness fixed this call's args AFTER the streaming early-
             #   announce already rendered the (garbled) display — patch the
             #   stale round entry so the UI shows the corrected line + badge.
@@ -484,6 +650,8 @@ def parse_tool_calls(
                     and tc['caller'].get('caller_id')):
                 round_entry['_programCallId'] = tc['caller']['caller_id']
                 event_payload['programCallId'] = tc['caller']['caller_id']
+        _stamp_presentation_parent(round_entry, tc)
+        _stamp_presentation_parent(event_payload, tc)
         # Harness self-repair badge — tells the user this call's arguments
         #   were auto-corrected from a malformed model output.
         if _repair_summary:

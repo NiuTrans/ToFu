@@ -148,16 +148,6 @@ def start_registered_background_services(app, *, process_role='all'):
             _log.warning(
                 'Codex model catalogue refresher start deferred: %s', e)
 
-    # ── Reconcile ordinary API-provider /models catalogues ──
-    if process_role_has(process_role, CAPABILITY_REQUEST_SERVICES):
-        try:
-            from lib.llm_dispatch.model_catalog_sync import start_model_catalog_sync
-            start_model_catalog_sync()
-            started += 1
-        except Exception as e:
-            _log.warning(
-                'Provider model catalogue sync start deferred: %s', e)
-
     # Resume only corpora whose durable owner settings explicitly opted in.
     if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
         try:
@@ -218,9 +208,6 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
         ('knowledge visual enrichment',
          'lib.knowledge.enrichment', 'stop_visual_enrichment',
          CAPABILITY_TASK_WORKERS),
-        ('provider model catalogue',
-         'lib.llm_dispatch.model_catalog_sync', 'stop_model_catalog_sync',
-         CAPABILITY_REQUEST_SERVICES),
         ('Codex model catalogue',
          'lib.oauth.codex_catalog', 'stop_codex_catalog_refresher',
          CAPABILITY_REQUEST_SERVICES),

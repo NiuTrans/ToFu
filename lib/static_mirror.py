@@ -124,10 +124,6 @@ class StaticViteMirror:
             ),
         )
 
-    @property
-    def active_static_dir(self) -> str | None:
-        return self._active_static_dir
-
     def static_dir_for(self, filename: str) -> str:
         """Return the local root only for paths owned by the Vite mirror."""
         if (

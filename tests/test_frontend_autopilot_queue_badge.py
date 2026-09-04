@@ -39,13 +39,20 @@ import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section, runtime_section_path
+from tests._runtime_sections import (
+    native_module_path,
+    runtime_section,
+    runtime_section_path,
+)
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 SEND_BUTTON = runtime_section_path('ui/send_button.js')
+SEND_CONTROLS = native_module_path(
+    '.native/composer-send-controls.js',
+    os.path.join(ROOT, 'frontend/src/conversation/ui/composer-send-controls.ts'))
 
 
 def _node_available() -> bool:
@@ -80,7 +87,11 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // ── Fake DOM: a single #sendBtn whose innerHTML/className we can inspect ──
-const btn = { innerHTML: '', className: '', style: {}, onclick: null };
+const btn = {
+  tagName: 'BUTTON', innerHTML: '', className: '', style: {}, onclick: null,
+  hidden: false, title: '', parentElement: null,
+  setAttribute() {}, removeAttribute() {},
+};
 global.document = { getElementById: (id) => (id === 'sendBtn' ? btn : null) };
 
 // ── Window-scope globals updateSendButton reads ──
@@ -89,6 +100,11 @@ global._branchStreams = new Map();
 global._activeBranch = null;
 global.activeConvId = 'conv-ap';
 global.conversations = [];
+
+global.t = (k) => k;
+global.pendingImages = [];
+global.pendingPdfTexts = [];
+global.pendingVideos = [];
 let _activeConv = null;
 global.getActiveConv = () => _activeConv;
 global.convIsBusy = (c) => !!c && (activeStreams.has(c.id) || !!c.activeTaskId);
@@ -106,9 +122,10 @@ global.ConversationTurnStore = {
   },
 };
 
-// argv[2] = real helper slice, argv[3] = real send_button.js
+// argv[2] = real helper slice, argv[3] = typed composer-send-controls, argv[4] = real send_button.js
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // _dispatchableQueueCount (real)
-eval(fs.readFileSync(process.argv[3], 'utf8'));   // ui/send_button.js (real)
+eval(fs.readFileSync(process.argv[3], 'utf8'));   // composer-send-controls.ts (typed owner)
+eval(fs.readFileSync(process.argv[4], 'utf8'));   // ui/send_button.js (real)
 
 check('helper_exposed', typeof _dispatchableQueueCount === 'function');
 check('updateSendButton_exposed', typeof updateSendButton === 'function');
@@ -162,6 +179,7 @@ def test_autopilot_sentinel_excluded_from_queue_badge():
         proc = subprocess.run(
             ['node', harness,
              helper_js,
+             SEND_CONTROLS,
              SEND_BUTTON,
              ],
             capture_output=True, text=True, timeout=60,

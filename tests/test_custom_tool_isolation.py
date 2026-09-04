@@ -22,9 +22,9 @@ import time
 import pytest
 
 from lib.tools.tool_env import (
-    CUSTOM_TOOL_PREFIX, CustomToolError, ToolLimits, count_tool_envs,
-    dispose_tool_env, mint_tool_env, request_client_tool_result,
-    resolve_client_tool_result,
+    CUSTOM_TOOL_PREFIX, MAX_CUSTOM_TOOL_CALL_ID_CHARS, CustomToolError,
+    ToolLimits, count_tool_envs, dispose_tool_env, mint_tool_env,
+    request_client_tool_result, resolve_client_tool_result,
 )
 
 
@@ -215,6 +215,64 @@ class TestClientHandoff:
         assert resolve_client_tool_result(
             'ctool_nope', 'x', task_id='task-owner-1', user_id=1) is False
 
+    def test_rejects_oversized_call_id_before_registration(self):
+        with pytest.raises(ValueError, match='call id too long'):
+            request_client_tool_result(
+                'x' * (MAX_CUSTOM_TOOL_CALL_ID_CHARS + 1),
+                task={'id': 'task-call-id-bound', '_userId': 1},
+                timeout=1,
+            )
+
+    def test_bounds_result_before_waiter_consumes_it(self):
+        call_id = 'call_result_bound'
+        task = {'id': 'task-result-bound', '_userId': 1}
+        env = mint_tool_env(
+            tools=[_fn('custom__bounded')],
+            limits=ToolLimits(max_result_chars=8),
+        )
+        task['_tool_env'] = env
+        result = {}
+        waiter = threading.Thread(
+            target=lambda: result.setdefault(
+                'val', request_client_tool_result(
+                    call_id, task=task, timeout=5)),
+            daemon=True,
+        )
+        try:
+            waiter.start()
+            time.sleep(0.2)
+            assert resolve_client_tool_result(
+                call_id, '0123456789abcdef', task_id=task['id'], user_id=1)
+            waiter.join(timeout=3)
+            assert result['val'] == (
+                '01234567\n… [custom tool result truncated]', False)
+        finally:
+            dispose_tool_env(env)
+
+    def test_capacity_rejects_new_waiter_without_displacing_existing(
+            self, monkeypatch):
+        monkeypatch.setattr('lib.tools.tool_env._MAX_CLIENT_RESULTS', 1)
+        first = {'id': 'task-capacity-one', '_userId': 1}
+        second = {'id': 'task-capacity-two', '_userId': 2}
+        result = {}
+        waiter = threading.Thread(
+            target=lambda: result.setdefault(
+                'first', request_client_tool_result(
+                    'call_one', task=first, timeout=5)),
+            daemon=True,
+        )
+        waiter.start()
+        time.sleep(0.2)
+
+        rejected = request_client_tool_result(
+            'call_two', task=second, timeout=1)
+        assert rejected[1] is True
+        assert 'capacity is temporarily full' in rejected[0]
+        assert resolve_client_tool_result(
+            'call_one', 'owned', task_id=first['id'], user_id=1)
+        waiter.join(timeout=3)
+        assert result['first'] == ('owned', False)
+
     def test_foreign_task_cannot_resolve_handoff(self):
         call_id = 'ctool_owner_fence'
         task = {'id': 'task-owner-1', '_userId': 1}
@@ -234,6 +292,123 @@ class TestClientHandoff:
             call_id, 'owned', task_id='task-owner-1', user_id=1) is True
         waiter.join(timeout=3)
         assert result['val'] == ('owned', False)
+
+    def test_same_call_id_is_isolated_between_concurrent_tasks(self):
+        call_id = 'call_0'
+        results = {}
+        tasks = {
+            'one': {'id': 'task-concurrent-1', '_userId': 1},
+            'two': {'id': 'task-concurrent-2', '_userId': 2},
+        }
+
+        waiters = [
+            threading.Thread(
+                target=lambda label=label: results.setdefault(
+                    label, request_client_tool_result(
+                        call_id, task=tasks[label], timeout=5)),
+                daemon=True,
+            )
+            for label in tasks
+        ]
+        for waiter in waiters:
+            waiter.start()
+        time.sleep(0.2)
+
+        assert resolve_client_tool_result(
+            call_id, 'result two', task_id='task-concurrent-2', user_id=2)
+        assert resolve_client_tool_result(
+            call_id, 'result one', task_id='task-concurrent-1', user_id=1)
+        for waiter in waiters:
+            waiter.join(timeout=3)
+
+        assert results == {
+            'one': ('result one', False),
+            'two': ('result two', False),
+        }
+
+    def test_duplicate_pending_id_in_one_task_fails_without_replacing_waiter(self):
+        call_id = 'call_duplicate'
+        task = {'id': 'task-duplicate', '_userId': 1}
+        result = {}
+        waiter = threading.Thread(
+            target=lambda: result.setdefault(
+                'first', request_client_tool_result(
+                    call_id, task=task, timeout=5)),
+            daemon=True,
+        )
+        waiter.start()
+        time.sleep(0.2)
+
+        duplicate = request_client_tool_result(call_id, task=task, timeout=5)
+        assert duplicate[1] is True
+        assert 'already pending' in duplicate[0]
+        assert resolve_client_tool_result(
+            call_id, 'first result', task_id='task-duplicate', user_id=1)
+        waiter.join(timeout=3)
+        assert result['first'] == ('first result', False)
+
+    def test_dispose_unblocks_only_its_own_pending_handoffs(self):
+        env_one = mint_tool_env(
+            tools=[_fn('custom__one')], owner='owner:1')
+        env_two = mint_tool_env(
+            tools=[_fn('custom__two')], owner='owner:2')
+        tasks = {
+            'one': {'id': 'task-dispose-1', '_userId': 1,
+                    '_tool_env': env_one},
+            'two': {'id': 'task-dispose-2', '_userId': 2,
+                    '_tool_env': env_two},
+        }
+        results = {}
+        waiters = [
+            threading.Thread(
+                target=lambda label=label: results.setdefault(
+                    label, request_client_tool_result(
+                        'call_0', task=tasks[label], timeout=5)),
+                daemon=True,
+            )
+            for label in tasks
+        ]
+        try:
+            for waiter in waiters:
+                waiter.start()
+            time.sleep(0.2)
+
+            assert dispose_tool_env(env_one) is True
+            waiters[0].join(timeout=3)
+            assert results['one'][1] is True
+            assert 'disposed' in results['one'][0]
+            assert 'two' not in results
+
+            assert resolve_client_tool_result(
+                'call_0', 'still owned', task_id='task-dispose-2', user_id=2)
+            waiters[1].join(timeout=3)
+            assert results['two'] == ('still owned', False)
+        finally:
+            dispose_tool_env(env_one)
+            dispose_tool_env(env_two)
+
+    def test_client_response_wins_exact_timeout_boundary(self, monkeypatch):
+        call_id = 'call_timeout_boundary'
+        task = {'id': 'task-timeout-boundary', '_userId': 1}
+
+        class CrossingEvent:
+            def __init__(self):
+                self.set_called = False
+
+            def set(self):
+                self.set_called = True
+
+            def wait(self, timeout):
+                assert resolve_client_tool_result(
+                    call_id, 'accepted', task_id=task['id'], user_id=1)
+                return False
+
+        clock = iter((0.0, 0.0, 2.0))
+        monkeypatch.setattr('lib.tools.tool_env.threading.Event', CrossingEvent)
+        monkeypatch.setattr('lib.tools.tool_env.time.time', lambda: next(clock))
+
+        assert request_client_tool_result(
+            call_id, task=task, timeout=1) == ('accepted', False)
 
 
 # ── AST guard: request modules must not mutate the global registry ──

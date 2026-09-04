@@ -162,7 +162,8 @@ def test_custom_server_config_declares_probe():
     assert spec is not None
     assert spec['tool'] == 'status'
 
-    bridge.call_tool = lambda n, a: 'service reports: BOOM EXPIRED token'  # type: ignore[method-assign]
+    bridge.call_tool = (  # type: ignore[method-assign]
+        lambda n, a, **_kwargs: 'service reports: BOOM EXPIRED token')
     rec = bridge._run_cred_probe('mycustom')
     assert rec['status'] == 'expired'
     assert bridge.get_cred_health('mycustom')['status'] == 'expired'

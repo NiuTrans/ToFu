@@ -29,7 +29,9 @@ This suite is the RATCHET, in three parts:
    AST heuristic still fires without requiring a forbidden production loop to
    remain in the repository as its own test fixture.
 3. Adoption ratchet — the number of files importing ``run_agent_loop`` must
-   never decrease (currently 12, including the migrated root orchestrator).
+   never decrease (currently 6; the seven Paper workflow call sites were
+   deliberately consolidated into ``lib/paper/agent_loop_policy.py``, which
+   still rides ``run_agent_loop`` through ``run_guarded_paper_agent_loop``).
 
 NEUTER evidence (manual):
   * a probe file under lib/ containing ``while True: … dispatch_stream(…)``
@@ -72,13 +74,28 @@ _HEURISTIC_EXEMPT = frozenset({
     'lib/llm/_sse_core.py',
     'lib/llm/chat.py',
     'lib/llm_dispatch/api.py',
+    'lib/llm_dispatch/_api_chat.py',
+    'lib/llm_dispatch/_api_stream.py',
+    'lib/llm_dispatch/_api_stream_state.py',
+    'lib/llm_dispatch/_api_multi.py',
+    'lib/llm_dispatch/_api_budget.py',
+    'lib/llm_dispatch/_api_contention.py',
+    'lib/llm_dispatch/_api_hygiene.py',
+    'lib/llm_dispatch/_api_errors.py',
     'lib/llm_dispatch/dispatcher.py',
 })
 
 # Minimum number of tracked files that must import run_agent_loop. Only
 # grows — a removal means an adopter was reverted to a private loop (or the
 # file was deleted), both of which need a conscious test edit.
-_MIN_LOOP_IMPORTERS = 12
+#
+# 2026-08-30: floor lowered 12 -> 6 deliberately. The Paper workflows
+# (deepen/ideate/qa/recommend/report/survey/_synthesize) stopped importing
+# run_agent_loop directly and now import run_guarded_paper_agent_loop from
+# lib/paper/agent_loop_policy.py, which is itself counted below and wraps
+# run_agent_loop. This is a consolidation of adopters, not a reversion to a
+# private loop (test_no_new_private_agent_loops still guards that shape).
+_MIN_LOOP_IMPORTERS = 6
 
 
 def _py_files():

@@ -35,6 +35,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 
 import pytest
 
@@ -49,7 +50,6 @@ _OPENSOURCE = is_opensource_build()
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 SCRIPT = os.path.join(ROOT, 'restart_15000.sh')
-_TEST_PORT = 15599
 
 
 def _fresh_store(tmp):
@@ -185,21 +185,17 @@ def _port_listening(port: int) -> bool:
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
-def _real_store_has_fireable_restart_token() -> bool:
-    """True when the REAL approvals file holds an approved+unexpired+
-    unconsumed restart token (the script would CONSUME it and really fire).
-    The live negative test must skip rather than risk a real restart."""
-    approvals = os.path.join(ROOT, 'data', 'lifecycle_approvals.json')
-    orig = la._APPROVALS_FILE
-    try:
-        la._APPROVALS_FILE = approvals
-        for rec in la.list_records(status='approved', action='restart'):
-            ok, _ = la.validate(rec['id'], 'restart')
-            if ok:
-                return True
-        return False
-    finally:
-        la._APPROVALS_FILE = orig
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(('127.0.0.1', 0))
+        return int(probe.getsockname()[1])
+
+
+def _isolated_lifecycle_root() -> str:
+    return tempfile.mkdtemp(
+        prefix='lifecycle-',
+        dir=os.environ['TOFU_PYTEST_RUN_ROOT'],
+    )
 
 
 def _defang_pgrep_fallback(text: str) -> str:
@@ -219,21 +215,40 @@ def _defang_pgrep_fallback(text: str) -> str:
     return out
 
 
-def _allow_isolated_lifecycle_test(text: str) -> str:
+def _allow_isolated_lifecycle_test(
+    text: str,
+    isolated_root: str,
+    test_port: int,
+) -> str:
     """Opt a retargeted/defanged script copy into lifecycle test execution."""
     marker = '#!/usr/bin/env bash\n'
     assert text.startswith(marker), 'restart script shebang changed?'
+    data_root = os.path.join(isolated_root, 'test-data')
+    os.makedirs(data_root, exist_ok=True)
     test_environment = (
         'export TOFU_ALLOW_LIFECYCLE_TEST=1\n'
-        f'export TOFU_PROJECT_ROOT={shlex.quote(ROOT)}\n'
+        'export TOFU_TESTING=1\n'
+        f'export TOFU_PYTEST_RUN_ROOT='
+        f'{shlex.quote(os.environ["TOFU_PYTEST_RUN_ROOT"])}\n'
+        f'export TOFU_LIFECYCLE_TEST_ROOT={shlex.quote(isolated_root)}\n'
+        f'export TOFU_LIFECYCLE_TEST_PORT={test_port}\n'
+        f'export PORT={test_port}\n'
+        f'export TOFU_PROJECT_ROOT={shlex.quote(isolated_root)}\n'
+        f'export TOFU_DATA_DIR={shlex.quote(data_root)}\n'
         f'export TOFU_RUNTIME_PYTHON={shlex.quote(sys.executable)}\n'
+        f'export PYTHONPATH={shlex.quote(ROOT)}\n'
     )
     return text.replace(
         marker,
         marker + test_environment, 1)
 
 
-def _run_orphaned(script_path: str, timeout: int = 120) -> tuple:
+def _run_orphaned(
+    script_path: str,
+    timeout: int = 120,
+    *,
+    target_pid: int | str | None = None,
+) -> tuple:
     """Run ``script_path`` detached (orphaned → PPID 1), like a setsid watcher.
 
     The script's descendant guard refuses to run as a CHILD of the :15000
@@ -260,7 +275,24 @@ def _run_orphaned(script_path: str, timeout: int = 120) -> tuple:
         'open(%r,"w").write(str(os.waitstatus_to_exitcode(rc)));'
         'os._exit(0)'
     ) % (out_file, script_path, rc_file)
-    subprocess.run([sys.executable, '-c', launcher], timeout=30)
+    environment = os.environ.copy()
+    for name in (
+        'PORT', '_TOFU_RUNTIME_PORT', '_TOFU_REEXEC_PORT',
+        'TOFU_PROJECT_ROOT', 'TOFU_PROJECT_PATH', 'TOFU_DATA_DIR',
+        'TOFU_MANAGED_BY', 'TOFU_SERVER_WORKER',
+        'TOFU_RESTART_GATE_PASSED', 'TOFU_LIFECYCLE_GATE_PASSED',
+        'TOFU_ALLOW_LIFECYCLE_TEST', 'TOFU_LIFECYCLE_TEST_ROOT',
+        'TOFU_LIFECYCLE_TEST_PORT', 'TOFU_LIFECYCLE_TEST_TARGET_PID',
+        'TOFU_TESTING',
+        'TOFU_STORAGE_CONNECTION_FILE', 'TOFU_STORAGE_TOKEN',
+        'TOFU_STORAGE_PARENT_PID', 'TOFU_SUPERVISOR_HOST',
+        'TOFU_SUPERVISOR_PORT',
+    ):
+        environment.pop(name, None)
+    if target_pid is not None:
+        environment['TOFU_LIFECYCLE_TEST_TARGET_PID'] = str(target_pid)
+    subprocess.run(
+        [sys.executable, '-c', launcher], env=environment, timeout=30)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if os.path.exists(rc_file):
@@ -282,15 +314,8 @@ def _run_orphaned(script_path: str, timeout: int = 120) -> tuple:
     return rc, output
 
 
-@pytest.mark.serial
 class TestRealScriptGate:
-    """Real shell-process tests share one fixed listener and restart lock.
-
-    They must never be distributed across xdist workers: both copies use the
-    deliberately isolated port 15599 and the fd-inheritance proof observes the
-    project-global ``data/.restart.lock``.  Parallel execution turns that
-    safety setup into a port/lock race before the lifecycle gate is exercised.
-    """
+    """Shell-process tests own a private project, data root, and dynamic port."""
 
     def test_shipped_script_carries_the_gate(self):
         """Static anchor: the gate block + the token check are in the shipped
@@ -301,6 +326,75 @@ class TestRealScriptGate:
         assert 'lib.lifecycle_approval --script-gate restart' in text
         assert 'PYTEST_CURRENT_TEST' in text
         assert 'TOFU_ALLOW_LIFECYCLE_TEST' in text
+        assert 'TOFU_LIFECYCLE_TEST_ROOT' in text
+        assert 'TOFU_LIFECYCLE_TEST_PORT' in text
+        assert 'TOFU_LIFECYCLE_TEST_TARGET_PID' in text
+
+    def test_boolean_test_opt_in_without_isolated_scope_refuses(self, tmp_path):
+        copied_script = tmp_path / 'restart_15000.sh'
+        shutil.copy2(SCRIPT, copied_script)
+        environment = os.environ.copy()
+        environment.update({
+            'PYTEST_CURRENT_TEST': 'lifecycle isolation guard',
+            'TOFU_ALLOW_LIFECYCLE_TEST': '1',
+            'TOFU_PROJECT_ROOT': str(tmp_path),
+            'TOFU_RUNTIME_PYTHON': sys.executable,
+            'PORT': '15000',
+        })
+        environment.pop('TOFU_LIFECYCLE_TEST_ROOT', None)
+        environment.pop('TOFU_LIFECYCLE_TEST_PORT', None)
+
+        result = subprocess.run(
+            ['bash', str(copied_script)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=environment,
+        )
+
+        assert result.returncode == 3
+        assert 'unisolated test process' in result.stdout
+
+    def test_mismatched_test_target_pid_refuses_and_listener_survives(self):
+        tmpdir = _isolated_lifecycle_root()
+        test_port = _free_port()
+        with open(SCRIPT, encoding='utf-8') as stream:
+            ported = stream.read().replace(
+                'PORT=15000', f'PORT={test_port}', 1)
+        ported = _defang_pgrep_fallback(ported)
+        ported = _allow_isolated_lifecycle_test(ported, tmpdir, test_port)
+        copied_script = os.path.join(tmpdir, 'mismatched-target.sh')
+        with open(copied_script, 'w', encoding='utf-8') as stream:
+            stream.write(ported)
+        os.chmod(copied_script, 0o755)
+        dummy = subprocess.Popen(
+            [sys.executable, '-m', 'http.server', str(test_port)],
+            cwd=tmpdir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            for _ in range(50):
+                if _port_listening(test_port):
+                    break
+                time.sleep(0.1)
+            assert _port_listening(test_port)
+
+            rc, output = _run_orphaned(
+                copied_script, timeout=30, target_pid='none')
+
+            assert rc == 3, output
+            assert 'unisolated test process' in output
+            assert _port_listening(test_port)
+        finally:
+            dummy.terminate()
+            try:
+                dummy.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dummy.kill()
+                dummy.wait(timeout=5)
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_noninteractive_run_refuses_and_server_survives(self):
@@ -313,34 +407,33 @@ class TestRealScriptGate:
         replacement.  A retargeted copy exercises the identical gate while
         making the strongest possible assertion: production is not a target.
         """
-        if _real_store_has_fireable_restart_token():
-            pytest.skip('a fireable approved restart token exists in the real '
-                        'store — running the script would REALLY restart the server')
+        tmpdir = _isolated_lifecycle_root()
+        test_port = _free_port()
         with open(SCRIPT, encoding='utf-8') as f:
             src = f.read()
-        ported = src.replace('PORT=15000', f'PORT={_TEST_PORT}', 1)
+        ported = src.replace('PORT=15000', f'PORT={test_port}', 1)
         assert ported != src
         ported = _defang_pgrep_fallback(ported)
-        ported = _allow_isolated_lifecycle_test(ported)
-        tmpdir = tempfile.mkdtemp()
+        ported = _allow_isolated_lifecycle_test(ported, tmpdir, test_port)
         gated_path = os.path.join(tmpdir, 'gated-only.sh')
         with open(gated_path, 'w', encoding='utf-8') as f:
             f.write(ported)
         os.chmod(gated_path, 0o755)
         dummy = subprocess.Popen(
-            [sys.executable, '-m', 'http.server', str(_TEST_PORT)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            [sys.executable, '-m', 'http.server', str(test_port)],
+            cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             for _ in range(50):
-                if _port_listening(_TEST_PORT):
+                if _port_listening(test_port):
                     break
                 time.sleep(0.1)
-            assert _port_listening(_TEST_PORT), 'isolated listener failed to start'
-            rc, output = _run_orphaned(gated_path, timeout=90)
+            assert _port_listening(test_port), 'isolated listener failed to start'
+            rc, output = _run_orphaned(
+                gated_path, timeout=90, target_pid=dummy.pid)
             assert rc == 3, (
                 f'expected the gate to refuse (exit 3), got {rc}:\n{output}')
             assert 'lifecycle-gate' in output
-            assert _port_listening(_TEST_PORT), (
+            assert _port_listening(test_port), (
                 'the refused isolated listener was harmed')
         finally:
             try:
@@ -359,17 +452,17 @@ class TestRealScriptGate:
         the SAME script now kills the dummy listener, proving the gate is
         what stopped it (the relaunch dies harmlessly on the instance lock).
         """
-        if _real_store_has_fireable_restart_token():
-            pytest.skip('fireable approved restart token in the real store')
+        tmpdir = _isolated_lifecycle_root()
+        test_port = _free_port()
         with open(SCRIPT, encoding='utf-8') as f:
             src = f.read()
         # retarget the port on BOTH copies, and defang the pgrep fallback
         # (would SIGTERM the PRODUCTION server if the dummy is dead — see
         # _defang_pgrep_fallback).
-        ported = src.replace('PORT=15000', f'PORT={_TEST_PORT}', 1)
+        ported = src.replace('PORT=15000', f'PORT={test_port}', 1)
         assert ported != src
         ported = _defang_pgrep_fallback(ported)
-        ported = _allow_isolated_lifecycle_test(ported)
+        ported = _allow_isolated_lifecycle_test(ported, tmpdir, test_port)
         # strip the gate block ([pre/5c] … up to the [pre/5b] marker)
         start = ported.index('# ── [pre/5c]')
         end = ported.index('# ── [pre/5b]')
@@ -385,7 +478,6 @@ class TestRealScriptGate:
         py_end = neutered.index('\n', py_line)
         neutered = neutered[:py_line] + 'PY="/bin/true"' + neutered[py_end:]
 
-        tmpdir = tempfile.mkdtemp()
         gated_path = os.path.join(tmpdir, 'gated.sh')
         neutered_path = os.path.join(tmpdir, 'neutered.sh')
         for path, text in ((gated_path, ported), (neutered_path, neutered)):
@@ -394,30 +486,32 @@ class TestRealScriptGate:
             os.chmod(path, 0o755)
 
         dummy = subprocess.Popen(
-            [sys.executable, '-m', 'http.server', str(_TEST_PORT)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            [sys.executable, '-m', 'http.server', str(test_port)],
+            cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             for _ in range(50):
-                if _port_listening(_TEST_PORT):
+                if _port_listening(test_port):
                     break
                 time.sleep(0.1)
-            if not _port_listening(_TEST_PORT):
-                pytest.skip(f'dummy listener on :{_TEST_PORT} failed to start')
+            if not _port_listening(test_port):
+                pytest.skip(f'dummy listener on :{test_port} failed to start')
 
             # (a) gated copy: refuses, dummy survives
-            rc_g, out_g = _run_orphaned(gated_path, timeout=90)
+            rc_g, out_g = _run_orphaned(
+                gated_path, timeout=90, target_pid=dummy.pid)
             assert rc_g == 3, f'gated copy did not refuse (rc={rc_g}):\n{out_g}'
-            assert _port_listening(_TEST_PORT), 'gated copy harmed the dummy'
+            assert _port_listening(test_port), 'gated copy harmed the dummy'
 
             # (b) neutered copy: NO gate → the kill phase reaches the dummy
-            rc_n, out_n = _run_orphaned(neutered_path, timeout=180)
+            rc_n, out_n = _run_orphaned(
+                neutered_path, timeout=180, target_pid=dummy.pid)
             assert rc_n != 3
             # the dummy was killed (the relaunch then dies on the instance lock)
             for _ in range(30):
-                if not _port_listening(_TEST_PORT):
+                if not _port_listening(test_port):
                     break
                 time.sleep(0.2)
-            assert not _port_listening(_TEST_PORT), (
+            assert not _port_listening(test_port), (
                 'neutered copy did NOT kill the dummy — the gate would not be '
                 f'load-bearing (rc={rc_n}):\n{out_n}')
         finally:
@@ -458,7 +552,7 @@ class TestRestartLockInheritance:
         # (run (a) kills the dummy; run (b) then matched 'server\\.py' on
         # the REAL process). See _defang_pgrep_fallback.
         ported = _defang_pgrep_fallback(ported)
-        ported = _allow_isolated_lifecycle_test(ported)
+        ported = _allow_isolated_lifecycle_test(ported, tmpdir, test_port)
         # Each pytest process gets its own serialization and instance locks.
         # ``serial`` only isolates workers inside one invocation; a fixed
         # project lock made independent test invocations contaminate this fd
@@ -479,6 +573,11 @@ class TestRestartLockInheritance:
         # stub interpreter: ignores args, sleeps long enough to outlive the
         # script (never serves — the [4/5] health wait expires → exit 4)
         stub = os.path.join(tmpdir, self._STUB_NAME)
+        # Unforgeable kill marker: a per-test uuid baked into argv[0] via
+        # ``exec -a``. ``_stub_pids`` only ever kills a process whose cmdline
+        # carries THIS exact marker — a bare `sleep 297` match (the old
+        # heuristic) would SIGKILL a foreign host process or a reused PID.
+        self._stub_marker = f'tofu_test_stub_{uuid.uuid4().hex}'
         with open(stub, 'w') as f:
             # `exec` so the stub process IS the sleep (no bash wrapper whose
             # orphaned sleep child would keep holding fd 9 after pkill of the
@@ -488,7 +587,7 @@ class TestRestartLockInheritance:
             # worker behavior this test needs.
             f.write('#!/bin/bash\n'
                     '[ "${1:-}" = "-" ] && exit 0\n'
-                    'exec sleep 297\n')
+                    f'exec -a {self._stub_marker} sleep 297\n')
         os.chmod(stub, 0o755)
         py_line = nogate.index('PY="')
         py_end = nogate.index('\n', py_line)
@@ -515,40 +614,50 @@ class TestRestartLockInheritance:
         except Exception:
             return set()
 
+    @staticmethod
+    def _cmdline(pid):
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as fh:
+                return [a for a in fh.read().split(b'\x00') if a]
+        except OSError:
+            return []
+
     def _stub_pids(self):
+        marker = getattr(self, '_stub_marker', None)
+        if not marker:
+            # Fail closed: without the per-test marker we cannot tell our stub
+            # from a foreign `sleep 297`, so return nothing and never kill.
+            return set()
+        marker_b = marker.encode()
         out = subprocess.run(['pgrep', '-x', 'sleep'],
                              capture_output=True, text=True, timeout=10)
         mine = set()
         for pid in out.stdout.split():
-            try:
-                with open(f'/proc/{pid}/cmdline', 'rb') as fh:
-                    argv = [a for a in fh.read().split(b'\x00') if a]
-            except OSError:
-                continue
-            if argv == [b'sleep', b'297']:
+            if self._cmdline(pid)[:2] == [marker_b, b'297']:
                 mine.add(pid)
         return mine
 
     def _kill_stubs(self):
+        # Fail closed: re-verify the exact per-test marker on the candidate's
+        # cmdline immediately before signalling, so a PID reused between
+        # discovery and the kill can never turn this into an ambiguous kill.
+        marker_b = getattr(self, '_stub_marker', '').encode()
         for pid in self._stub_pids():
-            try:
-                os.kill(int(pid), signal.SIGKILL)
-            except OSError:
-                pass
+            if self._cmdline(pid)[:2] == [marker_b, b'297']:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except OSError:
+                    pass
 
     @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_relaunched_child_does_not_hold_restart_lock(self):
-        if _real_store_has_fireable_restart_token():
-            pytest.skip('fireable approved restart token in the real store')
-        tmpdir = tempfile.mkdtemp()
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.bind(('127.0.0.1', 0))
-            test_port = probe.getsockname()[1]
+        tmpdir = _isolated_lifecycle_root()
+        test_port = _free_port()
         fixed_path, neuter_path, restart_lock = self._make_copies(
             tmpdir, test_port)
         dummy = subprocess.Popen(
             [sys.executable, '-m', 'http.server', str(test_port)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             for _ in range(50):
                 if _port_listening(test_port):
@@ -558,7 +667,8 @@ class TestRestartLockInheritance:
                 pytest.skip(f'dummy listener on :{test_port} failed to start')
 
             # (a) FIXED: after the script exits, NOTHING holds the lock
-            rc_f, out_f = _run_orphaned(fixed_path, timeout=120)
+            rc_f, out_f = _run_orphaned(
+                fixed_path, timeout=120, target_pid=dummy.pid)
             assert rc_f == 4, f'expected health-wait exit 4, got {rc_f}:\n{out_f}'
             holders = self._lock_holders(restart_lock)
             assert not holders, (
@@ -568,7 +678,8 @@ class TestRestartLockInheritance:
 
             # (b) NEUTER: without 9>&- the relaunched child KEEPS the lock —
             # proving (a) actually measures the fix, not empty air
-            rc_n, out_n = _run_orphaned(neuter_path, timeout=120)
+            rc_n, out_n = _run_orphaned(
+                neuter_path, timeout=120, target_pid='none')
             assert rc_n == 4, f'expected health-wait exit 4, got {rc_n}:\n{out_n}'
             holders_n = self._lock_holders(restart_lock)
             assert holders_n & self._stub_pids(), (

@@ -1,6 +1,6 @@
 """Guard: liveness reports an in-memory Sidecar snapshot without storage I/O.
 
-/api/health is the frontend's offline ARBITER (backend_offline_monitor: two
+/api/health is the typed backend-availability owner's offline ARBITER (two
 failed probes → red "backend offline" banner). The old implementation ran
 ``SELECT 1`` inline, so a PG-on-FUSE stall (measured 4–7s Slow queries) pushed
 the answer past the frontend's 3–4s probe budget and raised the banner on a
@@ -14,6 +14,7 @@ context; storage status is stubbed by monkeypatch. ``unit`` marker.
 """
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -138,6 +139,7 @@ def test_ready_requires_completed_lifecycle_and_ready_sidecar(
 
     payload, status = asyncio.run(call())
     assert status == 503
+    assert payload['pid'] == os.getpid()
     assert payload['ready'] is False
 
     app.extensions['tofu_production_lifecycle']['status'] = 'ready'

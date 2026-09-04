@@ -143,6 +143,22 @@ class OperationSpec:
     after: Callable[
         [Session, str, Mapping[str, Any], Any], Any
     ] | None = None
+    # Most transactions keep the backend's lean default. Explicit, bounded
+    # maintenance-style commands may declare a larger watchdog window without
+    # weakening every interactive write in the process.
+    transaction_timeout_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.transaction_timeout_s is not None and self.kind != "command":
+            raise ValueError(
+                "only command operations may override the transaction timeout"
+            )
+        if self.transaction_timeout_s is not None and not (
+            0.05 <= float(self.transaction_timeout_s) <= 300.0
+        ):
+            raise ValueError(
+                "operation transaction_timeout_s must be between 0.05 and 300"
+            )
 
 
 def _schema_version(session: Session, _payload: Mapping[str, Any]) -> Any:

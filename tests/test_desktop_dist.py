@@ -566,9 +566,9 @@ def test_build_is_single_flight(tmp_store, monkeypatch):
 
 
 @pytest.mark.unit
-def test_tofu_search_source_prefers_the_sibling_checkout(tmp_store,
+def test_tofu_search_source_prefers_the_workspace_member(tmp_store,
                                                          monkeypatch):
-    """install.sh's order: sibling checkout → vendor wheel → index name.
+    """Build order: workspace member → vendor wheel → index name.
 
     Pinned because the floor (>=0.5.3) is on NO index (measured: public
     PyPI tops at 0.5.1, the internal mirror carries none), so getting this
@@ -578,13 +578,13 @@ def test_tofu_search_source_prefers_the_sibling_checkout(tmp_store,
     root = tmp_store / 'root'
     root.mkdir()
     monkeypatch.setattr(builder, '_REPO_ROOT', str(root))
-    # Sibling checkout present → it wins.
-    sib = tmp_store / 'tofu-search'
-    sib.mkdir()
-    (sib / 'pyproject.toml').write_text('[project]')
-    assert builder._tofu_search_source() == os.path.abspath(sib)
-    # No sibling checkout → vendor wheel; none → bare name.
-    sib.rename(tmp_store / 'not-tofu-search')
+    # Workspace member present → it wins.
+    member = root / 'packages' / 'tofu-search'
+    member.mkdir(parents=True)
+    (member / 'pyproject.toml').write_text('[project]')
+    assert builder._tofu_search_source() == os.path.abspath(member)
+    # No workspace member → vendor wheel; none → bare name.
+    member.rename(root / 'packages' / 'not-tofu-search')
     vendor = root / 'vendor'
     vendor.mkdir()
     whl = vendor / 'tofu_search-0.5.3-py3-none-any.whl'
@@ -627,6 +627,73 @@ def test_the_build_route_is_authenticated():
     src = inspect.getsource(dmod)
     idx = src.index("route('/api/v1/desktop/build'")
     assert '@require_auth' in src[idx:idx + 200]
+
+
+@pytest.mark.api
+def test_build_route_validates_before_starting_expensive_work(
+        flask_client, monkeypatch):
+    """Malformed/default-looking input must never select a build by accident."""
+    from lib.desktop_dist import builder, winbuilder
+
+    started = []
+    monkeypatch.setattr(
+        builder,
+        'start',
+        lambda **kwargs: started.append(('linux', kwargs))
+        or {'state': 'running'},
+    )
+    monkeypatch.setattr(
+        winbuilder,
+        'start_installer',
+        lambda **kwargs: started.append(('windows', kwargs))
+        or {'state': 'running'},
+    )
+    headers = _bearer()
+
+    invalid_payloads = (
+        ['not', 'an', 'object'],
+        {'os': 'windwos'},
+        {'os': 1},
+        {'os': 'windows', 'kind': 'everything'},
+        {'os': 'windows', 'server_url': ['https://tofu.example']},
+        {'os': 'windows', 'server_url': 'file:///tmp/tofu'},
+        {'os': 'windows', 'server_url': 'https://user:secret@tofu.example'},
+        {'os': 'windows', 'server_url': 'https://tofu.example/?token=secret'},
+    )
+    for payload in invalid_payloads:
+        response = flask_client.post(
+            '/api/v1/desktop/build', json=payload, headers=headers)
+        assert response.status_code == 400, (payload, response.get_json())
+        assert response.get_json()['ok'] is False
+    malformed = flask_client.post(
+        '/api/v1/desktop/build',
+        data='{"os":',
+        headers={**headers, 'Content-Type': 'application/json'},
+    )
+    assert malformed.status_code == 400, malformed.get_data(as_text=True)
+    assert started == []
+
+    linux = flask_client.post(
+        '/api/v1/desktop/build', json={}, headers=headers)
+    assert linux.status_code == 202
+    windows = flask_client.post(
+        '/api/v1/desktop/build',
+        json={
+            'os': 'WINDOWS',
+            'kind': 'AGENT',
+            'server_url': 'https://tofu.example/proxy/15000/',
+        },
+        headers=headers,
+    )
+    assert windows.status_code == 202
+    assert started == [
+        ('linux', {'reason': 'api'}),
+        ('windows', {
+            'reason': 'api',
+            'server_url': 'https://tofu.example/proxy/15000/',
+            'target': 'agent',
+        }),
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════

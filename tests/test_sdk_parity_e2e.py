@@ -7,8 +7,8 @@ for the SDK-parity additions made in this round:
      real route handler (no in-memory shortcuts).
   3. PreCompact hooks fire when the compaction pipeline runs against a
      task that exists in the live registry.
-  4. ``maxBudgetUsd`` is accepted and round-trips through the API
-     surface alongside other ``cfg`` fields.
+  4. Retired budget keys remain accepted as backward-compatible extras but
+     are not advertised as active typed controls.
 
 All four tests boot the real ``server.py`` app the same way
 ``test_e2e_headless_api.py`` does and drive it via ``app.test_client()``.
@@ -31,8 +31,20 @@ import unittest
 
 import pytest
 
+from tests.support.model_routing import (
+    allow_native_test_endpoint,
+    install_native_test_model_route,
+    native_test_model,
+)
+
 pytestmark = pytest.mark.api
 _TEST_OWNER_USER_ID = 1
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _native_test_endpoint_policy():
+    with allow_native_test_endpoint():
+        yield
 
 
 # ── Boot one app instance per module ────────────────────────────────
@@ -71,6 +83,7 @@ def _setup_once():
         name='sdk-parity-user',
         scopes=['chat', 'tasks', 'usage', 'capabilities'],
         rate_limit_rpm=120, rate_limit_tpd=0)
+    install_native_test_model_route(owner_user_id=_TEST_OWNER_USER_ID)
     return _STATE
 
 
@@ -176,7 +189,7 @@ class SDKParityE2ETest(unittest.TestCase):
 
     # 1. ── OpenAPI schema exposes every TofuOptions field ─────────
 
-    def test_openapi_tofu_config_includes_new_fields(self):
+    def test_openapi_tofu_config_matches_current_typed_fields(self):
         async def go():
             r = await self._client().get('/api/openapi.json')
             self.assertEqual(r.status_code, 200)
@@ -189,10 +202,11 @@ class SDKParityE2ETest(unittest.TestCase):
             for key in ('model', 'maxTokens', 'thinkingDepth', 'searchMode',
                          'projectPath'):
                 self.assertIn(key, props, f'expected {key} in TofuConfig')
-            # New fields from this round.
-            self.assertIn('maxBudgetUsd', props,
-                           'maxBudgetUsd missing from TofuConfig')
-            self.assertEqual(props['maxBudgetUsd']['type'], 'number')
+            self.assertIn('disableModelFallback', props)
+            # The task-budget state machine was retired. Its legacy keys are
+            # still tolerated as extras, but SDKs must not present them as
+            # enforced controls.
+            self.assertNotIn('maxBudgetUsd', props)
             # ≥30 properties — auto-generation should outpace the old
             # hand-maintained schema (which had 12).
             self.assertGreaterEqual(len(props), 30,
@@ -217,7 +231,7 @@ class SDKParityE2ETest(unittest.TestCase):
                 '/api/v1/chat/completions',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'qwen-plus',
+                    'model': native_test_model(),
                     'messages': [{'role': 'user', 'content': 'original prompt'}],
                     'stream': False,
                 },
@@ -343,19 +357,17 @@ class SDKParityE2ETest(unittest.TestCase):
         self.assertFalse(task['_tokenBudgetReminderFired'],
                          'a fresh window must earn one fresh reminder')
 
-    # 4. ── maxBudgetUsd is accepted by the chat route ────────────
+    # 4. ── retired config extras remain backward-compatible ─────
 
-    def test_max_budget_usd_accepted_by_chat_route(self):
-        # The stub shortcuts to done before any tool round, so the gate
-        # never triggers — but the value must round-trip through the
-        # request parsing without being rejected.  This confirms the
-        # field is recognized by the parser.
+    def test_retired_budget_extra_is_accepted_by_chat_route(self):
+        # Unknown options intentionally round-trip through TofuOptions.extras
+        # so an older caller is not rejected after a server-side retirement.
         async def go():
             r = await self._client().post(
                 '/api/v1/chat/completions',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'qwen-plus',
+                    'model': native_test_model(),
                     'messages': [{'role': 'user', 'content': 'hello'}],
                     'stream': False,
                     'config': {'maxBudgetUsd': 5.0},

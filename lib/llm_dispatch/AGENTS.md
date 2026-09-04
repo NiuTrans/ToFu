@@ -21,6 +21,18 @@ fallback, and retry dispatch around `lib/llm/`. Read
 - User-facing failures use the shared typed taxonomy and localized projection;
   never include secrets or raw provider bodies.
 
+## Dispatch API module layout
+
+`api.py` is a pure re-export facade (a dynamic module hook keeps `monkeypatch.setattr(api, ...)`
+sites propagating into the owning shard). Implementation lives in the `_api_*.py`
+shards: `_api_errors.py` (typed errors), `_api_hygiene.py` (body/key hygiene),
+`_api_contention.py` (slot contention metrics), `_api_budget.py` (per-attempt
+budgets), `_api_chat.py` (non-streaming dispatch), `_api_stream_state.py` (stream
+attempt state), `_api_stream.py` (streaming dispatch), `_api_multi.py` (multi-key
+fan-out). New code goes into the owning shard, never the facade. Shard imports stay
+acyclic and may only point leftward in this layering: `_api_errors` / `_api_hygiene` /
+`_api_contention` (leaf shards, no cross-imports) ← `_api_budget` ← `_api_stream_state` ←
+`_api_chat` / `_api_stream` ← `_api_multi`.
 ## Verification
 
 Run focused dispatch, slot, pin, retry-budget, fallback, health, and cancellation

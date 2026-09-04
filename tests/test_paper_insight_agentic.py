@@ -186,6 +186,8 @@ def test_synthesis_actually_researches():
     assert p.dispatched_rounds[0][1] is True, 'first round was not offered tools'
     assert out['insight'] is not None, 'no insight produced'
     assert out['llmError'] is False
+    assert out['agentUsageV1']['stage'] == 'insight'
+    assert out['agentUsageV1']['agent_dispatches'] == len(p.dispatched_rounds)
     _ok('synthesis runs a real web_search research round before writing the insight')
 
 

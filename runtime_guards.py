@@ -20,7 +20,10 @@ from urllib.parse import parse_qs, urlsplit
 
 __all__ = [
     'DeploymentConfiguration',
+    'RESOURCE_BUDGET_AUTOMATIC_ENV',
     'RESOURCE_BUDGET_ENV_KEYS',
+    'RESOURCE_BUDGET_POLICY_ENV',
+    'RESOURCE_BUDGET_POLICY_VERSION',
     'ResourceBudgetManifest',
     'SystemResourceSnapshot',
     'deployment_resource_default',
@@ -34,6 +37,7 @@ __all__ = [
     'resolve_deployment_mode',
     'resource_budget_manifest',
     'resolve_resource_budget',
+    'task_concurrency_hard_ceiling',
 ]
 
 
@@ -50,18 +54,65 @@ _RESOURCE_FALLBACKS = {
     'personal': {
         'TOFU_MALLOC_ARENA_MAX': 1,
         'TOFU_STORAGE_RPC_CAPACITY': 2,
+        'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB': 128,
         'TOFU_STORAGE_SQLITE_READ_POOL': 2,
+        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY': 8,
         'TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB': 32,
+        'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB': 16,
         'TOFU_TURN_SEARCH_PROJECTION_MAX_MIB': 512,
         'TOFU_BROWSER_STAGING_MAX_MIB': 256,
+        'TOFU_RAW_ARCHIVE_BUDGET_MIB': 256,
         'TOFU_BROWSER_POLL_MAX_INFLIGHT': 8,
         'TOFU_BROWSER_POLL_MAX_WAITERS': 8,
         'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': 64,
+        'TOFU_BROWSER_SESSION_LEASE_CAPACITY': 64,
         'TOFU_BROWSER_POLL_BODY_MAX_MIB': 32,
         'TOFU_MAX_SSE_PER_PRINCIPAL': 12,
         'TOFU_RUN_PYTHON_CACHE_MAX_MIB': 64,
         'TOFU_SERVER_PYTHON_CACHE_MAX_MIB': 64,
         'TOFU_TOKEN_COUNT_CACHE_CAPACITY': 128,
+        'TOFU_USAGE_CACHE_CAPACITY': 128,
+        'TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY': 512,
+        'TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY': 512,
+        'TOFU_TOOL_RESULT_CACHE_CAPACITY': 64,
+        'TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS': 600,
+        'TOFU_TIMER_LIVE_CAP': 8,
+        'TOFU_MEMORY_METADATA_CACHE_CAPACITY': 512,
+        'TOFU_MEMORY_METADATA_CACHE_MAX_MIB': 4,
+        'TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY': 1,
+        'TOFU_TRANSLATE_CACHE_MAX_MIB': 128,
+        'TOFU_TRANSLATE_MAX_429_ATTEMPTS': 4,
+        'TOFU_TRANSLATE_WORKERS': 1,
+        'TOFU_TRANSLATE_QUEUE_CAPACITY': 4,
+        'TOFU_TRANSLATE_WORKER_IDLE_SECONDS': 60,
+        'TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS': 2,
+        'TOFU_PRODUCTION_LLM_FANOUT': 1,
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS': 4,
+        'TOFU_PRODUCTION_IMAGE_FANOUT': 1,
+        'TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS': 4,
+        'TOFU_PRODUCTION_TTS_FANOUT': 1,
+        'TOFU_PDF_PROCESSES': 1,
+        'TOFU_PDF_PARSE_CAPACITY': 3,
+        'TOFU_PDF_MAX_PAGES': 256,
+        'TOFU_PDF_MAX_TEXT_MIB': 2,
+        'TOFU_PDF_PARSE_TIMEOUT': 300,
+        'TOFU_PDF_WORKER_IDLE_SECONDS': 60,
+        'TOFU_PDF_VLM_TASK_WORKERS': 1,
+        'TOFU_PDF_VLM_QUEUE_CAPACITY': 2,
+        'TOFU_PDF_VLM_WORKER_IDLE_SECONDS': 60,
+        'TOFU_PDF_VLM_CALL_WORKERS': 1,
+        'TOFU_PDF_VLM_MAX_PAGES': 64,
+        'TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS': 1920,
+        'TOFU_PDF_VLM_MAX_429_ATTEMPTS': 4,
+        'TOFU_KNOWLEDGE_ENRICH_WORKERS': 1,
+        'TOFU_KNOWLEDGE_ENRICH_OWNER_CAPACITY': 4,
+        'TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS': 60,
+        'TOFU_SWARM_GLOBAL_WORKERS': 1,
+        'TOFU_SWARM_MAX_PARALLEL': 1,
+        'TOFU_SWARM_MAX_AGENTS_PER_WAVE': 2,
+        'TOFU_SWARM_MAX_AGENTS_PER_SESSION': 6,
+        'TOFU_SWARM_MAX_RETRIES': 1,
+        'TOFU_SWARM_SESSION_CAPACITY': 2,
         'TOFU_CONTROL_RPC_WORKERS': 4,
         'TOFU_PROJECT_REFRESH_QUEUE_CAPACITY': 16,
         'TOFU_PROJECT_REFRESH_IDLE_SECONDS': 60,
@@ -71,17 +122,23 @@ _RESOURCE_FALLBACKS = {
         'TOFU_TREE_INDEX_MEM_ROOTS': 2,
         'TOFU_INCREMENTAL_TRANSLATE_ACTIVE': 2,
         'TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY': 8,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS': 32,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS': 30,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS': 256,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS': 1,
         'TOFU_MAX_INFLIGHT_TASKS': 1,
-        'TOFU_TASK_MAX_API_ROUNDS': 192,
+        'TOFU_TASK_RSS_RESERVE_MB': 1024,
         'TOFU_SYNC_WORKERS': 2,
         'TOFU_AGENT_WORKERS': 1,
         'TOOL_MAX_PARALLEL_WORKERS': 1,
         'TOFU_NUMERIC_THREADS': 1,
+        'TOFU_MCP_CRED_PROBE_WORKERS': 1,
         'TOFU_MCP_STDIO_IDLE_SECONDS': 300,
         'TOFU_EXECUTOR_IDLE_SECONDS': 600,
         'TOFU_LOG_TOTAL_BUDGET_MB': 128,
         'TOFU_STORAGE_MIN_FREE_BYTES': 256 * _MIB,
         'TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB': 64 * 1024,
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': 5896,
         'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB': 512,
         'TOFU_ATTEMPT_EVENT_TTL_DAYS': 1,
         'TOFU_PROCESS_RSS_RELIEF_MB': 1024,
@@ -90,18 +147,65 @@ _RESOURCE_FALLBACKS = {
     'distributed': {
         'TOFU_MALLOC_ARENA_MAX': 8,
         'TOFU_STORAGE_RPC_CAPACITY': 64,
+        'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB': 1024,
         'TOFU_STORAGE_SQLITE_READ_POOL': 16,
+        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY': 128,
         'TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB': 64,
+        'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB': 256,
         'TOFU_TURN_SEARCH_PROJECTION_MAX_MIB': 1024,
         'TOFU_BROWSER_STAGING_MAX_MIB': 4096,
+        'TOFU_RAW_ARCHIVE_BUDGET_MIB': 4096,
         'TOFU_BROWSER_POLL_MAX_INFLIGHT': 128,
         'TOFU_BROWSER_POLL_MAX_WAITERS': 128,
         'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': 2048,
+        'TOFU_BROWSER_SESSION_LEASE_CAPACITY': 2048,
         'TOFU_BROWSER_POLL_BODY_MAX_MIB': 64,
         'TOFU_MAX_SSE_PER_PRINCIPAL': 64,
         'TOFU_RUN_PYTHON_CACHE_MAX_MIB': 128,
         'TOFU_SERVER_PYTHON_CACHE_MAX_MIB': 128,
         'TOFU_TOKEN_COUNT_CACHE_CAPACITY': 1024,
+        'TOFU_USAGE_CACHE_CAPACITY': 4096,
+        'TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY': 4096,
+        'TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY': 4096,
+        'TOFU_TOOL_RESULT_CACHE_CAPACITY': 512,
+        'TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS': 3600,
+        'TOFU_TIMER_LIVE_CAP': 64,
+        'TOFU_MEMORY_METADATA_CACHE_CAPACITY': 8192,
+        'TOFU_MEMORY_METADATA_CACHE_MAX_MIB': 64,
+        'TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY': 8,
+        'TOFU_TRANSLATE_CACHE_MAX_MIB': 1024,
+        'TOFU_TRANSLATE_MAX_429_ATTEMPTS': 16,
+        'TOFU_TRANSLATE_WORKERS': 16,
+        'TOFU_TRANSLATE_QUEUE_CAPACITY': 128,
+        'TOFU_TRANSLATE_WORKER_IDLE_SECONDS': 600,
+        'TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS': 8,
+        'TOFU_PRODUCTION_LLM_FANOUT': 4,
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS': 16,
+        'TOFU_PRODUCTION_IMAGE_FANOUT': 4,
+        'TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS': 16,
+        'TOFU_PRODUCTION_TTS_FANOUT': 4,
+        'TOFU_PDF_PROCESSES': 4,
+        'TOFU_PDF_PARSE_CAPACITY': 16,
+        'TOFU_PDF_MAX_PAGES': 2048,
+        'TOFU_PDF_MAX_TEXT_MIB': 16,
+        'TOFU_PDF_PARSE_TIMEOUT': 3600,
+        'TOFU_PDF_WORKER_IDLE_SECONDS': 600,
+        'TOFU_PDF_VLM_TASK_WORKERS': 4,
+        'TOFU_PDF_VLM_QUEUE_CAPACITY': 32,
+        'TOFU_PDF_VLM_WORKER_IDLE_SECONDS': 600,
+        'TOFU_PDF_VLM_CALL_WORKERS': 8,
+        'TOFU_PDF_VLM_MAX_PAGES': 512,
+        'TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS': 14_400,
+        'TOFU_PDF_VLM_MAX_429_ATTEMPTS': 16,
+        'TOFU_KNOWLEDGE_ENRICH_WORKERS': 8,
+        'TOFU_KNOWLEDGE_ENRICH_OWNER_CAPACITY': 128,
+        'TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS': 600,
+        'TOFU_SWARM_GLOBAL_WORKERS': 16,
+        'TOFU_SWARM_MAX_PARALLEL': 8,
+        'TOFU_SWARM_MAX_AGENTS_PER_WAVE': 16,
+        'TOFU_SWARM_MAX_AGENTS_PER_SESSION': 64,
+        'TOFU_SWARM_MAX_RETRIES': 2,
+        'TOFU_SWARM_SESSION_CAPACITY': 32,
         'TOFU_CONTROL_RPC_WORKERS': 32,
         'TOFU_PROJECT_REFRESH_QUEUE_CAPACITY': 512,
         'TOFU_PROJECT_REFRESH_IDLE_SECONDS': 600,
@@ -111,18 +215,24 @@ _RESOURCE_FALLBACKS = {
         'TOFU_TREE_INDEX_MEM_ROOTS': 4,
         'TOFU_INCREMENTAL_TRANSLATE_ACTIVE': 32,
         'TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY': 64,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS': 256,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS': 60,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS': 256,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS': 1,
         'TOFU_MAX_INFLIGHT_TASKS': 16,
-        'TOFU_TASK_MAX_API_ROUNDS': 512,
+        'TOFU_TASK_RSS_RESERVE_MB': 512,
         'TOFU_SYNC_WORKERS': 16,
         'TOFU_AGENT_WORKERS': 16,
         'TOOL_MAX_PARALLEL_WORKERS': 8,
         'TOFU_NUMERIC_THREADS': 4,
+        'TOFU_MCP_CRED_PROBE_WORKERS': 8,
         'TOFU_MCP_STDIO_IDLE_SECONDS': 1800,
         'TOFU_EXECUTOR_IDLE_SECONDS': 3600,
         'TOFU_LOG_TOTAL_BUDGET_MB': 512,
         'TOFU_STORAGE_MIN_FREE_BYTES': 1024 * _MIB,
         'TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB': 1024 * 1024,
-        'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB': 8192,
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': 21600,
+        'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB': 16_384,
         'TOFU_ATTEMPT_EVENT_TTL_DAYS': 7,
         'TOFU_PROCESS_RSS_RELIEF_MB': 4096,
         'TOFU_PROCESS_RSS_RECYCLE_MB': 8192,
@@ -131,15 +241,20 @@ _RESOURCE_FALLBACKS = {
 
 _RESOURCE_NAMES = tuple(_RESOURCE_FALLBACKS['personal'])
 RESOURCE_BUDGET_ENV_KEYS = frozenset(_RESOURCE_NAMES)
+RESOURCE_BUDGET_POLICY_VERSION = '2026-08-31.2'
+RESOURCE_BUDGET_POLICY_ENV = 'TOFU_RESOURCE_BUDGET_POLICY_VERSION'
+RESOURCE_BUDGET_AUTOMATIC_ENV = 'TOFU_RESOURCE_BUDGET_AUTOMATIC_DEFAULTS'
 _RESOURCE_SNAPSHOT_CACHE: dict[str, 'SystemResourceSnapshot'] = {}
 
 
 class ResourceBudgetManifest(TypedDict):
+    policy_version: str
     deployment_mode: str
     adaptive: bool
     probe: dict[str, object]
     defaults: dict[str, int]
     overrides: dict[str, str]
+    automatic: list[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +593,22 @@ def probe_system_resources(
     return snapshot
 
 
+def _task_slots_from_rss_budget(
+    hard_rss_mb: int,
+    task_reserve_mb: int,
+) -> int:
+    """Return task slots that fit beside the non-task process working set."""
+    if hard_rss_mb <= 0:
+        return 256
+    reserve = max(64, int(task_reserve_mb))
+    # Imports, route state, storage clients, terminal settlement, and transient
+    # response copies need a quarter of the process budget (at least 512 MiB)
+    # even with zero active agents.  Tasks consume only the remainder.
+    process_baseline_mb = max(512, int(hard_rss_mb) // 4)
+    task_budget_mb = max(0, int(hard_rss_mb) - process_baseline_mb)
+    return max(1, task_budget_mb // reserve)
+
+
 def _personal_resource_defaults(
     snapshot: SystemResourceSnapshot,
 ) -> dict[str, int]:
@@ -494,8 +625,67 @@ def _personal_resource_defaults(
     if available_mb is not None:
         memory_units = min(
             memory_units, max(1, (available_mb + 511) // 1024))
-    useful_parallelism = max(1, min(8, cpus, memory_units))
+
+    cgroup_is_explicit_budget = bool(
+        snapshot.cgroup_memory_limit_mb
+        and snapshot.host_memory_total_mb
+        and snapshot.cgroup_memory_limit_mb
+        < snapshot.host_memory_total_mb * 0.90)
+    hard_fraction = 0.70 if cgroup_is_explicit_budget else 0.375
+    hard_floor_mb = min(1536, max(768, int(capacity_mb * 0.50)))
+    # Scale the worker envelope on actual servers instead of pinning every
+    # personal deployment to the old 6 GiB workstation ceiling.  The fraction
+    # still reserves most host memory for the OS/browser (or 30% of an explicit
+    # application cgroup), while the absolute 64 GiB ceiling prevents a huge
+    # host probe from creating an unbounded single-process budget.
+    hard_rss_mb = max(
+        hard_floor_mb, min(64 * 1024, int(capacity_mb * hard_fraction)))
+    if available_mb is not None:
+        hard_rss_mb = min(
+            hard_rss_mb, max(hard_floor_mb, int(available_mb * 0.75)))
+    soft_target_mb = (
+        int(capacity_mb * 0.50)
+        if cgroup_is_explicit_budget else
+        int(hard_rss_mb * (2.0 / 3.0)))
+    if available_mb is not None:
+        soft_target_mb = min(soft_target_mb, int(available_mb * 0.50))
+    soft_rss_mb = max(512, soft_target_mb)
+    if hard_rss_mb - soft_rss_mb < 256:
+        soft_rss_mb = max(512, hard_rss_mb - 256)
+
+    # A 3 GiB worker on the 8 GiB reference computer historically sustains
+    # four ordinary tasks with a 512 MiB live-state envelope. Larger worker
+    # envelopes reserve 1 GiB per root so task concurrency scales only with the
+    # memory the process is actually allowed to retain.
+    task_rss_reserve_mb = (
+        512 if capacity_known and hard_rss_mb <= 3072 else
+        _RESOURCE_FALLBACKS['personal']['TOFU_TASK_RSS_RESERVE_MB'])
+    rss_task_units = _task_slots_from_rss_budget(
+        hard_rss_mb, task_rss_reserve_mb)
+    # The absolute 64-GiB worker envelope minus its 25% process baseline fits
+    # at most 48 default 1-GiB root tasks.  Align this CPU/capacity ceiling to
+    # that measured RSS boundary so a large personal server is not stranded at
+    # an unrelated 32-task cap; smaller hosts remain constrained first by CPU,
+    # current memory headroom, and ``rss_task_units`` below.
+    general_parallelism = max(1, min(48, cpus, memory_units))
+    task_parallelism = max(
+        1, min(general_parallelism, rss_task_units))
+    # This is a PER-TASK fan-out pool. Letting it grow with root-task count
+    # multiplies threads quadratically on a large server, so retain a separate
+    # four-way ceiling while root concurrency consumes the wider host budget.
+    tool_parallelism = max(1, min(4, cpus, memory_units))
     io_parallelism = max(2, min(12, cpus * 2, memory_units * 2))
+    # storage.v1 permits one 64 MiB frame so historical slot-only admission
+    # exposed ``rpc_capacity * 64 MiB`` of serialized buffers. Give each
+    # launch-probed memory unit 32 MiB while retaining room for at least one
+    # maximum request and one maximum response. The Sidecar consumes this as
+    # one process-wide weighted budget, independently of handler count.
+    rpc_inflight_max_mib = (
+        _RESOURCE_FALLBACKS['personal'][
+            'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB']
+        if not capacity_known else
+        max(128, min(512, memory_units * 32))
+    )
     sync_workers = max(2, min(16, cpus * 2, memory_units * 2))
     # Browser polls are async and normally retain only one small coroutine per
     # installed device.  Keep enough headroom for several personal computers
@@ -519,7 +709,7 @@ def _personal_resource_defaults(
                 max(16, available_mb // 128),
             )
         max_sse_per_principal = max(
-            8, min(24, useful_parallelism * 3))
+            8, min(24, general_parallelism * 3))
     numeric_threads = max(
         1, min(4, cpus, max(1, (memory_units + 1) // 2)))
     # Local MCP stdio servers are optional helper processes, but each npm/uv
@@ -566,6 +756,79 @@ def _personal_resource_defaults(
         project_refresh_idle_seconds = 60
     else:
         project_refresh_idle_seconds = 300
+    # VLM PDF transcription retains compressed source bytes and rendered page
+    # images, then fans out paid model calls. Bound pages before rendering and
+    # grant a second whole-document worker only when the launch probe shows
+    # substantial task headroom. Thirty seconds per admitted page gives the
+    # task deadline a conservative finite envelope across all batches.
+    if not capacity_known:
+        vlm_max_pages = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_PDF_VLM_MAX_PAGES']
+    else:
+        vlm_memory_mb = min(
+            capacity_mb,
+            available_mb if available_mb is not None else capacity_mb,
+        )
+        if vlm_memory_mb <= 4096:
+            vlm_max_pages = 64
+        elif vlm_memory_mb <= 8192:
+            vlm_max_pages = 128
+        elif vlm_memory_mb <= 16 * 1024:
+            vlm_max_pages = 192
+        else:
+            vlm_max_pages = 256
+    vlm_task_timeout_seconds = max(
+        1800, min(7200, vlm_max_pages * 30))
+    # Classic extraction retains the compressed source, parser-native state,
+    # Markdown output, and an IPC copy when it runs in the process pool. Keep
+    # the 8 GiB reference machine at one worker / three unfinished documents,
+    # while larger personal machines grow only to two workers. Page and text
+    # ceilings bound CPU and durable/context amplification independently of the
+    # historical 200 MiB compressed-input gate.
+    if not capacity_known:
+        classic_pdf_processes = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_PDF_PROCESSES']
+        classic_pdf_capacity = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_PDF_PARSE_CAPACITY']
+        classic_pdf_max_pages = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_PDF_MAX_PAGES']
+        classic_pdf_max_text_mib = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_PDF_MAX_TEXT_MIB']
+        classic_pdf_timeout = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_PDF_PARSE_TIMEOUT']
+    else:
+        classic_pdf_processes = 2 if task_parallelism >= 16 else 1
+        classic_pdf_capacity = max(3, classic_pdf_processes * 3)
+        # Classic extraction does not render a page-image batch or retain paid
+        # call inputs. Scale its page budget separately from VLM: installed
+        # capacity grants one page per 16 MiB and current headroom grants one
+        # per 8 MiB. Thus the 8/4 GiB reference machine keeps 512 pages while
+        # a 4/2 GiB host falls back to 256.
+        classic_pdf_max_pages = max(
+            256, min(1024, capacity_mb // 16))
+        if available_mb is not None:
+            classic_pdf_max_pages = min(
+                classic_pdf_max_pages,
+                max(256, available_mb // 8),
+            )
+        classic_pdf_max_text_mib = max(
+            2, min(8, (classic_pdf_max_pages + 127) // 128))
+        classic_pdf_timeout = max(
+            300, min(1800, classic_pdf_max_pages * 2))
+    # Swarm agents outlive the root turn and historically created one private
+    # thread/API pool per conversation. Derive both the process-wide expensive
+    # execution ceiling and each session's smaller share from the root-task
+    # envelope, then bound accepted waves/results separately. On the 8 GiB
+    # reference host this is two executing agents, four agents per wave, and
+    # twelve total agents in one live session.
+    swarm_global_workers = max(
+        1, min(4, max(1, (task_parallelism + 1) // 2)))
+    swarm_max_agents_per_wave = max(
+        2, min(8, swarm_global_workers * 2))
+    swarm_max_agents_per_session = max(
+        6, min(24, swarm_max_agents_per_wave * 3))
+    swarm_session_capacity = max(
+        2, min(8, task_parallelism))
     # SQLite's default cache is only 2 MiB per connection.  That is adequate
     # for bounded readers, but the sole writer repeatedly touches hot indexes
     # from every domain; evicting those pages turns a small UPSERT into random
@@ -578,28 +841,23 @@ def _personal_resource_defaults(
             sqlite_writer_cache_mib,
             max(8, available_mb // 64),
         )
-
-    cgroup_is_explicit_budget = bool(
-        snapshot.cgroup_memory_limit_mb
-        and snapshot.host_memory_total_mb
-        and snapshot.cgroup_memory_limit_mb
-        < snapshot.host_memory_total_mb * 0.90)
-    hard_fraction = 0.70 if cgroup_is_explicit_budget else 0.375
-    hard_floor_mb = min(1536, max(768, int(capacity_mb * 0.50)))
-    hard_rss_mb = max(
-        hard_floor_mb, min(6144, int(capacity_mb * hard_fraction)))
-    if available_mb is not None:
-        hard_rss_mb = min(
-            hard_rss_mb, max(hard_floor_mb, int(available_mb * 0.75)))
-    soft_target_mb = (
-        int(capacity_mb * 0.50)
-        if cgroup_is_explicit_budget else
-        int(hard_rss_mb * (2.0 / 3.0)))
-    if available_mb is not None:
-        soft_target_mb = min(soft_target_mb, int(available_mb * 0.50))
-    soft_rss_mb = max(512, soft_target_mb)
-    if hard_rss_mb - soft_rss_mb < 256:
-        soft_rss_mb = max(512, hard_rss_mb - 256)
+    # A revision-keyed public Turn baseline avoids repeatedly transferring and
+    # decoding the same multi-MiB writer row. Charge hydrated JSON bytes under
+    # an independent Sidecar-process budget: the 8 GiB reference gets 32 MiB,
+    # a 4/2 GiB host gets 16 MiB, and probe failure stays at the lean fallback.
+    # The consumer also enforces entry count, idle lifetime, and a 1 GiB hard
+    # ceiling for explicit distributed overrides.
+    if not capacity_known:
+        turn_projection_cache_mib = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB']
+    else:
+        turn_projection_cache_mib = max(
+            8, min(128, capacity_mb // 256))
+        if available_mb is not None:
+            turn_projection_cache_mib = min(
+                turn_projection_cache_mib,
+                max(8, available_mb // 128),
+            )
 
     disk_free_mb = snapshot.disk_free_mb
     if disk_free_mb is not None and disk_free_mb < 4096:
@@ -624,14 +882,23 @@ def _personal_resource_defaults(
         _RESOURCE_FALLBACKS['personal'][
             'TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB']
     )
+    # A verified backup performs a sequential image write plus full integrity
+    # and checksum reads. The old fixed 1,800-second deadline repeatedly lost
+    # all progress on large network-backed authorities. Derive one finite
+    # overnight window from the same recovery-copy budget at a conservative
+    # effective 16 MiB/s, retaining a 30-minute floor and six-hour default cap.
+    storage_backup_timeout_seconds = max(
+        1800,
+        min(21600, 1800 + recovery_copy_budget_mib // 16),
+    )
     # A WAL rebase writes one full database image to durable storage. Bound
     # the WAL ceiling from the same launch-time disk observation so a large
     # authority does not turn a tiny fixed threshold into continuous full-copy
-    # churn. Both the local WAL and its durable mirror fit inside two percent
+    # churn. Both the local WAL and its durable mirror fit inside four percent
     # of observed free space; the shipper additionally scales the effective
     # trigger to the authority size. Probe failure stays lean and explicit.
     fastpath_wal_rebase_max_mib = (
-        max(64, min(8192, int(disk_free_mb * 0.01)))
+        max(64, min(16_384, int(disk_free_mb * 0.02)))
         if disk_free_mb is not None else
         _RESOURCE_FALLBACKS['personal'][
             'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB']
@@ -655,6 +922,16 @@ def _personal_resource_defaults(
         if disk_free_mb is not None else
         _RESOURCE_FALLBACKS['personal']['TOFU_BROWSER_STAGING_MAX_MIB']
     )
+    # Durable Request Inspector raw evidence has no TTL or silent eviction.
+    # Bound the whole archive authority to one percent of the launch-time data
+    # volume's available space, capped at 4 GiB; an unknown probe stays at the
+    # explicit 256 MiB fallback. The writer independently preserves the
+    # storage minimum-free floor on every archive commit.
+    raw_archive_budget_mib = (
+        max(1, min(4096, int(disk_free_mb * 0.01)))
+        if disk_free_mb is not None else
+        _RESOURCE_FALLBACKS['personal']['TOFU_RAW_ARCHIVE_BUDGET_MIB']
+    )
     # Python bytecode is reconstructible and useful only as a small local
     # acceleration layer.  Scale its hard process-wide ceiling from the same
     # launch-time disk observation as every other zero-config disk budget;
@@ -667,6 +944,40 @@ def _personal_resource_defaults(
         python_cache_max_mib = (
             64 if disk_free_mb is not None else
             _RESOURCE_FALLBACKS['personal']['TOFU_RUN_PYTHON_CACHE_MAX_MIB'])
+    # Translation results are reconstructible API-cost caches, not durable
+    # user state.  Bound the whole sharded directory from the same data-volume
+    # observation: 0.25% of currently free space, with a small-machine floor
+    # and a personal-computer ceiling.  The cache owner divides this exact
+    # budget across all 256 hash shards, so skew cannot create unbounded disk
+    # growth. Probe failure remains lean and explicit.
+    translate_cache_max_mib = (
+        max(32, min(512, int(disk_free_mb) // 400))
+        if disk_free_mb is not None else
+        _RESOURCE_FALLBACKS['personal']['TOFU_TRANSLATE_CACHE_MAX_MIB']
+    )
+    # Memory-list metadata is reconstructible from user-owned Markdown files.
+    # Cache only parsed frontmatter (never bodies or eligibility decisions),
+    # and scale both identity cardinality and estimated Python residency from
+    # the one launch-time memory probe. The consumer repeats hard ceilings.
+    if not capacity_known:
+        memory_metadata_cache_capacity = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_MEMORY_METADATA_CACHE_CAPACITY']
+        memory_metadata_cache_max_mib = _RESOURCE_FALLBACKS['personal'][
+            'TOFU_MEMORY_METADATA_CACHE_MAX_MIB']
+    else:
+        memory_metadata_cache_capacity = max(
+            512, min(4096, capacity_mb // 4))
+        memory_metadata_cache_max_mib = max(
+            4, min(32, capacity_mb // 512))
+        if available_mb is not None:
+            memory_metadata_cache_capacity = min(
+                memory_metadata_cache_capacity,
+                max(512, available_mb // 2),
+            )
+            memory_metadata_cache_max_mib = min(
+                memory_metadata_cache_max_mib,
+                max(4, available_mb // 256),
+            )
     # Control RPC executes bounded, read-only filesystem requests away from
     # the event loop.  It shares the launch-time I/O parallelism observation,
     # but stays below the general storage pool so several browser tabs cannot
@@ -701,13 +1012,28 @@ def _personal_resource_defaults(
     return {
         'TOFU_MALLOC_ARENA_MAX': min(4, numeric_threads),
         'TOFU_STORAGE_RPC_CAPACITY': io_parallelism,
+        'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB': rpc_inflight_max_mib,
         'TOFU_STORAGE_SQLITE_READ_POOL': io_parallelism,
+        # One SQLite writer serializes all domains. RPC admission already
+        # bounds simultaneously live callers; keep a small second envelope
+        # for internal event/maintenance producers without retaining an
+        # arbitrary number of timed-out operation closures during slow I/O.
+        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY': max(
+            8, min(64, io_parallelism * 2)),
         'TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB': sqlite_writer_cache_mib,
+        'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB': turn_projection_cache_mib,
         'TOFU_TURN_SEARCH_PROJECTION_MAX_MIB': search_projection_max_mib,
         'TOFU_BROWSER_STAGING_MAX_MIB': browser_staging_max_mib,
+        'TOFU_RAW_ARCHIVE_BUDGET_MIB': raw_archive_budget_mib,
         'TOFU_BROWSER_POLL_MAX_INFLIGHT': browser_poll_max_inflight,
         'TOFU_BROWSER_POLL_MAX_WAITERS': browser_poll_max_waiters,
         'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': (
+            browser_client_registry_capacity),
+        # Browser pages and adapters retain one small owner/device lease each.
+        # Use the device-cardinality budget as the upper envelope, but expire
+        # all timed leases through one shared sweeper rather than multiplying
+        # resident Timer threads by this value.
+        'TOFU_BROWSER_SESSION_LEASE_CAPACITY': (
             browser_client_registry_capacity),
         'TOFU_BROWSER_POLL_BODY_MAX_MIB': browser_poll_body_max_mib,
         # SSE sockets and their proxy buffers are resident resources. Scale
@@ -720,7 +1046,134 @@ def _personal_resource_defaults(
         # Scale with useful task parallelism so each active task can keep a
         # small stable schema/prompt working set without an unbounded cache.
         'TOFU_TOKEN_COUNT_CACHE_CAPACITY': max(
-            64, min(1024, useful_parallelism * 64)),
+            64, min(1024, task_parallelism * 64)),
+        # Provider-reported prompt totals make the next round cheaper and more
+        # accurate, but a one-shot conversation may never be looked up again.
+        # Retain only the recent useful working set; eviction safely falls back
+        # to the next local counter tier.
+        'TOFU_USAGE_CACHE_CAPACITY': max(
+            128, min(2048, task_parallelism * 64)),
+        # The single-process throttle retains exact sliding-window timestamps.
+        # Bound identity cardinality from the same useful task concurrency;
+        # its owner derives one finite aggregate event envelope from this knob.
+        'TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY': max(
+            512, min(4096, task_parallelism * 256)),
+        # Tool Search repeatedly tokenizes a task-stable catalog plus short
+        # model queries. Cache only that economic working set; the gateway
+        # separately refuses to retain oversized strings as LRU keys.
+        'TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY': max(
+            512, min(4096, task_parallelism * 256)),
+        # A root task keeps reusable and streaming-prefetched tool receipts in
+        # process memory.  Bound that optimization independently of task TTL:
+        # the 8 GiB reference gets 128 entries, probe failure stays at 64, and
+        # larger personal hosts stop at 256.  The consumer retains a separate
+        # 1,024-entry hard ceiling for explicit operator overrides.
+        'TOFU_TOOL_RESULT_CACHE_CAPACITY': max(
+            64, min(256, task_parallelism * 32)),
+        # Durable task-result + event replay makes terminal chat dictionaries
+        # reconstructible. Keep a short late-poller window on personal hosts
+        # instead of pinning up to several MiB of event objects for one hour;
+        # larger workstations retain modestly more warmth, never over 30 min.
+        'TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS': max(
+            600, min(1800, task_parallelism * 150)),
+        # Timer watchers currently own one sleeping daemon thread apiece.
+        # Bound both durable admission and the live registry from this one
+        # launch-time probe; future coordinator/queue implementations can
+        # retain the same observable product budget.
+        'TOFU_TIMER_LIVE_CAP': max(
+            8, min(16, task_parallelism * 2)),
+        'TOFU_MEMORY_METADATA_CACHE_CAPACITY': (
+            memory_metadata_cache_capacity),
+        'TOFU_MEMORY_METADATA_CACHE_MAX_MIB': memory_metadata_cache_max_mib,
+        # Full paper source is useful only while a user asks successive
+        # questions about a small active set. Each entry is independently
+        # capped at one million characters by the Paper contract, so this
+        # probe-derived cardinality also gives the cache a deterministic
+        # resident envelope. The consumer repeats a lower hard ceiling.
+        'TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY': max(
+            1, min(8, (task_parallelism + 1) // 2)),
+        'TOFU_TRANSLATE_CACHE_MAX_MIB': translate_cache_max_mib,
+        # Optional translation enrichment must not turn a provider-wide
+        # capacity incident into hundreds of paid transport attempts. Scale
+        # enough to sample several keys/models, then stop independently of the
+        # longer wall-clock deadline. Interactive task dispatch stays uncapped.
+        'TOFU_TRANSLATE_MAX_429_ATTEMPTS': max(
+            4, min(8, task_parallelism * 2)),
+        # Whole-turn, explicit text, PPTX, and paper translation share this
+        # one optional-work lane. Keep provider concurrency below ordinary
+        # root-task concurrency and retain only a finite owner-fair backlog.
+        'TOFU_TRANSLATE_WORKERS': max(
+            1, min(2, task_parallelism)),
+        'TOFU_TRANSLATE_QUEUE_CAPACITY': max(
+            4, min(32, task_parallelism * 4)),
+        'TOFU_TRANSLATE_WORKER_IDLE_SECONDS': 60,
+        # Reconstructible metadata and maintenance enrichments are lower value
+        # than an explicit production deliverable. Two actual 429 responses
+        # can sample a second slot without inheriting production's 4..8-call
+        # personal allowance; attended Agent dispatch remains uncapped here.
+        'TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS': 2,
+        # Independent long-production calls share one per-job fan-out budget.
+        # It never exceeds two on a personal computer; root-task admission is
+        # the separate process-wide multiplier.
+        'TOFU_PRODUCTION_LLM_FANOUT': max(
+            1, min(2, task_parallelism)),
+        # Paid long-production calls must not inherit the interactive
+        # dispatcher's intentionally unbounded 429 cycling. Larger admitted
+        # machines may sample more provider slots, still under a hard caller
+        # ceiling.
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS': max(
+            4, min(8, task_parallelism * 2)),
+        # Generated image replies retain base64 plus decoded pixels. Keep the
+        # per-job HTTP fan-out independently observable from text-model calls.
+        'TOFU_PRODUCTION_IMAGE_FANOUT': max(
+            1, min(2, task_parallelism)),
+        'TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS': max(
+            4, min(8, task_parallelism * 2)),
+        # TTS is HTTP-bound but each response retains audio bytes until ordered
+        # assembly. Two personal lanes shorten long narration without letting
+        # one task own the process or provider.
+        'TOFU_PRODUCTION_TTS_FANOUT': max(
+            1, min(2, task_parallelism)),
+        'TOFU_PDF_PROCESSES': classic_pdf_processes,
+        'TOFU_PDF_PARSE_CAPACITY': classic_pdf_capacity,
+        'TOFU_PDF_MAX_PAGES': classic_pdf_max_pages,
+        'TOFU_PDF_MAX_TEXT_MIB': classic_pdf_max_text_mib,
+        'TOFU_PDF_PARSE_TIMEOUT': classic_pdf_timeout,
+        'TOFU_PDF_WORKER_IDLE_SECONDS': 60,
+        # One owner-fair lane bounds retained source PDFs. Page-level calls
+        # have a second, lower ceiling, so neither job count nor a large PDF
+        # recreates an unbounded thread/API fan-out inside an admitted job.
+        'TOFU_PDF_VLM_TASK_WORKERS': (
+            2 if task_parallelism >= 16 else 1),
+        'TOFU_PDF_VLM_QUEUE_CAPACITY': max(
+            2, min(8, max(1, task_parallelism // 2))),
+        'TOFU_PDF_VLM_WORKER_IDLE_SECONDS': 60,
+        'TOFU_PDF_VLM_CALL_WORKERS': max(
+            1, min(4, max(1, task_parallelism // 2))),
+        'TOFU_PDF_VLM_MAX_PAGES': vlm_max_pages,
+        'TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS': vlm_task_timeout_seconds,
+        'TOFU_PDF_VLM_MAX_429_ATTEMPTS': max(
+            4, min(8, task_parallelism * 2)),
+        # Visual descriptions are optional, paid, and backed by durable asset
+        # claims. One process-wide owner-fair scheduler therefore retains only
+        # owner IDs, executes one asset per owner turn, and keeps personal-host
+        # provider concurrency below general foreground task concurrency.
+        'TOFU_KNOWLEDGE_ENRICH_WORKERS': (
+            2 if task_parallelism >= 16 else 1),
+        'TOFU_KNOWLEDGE_ENRICH_OWNER_CAPACITY': max(
+            4, min(32, task_parallelism * 4)),
+        'TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS': 60,
+        # Every session retains a private scheduler for dependency state, but
+        # expensive SubAgent execution also crosses one process-wide,
+        # owner-fair gate. These caps bound thread/API fan-out, accepted model
+        # work, retries, and live conversation registries independently.
+        'TOFU_SWARM_GLOBAL_WORKERS': swarm_global_workers,
+        'TOFU_SWARM_MAX_PARALLEL': swarm_global_workers,
+        'TOFU_SWARM_MAX_AGENTS_PER_WAVE': swarm_max_agents_per_wave,
+        'TOFU_SWARM_MAX_AGENTS_PER_SESSION': (
+            swarm_max_agents_per_session),
+        'TOFU_SWARM_MAX_RETRIES': 1,
+        'TOFU_SWARM_SESSION_CAPACITY': swarm_session_capacity,
         'TOFU_CONTROL_RPC_WORKERS': control_rpc_workers,
         'TOFU_PROJECT_REFRESH_QUEUE_CAPACITY': max(
             16, min(128, io_parallelism * 8)),
@@ -731,20 +1184,33 @@ def _personal_resource_defaults(
         'TOFU_TREE_INDEX_MAX_ENTRIES': tree_index_max_entries,
         'TOFU_TREE_INDEX_MEM_ROOTS': tree_index_mem_roots,
         'TOFU_INCREMENTAL_TRANSLATE_ACTIVE': max(
-            2, min(16, useful_parallelism * 2)),
+            2, min(16, task_parallelism * 2)),
         'TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY': max(
-            8, min(32, useful_parallelism * 4)),
-        'TOFU_MAX_INFLIGHT_TASKS': useful_parallelism,
-        'TOFU_TASK_MAX_API_ROUNDS': 192,
+            8, min(32, task_parallelism * 4)),
+        # Preview enrichment must never grow with the lifetime of a Turn.
+        # The terminal deliverable is outside this per-accumulator allowance.
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS': 32,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS': 30,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS': 256,
+        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS': 1,
+        'TOFU_MAX_INFLIGHT_TASKS': task_parallelism,
+        'TOFU_TASK_RSS_RESERVE_MB': task_rss_reserve_mb,
         'TOFU_SYNC_WORKERS': sync_workers,
-        'TOFU_AGENT_WORKERS': useful_parallelism,
-        'TOOL_MAX_PARALLEL_WORKERS': useful_parallelism,
+        'TOFU_AGENT_WORKERS': task_parallelism,
+        'TOOL_MAX_PARALLEL_WORKERS': tool_parallelism,
         'TOFU_NUMERIC_THREADS': numeric_threads,
+        # Credential probes have no foreground cancellation owner. Defer a
+        # diagnostic when these finite slots are busy; the maintenance sweep
+        # retries it without delaying connection or retaining another thread.
+        'TOFU_MCP_CRED_PROBE_WORKERS': max(
+            1, min(4, max(1, task_parallelism // 2))),
         'TOFU_MCP_STDIO_IDLE_SECONDS': mcp_stdio_idle_seconds,
         'TOFU_EXECUTOR_IDLE_SECONDS': executor_idle_seconds,
         'TOFU_LOG_TOTAL_BUDGET_MB': log_budget_mb,
         'TOFU_STORAGE_MIN_FREE_BYTES': storage_reserve_mb * _MIB,
         'TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB': recovery_copy_budget_mib,
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': (
+            storage_backup_timeout_seconds),
         'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB': (
             fastpath_wal_rebase_max_mib),
         'TOFU_ATTEMPT_EVENT_TTL_DAYS': 1,
@@ -772,6 +1238,40 @@ def deployment_resource_default(
         raise KeyError(f'unknown deployment resource: {name}') from exc
 
 
+def task_concurrency_hard_ceiling(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Return the personal task ceiling implied by the worker RSS budget.
+
+    Operators may raise task concurrency, but not independently of the process
+    hard ceiling that the lifecycle manager enforces.  Raising both remains an
+    explicit supported override. Distributed replicas retain their external
+    deployment admission contract.
+    """
+    env = os.environ if environment is None else environment
+    mode = (env.get('TOFU_DEPLOYMENT_MODE') or 'personal').strip().lower()
+    if mode == 'distributed':
+        return 256
+
+    def _positive_mb(name: str) -> int:
+        default = deployment_resource_default(name, env)
+        try:
+            value = int(float(str(env.get(name) or default)))
+        except (TypeError, ValueError, OverflowError):
+            value = default
+        return value
+
+    hard_rss_mb = _positive_mb('TOFU_PROCESS_RSS_RECYCLE_MB')
+    if hard_rss_mb <= 0:
+        return 256
+    task_reserve_mb = max(
+        64, _positive_mb('TOFU_TASK_RSS_RESERVE_MB'))
+    return min(
+        256,
+        _task_slots_from_rss_budget(hard_rss_mb, task_reserve_mb),
+    )
+
+
 def resolve_resource_budget(
     name: str,
     environment: Mapping[str, str] | None = None,
@@ -790,15 +1290,37 @@ def resolve_resource_budget(
     if maximum < minimum:
         raise ValueError('maximum resource budget must be >= minimum')
     env = os.environ if environment is None else environment
+    if name not in RESOURCE_BUDGET_ENV_KEYS:
+        raise KeyError(f'unknown deployment resource: {name}')
+    # A valid operator override — including the adaptive value materialized at
+    # process launch — needs only hard-ceiling enforcement. Do not perform the
+    # filesystem/cgroup default probe merely to evaluate the unused fallback.
+    try:
+        raw_value = env.get(name, '')
+        value = int(raw_value) if str(raw_value).strip() else 0
+    except (TypeError, ValueError, OverflowError):
+        value = 0
+    if value > 0:
+        return max(int(minimum), min(int(maximum), value))
+
     default = deployment_resource_default(
         name, env, snapshot=snapshot)
-    try:
-        value = int(env.get(name, '') or default)
-    except (TypeError, ValueError, OverflowError):
-        value = default
-    if value <= 0:
-        value = default
-    return max(int(minimum), min(int(maximum), value))
+    return max(int(minimum), min(int(maximum), default))
+
+
+def storage_backup_timeout_seconds(
+    environment: Mapping[str, str] | None = None,
+    *,
+    snapshot: SystemResourceSnapshot | None = None,
+) -> int:
+    """Return the one bounded full-backup deadline for every entry point."""
+    return resolve_resource_budget(
+        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS',
+        environment,
+        minimum=1800,
+        maximum=86400,
+        snapshot=snapshot,
+    )
 
 
 def resource_budget_manifest(
@@ -810,11 +1332,17 @@ def resource_budget_manifest(
     env = os.environ if environment is None else environment
     observed = snapshot or probe_system_resources(env)
     mode = (env.get('TOFU_DEPLOYMENT_MODE') or 'personal').strip().lower()
+    automatic = (
+        _automatic_resource_names(env)
+        if env.get(RESOURCE_BUDGET_POLICY_ENV) == RESOURCE_BUDGET_POLICY_VERSION
+        else set()
+    )
     probe: dict[str, object] = {
         **observed.as_dict(),
         'data_path': str(_persistent_data_path(env)),
     }
     return {
+        'policy_version': RESOURCE_BUDGET_POLICY_VERSION,
         'deployment_mode': mode,
         'adaptive': mode != 'distributed',
         'probe': probe,
@@ -826,9 +1354,52 @@ def resource_budget_manifest(
         'overrides': {
             name: str(env.get(name)).strip()
             for name in _RESOURCE_NAMES
-            if env.get(name) not in (None, '')
+            if env.get(name) not in (None, '') and name not in automatic
         },
+        'automatic': sorted(automatic),
     }
+
+
+def _automatic_resource_names(environment: Mapping[str, str]) -> set[str]:
+    """Parse the internal provenance marker without widening public knobs."""
+    raw = str(environment.get(RESOURCE_BUDGET_AUTOMATIC_ENV) or '')
+    return {
+        name for name in raw.split(',')
+        if name in RESOURCE_BUDGET_ENV_KEYS
+    }
+
+
+def _prepare_resource_budget_environment(
+    environment: MutableMapping[str, str],
+) -> set[str]:
+    """Discard only defaults attributed to an older policy generation.
+
+    Explicit settings are never inferred from their numeric value.  A value is
+    replaceable only when a prior Tofu generation wrote its name into the
+    internal provenance marker.  This lets an in-place exec adopt a new policy
+    without laundering generated values into permanent operator overrides.
+    """
+    previous_policy = str(
+        environment.get(RESOURCE_BUDGET_POLICY_ENV) or '').strip()
+    automatic = _automatic_resource_names(environment) if previous_policy else set()
+    if previous_policy and previous_policy != RESOURCE_BUDGET_POLICY_VERSION:
+        previous_allocator = environment.get('TOFU_MALLOC_ARENA_MAX')
+        for name in automatic:
+            environment.pop(name, None)
+        if 'TOFU_MALLOC_ARENA_MAX' in automatic \
+                and environment.get('MALLOC_ARENA_MAX') == previous_allocator:
+            environment.pop('MALLOC_ARENA_MAX', None)
+        automatic.clear()
+        environment.pop(RESOURCE_BUDGET_AUTOMATIC_ENV, None)
+    return automatic
+
+
+def _write_resource_budget_provenance(
+    environment: MutableMapping[str, str],
+    automatic: set[str],
+) -> None:
+    environment[RESOURCE_BUDGET_POLICY_ENV] = RESOURCE_BUDGET_POLICY_VERSION
+    environment[RESOURCE_BUDGET_AUTOMATIC_ENV] = ','.join(sorted(automatic))
 
 
 def install_runtime_resource_defaults(
@@ -838,6 +1409,7 @@ def install_runtime_resource_defaults(
 ) -> ResourceBudgetManifest:
     """Materialize one boot-time adaptive snapshot into otherwise-empty knobs."""
     env = os.environ if environment is None else environment
+    automatic = _prepare_resource_budget_environment(env)
     observed = snapshot or probe_system_resources(env, refresh=True)
     manifest = resource_budget_manifest(env, snapshot=observed)
     for name, default_value in manifest['defaults'].items():
@@ -847,6 +1419,9 @@ def install_runtime_resource_defaults(
             continue
         if not str(env.get(name) or '').strip():
             env[name] = str(default_value)
+            automatic.add(name)
+    _write_resource_budget_provenance(env, automatic)
+    manifest['automatic'] = sorted(automatic)
     return manifest
 
 
@@ -872,11 +1447,12 @@ def install_process_resource_defaults(
     explicitly overridable through one bounded Tofu setting.
     """
     env = os.environ if environment is None else environment
+    manifest = install_runtime_resource_defaults(env, snapshot=snapshot)
+    automatic = _automatic_resource_names(env)
     configured_allocator = (
         env.get('TOFU_MALLOC_ARENA_MAX', '').strip()
         or env.get('MALLOC_ARENA_MAX', '').strip()
     )
-    manifest = install_runtime_resource_defaults(env, snapshot=snapshot)
     defaults = manifest['defaults']
     default_arenas = int(defaults['TOFU_MALLOC_ARENA_MAX'])
     try:
@@ -888,6 +1464,9 @@ def install_process_resource_defaults(
     arenas = max(1, min(64, arenas))
     env['TOFU_MALLOC_ARENA_MAX'] = str(arenas)
     env['MALLOC_ARENA_MAX'] = str(arenas)
+    if not configured_allocator:
+        automatic.add('TOFU_MALLOC_ARENA_MAX')
+    _write_resource_budget_provenance(env, automatic)
     return {'malloc_arena_max': arenas}
 
 

@@ -37,7 +37,12 @@ def _required_request_id(
     body: dict,
 ) -> OrchestrationHttpPreparation[str]:
     field = _HUMAN_GATE['requestIdField']
-    request_id = optional_str(body, field, default='').strip()
+    request_id = optional_str(
+        body,
+        field,
+        default='',
+        max_len=_HUMAN_GATE['requestIdMaxLength'],
+    ).strip()
     if not request_id:
         return OrchestrationHttpPreparation.reject(api_bad_request(
             f'{field} is required', field=field,

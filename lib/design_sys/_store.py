@@ -8,8 +8,8 @@ belong to BOTH capabilities, so they get their own library at
 direction is motion_video → design_sys, never the reverse).
 
 Same three-tier materialisation discipline as motion's store (hardlink →
-symlink → copy, never predicted — dolphinfs answers ``os.link`` with EPERM on
-this very host), same atomic-write rule, same extension whitelist.
+symlink → copy, never predicted — some FUSE mounts answer ``os.link`` with
+EPERM even on same-device paths), same atomic-write rule, same extension whitelist.
 """
 
 from __future__ import annotations

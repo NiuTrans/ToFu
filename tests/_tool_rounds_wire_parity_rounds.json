@@ -613,12 +613,40 @@
      {
       "path": "y.py",
       "status": "fail",
-      "description": "second"
+      "description": "second",
+      "detail": "y.py: Search text not found in y.py: c"
      }
     ]
    }
   ],
-  "roundNum": 39
+  "roundNum": 39,
+  "toolContent": "Applied 1/2 edits (1 failed)\n[1] OK x.py: 1 lines changed (3L → 3L)\n[2] FAIL y.py: Search text not found in y.py: c"
+ },
+ {
+  "_name": "batch-diffs-fail-compacted",
+  "status": "done",
+  "toolName": "apply_diffs",
+  "query": "Patch x.py (2 edits)",
+  "toolArgs": "{\"edits\":[{\"search\":\"a\",\"replace\":\"b\"},{\"search\":\"c\",\"replace\":\"d\"}]}",
+  "results": [
+   {
+    "badge": "2 edits",
+    "editSummaries": [
+     {
+      "path": "x.py",
+      "status": "ok",
+      "description": "first"
+     },
+     {
+      "path": "y.py",
+      "status": "fail",
+      "description": "second",
+      "detail": "y.py: Search text not found in y.py: c"
+     }
+    ]
+   }
+  ],
+  "roundNum": 56
  },
  {
   "_name": "elapsed-done",
@@ -688,7 +716,10 @@
         }
        ]
       }
-     ]
+     ],
+     "preset": "kimi-k3",
+     "raw": true,
+     "rev": 1124
     }
    }
   ],
@@ -801,5 +832,103 @@
    {}
   ],
   "roundNum": 50
+ },
+ {
+  "_name": "search-tools-results",
+  "status": "done",
+  "toolName": "search_tools",
+  "query": "edit project documentation",
+  "toolSearchTotal": 2,
+  "results": [
+   {
+    "type": "tool_catalog_match",
+    "toolName": "mcp__docs__update",
+    "namespace": "docs",
+    "snippet": "Update a documentation page",
+    "arguments": [
+     {
+      "name": "page_id",
+      "type": "string",
+      "required": true
+     }
+    ]
+   },
+   {
+    "type": "tool_catalog_match",
+    "toolName": "mcp__docs__search",
+    "namespace": "docs"
+   }
+  ],
+  "roundNum": 100
+ },
+ {
+  "_name": "injection-inbox",
+  "_inboxInject": true,
+  "inboxCount": 2,
+  "inboxAgentIds": [
+   "agent-one",
+   "agent-two"
+  ],
+  "inboxPreviews": [
+   {
+    "agentId": "agent-one",
+    "text": "<swarm-update><agent-id>agent-one</agent-id><role>reviewer</role><status>completed</status><elapsed-seconds>4</elapsed-seconds><tokens>321</tokens><output-file>reports/review.md</output-file><preview>Review **complete**.</preview><remaining running=\"1\" pending=\"0\"/></swarm-update>"
+   },
+   {
+    "agentId": "agent-two",
+    "text": "legacy raw update"
+   }
+  ],
+  "roundNum": 101
+ },
+ {
+  "_name": "injection-peer",
+  "_peerInject": true,
+  "peerCount": 2,
+  "peerPreviews": [
+   {
+    "fromConv": "sibling-alpha",
+    "text": "Alpha sent **evidence**."
+   },
+   {
+    "fromConv": "sibling-beta",
+    "text": "Beta confirmed the gate."
+   }
+  ],
+  "roundNum": 102
+ },
+ {
+  "_name": "injection-steer",
+  "_userSteerInject": true,
+  "steerCount": 1,
+  "steerPreviews": [
+   {
+    "text": "Please preserve the public contract."
+   }
+  ],
+  "roundNum": 103
+ },
+ {
+  "_name": "injection-stall",
+  "_stallNudge": true,
+  "stallTool": "run_command",
+  "stallPrompt": "[SYSTEM: TOOL CALL DID NOT RUN] Continue with the promised action.",
+  "roundNum": 104
+ }
+,
+ {
+  "_name": "compaction-L0",
+  "status": "done",
+  "toolName": "read_files",
+  "query": "Read 1 file: zh.json L1010-2900",
+  "compactionLayer": "L0",
+  "compactedFromChars": 100069,
+  "compactedToChars": 18000,
+  "rawToolTokens": 22461,
+  "toolTokens": 4512,
+  "results": [
+   {}
+  ],
+  "roundNum": 105
  }
 ]

@@ -8,12 +8,21 @@ import type {
   ConversationBlockViewModel,
   ConversationQueueItemViewModel,
   ConversationTurnAction,
+  ConversationTurnActionViewModel,
   ConversationTurnViewModel,
 } from '../presentation/conversation-view-model';
 import type { ConversationSurfaceRenderers } from './conversation-surface';
 
+export interface ClassicConversationMarkdownOptions {
+  /** Human-authored input is plain text: neutralize raw '<tag>' HTML so it
+   * renders literally instead of being swallowed as an unknown element. */
+  escapeRawHtml?: boolean;
+}
 export interface ClassicConversationRendererPorts {
-  renderSafeMarkdownHtml(markdown: string): string;
+  renderSafeMarkdownHtml(
+    markdown: string,
+    options?: ClassicConversationMarkdownOptions,
+  ): string;
   /** Transitional trusted mascot markup from the retained branding module. */
   renderTurnAvatarHtml?(turn: ConversationTurnViewModel): string;
   /**
@@ -23,9 +32,9 @@ export interface ClassicConversationRendererPorts {
   renderTurnContextParts?(
     block: Extract<ConversationBlockViewModel, { kind: 'context' }>,
   ): { fold: string; rail: string } | null;
-  /** Transitional rich-tool port; output must already be sanitized. */
+  /** Transitional rich tool/program-timeline port; output is sanitized. */
   renderToolBlockHtml?(
-    block: Extract<ConversationBlockViewModel, { kind: 'tool' }>,
+    block: Extract<ConversationBlockViewModel, { kind: 'tool' | 'program' }>,
     turn: ConversationTurnViewModel,
   ): string;
   /** Transitional injection-row port; output must already be sanitized. */
@@ -44,6 +53,7 @@ export interface ClassicConversationRendererPorts {
   actionLabel?(
     action: ConversationTurnAction,
     turn: ConversationTurnViewModel,
+    actionView?: ConversationTurnActionViewModel,
   ): string;
   formatTimestamp?(timestamp: string | number): string;
   resolveMediaUrl?(url: string): string;
@@ -594,6 +604,12 @@ function defaultActionLabel(action: ConversationTurnAction): string {
   return action.charAt(0).toUpperCase() + action.slice(1);
 }
 
+/* 5-char cap mirrors the knowledge panel's _knowledgeFileGlyph. */
+function documentAttachmentGlyph(fileName: string): string {
+  const extension = /\.([A-Za-z0-9]{1,5})$/.exec(fileName)?.[1];
+  return extension ? extension.toUpperCase() : 'DOC';
+}
+
 type ManagedHtmlElement = HTMLElement & {
   _tofuRenderedHtml?: string;
 };
@@ -602,6 +618,7 @@ interface InteractiveElementState {
   path: ReadonlyArray<number>;
   open?: boolean;
   expanded: boolean;
+  collapsed: boolean;
   ariaExpanded?: string;
   scrollTop: number;
 }
@@ -652,7 +669,7 @@ function captureInteractiveElementStates(
   root: HTMLElement,
 ): InteractiveElementState[] {
   return Array.from(root.querySelectorAll<HTMLElement>(
-    'details, [aria-expanded], .expanded',
+    'details, [aria-expanded], .expanded, [data-collapsible="true"]',
   )).flatMap((element) => {
     const path = pathFromRoot(root, element);
     if (!path) return [];
@@ -661,6 +678,7 @@ function captureInteractiveElementStates(
       ...(element.tagName === 'DETAILS'
         ? { open: (element as HTMLDetailsElement).open } : {}),
       expanded: element.classList.contains('expanded'),
+      collapsed: element.classList.contains('collapsed'),
       ...(element.hasAttribute('aria-expanded')
         ? { ariaExpanded: element.getAttribute('aria-expanded') ?? 'false' }
         : {}),
@@ -680,11 +698,97 @@ function restoreInteractiveElementStates(
       (element as HTMLDetailsElement).open = state.open;
     }
     if (state.expanded) element.classList.add('expanded');
+    if (element.hasAttribute('data-collapsible')) {
+      element.classList.toggle('collapsed', state.collapsed);
+    }
     if (state.ariaExpanded !== undefined) {
       element.setAttribute('aria-expanded', state.ariaExpanded);
     }
     if (state.scrollTop > 0) element.scrollTop = state.scrollTop;
   }
+}
+
+const SWARM_READER_STATE_CLASSES = Object.freeze([
+  'sw-collapsed', 'sw-a-open', 'sw-tl-open',
+]);
+
+type ReconciliationParent = Node & ParentNode;
+
+function syncSwarmElementAttributes(
+  current: Element,
+  next: Element,
+): void {
+  for (const attribute of Array.from(current.attributes)) {
+    if (attribute.name !== 'class' && !next.hasAttribute(attribute.name)) {
+      current.removeAttribute(attribute.name);
+    }
+  }
+  for (const attribute of Array.from(next.attributes)) {
+    if (attribute.name !== 'class'
+        && current.getAttribute(attribute.name) !== attribute.value) {
+      current.setAttribute(attribute.name, attribute.value);
+    }
+  }
+  const nextClasses = new Set(
+    (next.getAttribute('class') ?? '').split(/\s+/).filter(Boolean),
+  );
+  for (const className of SWARM_READER_STATE_CLASSES) {
+    if (current.classList.contains(className)) nextClasses.add(className);
+    else nextClasses.delete(className);
+  }
+  const className = Array.from(nextClasses).join(' ');
+  if ((current.getAttribute('class') ?? '') !== className) {
+    current.setAttribute('class', className);
+  }
+}
+
+function reconcileSwarmNode(current: Node, next: Node): void {
+  if (current.nodeType === 3 && next.nodeType === 3) {
+    if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+    return;
+  }
+  const currentElement = current.nodeType === 1 ? current as Element : null;
+  const nextElement = next.nodeType === 1 ? next as Element : null;
+  if (current.nodeType !== next.nodeType
+      || currentElement?.tagName !== nextElement?.tagName) {
+    current.parentNode?.replaceChild(next.cloneNode(true), current);
+    return;
+  }
+  if (!currentElement || !nextElement) return;
+  syncSwarmElementAttributes(currentElement, nextElement);
+  reconcileSwarmChildren(
+    currentElement as ReconciliationParent,
+    nextElement as ReconciliationParent,
+  );
+}
+
+function reconcileSwarmChildren(
+  currentParent: ReconciliationParent,
+  nextParent: ReconciliationParent,
+): void {
+  const currentNodes = Array.from(currentParent.childNodes);
+  const nextNodes = Array.from(nextParent.childNodes);
+  for (let index = 0; index < nextNodes.length; index += 1) {
+    const current = currentNodes[index];
+    if (current) reconcileSwarmNode(current, nextNodes[index]);
+    else currentParent.appendChild(nextNodes[index].cloneNode(true));
+  }
+  for (let index = currentNodes.length - 1; index >= nextNodes.length; index -= 1) {
+    currentParent.removeChild(currentNodes[index]);
+  }
+}
+
+/** Preserve live Swarm nodes so streaming updates do not restart animations. */
+function reconcileSwarmRichHtml(node: HTMLElement, html: string): boolean {
+  if (!node.querySelector('.sw-panel')) return false;
+  const template = node.ownerDocument.createElement('template');
+  template.innerHTML = html;
+  if (!template.content.querySelector('.sw-panel')) return false;
+  reconcileSwarmChildren(
+    node as ReconciliationParent,
+    template.content as ReconciliationParent,
+  );
+  return true;
 }
 
 function setManagedRichHtml(node: HTMLElement, html: string): boolean {
@@ -695,7 +799,7 @@ function setManagedRichHtml(node: HTMLElement, html: string): boolean {
   const focusedPath = activeElement && node.contains(activeElement)
     ? pathFromRoot(node, activeElement)
     : null;
-  node.innerHTML = html;
+  if (!reconcileSwarmRichHtml(node, html)) node.innerHTML = html;
   managedNode._tofuRenderedHtml = html;
   restoreInteractiveElementStates(node, interactiveStates);
   const restoredFocus = focusedPath ? elementAtPath(node, focusedPath) : null;
@@ -782,6 +886,11 @@ const ACTION_ICON_PATHS: Record<string, ReadonlyArray<string>> = {
     'm7 10 5 5 5-5',
     'M12 15V3',
   ],
+  'promote-decision': [
+    'M9 18h6',
+    'M10 22h4',
+    'M8.5 14.5A7 7 0 1 1 15.5 14.5C14.5 15.3 14 16 14 18h-4c0-2-0.5-2.7-1.5-3.5z',
+  ],
   branch: [
     'M6 3v12',
     'M18 6m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0',
@@ -824,6 +933,7 @@ function renderTextBlock(
   node: HTMLElement,
   block: Extract<ConversationBlockViewModel, { kind: 'text' }>,
   ports: ClassicConversationRendererPorts,
+  turn?: ConversationTurnViewModel,
 ): void {
   node.className = 'conversation-block conversation-block--text message-body';
   node.dataset.deliverable = String(block.deliverable);
@@ -838,6 +948,7 @@ function renderTextBlock(
   body.className = 'md-content';
   setManagedHtml(body, ports.renderSafeMarkdownHtml(
     block.displayMarkdown ?? block.markdown,
+    turn?.actor === 'human' ? { escapeRawHtml: true } : undefined,
   ));
   renderTranslationAlternative(node, block, ports);
 }
@@ -929,8 +1040,17 @@ function renderLiveStatusBlock(
   node.setAttribute('aria-atomic', 'true');
   const document = node.ownerDocument;
   const phase = value.phase || 'working';
+  const phaseFallback = phase === 'executor_preparing'
+    ? "Task accepted; binding it to this server's task scheduler…"
+    : phase === 'executor_queued'
+      ? "Waiting in this server's AI task queue; syncing queue position and "
+        + 'available slots (not model/API quota)…'
+      : phase === 'worker_starting'
+        ? 'Server execution slot acquired; starting the task…'
+        : '';
   const localizedDetail = value.detailKey
-    ? textFor(ports, value.detailKey, value.detail || value.label,
+    ? textFor(ports, value.detailKey,
+      value.detail || value.label || phaseFallback,
       value.detailArgs)
     : '';
   let label = localizedDetail || value.detail || value.label;
@@ -948,10 +1068,28 @@ function renderLiveStatusBlock(
     );
   } else if (phase === 'waiting' && !localizedDetail && !value.detail) {
     label = textFor(
-      ports, 'stream.phase.waitingWorkerStatus', 'Waiting for the agent…',
+      ports, 'stream.phase.waitingWorkerStatus',
+      'No execution status yet — resynchronizing…',
     );
   } else if (phase === 'responding' && !value.detail) {
     label = textFor(ports, 'autopilot.warming', 'Autopilot is responding…');
+  }
+  const modelRoute = value.modelRoute;
+  if (modelRoute?.selectedModel && modelRoute.resolvedModel
+      && modelRoute.selectedModel !== modelRoute.resolvedModel
+      && value.detailKey !== 'stream.phase.modelRouted') {
+    const routeLabel = textFor(
+      ports,
+      'stream.phase.modelRouted',
+      'Model routing: {from} → {to} ({role}, {tier})',
+      {
+        from: modelRoute.selectedModel,
+        to: modelRoute.resolvedModel,
+        role: modelRoute.role,
+        tier: modelRoute.tier,
+      },
+    );
+    label = label ? `${routeLabel} · ${label}` : routeLabel;
   }
 
   if (phase === 'warming') {
@@ -1112,6 +1250,44 @@ function renderToolBlock(
   }
   result.className = 'conversation-tool__result';
   result.textContent = displayJson(block.result.content ?? block.result);
+}
+
+function renderProgramBlock(
+  node: HTMLElement,
+  block: Extract<ConversationBlockViewModel, { kind: 'program' }>,
+  turn: ConversationTurnViewModel,
+  ports: ClassicConversationRendererPorts,
+): void {
+  node.className = 'conversation-block conversation-block--program';
+  const richHtml = ports.renderToolBlockHtml?.(block, turn) ?? '';
+  if (richHtml) {
+    node.dataset.rendererMode = 'rich';
+    setManagedRichHtml(node, richHtml);
+    return;
+  }
+  const priorOpen = node.querySelector('details')?.open ?? false;
+  node.dataset.rendererMode = 'fallback';
+  node.replaceChildren();
+  resetManagedHtml(node);
+  const details = node.ownerDocument.createElement('details');
+  details.className = 'conversation-tool conversation-program';
+  details.open = priorOpen;
+  const summary = node.ownerDocument.createElement('summary');
+  summary.className = 'conversation-tool__summary';
+  const title = ports.localizedText?.(
+    'ptc.title', 'Program orchestration',
+  ) ?? 'Program orchestration';
+  const status = typeof block.round.programStatus === 'string'
+    ? block.round.programStatus : block.round.status;
+  summary.textContent = [title, status].filter(Boolean).join(' · ');
+  const code = node.ownerDocument.createElement('pre');
+  code.className = 'conversation-tool__input';
+  code.textContent = String(block.round.programCode ?? '');
+  const result = node.ownerDocument.createElement('pre');
+  result.className = 'conversation-tool__result';
+  result.textContent = displayJson(block.round.programResult);
+  details.append(summary, code, result);
+  node.appendChild(details);
 }
 
 function activityInterpolationArgs(
@@ -1418,6 +1594,9 @@ function renderFileChangesBlock(
   if (turn.status === 'completed' && block.commandAvailable) {
     const action = node.ownerDocument.createElement('button');
     action.type = 'button';
+    action.addEventListener('click', (event) => {
+      event.preventDefault();
+    });
     if (block.state === 'applied') {
       action.className = 'fc-undo-btn';
       action.dataset.conversationAction = 'undo-turn-files';
@@ -1441,8 +1620,9 @@ function renderFileChangesBlock(
     error.textContent = String(block.error);
     actions.append(error);
   }
+  summary.append(actions);
   details.append(summary, fileList);
-  node.replaceChildren(details, actions);
+  node.replaceChildren(details);
 }
 
 function renderProvenanceBlock(
@@ -1473,6 +1653,64 @@ function renderProvenanceBlock(
   node.replaceChildren(details);
 }
 
+function renderRolledBackBlock(
+  node: HTMLElement,
+  block: Extract<ConversationBlockViewModel, { kind: 'rolled-back' }>,
+  ports: ClassicConversationRendererPorts,
+): void {
+  node.className = 'conversation-block conversation-block--rolled-back';
+  const document = node.ownerDocument;
+  const thinking = String(block.value.thinking ?? '').trim();
+  const content = String(block.value.content ?? '').trim();
+  const fragment = document.createDocumentFragment();
+  if (thinking) {
+    fragment.appendChild(rolledBackDisclosure(
+      document, ports, 'thinking-prior',
+      textFor(ports, 'rolledBack.thinking', 'Earlier Thinking (rolled back)'),
+      thinking,
+    ));
+  }
+  if (content) {
+    fragment.appendChild(rolledBackDisclosure(
+      document, ports, 'content-prior',
+      textFor(ports, 'rolledBack.content', 'Interrupted Draft (rolled back)'),
+      content,
+    ));
+  }
+  node.replaceChildren(fragment);
+}
+
+/* Display-only disclosure for one rewound lane. Reuses the thinking-block
+ * visual language; the -prior variants (dashed border, muted label) mark it
+ * as history that will never rejoin the live stream. Collapsed by default. */
+function rolledBackDisclosure(
+  document: Document,
+  ports: ClassicConversationRendererPorts,
+  variantClass: string,
+  labelText: string,
+  markdown: string,
+): HTMLDetailsElement {
+  const details = document.createElement('details');
+  details.className = `thinking-block ${variantClass}`;
+  details.dataset.state = 'complete';
+  const summary = document.createElement('summary');
+  summary.className = 'thinking-header';
+  const stateDot = document.createElement('span');
+  stateDot.className = 'thinking-state-dot';
+  stateDot.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.className = 'thinking-label';
+  label.textContent = labelText;
+  summary.append(stateDot, label, disclosureChevron(document, 'thinking-toggle'));
+  const contentEl = document.createElement('div');
+  contentEl.className = 'thinking-content';
+  const body = document.createElement('div');
+  body.className = 'thinking-text thinking-md md-content';
+  setManagedHtml(body, ports.renderSafeMarkdownHtml(markdown));
+  contentEl.appendChild(body);
+  details.append(summary, contentEl);
+  return details;
+}
 function safeMediaUrl(
   raw: string | undefined,
   ports: ClassicConversationRendererPorts,
@@ -1844,28 +2082,41 @@ function renderAttachmentsBlock(
     });
     children.push(grid);
   }
-  if (block.videos.length) {
+  const videoItems = [
+    ...block.videos.map((item, index) => ({ item, legacyIndex: index })),
+    ...block.mediaAttachments.filter((item) => item.kind === 'video')
+      .map((item) => ({ item, legacyIndex: null })),
+  ];
+  if (videoItems.length) {
     const list = document.createElement('div');
     list.className = 'msg-video-list';
-    block.videos.forEach((item, index) => {
+    videoItems.forEach(({ item, legacyIndex }) => {
+      const unified = legacyIndex === null
+        ? item as typeof block.mediaAttachments[number] : null;
+      const legacy = legacyIndex === null
+        ? null : item as typeof block.videos[number];
       const card = document.createElement('button');
       card.type = 'button';
       card.className = 'msg-video-card conversation-attachment-button';
-      const videoUrl = safeMediaUrl(item.video_url, ports);
+      const videoUrl = safeMediaUrl(
+        unified?.sourceUrl ?? legacy?.video_url, ports);
       if (videoUrl) {
-        card.dataset.conversationAction = 'open-video';
-        card.dataset.operation = String(index);
+        card.dataset.conversationAction = unified ? 'open-media' : 'open-video';
+        card.dataset.operation = unified
+          ? unified.attachmentId : String(legacyIndex);
       } else {
         card.disabled = true;
       }
-      card.title = item.name || 'video';
+      const itemName = unified?.name ?? legacy?.name ?? 'video';
+      card.title = itemName;
       const thumb = document.createElement('span');
       thumb.className = 'msg-video-thumb';
-      const poster = safeMediaUrl(item.poster, ports);
+      const poster = safeMediaUrl(
+        unified?.previewUrl ?? legacy?.poster, ports);
       if (poster) {
         const image = document.createElement('img');
         image.src = poster;
-        image.alt = item.name ? `${item.name} poster` : 'Video poster';
+        image.alt = `${itemName} poster`;
         image.width = 72;
         image.height = 44;
         image.loading = 'lazy';
@@ -1881,15 +2132,21 @@ function renderAttachmentsBlock(
       info.className = 'msg-video-info';
       const name = document.createElement('span');
       name.className = 'msg-video-name';
-      name.textContent = item.name || 'video';
+      name.textContent = itemName;
       const metadata = document.createElement('span');
       metadata.className = 'msg-video-meta';
-      const frameCount = item.frame_count ?? item.frames?.length ?? 0;
+      const frameCount = unified
+        ? (unified.frameCount ?? 0)
+        : (legacy?.frame_count ?? legacy?.frames?.length ?? 0);
       metadata.textContent = [
-        item.duration_s ? formatDuration(item.duration_s) : '',
+        (unified?.durationSeconds ?? legacy?.duration_s)
+          ? formatDuration(unified?.durationSeconds ?? legacy?.duration_s ?? 0)
+          : '',
         `${frameCount} ${textFor(ports, 'upload.videoFrames', 'frames')}`,
-        item.transcript
-          ? textFor(ports, 'upload.videoTranscript', 'transcript') : '',
+        unified
+          ? unified.status
+          : (legacy?.transcript
+            ? textFor(ports, 'upload.videoTranscript', 'transcript') : ''),
       ].filter(Boolean).join(' · ');
       info.append(name, metadata);
       card.append(thumb, info);
@@ -1897,33 +2154,46 @@ function renderAttachmentsBlock(
     });
     children.push(list);
   }
-  if (block.pdfTexts.length) {
+  const documentItems = [
+    ...block.pdfTexts.map((item, index) => ({ item, legacyIndex: index })),
+    ...block.mediaAttachments.filter((item) => item.kind === 'document')
+      .map((item) => ({ item, legacyIndex: null })),
+  ];
+  if (documentItems.length) {
     const documents = document.createElement('div');
     documents.className = 'pdf-attachments-indicator';
-    block.pdfTexts.forEach((item, index) => {
+    documentItems.forEach(({ item, legacyIndex }) => {
+      const unified = legacyIndex === null
+        ? item as typeof block.mediaAttachments[number] : null;
+      const legacy = legacyIndex === null
+        ? null : item as typeof block.pdfTexts[number];
       const badge = document.createElement('button');
       badge.type = 'button';
       badge.className = 'pdf-attach-badge conversation-attachment-button';
-      badge.dataset.conversationAction = 'preview-document';
-      badge.dataset.operation = String(index);
-      badge.title = item.name || 'Document';
+      badge.dataset.conversationAction = unified ? 'open-media' : 'preview-document';
+      badge.dataset.operation = unified
+        ? unified.attachmentId : String(legacyIndex);
+      badge.title = unified?.name ?? legacy?.name ?? 'Document';
       const icon = document.createElement('span');
       icon.className = 'pdf-attach-icon';
-      icon.textContent = 'DOC';
+      icon.textContent = documentAttachmentGlyph(unified?.name ?? legacy?.name ?? '');
       const info = document.createElement('span');
       info.className = 'pdf-attach-info';
       const name = document.createElement('span');
       name.className = 'pdf-attach-name';
-      const fullName = item.name || 'Document';
+      const fullName = unified?.name ?? legacy?.name ?? 'Document';
       name.textContent = fullName.length > 25 ? `${fullName.slice(0, 23)}…` : fullName;
       const metadata = document.createElement('span');
       metadata.className = 'pdf-attach-meta';
-      const length = item.textLength ?? item.text?.length ?? 0;
+      const length = unified
+        ? (unified.textChars ?? 0)
+        : (legacy?.textLength ?? legacy?.text?.length ?? 0);
       const lengthText = length >= 1024 ? `${(length / 1024).toFixed(1)}KB`
         : `${length} chars`;
       metadata.textContent = [
-        `${item.pages ?? '?'} pages`, lengthText,
-        item.isScanned ? 'scanned' : '', item.method === 'vlm' ? 'VLM' : '',
+        `${unified?.pages ?? legacy?.pages ?? '?'} pages`, lengthText,
+        unified ? unified.status : (legacy?.isScanned ? 'scanned' : ''),
+        (unified?.method ?? legacy?.method) === 'vlm' ? 'VLM' : '',
       ].filter(Boolean).join(' · ');
       info.append(name, metadata);
       badge.append(icon, info);
@@ -1996,6 +2266,34 @@ function renderBranchLaneHeader(
   node.appendChild(remove);
 }
 
+/* Clock glyph — static SVG, no emoji/unicode icons (CLAUDE.md §3.4). */
+const QUEUE_ITEM_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+
+function renderQueueStatusBlock(
+  node: HTMLElement,
+  block: Extract<ConversationBlockViewModel, { kind: 'queue-status' }>,
+  ports: ClassicConversationRendererPorts,
+): void {
+  node.className = 'conversation-block conversation-block--queue-status';
+  node.dataset.queueId = block.value.queueId;
+  const status = node.ownerDocument.createElement('div');
+  status.className = 'conversation-queue-status';
+  const icon = node.ownerDocument.createElement('span');
+  icon.className = 'queue-item-icon';
+  icon.innerHTML = QUEUE_ITEM_ICON_SVG;
+  const label = node.ownerDocument.createElement('span');
+  label.className = 'conversation-queue-status__label';
+  label.textContent = `${textFor(ports, 'sidebar.queued', 'Queued')} #${
+    block.value.position}`;
+  const cancel = node.ownerDocument.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'msg-action-btn queue-item-cancel';
+  cancel.dataset.conversationAction = 'remove-queue';
+  cancel.textContent = textFor(ports, 'queue.cancelMsg', 'Cancel');
+  status.append(icon, label, cancel);
+  node.replaceChildren(status);
+}
+
 function renderNativeQueueItem(
   node: HTMLElement,
   item: ConversationQueueItemViewModel,
@@ -2008,13 +2306,16 @@ function renderNativeQueueItem(
   const document = node.ownerDocument;
   const header = document.createElement('header');
   header.className = 'message-header conversation-queue-item__header';
-  const number = document.createElement('span');
-  number.className = 'queue-item-number';
-  number.textContent = String(item.position);
+  const icon = document.createElement('span');
+  icon.className = 'queue-item-icon';
+  icon.innerHTML = QUEUE_ITEM_ICON_SVG;
   const label = document.createElement('span');
   label.className = 'message-role';
   label.textContent = textFor(ports, 'sidebar.queued', 'Queued');
-  header.append(number, label);
+  const number = document.createElement('span');
+  number.className = 'queue-item-number';
+  number.textContent = `#${item.position}`;
+  header.append(icon, label, number);
   if (item.source.isPeerMessage && item.source.fromConv) {
     const source = document.createElement('span');
     source.className = 'queue-item-src queue-item-src-static';
@@ -2025,12 +2326,20 @@ function renderNativeQueueItem(
     )} ${item.source.fromConv}`;
     header.appendChild(source);
   }
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'msg-action-btn queue-item-cancel';
+  cancel.dataset.conversationAction = 'remove-queue';
+  cancel.textContent = textFor(ports, 'queue.cancelMsg', 'Cancel');
+  header.appendChild(cancel);
   const body = document.createElement('div');
   body.className = 'message-body conversation-queue-item__body';
   body.textContent = item.text || textFor(ports, 'queue.attachment', 'Attachment');
+  if (item.text) body.title = item.text;
   const attachmentKinds = [
     item.source.hasImages ? 'img' : '',
     item.source.hasPdfs ? 'pdf' : '',
+    item.source.hasAttachments ? 'media' : '',
     item.source.hasRefs ? 'ref' : '',
     item.source.hasQuotes ? 'quote' : '',
   ].filter(Boolean);
@@ -2040,15 +2349,7 @@ function renderNativeQueueItem(
     attachments.textContent = attachmentKinds.join(' · ');
     body.appendChild(attachments);
   }
-  const actions = document.createElement('div');
-  actions.className = 'message-actions conversation-queue-item__actions';
-  const cancel = document.createElement('button');
-  cancel.type = 'button';
-  cancel.className = 'msg-action-btn queue-item-cancel';
-  cancel.dataset.conversationAction = 'remove-queue';
-  cancel.textContent = textFor(ports, 'queue.cancelMsg', 'Cancel');
-  actions.appendChild(cancel);
-  node.replaceChildren(header, body, actions);
+  node.replaceChildren(header, body);
 }
 
 function turnTimestampPresentation(
@@ -2082,11 +2383,13 @@ export function createClassicConversationRenderers(
     },
     renderBlock(node, block, context) {
       if (block.kind === 'text') {
-        renderTextBlock(node, block, ports);
+        renderTextBlock(node, block, ports, context.turn);
       } else if (block.kind === 'thinking') {
         renderThinkingBlock(node, block, ports);
       } else if (block.kind === 'tool') {
         renderToolBlock(node, block, context.turn, ports);
+      } else if (block.kind === 'program') {
+        renderProgramBlock(node, block, context.turn, ports);
       } else if (block.kind === 'attachments') {
         renderAttachmentsBlock(node, block, ports);
       } else if (block.kind === 'injections') {
@@ -2101,6 +2404,8 @@ export function createClassicConversationRenderers(
         renderContextBlock(node, block, ports);
       } else if (block.kind === 'compaction') {
         renderCompactionBlock(node, block, ports);
+      } else if (block.kind === 'rolled-back') {
+        renderRolledBackBlock(node, block, ports);
       } else if (block.kind === 'image-generation') {
         renderImageGenerationBlock(node, block, ports);
       } else if (block.kind === 'proposed-plan') {
@@ -2113,6 +2418,8 @@ export function createClassicConversationRenderers(
         renderAutopilotRunNoticeBlock(node, block, ports);
       } else if (block.kind === 'activity-event') {
         renderActivityEventBlock(node, block, ports);
+      } else if (block.kind === 'queue-status') {
+        renderQueueStatusBlock(node, block, ports);
       } else if (block.kind === 'live-status') {
         renderLiveStatusBlock(node, block, ports);
       } else {
@@ -2157,7 +2464,7 @@ export function createClassicConversationRenderers(
         if (action.operation) button.dataset.operation = action.operation;
         button.disabled = action.disabled;
         const label = (ports.actionLabel ?? defaultActionLabel)(
-          action.action, turn,
+          action.action, turn, action,
         );
         const icon = actionIcon(node.ownerDocument, action.action);
         if (icon) button.appendChild(icon);
@@ -2201,12 +2508,44 @@ export function createClassicConversationRenderers(
           textFor(ports, 'sidebar.translating', 'Translating…'));
       }
       appendTag('model-tag', turn.metadata.model ?? '');
+      const routeSnapshot = turn.metadata.routeSnapshot;
+      if (routeSnapshot?.provider_id) {
+        appendTag('model-route', [
+          routeSnapshot.provider_id,
+          routeSnapshot.wire_model_id,
+          routeSnapshot.connection_id,
+        ].filter(Boolean).join(' · '));
+      }
+      const modelRoute = turn.metadata.orchestration?.modelRoute;
+      if (modelRoute?.selectedModel && modelRoute.resolvedModel
+          && modelRoute.selectedModel !== modelRoute.resolvedModel) {
+        appendTag('warn model-route', textFor(
+          ports,
+          'finishInfo.modelRouteTag',
+          'Routed {from} → {to}',
+          { from: modelRoute.selectedModel, to: modelRoute.resolvedModel },
+        ));
+      }
       if (!turn.metadata.fallbackInTimeline
           && (turn.metadata.fallback?.model || turn.metadata.fallback?.reason)) {
         appendTag('fallback-tag', [
           turn.metadata.fallback.model,
           turn.metadata.fallback.reason,
         ].filter(Boolean).join(' · '));
+      }
+      const settledAt = Number(turn.source?.updatedAt) || 0;
+      const createdAt = Number(turn.source?.createdAt) || 0;
+      if (settledAt > 0) {
+        const settledDate = new Date(settledAt);
+        if (!Number.isNaN(settledDate.getTime())) {
+          const clockText = settledDate.toLocaleTimeString([], {
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+          });
+          const durationText = createdAt > 0 && settledAt >= createdAt
+            ? formatDuration((settledAt - createdAt) / 1000) : '';
+          appendTag('timing',
+            durationText ? `${clockText} · ${durationText}` : clockText);
+        }
       }
       node.hidden = node.childElementCount === 0;
     },

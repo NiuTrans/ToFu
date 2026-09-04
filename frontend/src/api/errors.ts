@@ -9,6 +9,7 @@ export interface ErrorEnvelope {
   context: string;
   source: string;
   raw: unknown;
+  statusCode?: number;
   [key: string]: unknown;
 }
 
@@ -150,6 +151,7 @@ export function errorEnvelopeFingerprint(value: unknown): string {
     envelope.model,
     envelope.context,
     envelope.source,
+    Number.isInteger(envelope.statusCode) ? envelope.statusCode : '',
   ].map((part) => String(part ?? '')).join('\u001f');
 }
 

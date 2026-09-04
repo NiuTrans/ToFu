@@ -1,23 +1,16 @@
-"""routes/api_v1/config.py — Server-config + provider templates surface.
+"""routes/api_v1/config.py — Miscellaneous server-settings surface.
 
 This blueprint defines ``api_v1_config_bp``. The actual handlers live
 in :mod:`routes.config`, which imports this blueprint as the alias
-``config_bp`` and registers all 9 routes here:
+``config_bp`` and registers the settings routes here:
 
   GET    /api/v1/server-config             — full server config (sensitive)
   POST   /api/v1/server-config             — save + hot-reload
   GET    /api/v1/feishu/status             — Feishu bot status
-  POST   /api/v1/providers/balance         — fetch upstream wallet balance
-  POST   /api/v1/providers/discover-models — re-discover model list
-  POST   /api/v1/providers/resolve-faces   — resolve each model's wire face
-  PUT    /api/v1/providers/templates/update — update a provider template
-  POST   /api/v1/providers/probe           — single-provider probe
-  POST   /api/v1/providers/probe-bulk      — bulk probe
-  GET    /api/v1/providers/templates       — list available templates
+  POST   /api/v1/network/proxy-test        — test one unsaved proxy row
 
-These provider-template / probe routes complement the CRUD surface in
-:mod:`routes.api_v1.providers` (``GET/POST /api/v1/providers``,
-``GET/PATCH/DELETE /api/v1/providers/{id}``, ``POST /probe``).
+Provider discovery and owner-scoped model routing live exclusively in
+:mod:`routes.api_v1.providers`.
 """
 
 from __future__ import annotations

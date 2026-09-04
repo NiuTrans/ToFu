@@ -47,9 +47,6 @@ function _stdStubs(win) {
     Icon: () => '',
     IconDot: () => '',
     _TOOL_DISPLAY: {},
-    // formatClockTime (core.js) — shared HH:MM formatter used by the streaming
-    // bubble builders; deterministic stub so time strings don't vary per run.
-    formatClockTime: () => '12:00',
     // getConvById / getActiveConv (core.js) — the canonical conversation
     // lookup helpers that several feature modules now delegate to instead of
     // open-coding `conversations.find((c) => c.id === X)`. A harness that

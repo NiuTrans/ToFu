@@ -136,25 +136,37 @@ def test_sources_card_scene_is_silent_and_tts_skips_it(monkeypatch, tmp_path):
     assert set(seen_by_tts) == {s['id'] for s in scenes[:-1]}
 
 
-def test_engine_manifest_reuse_ignores_silent_scenes():
+def test_engine_manifest_reuse_ignores_silent_scenes(tmp_path):
     """_reusable_manifest must not demand a wav for a spoken=False scene —
     otherwise a correctly-silent card makes the whole manifest unreusable and
     the engine re-synthesizes everything (cost + latency regression)."""
+    import hashlib
+
+    from lib.motion_video import _audio as narration_audio
     from lib.motion_video import engine as eng
     from lib.json_store import write_json_atomic
-    import tempfile
-    td = tempfile.mkdtemp()
-    audio = os.path.join(td, 'audio')
+    audio = os.path.join(str(tmp_path), 'audio')
     os.makedirs(audio)
     wav = os.path.join(audio, 'scene-001.wav')
-    open(wav, 'wb').write(b'RIFF')
+    wav_bytes = b'RIFF-spoken-only'
+    open(wav, 'wb').write(wav_bytes)
     write_json_atomic(os.path.join(audio, 'manifest.json'),
-                      {'ok': True, 'scenes': [
-                          {'scene_id': 'scene-001', 'wav': wav,
-                           'audio_duration': 3.0, 'target_duration': 3.0,
-                           'overflow': 0.0}]})
-    scenes = [{'id': 'scene-001'},
-              {'id': 'scene-002', 'spoken': False}]
+                      {'ok': True, 'manifest_version': 2,
+                       'request': narration_audio._manifest_request_contract(
+                           voice=None, speed=None, alignment='loose',
+                           tail_pad=0.35),
+                       'scenes': [{
+                           'scene_id': 'scene-001', 'wav': wav,
+                           'text_sha256': narration_audio._scene_text_sha256(
+                               '第一段口播'),
+                           'wav_bytes': len(wav_bytes),
+                           'wav_sha256': hashlib.sha256(wav_bytes).hexdigest(),
+                           'audio_duration': 3.0, 'srt_duration': 3.0,
+                           'target_duration': 3.0, 'overflow': 0.0}]})
+    scenes = [{'id': 'scene-001', 'start': 0, 'end': 3,
+               'text': '第一段口播'},
+              {'id': 'scene-002', 'start': 3, 'end': 5,
+               'text': '资料来源:example.org', 'spoken': False}]
     assert eng._reusable_manifest(audio, scenes) is not None, (
         'a manifest covering only spoken scenes was rejected')
 

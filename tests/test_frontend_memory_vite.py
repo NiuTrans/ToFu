@@ -40,7 +40,7 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
         """
         const { JSDOM } = require('jsdom');
         const dom = new JSDOM(`<!doctype html><body>
-          <div id="memoryModal"><div id="memoryStats"></div>
+          <div id="memoryModal"><div class="memory-modal"><div id="memoryStats"></div>
             <button class="memory-tab active" data-scope="all"></button>
             <input id="memorySearchInput"><div id="memoryList"></div>
             <div id="memoryAddSection" style="display:none"></div>
@@ -48,11 +48,14 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
             <textarea id="memoryNewBody"></textarea><input id="memoryNewTags">
             <select id="memoryNewScope"><option value="project">p</option></select>
             <div id="memoryModalStatus"></div><button id="memoryModalToggleBtn"></button>
-          </div><div id="prefsMemoryList"></div>
+            <input id="memoryInstallInput" type="file">
+          </div></div><div id="prefsMemoryList"></div>
         </body>`, { url: 'http://localhost/' });
         global.window = dom.window; global.document = dom.window.document;
         for (const name of ['Element','HTMLElement','HTMLButtonElement','HTMLInputElement',
-          'HTMLTextAreaElement','HTMLSelectElement']) global[name] = dom.window[name];
+          'HTMLTextAreaElement','HTMLSelectElement','File','FormData']) {
+          global[name] = dom.window[name];
+        }
         global.memoryEnabled = true;
         const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
         const response = (body = {}) => ({ ok: true, status: 200, json: async () => body });
@@ -69,7 +72,7 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
         };
         window.captureActiveConversationSettings = () => calls.push(['saveState']);
         window.updateSubmenuCounts = () => calls.push(['counts']);
-        window._attachMemoryDropZone = () => calls.push(['drop']);
+        window._ephemeralToast = () => null;
         window.Api = { memory: {
           list: async () => ({ memories: rows.map((row) => ({ ...row })) }),
           toggle: (id) => new Promise((_, reject) => { calls.push(['toggle', id]); toggleReject = reject; }),
@@ -77,6 +80,11 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           create: async (item) => { calls.push(['create', item]); return response({ memory: {
             id: 'm2', ...item, enabled: true,
           }}); },
+        }, skills: {
+          install: async (form) => {
+            calls.push(['packageInstall', form.get('scope'), form.get('file')?.name]);
+            return response({ memory: { name: 'Uploaded', scope: 'project' } });
+          },
         }};
         require(BUILT_PATH);
         (async () => {
@@ -84,6 +92,13 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           const list = document.getElementById('memoryList');
           const noInlineHandlers = list.querySelectorAll('[onclick],[oninput]').length === 0;
           const initialRendered = list.textContent.includes('Memory One');
+          const packageInput = document.getElementById('memoryInstallInput');
+          Object.defineProperty(packageInput, 'files', { value: [
+            new File(['zip'], 'memory.zip', { type: 'application/zip' }),
+          ] });
+          window.installSkillFromFileInput(packageInput);
+          await tick(); await tick(); await tick();
+          const packageInstallCalls = calls.filter((row) => row[0] === 'packageInstall');
           list.querySelector('[data-memory-action="toggle"]').click(); await tick();
           const toggledInstantly = list.querySelector('.memory-card').classList.contains('is-disabled');
           toggleReject(new Error('down')); await tick(); await tick();
@@ -98,7 +113,10 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           const createRendered = list.textContent.includes('Created');
 
           const resolvers = [];
-          window.Api.memory.list = () => new Promise((resolve) => resolvers.push(resolve));
+          let deferredListCalls = 0;
+          window.Api.memory.list = () => new Promise((resolve) => {
+            deferredListCalls++; resolvers.push(resolve);
+          });
           const oldRequest = window.refreshMemoryList();
           window.closeMemoryModal();
           const newRequest = window.refreshMemoryList();
@@ -108,10 +126,25 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           resolvers[1]({ memories: [{ id: 'new', name: 'NEW', enabled: true }] });
           await Promise.all([oldRequest, newRequest]);
           const reopenedApplied = list.textContent.includes('NEW');
+
+          const sameEpochResolvers = [];
+          window.Api.memory.list = () => new Promise((resolve) => sameEpochResolvers.push(resolve));
+          const allRequest = window.refreshMemoryList('all');
+          const projectRequest = window.refreshMemoryList('project');
+          const sameEpochSingleFlight = sameEpochResolvers.length === 1;
+          sameEpochResolvers[0]({ memories: [
+            { id: 'global', name: 'GLOBAL', scope: 'global', enabled: true },
+            { id: 'project', name: 'PROJECT', scope: 'project', enabled: true },
+          ] });
+          await Promise.all([allRequest, projectRequest]);
+          const latestScopeApplied = list.textContent.includes('PROJECT')
+            && !list.textContent.includes('GLOBAL');
           window.toggleMemoryFromModal();
           console.log(JSON.stringify({ noInlineHandlers, initialRendered, toggledInstantly,
             toggleRolledBack, hiddenInstantly, deleteRolledBack, createRendered,
-            oldIgnored, reopenedApplied, toggleCalls: calls.filter(x => x[0] === 'toggle').length,
+            oldIgnored, reopenedApplied, sameEpochSingleFlight, latestScopeApplied,
+            deferredListCalls, packageInstallCalls,
+            toggleCalls: calls.filter(x => x[0] === 'toggle').length,
             deleteCalls: calls.filter(x => x[0] === 'delete').length,
             createCalls: calls.filter(x => x[0] === 'create').length,
             settingsCaptures: calls.filter(x => x[0] === 'saveState').length,
@@ -127,7 +160,12 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
         'noInlineHandlers', 'initialRendered', 'toggledInstantly',
         'toggleRolledBack', 'hiddenInstantly', 'deleteRolledBack',
         'createRendered', 'oldIgnored', 'reopenedApplied',
+        'sameEpochSingleFlight', 'latestScopeApplied',
     ))
+    assert result['deferredListCalls'] == 2
     assert result['toggleCalls'] == result['deleteCalls'] == result['createCalls'] == 1
     assert result['settingsCaptures'] == 1
     assert result['memoryApply'] is False
+    assert result['packageInstallCalls'] == [
+        ['packageInstall', 'project', 'memory.zip'],
+    ]

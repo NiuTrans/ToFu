@@ -111,7 +111,7 @@ def test_loop_runtime_ceiling_is_visible_without_rejecting_portable_graphs():
         'max_iterations': spec['runtimeMax'] + 1,
     }))
 
-    assert spec['runtimeMax'] == 12
+    assert spec['runtimeMax'] == 64
     assert verdict['ok'] is True
     assert any(issue['code'] == 'field.runtime_max'
                for issue in verdict['diagnostics'])

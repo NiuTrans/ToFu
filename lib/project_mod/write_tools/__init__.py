@@ -17,6 +17,7 @@ import surface too.
 
 from ._paths import (
     _FORBIDDEN_CREATE_ROOTS,
+    OutsideWorkspaceError,
     _enforce_not_readonly,
     _is_forbidden_create_path,
     _is_temp_path,
@@ -51,6 +52,7 @@ from ._ops import (
 )
 
 __all__ = [
+    'OutsideWorkspaceError',
     'tool_write_file',
     'save_uploaded_file',
     'tool_apply_diff',

@@ -44,10 +44,10 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 sys.path.insert(0, HERE)
-from _runtime_sections import runtime_section_path  # noqa: E402
+from _runtime_sections import runtime_section_path, shipped_source_text  # noqa: E402
 
 MCP_JS = runtime_section_path('settings/mcp.js')
-SKILLS_TS = os.path.join(ROOT, 'frontend', 'src', 'features', 'skills.ts')
+SKILLS_TS = os.path.join(ROOT, 'frontend', 'src', 'features', 'skills', 'panel.ts')
 
 
 def _node_available() -> bool:
@@ -122,11 +122,12 @@ def _mcp_orderer() -> str:
 
 
 def _skills_orderer() -> str:
-    with open(SKILLS_TS, encoding='utf-8') as fh:
-        src = fh.read()
+    src = shipped_source_text('frontend/src/features/skills/panel.ts')
     order = re.search(r'const CATEGORY_ORDER = (\[.*?\]) as const;', src, re.S)
     assert order, 'typed skills owner lost CATEGORY_ORDER'
-    body = _splice_fn(SKILLS_TS, _SKILLS_ORDER_SIG)
+    start = src.index(_SKILLS_ORDER_SIG)
+    end = src.index('\n}\n', start) + len('\n}\n')
+    body = src[start:end]
     body = body.replace(_SKILLS_ORDER_SIG,
                         'function _skillsOrderedCategories(cats) {', 1)
     body = body.replace('counts', 'cats')

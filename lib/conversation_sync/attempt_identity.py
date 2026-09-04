@@ -12,9 +12,20 @@ from collections.abc import Mapping
 from typing import Any
 
 
+_NON_AUTHORITY_TASK_FLAGS = ("_inline_messages", "_vu_subtask")
+
+
 def is_conversation_attempt(context: Mapping[str, Any] | None) -> bool:
-    """Return whether *context* carries a complete turn/attempt identity."""
+    """Return whether *context* owns a complete turn/attempt identity.
+
+    Inline and virtual-user carrier tasks are transport holders, not turn
+    executors.  They must fail closed even if a shallow-copied parent config
+    left stale identity fields behind; otherwise their private projection can
+    overwrite the parent's authoritative turn while both streams are live.
+    """
     if not isinstance(context, Mapping):
+        return False
+    if any(context.get(flag) for flag in _NON_AUTHORITY_TASK_FLAGS):
         return False
     return bool(
         str(context.get("_turnId") or "").strip()

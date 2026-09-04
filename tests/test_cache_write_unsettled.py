@@ -242,6 +242,14 @@ def test_detector_names_write_unsettled_not_upstream():
     blob = json.dumps(r).lower()
     assert 'visib' in blob or 'settle' in blob or 'not yet visible' in blob, (
         f'the verdict must name the write-visibility race: {r}')
+    # Structured sibling fields for the parameterized frontend rendering
+    # (finish_info.js _cacheBreakReason) — the string cause above is retained,
+    # these numbers let the zh/en UI interpolate instead of substring-matching
+    # dynamic digits.
+    assert r.get('cold_gap_s') == 8.0, f'cold_gap_s must be structured: {r}'
+    assert isinstance(r.get('gap_s'), float), f'gap_s must be a float: {r}'
+    assert r.get('read') == 0, f'read must be structured: {r}'
+    assert r.get('prev_read') == 0, f'prev_read must be structured: {r}'
 
 
 def test_detector_NEUTER_without_cold_gap_launders_to_upstream():

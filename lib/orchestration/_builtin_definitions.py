@@ -8,14 +8,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from lib.goal_runs.contract import (
+    DEFAULT_GOAL_MAX_ITERATIONS,
+    GOAL_POLICY_DIRECTIVE,
+)
 from lib.orchestration._definition_contract import SCHEMA_ID
 from lib.orchestration._defaults import control_node_params, role_node_params
 from lib.orchestration._layout import layout_definition
 from lib.orchestration._role_personas import role_persona
 from lib.orchestration._role_axes import DEFAULT_ROLE_TIER
-from lib.orchestration.loop_policy import (
-    DEFAULT_EXECUTOR_MAX_ITERATIONS,
-)
 
 
 def _role_params(role: str, **overrides: Any) -> dict:
@@ -33,7 +34,7 @@ def build_blank_definition(*, name: str = 'Untitled Flow') -> dict:
 
 def build_autopilot_definition(*, name: str = 'Autopilot',
                                max_iterations: int =
-                               DEFAULT_EXECUTOR_MAX_ITERATIONS,
+                               DEFAULT_GOAL_MAX_ITERATIONS,
                                worker: str = 'worker') -> dict:
     """Build the canonical Worker ⇄ Virtual User autopilot loop."""
     definition = {
@@ -49,8 +50,11 @@ def build_autopilot_definition(*, name: str = 'Autopilot',
             {'id': 'worker', 'type': 'role', 'role': worker,
              'params': _role_params(
                  worker, isolation='shared-context', emits='assistant',
-                 objective='Continue the task. Make concrete progress every '
-                 'turn; act, do not just analyze.',
+                 objective=(
+                     'Work the task in the conversation context. Make '
+                     'concrete progress every turn; act, do not just '
+                     'analyze. ' + GOAL_POLICY_DIRECTIVE
+                 ),
              )},
             {'id': 'vu', 'type': 'role', 'role': 'virtual_user',
              'params': _role_params(
@@ -58,7 +62,7 @@ def build_autopilot_definition(*, name: str = 'Autopilot',
                  objective='Stand in for the human and drive the task to '
                  'completion per your virtual-user role. Emit [VERDICT: STOP] '
                  '(or [VU: TASK_DONE]) only when the objective is genuinely '
-                 'met.',
+                 'met. ' + GOAL_POLICY_DIRECTIVE,
              )},
             {'id': 'stop', 'type': 'control', 'kind': 'stop'},
         ],

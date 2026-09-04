@@ -116,53 +116,56 @@ def _collect_conversation_tool_distribution(
     """Scan recent conversation messages for tool usage distribution.
 
     Best-effort — on any DB error we return empty counters."""
+    tool_counts: Counter = Counter()
+    search_urls: Counter = Counter()
+    fetch_urls: Counter = Counter()
     try:
         updated_ms = int(cutoff_local.timestamp() * 1000)
-        from lib.conversations.repository import list_conversations
-        rows = list_conversations(
+        from lib.conversations.repository import scan_conversations_bounded
+        _candidate_count, rows = scan_conversations_bounded(
             user_id=owner_user_id,
             updated_at_gte=updated_ms,
             limit=200,
+            settings_keys=[],
         )
+        # Keep iteration inside the best-effort boundary: bounded scans hydrate
+        # lazily, so a later Sidecar frame can fail after earlier rows arrived.
+        for row in rows:
+            if row is None:
+                continue
+            messages = (row.get('messages') if isinstance(row, dict)
+                        else row.messages)
+            for m in messages:
+                if not isinstance(m, dict):
+                    continue
+                rounds = m.get('toolRounds') or []
+                if not isinstance(rounds, list):
+                    continue
+                for r in rounds:
+                    if not isinstance(r, dict):
+                        continue
+                    name = r.get('toolName') or ''
+                    if name:
+                        tool_counts[name] += 1
+                    if name == 'web_search':
+                        for res in (r.get('results') or [])[:10]:
+                            url = ((res or {}).get('url')
+                                   if isinstance(res, dict) else '')
+                            if url:
+                                dom = _domain_of(url)
+                                if dom:
+                                    search_urls[dom] += 1
+                    elif name == 'fetch_url':
+                        args = r.get('args') or {}
+                        url = args.get('url') if isinstance(args, dict) else ''
+                        if url:
+                            dom = _domain_of(url)
+                            if dom:
+                                fetch_urls[dom] += 1
     except Exception as e:
         logger.warning('[Optimizer.analyzer] conversation scan skipped: %s', e)
         return {'tool_counts': {}, 'search_urls': [], 'fetch_urls': []}
 
-    tool_counts: Counter = Counter()
-    search_urls: Counter = Counter()
-    fetch_urls: Counter = Counter()
-
-    for row in rows:
-        if row is None:
-            continue
-        messages = (row.get('messages') if isinstance(row, dict)
-                    else row.messages)
-        for m in messages:
-            if not isinstance(m, dict):
-                continue
-            rounds = m.get('toolRounds') or []
-            if not isinstance(rounds, list):
-                continue
-            for r in rounds:
-                if not isinstance(r, dict):
-                    continue
-                name = r.get('toolName') or ''
-                if name:
-                    tool_counts[name] += 1
-                if name == 'web_search':
-                    for res in (r.get('results') or [])[:10]:
-                        url = (res or {}).get('url') if isinstance(res, dict) else ''
-                        if url:
-                            dom = _domain_of(url)
-                            if dom:
-                                search_urls[dom] += 1
-                elif name == 'fetch_url':
-                    args = r.get('args') or {}
-                    url = args.get('url') if isinstance(args, dict) else ''
-                    if url:
-                        dom = _domain_of(url)
-                        if dom:
-                            fetch_urls[dom] += 1
     return {
         'tool_counts': dict(tool_counts),
         'search_urls': [{'domain': d, 'count': n} for d, n in search_urls.most_common(10)],

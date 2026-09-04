@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import queue as _queue
 import time
 
 from quart import Response
@@ -14,15 +15,44 @@ from lib.api_response import (
     api_ok,
 )
 from lib.log import get_logger
-from lib.paper.arxiv import (
-    _extract_arxiv_id,
-    fetch_arxiv_title,
-)
 from lib.paper.images.figures import extract_paper_figures
 from lib.paper_identity import PAPER_DIR, _paper_hash
 from lib.request_parser import async_parse_body
 
 logger = get_logger(__name__)
+
+
+def _offer_latest_progress(progress_queue: _queue.Queue, message: tuple) -> None:
+    """Retain one newest parse update without ever blocking its worker."""
+    try:
+        progress_queue.put_nowait(message)
+        return
+    except _queue.Full:
+        pass
+    try:
+        progress_queue.get_nowait()
+    except _queue.Empty:
+        pass
+    try:
+        progress_queue.put_nowait(message)
+    except _queue.Full:
+        # The sole consumer won the race and a newer producer update already
+        # occupies the slot. Progress is observational; parsing must continue.
+        pass
+
+
+def _extract_arxiv_id(*args, **kwargs):
+    """Load the Atom/HTML arXiv adapter only for an actual fetch request."""
+    from lib.paper.arxiv import _extract_arxiv_id as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def fetch_arxiv_title(*args, **kwargs):
+    """Patchable request-loaded title lookup retained for route tests."""
+    from lib.paper.arxiv import fetch_arxiv_title as implementation
+
+    return implementation(*args, **kwargs)
 
 
 def http_get(*args, **kwargs):
@@ -184,7 +214,10 @@ async def fetch_arxiv():
         return api_error("Download timed out (60s)", status=504)
     except _RequestException as e:
         logger.warning("[Paper:arXiv] Download failed: %s — %s", pdf_url, e)
-        return api_error(f"Download failed: {str(e)}", status=502)
+        # requests exceptions may echo signed query strings, proxy URLs, or
+        # transport internals. The operator log has the precise failure; the
+        # caller only needs the stable upstream classification.
+        return api_error("Could not download the PDF from arXiv", status=502)
     except OSError as e:
         logger.error(
             "[Paper:arXiv] Disk write failed for %s: %s", filepath, e, exc_info=True
@@ -407,18 +440,18 @@ async def fetch_arxiv_stream():
         yield _sse({"stage": "parse_start"})
         try:
             from lib.pdf_parser.core import parse_pdf as _parse_pdf
-            import queue as _queue
             import threading as _threading
 
             # Run the blocking parse in a worker thread and bridge its
             # per-page progress callback to SSE events via a queue. This
             # turns pymupdf4llm's opaque multi-second call into a
             # streaming "page N/M" progress bar in the UI.
-            progress_q: "_queue.Queue" = _queue.Queue()
+            progress_q: "_queue.Queue" = _queue.Queue(maxsize=1)
             result_holder = {"result": None, "exception": None}
 
             def _on_progress(stage, done, total):
-                progress_q.put(("progress", stage, done, total))
+                _offer_latest_progress(
+                    progress_q, ("progress", stage, done, total))
 
             def _worker():
                 try:
@@ -434,7 +467,8 @@ async def fetch_arxiv_stream():
                     logger.debug("[Paper] PDF parse worker captured exception: %s", ex)
                     result_holder["exception"] = ex
                 finally:
-                    progress_q.put(("done", None, None, None))
+                    _offer_latest_progress(
+                        progress_q, ("done", None, None, None))
 
             t0 = time.time()
             worker = _threading.Thread(

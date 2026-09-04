@@ -70,6 +70,10 @@ def resolve_static_prompt_profile(model: str, profile: str = 'auto') -> str:
 # ``BLOCK_META`` drives the editor: id → (human title, whether the block's
 # text is dynamic/read-only). Dynamic blocks (environment, current_date) are
 # generated per-request and can only be toggled, not edited.
+# Runtime note: ``environment`` no longer ships inside the static block —
+# the context composer renders it as a per-turn tail block so a project-path
+# change never rewrites the cached prefix. The id stays registered here so
+# saved per-block toggles keep resolving against the tail block.
 BLOCK_META: dict[str, dict] = {
     'intro': {'title': 'Intro & identity', 'dynamic': False, 'lockable': True},
     'system': {'title': '# System', 'dynamic': False, 'lockable': False},
@@ -98,7 +102,9 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
                          has_real_tools: bool = True,
                          is_code_context: bool = True,
                          include_date: bool = True,
+                         include_environment: bool = True,
                          tool_names: set[str] | None = None,
+                         tool_search_available: bool = False,
                          profile: str = 'full',
                          ) -> list[dict]:
     """Build the static prompt as an ordered list of identified blocks.
@@ -120,6 +126,7 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
         raw: list[tuple[str, str]] = [('intro', section_gpt56_lean(
             is_code_context=is_code_context, tool_names=tool_names,
             web_tools=_web_tools,
+            tool_search_available=tool_search_available,
             omit_sections=_LEAN_ABLATION_OMISSIONS.get(
                 normalized_profile, frozenset())))]
     else:
@@ -130,7 +137,9 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
             ('actions', section_actions(is_code_context=is_code_context)),
         ]
         if has_real_tools:
-            raw.append(('using_tools', section_using_tools(tool_names=tool_names)))
+            raw.append(('using_tools', section_using_tools(
+                tool_names=tool_names,
+                tool_search_available=tool_search_available)))
         raw.append(('tone_and_style',
                     section_tone_and_style(is_code_context=is_code_context,
                                            web_tools=_web_tools)))
@@ -146,10 +155,11 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
                        + section_summarize_tool_results())
         else:
             raw.append(('system_reminders', section_system_reminders()))
-    raw.append(('environment',
-                section_environment(cwd=cwd, is_git=is_git, model=model,
-                                    extra_roots=extra_roots,
-                                    has_real_tools=has_real_tools)))
+    if include_environment:
+        raw.append(('environment',
+                    section_environment(cwd=cwd, is_git=is_git, model=model,
+                                        extra_roots=extra_roots,
+                                        has_real_tools=has_real_tools)))
     if include_date:
         raw.append(('current_date', section_current_date()))
 
@@ -172,7 +182,9 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          has_real_tools: bool = True,
                          is_code_context: bool = True,
                          include_date: bool = True,
+                         include_environment: bool = True,
                          tool_names: set[str] | None = None,
+                         tool_search_available: bool = False,
                          disabled_blocks: set[str] | None = None,
                          profile: str = 'auto') -> str:
     """Assemble the full Claude Code-style static prompt block.
@@ -200,12 +212,23 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          so the editor text doesn't bake in a stale date,
                          and by replace-mode injection which appends the
                          date as its own dynamic block.
+        include_environment:
+                         When False, omit the ``# Environment`` section.
+                         The context composer passes False and renders the
+                         same content as a per-turn tail block instead, so
+                         a project-path change never rewrites the cached
+                         static prefix.
         tool_names:      The set of tool names actually registered for this
                          turn. Passed to ``section_using_tools`` so the
                          "prefer the dedicated tool" bullets only name tools
                          that exist (e.g. ``write_file`` / ``grep_search``
                          are project-mode-only). ``None`` ships all bullets
                          (back-compat).
+        tool_search_available:
+                         Whether this turn has a live discovery path for
+                         hidden tool schemas. This gates capability-search
+                         guidance; it never asserts that an example tool is
+                         enabled.
         disabled_blocks: Block IDs (see ``BLOCK_META``) the user has switched
                          OFF in the per-block editor. Those blocks are dropped
                          from the assembled prompt. ``None`` keeps every block.
@@ -215,7 +238,9 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
     blocks = build_static_blocks(
         cwd=cwd, is_git=is_git, model=model, extra_roots=extra_roots,
         has_real_tools=has_real_tools, is_code_context=is_code_context,
-        include_date=include_date, tool_names=tool_names,
+        include_date=include_date, include_environment=include_environment,
+        tool_names=tool_names,
+        tool_search_available=tool_search_available,
         profile=normalized_profile,
     )
     return "\n\n".join(b['text'] for b in blocks if b['id'] not in disabled)

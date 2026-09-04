@@ -18,7 +18,7 @@ def test_file_history_unhandled_failure_is_an_envelope(tmp_path, monkeypatch):
     def fail_lookup(*_args, **_kwargs):
         raise OSError('history store unavailable')
 
-    monkeypatch.setattr(api, 'find_snapshot', fail_lookup)
+    monkeypatch.setattr(api, 'find_snapshot_with_previous', fail_lookup)
     result = api.rewind_to(str(tmp_path), 'snapshot-1')
 
     assert is_envelope(result['error'])
@@ -87,11 +87,15 @@ def test_retained_ui_consumers_normalize_nonchat_error_fields():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    source = (root / 'frontend/src/runtime/app-runtime.js').read_text(
-        encoding='utf-8')
+    # The consumers moved out of the generated app-runtime.js monolith into
+    # their retained section owners during the classic-to-ESM migration.
+    sections = (
+        root / 'frontend/src/runtime/sections/settings/oauth.js',
+        root / 'frontend/src/runtime/sections/upload.js',
+    )
+    source = '\n'.join(path.read_text(encoding='utf-8') for path in sections)
 
     for contract in (
-        'const probeError = errorEnvelopeMessage(probe.error);',
         'entry.vlmError = errorEnvelopeMessage(task.error);',
         'badge.title = errorEnvelopeMessage(status.error);',
         'error: errorEnvelopeMessage(data.error) || String(data.error)',

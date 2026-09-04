@@ -230,6 +230,11 @@ def test_manager_applies_prefix_and_owns_namespace_lease(
     (project / 'logs').mkdir()
     (project / 'server.py').write_text('raise SystemExit(0)\n')
     lock_fd = os.open(tmp_path / 'cache.lock', os.O_RDWR | os.O_CREAT, 0o600)
+
+    # The manager runs a project's serverctl.py frontend preflight before the
+    # bytecode-cache step; this test owns the cache seam, not the preflight.
+    monkeypatch.setattr(sm, 'run_frontend_preflight',
+                        lambda *_args, **_kwargs: (True, ''))
     activation = cache.ServerPythonCacheActivation(
         selected=True,
         managed=True,
@@ -277,6 +282,9 @@ def test_cache_helper_failure_never_blocks_worker_spawn(tmp_path, monkeypatch):
     (project / 'data').mkdir(parents=True)
     (project / 'logs').mkdir()
     (project / 'server.py').write_text('raise SystemExit(0)\n')
+
+    monkeypatch.setattr(sm, 'run_frontend_preflight',
+                        lambda *_args, **_kwargs: (True, ''))
 
     def fail_cache_setup(*_args, **_kwargs):
         raise RuntimeError('optional cache unavailable')

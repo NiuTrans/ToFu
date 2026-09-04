@@ -34,9 +34,19 @@ OPERATIONS = {
         'query', False, ops._orchestration_event_page),
     'orchestration.run.delete': ops.OperationSpec(
         'command', True, ops._orchestration_run_delete),
+    'goal.run.start': ops.OperationSpec(
+        'command', True, ops._goal_run_start),
+    'goal.run.transition': ops.OperationSpec(
+        'command', True, ops._goal_run_transition),
+    'goal.run.get': ops.OperationSpec(
+        'query', False, ops._goal_run_get),
+    'goal.run.latest': ops.OperationSpec(
+        'query', False, ops._goal_run_latest),
     'swarm.session.save': ops.OperationSpec('command', True, ops._swarm_session_save),
     'swarm.session.terminate': ops.OperationSpec(
         'command', True, ops._swarm_session_terminate),
+    'swarm.session.quarantine_ownerless': ops.OperationSpec(
+        'command', True, ops._swarm_session_quarantine_ownerless),
     'swarm.session.delete': ops.OperationSpec(
         'command', True, ops._swarm_session_delete),
     'swarm.agent.save': ops.OperationSpec('command', True, ops._swarm_agent_save),

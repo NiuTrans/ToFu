@@ -2,12 +2,12 @@
 
 Board epic pt_cb8f98b0cb9b47fb / docs/RENDER_CONTRACT.md §5-6.
 
-Step 1 ships DARK: ``task['segments']`` is populated alongside the three
-existing channels (``content`` / ``thinking`` / ``toolRounds``). This suite is
-the acceptance gate that de-risks the whole chain — it proves the three
-channels are *loss-less projections* of the segment list over real multi-round
-transcript shapes, so none of the ~40 measured backend readers can drift when
-later steps flip them onto segments.
+Step 1 ships DARK: ``task['segments']`` is assembled alongside the three
+existing channels (``content`` / ``thinking`` / ``toolRounds``) at settlement.
+Turn-native terminal carriers then release the reconstructible structural
+copies; their authoritative Turn must rehydrate byte-identically. This suite
+proves the three channels are loss-less projections over real multi-round
+transcript shapes, so none of the measured backend readers can drift.
 
   • GOLDEN: for each transcript, ``derive_content`` / ``derive_thinking`` /
     ``derive_tool_rounds`` are byte-identical to what the current pipeline
@@ -532,12 +532,22 @@ def _create_ground_truth_task(conv_id):
         '_attemptId': created['attempt']['attemptId'],
     })
     assert claim_attempt_start(created['attempt']['attemptId'], user_id=1)
-    return create_task(
+    task = create_task(
         conv_id,
         [{'role': 'user', 'content': 'search then answer'}],
         config,
         user_id=1,
     )
+    # The pending→running transition now lives at the physical worker entry
+    # (lib/tasks_pkg/spawn.py). These integration cases invoke run_task()
+    # directly, so publish that durable transition explicitly — otherwise the
+    # first event is rejected as a stale attempt and the run yields no content.
+    from lib.turn_lifecycle import bind_task, mark_task_started
+    bind_task(created['attempt']['attemptId'], task['id'], user_id=1)
+    started = mark_task_started(
+        created['attempt']['attemptId'], task['id'], user_id=1)
+    assert started and started.get('status') == 'running'
+    return task
 
 
 @pytest.mark.serial  # real run_task writes through the shared pool;
@@ -594,8 +604,7 @@ class TestGroundTruthRealRunTask:
         monkeypatch.setattr(tofu_search, 'perform_web_search', _stub_search)
         monkeypatch.setattr(search_core, 'perform_web_search', _stub_search)
 
-    def test_derivation_matches_produced_task_dict(self, monkeypatch, chat_sidecar):
-        from lib.tasks_pkg.manager._persist import _merge_tool_rounds
+    def test_derivation_matches_durable_turn(self, monkeypatch, chat_sidecar):
         from lib.tasks_pkg.orchestrator.api import run_task
         conv_id = 'cv-seg-gt-' + str(id(self))
         _cleanup_conv(conv_id)
@@ -606,14 +615,22 @@ class TestGroundTruthRealRunTask:
             task = _create_ground_truth_task(conv_id)
             run_task(task)
 
-            # run_task → persist_task_result populated task['segments'] (dark).
-            segs = task.get('segments')
-            assert segs is not None, 'run_task did not populate task["segments"]'
+            assert task.get('segments') is None
+            assert task.get('toolRounds') is None
+            from tests._seed import conv_document
+            assistant = [
+                message for message in conv_document(conv_id)['messages']
+                if message.get('role') == 'assistant'
+            ][-1]
+            persisted_segments = assistant.get('segments') or []
+            persisted_rounds = assistant.get('toolRounds') or []
+            segs = rehydrate_segments(persisted_segments, persisted_rounds)
 
-            # GROUND-TRUTH GOLDEN: derivations byte-identical to the produced dict.
+            # GROUND-TRUTH GOLDEN: the durable Turn remains byte-identical to
+            # the terminal text after the process-local carrier is slimmed.
             assert derive_content(segs) == task['content']
             assert derive_thinking(segs) == task['thinking']
-            assert derive_tool_rounds(segs) == _merge_tool_rounds(task)
+            assert derive_tool_rounds(segs) == persisted_rounds
 
             # The produced turn actually ran a tool round + a deliverable answer.
             # NOTE: the real run_task legitimately POST-PROCESSES task['content']
@@ -742,6 +759,68 @@ class TestThinRehydrateRoundTrip:
         assert [s for s in rehydrated if s.get('type') == SEG_TEXT and s.get('deliverable')] == []
         assert derive_tool_rounds(rehydrated) == _merge_tool_rounds(task)
 
+    def test_synthetic_round_before_real_tool_cannot_shift_round_metadata(self):
+        real = _round(
+            1, 0, 'real-call', 'read_files', '{}', 'body')
+        real['caller'] = {
+            'type': 'multi_agent', 'agent_name': '/worker',
+        }
+        synthetic = {
+            'roundNum': 9_000_001, '_inboxInject': True,
+            'toolName': 'agent_inbox', 'status': 'done',
+        }
+        task = {
+            'id': 's' * 32, 'convId': 'c' * 32,
+            'content': '', 'thinking': '',
+            'toolRounds': [synthetic, real],
+        }
+
+        thin = segments_to_json(assemble_segments(task))
+        rehydrated = rehydrate_segments(thin, [synthetic, real])
+        tool_segment = next(
+            segment for segment in rehydrated
+            if segment.get('type') == SEG_TOOL_USE)
+        assert tool_segment['_round'] is real
+        assert tool_segment['_round']['caller']['agent_name'] == '/worker'
+
+    def test_identity_mismatch_stays_thin_instead_of_borrowing_round(self):
+        thin = [{
+            'type': SEG_TOOL_USE, 'blockId': 'tool:expected',
+            'id': 'expected', 'name': 'read_files', 'input': '{}',
+            'llmRound': 0, 'result': {'content': 'body', 'status': 'done'},
+        }]
+        wrong_round = _round(
+            1, 0, 'different', 'grep_search', '{}', 'different body')
+
+        rehydrated = rehydrate_segments(thin, [wrong_round])
+        assert '_round' not in rehydrated[0]
+
+    def test_duplicate_ids_keep_occurrence_ordered_authority(self):
+        rounds = [
+            {
+                **_round(1, 0, 'reused', 'read_files', '{}', 'first'),
+                'caller': {'type': 'program', 'caller_id': 'program-a'},
+            },
+            {
+                **_round(2, 0, 'reused', 'read_files', '{}', 'second'),
+                'caller': {
+                    'type': 'multi_agent', 'agent_name': '/worker-b',
+                },
+            },
+        ]
+        task = {
+            'id': 'd' * 32, 'convId': 'c' * 32,
+            'content': '', 'thinking': '', 'toolRounds': rounds,
+        }
+
+        thin = segments_to_json(assemble_segments(task))
+        rehydrated = rehydrate_segments(thin, rounds)
+        assert [
+            segment['_round']['caller']
+            for segment in rehydrated
+            if segment.get('type') == SEG_TOOL_USE
+        ] == [round_entry['caller'] for round_entry in rounds]
+
 
 # ═══════════════════════════════════════════════════════════
 #  STEP 2 — DB round-trip: re-READ segments from the persisted row
@@ -749,17 +828,16 @@ class TestThinRehydrateRoundTrip:
 
 @pytest.mark.serial  # same contention reason as TestGroundTruthRealRunTask
 class TestSegmentsDBRoundTrip:
-    """Drive real run_task, then re-READ the persisted segments from BOTH the
-    task_results.segments column AND the conversation messages dict — proving
-    JSON serialization survives the DB boundary and rehydrates byte-identically
-    to what was assembled in memory. A pure in-memory assert would miss a
-    serialization bug; this is the step-2 acceptance gate held to the
-    ground-truth bar."""
+    """Drive real run_task and verify the single durable segment authority.
+
+    A canonical conversation attempt stores its segment timeline on the Turn,
+    not in the executor-diagnostic task_results row. The Turn copy must still
+    survive JSON persistence and rehydrate byte-identically to the tool rounds.
+    """
 
     def test_persisted_segments_reread_and_rehydrate(
             self, monkeypatch, chat_sidecar):
         from lib.storage import get_storage_client
-        from lib.tasks_pkg.manager._persist import _merge_tool_rounds
         from lib.tasks_pkg.orchestrator.api import run_task
 
         conv_id = 'cv-seg-rt-' + str(id(self))
@@ -772,28 +850,19 @@ class TestSegmentsDBRoundTrip:
             task = _create_ground_truth_task(conv_id)
             run_task(task)
 
-            in_memory = task.get('segments')
-            assert in_memory, 'run_task did not populate task["segments"]'
-            expected_tr = _merge_tool_rounds(task)
+            assert task.get('segments') is None
+            assert task.get('toolRounds') is None
 
-            # ── (A) task-results semantic record ──
+            # ── (A) task-results executor diagnostic ──
             row = get_storage_client().query(
                 'record.get', {'namespace': 'task_results', 'key': task['id']})
             assert row is not None, 'task result record not written'
             value = row['value']
-            col_segments = value.get('segments')
-            assert col_segments, 'segments column is empty — persist did not write it'
-            thin_from_db = _json.loads(col_segments)
-            # The persisted form is THIN (no _round mirror — it would duplicate
-            # the tool_rounds column / conversation toolRounds).
-            assert all('_round' not in s for s in thin_from_db)
-            # Rehydrate against the co-persisted tool_rounds → byte-identical.
-            rehydrated = rehydrate_segments(thin_from_db, expected_tr)
-            assert derive_content(rehydrated) == task['content']
-            assert derive_thinking(rehydrated) == task['thinking']
-            assert derive_tool_rounds(rehydrated) == expected_tr
+            assert value.get('tool_rounds') is None
+            assert value.get('segments') is None, (
+                'conversation task_results must not duplicate the Turn timeline')
 
-            # ── (B) canonical conversation projection ──
+            # ── (B) canonical Turn projection ──
             from tests._seed import conv_document
             messages = conv_document(conv_id)['messages']
             asst = [m for m in messages if m.get('role') == 'assistant']
@@ -808,6 +877,113 @@ class TestSegmentsDBRoundTrip:
             assert derive_tool_rounds(rehydrated_msg) == msg_tr
         finally:
             _cleanup_conv(conv_id)
+
+
+def test_running_checkpoint_keeps_only_the_owned_segment_home(monkeypatch):
+    """Turn attempts omit the duplicate; inline tasks retain their only copy."""
+    import lib.tasks_pkg.manager._sync as checkpoint_module
+
+    captured = []
+
+    monkeypatch.setattr(
+        checkpoint_module,
+        'snapshot_task_text',
+        lambda _task: ('answer', 'thought', 3),
+    )
+    monkeypatch.setattr(
+        checkpoint_module,
+        '_upsert_task_row',
+        lambda _task, _conv_id, **payload: captured.append(payload) or True,
+    )
+    monkeypatch.setattr(
+        checkpoint_module.chat_task_runtime,
+        'snapshot',
+        lambda: [],
+    )
+
+    round_record = _round(
+        1, 0, 'call-checkpoint', 'read_files', '{}', 'large result')
+    conversation_task = {
+        'id': 'task-turn',
+        'convId': 'conv-turn',
+        '_turnId': 'turn-1',
+        '_attemptId': 'attempt-1',
+        'toolRounds': [round_record],
+    }
+    assert checkpoint_module.checkpoint_task_partial(
+        conversation_task, force=True) is True
+    assert conversation_task.get('segments')
+    assert captured[-1]['tr_json'] is None
+    assert captured[-1]['segments_json'] is None
+
+    inline_task = {
+        'id': 'task-inline',
+        'convId': '',
+        '_inline_messages': True,
+        'toolRounds': [round_record],
+    }
+    assert checkpoint_module.checkpoint_task_partial(
+        inline_task, force=True) is True
+    assert captured[-1]['tr_json']
+    assert captured[-1]['segments_json']
+
+
+def test_terminal_result_keeps_only_the_owned_segment_home(monkeypatch):
+    """Terminal diagnostics use the same authority predicate as checkpoints."""
+    import lib.tasks_pkg.manager._persist as persist_module
+    import lib.tasks_pkg.manager._sync as checkpoint_module
+
+    captured = []
+    monkeypatch.setattr(
+        persist_module,
+        'snapshot_task_text',
+        lambda task: (task.get('content', ''), task.get('thinking', ''), 4),
+    )
+    monkeypatch.setattr(persist_module, 'build_result_meta', lambda _task: {})
+    monkeypatch.setattr(
+        persist_module,
+        '_upsert_task_row',
+        lambda _task, _conv_id, **payload: captured.append(payload) or True,
+    )
+    monkeypatch.setattr(
+        persist_module, '_release_heavy_task_state', lambda _task: 0)
+    monkeypatch.setattr(
+        checkpoint_module,
+        '_update_proactive_execution_status',
+        lambda _task: None,
+    )
+
+    round_record = _round(
+        1, 0, 'call-terminal', 'read_files', '{}', 'large result')
+    conversation_task = {
+        'id': 'terminal-turn',
+        'convId': 'conv-turn',
+        '_turnId': 'turn-1',
+        '_attemptId': 'attempt-1',
+        'status': 'done',
+        'finishReason': 'stop',
+        'content': 'answer',
+        'thinking': 'thought',
+        'toolRounds': [round_record],
+    }
+    assert persist_module.persist_task_result(conversation_task) is True
+    assert conversation_task.get('segments')
+    assert captured[-1]['tr_json'] is None
+    assert captured[-1]['segments_json'] is None
+
+    inline_task = {
+        'id': 'terminal-inline',
+        'convId': '',
+        '_inline_messages': True,
+        'status': 'done',
+        'finishReason': 'stop',
+        'content': 'answer',
+        'thinking': 'thought',
+        'toolRounds': [round_record],
+    }
+    assert persist_module.persist_task_result(inline_task) is True
+    assert captured[-1]['tr_json']
+    assert captured[-1]['segments_json']
 
 
 if __name__ == '__main__':

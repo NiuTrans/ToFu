@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -67,44 +65,60 @@ def test_role_selection_never_uses_below_threshold_or_wrong_role():
     ) == 'chosen-parent'
 
 
-def test_catalog_profile_refresh_preserves_operator_override_and_ignores_timestamp_only():
-    from lib.llm_dispatch.model_catalog_sync import reconcile_catalog_models
+def test_runtime_selection_reads_only_the_requested_owner_v2_authority():
+    from lib.model_profiles import (
+        configured_model_profiles,
+        select_model_for_tier,
+    )
+    from lib.model_routing import (
+        InMemoryModelRoutingRepository,
+        OwnerBoundary,
+        empty_document,
+        upsert_local_provider,
+    )
 
-    operator = _entry('operator-model', 'heavy', 2, ['coder'])
-    incoming_operator = _entry('operator-model', 'light', 1, ['writer'])
-    incoming_operator['capability_profile']['evidence'] = 'provider_catalog'
-    result = reconcile_catalog_models([operator], [incoming_operator])
-    assert result['updated'] == []
-    assert result['models'][0]['capability_profile']['quality'] == 'heavy'
+    repository = InMemoryModelRoutingRepository()
+    alice = OwnerBoundary.create(41, 'tenant-a')
+    bob = OwnerBoundary.create(42, 'tenant-a')
+    repository.compare_and_swap(alice, empty_document(), expected_revision=0)
+    repository.compare_and_swap(bob, empty_document(), expected_revision=0)
+    upsert_local_provider(
+        repository,
+        alice,
+        provider_id='alice-local',
+        display_name='Alice local',
+        base_url='http://127.0.0.1:18001/v1',
+        models=[{
+            'model_id': 'gpt-5.6-terra',
+            'capabilities': ['text', 'thinking'],
+            'context_window': 256_000,
+        }],
+    )
 
-    current = _entry('auto-model', 'heavy', 2, ['coder'])
-    current['capability_profile'].update(evidence='provider_catalog', updated_at=100)
-    incoming = _entry('auto-model', 'heavy', 2, ['coder'])
-    incoming['capability_profile'].update(evidence='provider_catalog', updated_at=200)
-    result = reconcile_catalog_models([current], [incoming])
-    assert result['updated'] == []
-    assert result['models'][0]['capability_profile']['updated_at'] == 100
-
-
-def test_capabilities_api_exposes_profile_per_provider(monkeypatch):
-    import lib
-    from routes.api_v1.capabilities import _models_summary
-
-    monkeypatch.setattr(lib, '_SAVED_CONFIG', {'providers': [{
-        'id': 'supplier', 'models': [
-            _entry('gpt-5.6-terra', 'heavy', 2, ['coder']),
-        ],
-    }]})
-    profile = _models_summary()[0]['capability_profile']
-    assert profile['providerId'] == 'supplier'
-    assert profile['quality'] == 'heavy'
-    assert profile['autoSelectable'] is True
-
-
-def test_settings_card_renders_profile_provenance_and_routing_state():
-    source = Path('frontend/src/runtime/app-runtime.js').read_text(
-        encoding='utf-8')
-    assert 'm.capability_profile || null' in source
-    assert "settings.modelProfileDetail" in source
-    assert "settings.modelProfileAuto" in source
-    assert "settings.modelProfileManual" in source
+    alice_profiles = configured_model_profiles(
+        owner_user_id=41,
+        tenant_id='tenant-a',
+        repository=repository,
+    )
+    bob_profiles = configured_model_profiles(
+        owner_user_id=42,
+        tenant_id='tenant-a',
+        repository=repository,
+    )
+    assert [(row['providerId'], row['modelId']) for row in alice_profiles] == [
+        ('alice-local', 'gpt-5.6-terra')]
+    assert bob_profiles == []
+    assert select_model_for_tier(
+        'heavy',
+        parent_model='parent-model',
+        owner_user_id=41,
+        tenant_id='tenant-a',
+        repository=repository,
+    ) == 'gpt-5.6-terra'
+    assert select_model_for_tier(
+        'heavy',
+        parent_model='parent-model',
+        owner_user_id=42,
+        tenant_id='tenant-a',
+        repository=repository,
+    ) == 'parent-model'

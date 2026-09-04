@@ -12,6 +12,22 @@ pytestmark = pytest.mark.unit
 def _fat_meta():
     return {
         'finishReason': 'stop',
+        'programmaticAdoptionNudges': [{
+            'afterRound': 3,
+            'targetRound': 4,
+            'reason': 'serial_direct_reads',
+            'chainLength': 3,
+            'tools': ['find_files', 'grep_search', 'read_files'],
+            'max': 1,
+        }],
+        'toolRoundTripNudges': [{
+            'afterRound': 6,
+            'targetRound': 7,
+            'reason': 'serial_single_tool_rounds',
+            'chainLength': 6,
+            'tools': ['run_command'] * 6,
+            'max': 1,
+        }],
         'usage': {'input_tokens': 5},
         'apiRounds': [
             {'round': 1, 'usage': {
@@ -39,6 +55,9 @@ def test_trim_metadata_reuses_live_sanitizer_and_preserves_visible_fields():
     assert usage['trace_id'] == 'trace-visible'
     assert usage['_dispatch'] == {'provider': 'visible'}
     assert clean['finishReason'] == 'stop' and clean['usage'] == {'input_tokens': 5}
+    assert clean['programmaticAdoptionNudges'] == (
+        meta['programmaticAdoptionNudges'])
+    assert clean['toolRoundTripNudges'] == meta['toolRoundTripNudges']
     assert '_wire_bytes' in meta['apiRounds'][0]['usage'], 'input must not mutate'
 
 

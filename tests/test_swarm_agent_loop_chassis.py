@@ -31,7 +31,9 @@ NEUTER evidence (manual, 2026-07-27):
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import sys
+import tempfile
 import time
 import unittest
 
@@ -109,6 +111,25 @@ class TestSwarmOnChassis(unittest.TestCase):
         self.assertEqual(agent.result.rounds_used, 1)
         self.assertEqual(disp['n'], 1)
         self.assertEqual(agent._tool_batches, [])
+
+    def test_stream_log_creates_parent_only_when_output_arrives(self):
+        def dispatch(body, **kwargs):
+            kwargs['on_thinking']('measured thought; ')
+            kwargs['on_content']('streamed final answer')
+            return _final_msg('streamed final answer')
+
+        with tempfile.TemporaryDirectory(prefix='swarm-lazy-log-') as root:
+            output_path = Path(root) / 'session' / 'worker.log'
+            agent = _mk_agent(dispatch_fn=dispatch)
+            agent.output_file = str(output_path)
+            self.assertFalse(output_path.parent.exists())
+
+            agent._run_loop(time.time())
+
+            self.assertEqual(
+                output_path.read_text(encoding='utf-8'),
+                'measured thought; streamed final answer',
+            )
 
     def test_rehydrated_round_number_continues_from_checkpoint(self):
         events = []
@@ -236,6 +257,46 @@ class TestSwarmOnChassis(unittest.TestCase):
         self.assertIn('LLM call failed at round 1',
                       agent.result.error_message or '')
 
+    def test_llm_error_with_only_placeholder_stays_failed(self):
+        """Round-2+ LLM failure with NO substantive history: the synthesized
+        'No substantive answer' placeholder must NOT promote the run to
+        COMPLETED — the real error_message has to reach the transcript."""
+        from lib.swarm.types import SubAgentStatus
+        calls = {'n': 0}
+
+        def dispatch(body, **kw):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return _tool_msg([_tc()])
+            raise RuntimeError('schema rejected (HTTP 400)')
+
+        agent = _mk_agent(dispatch_fn=dispatch)
+        agent._run_loop(time.time())
+        self.assertEqual(agent.result.status, SubAgentStatus.FAILED.value)
+        self.assertIn('LLM call failed at round 2',
+                      agent.result.error_message or '')
+        self.assertIn('No substantive answer',
+                      agent.result.final_answer or '')
+
+    def test_llm_error_with_genuine_partial_completes(self):
+        from lib.swarm.types import SubAgentStatus
+        calls = {'n': 0}
+
+        def dispatch(body, **kw):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                msg, sr, u = _tool_msg([_tc()])
+                msg['content'] = ('partial findings substantial enough '
+                                  'to be worth keeping')
+                return msg, sr, u
+            raise RuntimeError('schema rejected (HTTP 400)')
+
+        agent = _mk_agent(dispatch_fn=dispatch)
+        agent._run_loop(time.time())
+        self.assertEqual(agent.result.status, SubAgentStatus.COMPLETED.value)
+        self.assertIn('LLM call failed at round 2',
+                      agent.result.error_message or '')
+        self.assertIn('partial findings', agent.result.final_answer or '')
     def test_content_bearing_malformed_stream_never_completes(self):
         from lib.llm.stream_result import (
             ProviderStreamResult,

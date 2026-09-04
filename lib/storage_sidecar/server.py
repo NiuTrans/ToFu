@@ -14,11 +14,13 @@ from typing import Any, Callable, Mapping
 import psutil
 
 from lib.storage.errors import StorageError
+from lib.storage.frame_admission import FrameByteAdmission
 from lib.log import get_logger
 from lib.storage.protocol import (
-    PROTOCOL_VERSION, canonical_json, recv_frame, send_frame, validate_operation,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, canonical_json, recv_frame, send_frame,
+    validate_operation,
 )
-from lib.storage_sidecar.operations import resolve_operation
+from lib.storage_sidecar.operations import resolve_operation_contract
 
 
 logger = get_logger('tofu.storage.sidecar')
@@ -30,6 +32,7 @@ logger = get_logger('tofu.storage.sidecar')
 # classified rejection below instead of growing threads or an application
 # queue without bound.
 _RPC_ADMISSION_WAIT_S = 0.1
+_FRAME_BYTE_ADMISSION_WAIT_S = 5.0
 
 
 def _malloc_trim() -> bool:
@@ -53,6 +56,7 @@ class _IdleHeapTrimmer:
         clock: Callable[[], float] = time.monotonic,
         rss_bytes: Callable[[], int] | None = None,
         trim: Callable[[], bool] = _malloc_trim,
+        timer_ns: Callable[[], int] = time.perf_counter_ns,
     ) -> None:
         self.threshold_bytes = max(0, int(threshold_bytes))
         self.cooldown_s = max(0.0, float(cooldown_s))
@@ -60,6 +64,7 @@ class _IdleHeapTrimmer:
         self._rss_bytes = rss_bytes or (
             lambda: int(psutil.Process().memory_info().rss))
         self._trim = trim
+        self._timer_ns = timer_ns
         self._lock = threading.Lock()
         self._last_check_at: float | None = None
         self._attempts = 0
@@ -67,6 +72,8 @@ class _IdleHeapTrimmer:
         self._reclaimed_bytes = 0
         self._last_before_bytes = 0
         self._last_after_bytes = 0
+        self._duration_ns_total = 0
+        self._last_duration_ns = 0
 
     def maybe_trim(self) -> dict[str, int] | None:
         """Trim once above threshold and outside the configured cooldown."""
@@ -86,6 +93,7 @@ class _IdleHeapTrimmer:
             if before < self.threshold_bytes:
                 return None
             self._attempts += 1
+            started_ns = max(0, int(self._timer_ns()))
             try:
                 trimmed = self._trim()
             except Exception as exc:  # best-effort memory relief only
@@ -96,23 +104,29 @@ class _IdleHeapTrimmer:
             except (OSError, ValueError, TypeError, psutil.Error) as exc:
                 logger.debug('storage post-trim RSS probe failed: %s', exc)
                 after = before
+            duration_ns = max(
+                0, max(0, int(self._timer_ns())) - started_ns)
             reclaimed = max(0, before - after)
             self._successes += int(bool(trimmed))
             self._reclaimed_bytes += reclaimed
             self._last_before_bytes = before
             self._last_after_bytes = after
+            self._duration_ns_total += duration_ns
+            self._last_duration_ns = duration_ns
             result = {
                 'before_bytes': before,
                 'after_bytes': after,
                 'reclaimed_bytes': reclaimed,
+                'duration_ns': duration_ns,
             }
         log = logger.info if reclaimed >= 1024 * 1024 else logger.debug
         log(
             'storage idle heap trim: %.1fMiB -> %.1fMiB '
-            '(reclaimed %.1fMiB, threshold %.1fMiB)',
+            '(reclaimed %.1fMiB in %.1fms, threshold %.1fMiB)',
             before / (1024 * 1024),
             after / (1024 * 1024),
             reclaimed / (1024 * 1024),
+            duration_ns / 1_000_000,
             self.threshold_bytes / (1024 * 1024),
         )
         return result
@@ -125,7 +139,13 @@ class _IdleHeapTrimmer:
                 'idle_trim_reclaimed_bytes': self._reclaimed_bytes,
                 'idle_trim_last_before_bytes': self._last_before_bytes,
                 'idle_trim_last_after_bytes': self._last_after_bytes,
+                'idle_trim_duration_ns_total': self._duration_ns_total,
+                'idle_trim_last_duration_ns': self._last_duration_ns,
             }
+
+
+class _FrameAdmissionRejected(Exception):
+    """Internal signal: close before retaining an unadmitted frame body."""
 
 
 class _StorageTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -137,6 +157,7 @@ class _StorageTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def __init__(
         self, address, handler, *, backend, token: str, rpc_capacity: int,
         read_only_preview: bool, logical_outbox=None,
+        rpc_inflight_bytes: int = 128 * 1024 * 1024,
         idle_trim_rss_bytes: int = 0,
         idle_trim_cooldown_s: float = 300.0,
     ):
@@ -149,6 +170,9 @@ class _StorageTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._rpc_active = 0
         self._rpc_waiting = 0
         self._rpc_rejected = 0
+        self._frame_byte_admission = FrameByteAdmission(
+            capacity_bytes=max(MAX_FRAME_BYTES * 2, int(rpc_inflight_bytes)),
+        )
         self._idle_heap_trimmer = _IdleHeapTrimmer(
             threshold_bytes=idle_trim_rss_bytes,
             cooldown_s=idle_trim_cooldown_s,
@@ -206,6 +230,7 @@ class _StorageTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 'error': StorageError(
                     'database_unavailable',
                     'Storage sidecar is at capacity', True, 100,
+                    request_not_dispatched=True,
                 ).to_payload(),
             })
         except (OSError, StorageError):
@@ -238,6 +263,7 @@ class _StorageTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 'rejected': self._rpc_rejected,
             }
         metrics.update(self._idle_heap_trimmer.metrics())
+        metrics.update(self._frame_byte_admission.metrics())
         return metrics
 
     @staticmethod
@@ -258,14 +284,33 @@ class _StorageHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         request_id = ''
         operation = ''
+        request = None
+        reserved_request_bytes = 0
+
+        def admit_request_frame(size: int) -> None:
+            nonlocal reserved_request_bytes
+            admitted = self.server._frame_byte_admission.acquire(
+                size, timeout_s=_FRAME_BYTE_ADMISSION_WAIT_S)
+            if not admitted:
+                raise _FrameAdmissionRejected
+            reserved_request_bytes = size
+            self.server._frame_byte_admission.observe_frame('request', size)
+
         # Authentication is inside the first frame.  Bound unauthenticated
         # half-open clients so they cannot retain a worker/FD indefinitely.
         self.request.settimeout(5.0)
         try:
-            request = recv_frame(self.request)
+            request = recv_frame(
+                self.request, before_payload=admit_request_frame)
             request_id = str(request.get('request_id') or '')
             operation = str(request.get('operation') or '')
             response = self._dispatch(request, request_id)
+        except _FrameAdmissionRejected:
+            # The body is deliberately unread. Closing makes the client map
+            # the pre-dispatch rejection to retryable unavailability without
+            # retaining or draining a frame that exceeded process headroom.
+            logger.debug('storage frame-byte admission timed out')
+            return
         except (TimeoutError, socket.timeout):
             logger.debug(
                 'storage frame deadline elapsed operation_id=%s', request_id)
@@ -300,6 +345,11 @@ class _StorageHandler(socketserver.BaseRequestHandler):
                     operation_id=request_id,
                 ).to_payload(),
             }
+        finally:
+            request = None
+            if reserved_request_bytes:
+                self.server._frame_byte_admission.release(
+                    reserved_request_bytes)
         self._send_response(response, request_id, operation)
 
     def _send_response(
@@ -315,33 +365,54 @@ class _StorageHandler(socketserver.BaseRequestHandler):
         the real diagnosis.  OSError may mean a partial network write, so that
         branch still closes without attempting a second frame.
         """
-        try:
-            send_frame(self.request, response)
-            return
-        except StorageError as exc:
-            exc.operation_id = exc.operation_id or request_id
-            logger.warning(
-                'storage response encoding failed code=%s operation=%s '
-                'operation_id=%s: %s',
-                exc.code, operation or 'unknown', request_id, exc.message)
-            fallback = {
-                'protocol': PROTOCOL_VERSION,
-                'request_id': request_id,
-                'ok': False,
-                'error': exc.to_payload(),
-            }
-            try:
-                send_frame(self.request, fallback)
-                return
-            except (OSError, StorageError):
-                logger.debug(
-                    'storage fallback response channel closed operation=%s '
-                    'operation_id=%s', operation or 'unknown', request_id)
-                return
-        except OSError:
+        reserved_response_bytes = MAX_FRAME_BYTES
+        admitted = self.server._frame_byte_admission.acquire(
+            reserved_response_bytes,
+            timeout_s=_FRAME_BYTE_ADMISSION_WAIT_S,
+            response_priority=True,
+        )
+        if not admitted:
             logger.debug(
-                'storage response channel closed operation=%s operation_id=%s',
-                operation or 'unknown', request_id)
+                'storage response frame-byte admission timed out operation=%s '
+                'operation_id=%s', operation or 'unknown', request_id)
+            return
+        try:
+            try:
+                sent_bytes = send_frame(self.request, response)
+                if sent_bytes is not None:
+                    self.server._frame_byte_admission.observe_frame(
+                        'response', max(0, sent_bytes - 4))
+                return
+            except StorageError as exc:
+                exc.operation_id = exc.operation_id or request_id
+                logger.warning(
+                    'storage response encoding failed code=%s operation=%s '
+                    'operation_id=%s: %s',
+                    exc.code, operation or 'unknown', request_id, exc.message)
+                fallback = {
+                    'protocol': PROTOCOL_VERSION,
+                    'request_id': request_id,
+                    'ok': False,
+                    'error': exc.to_payload(),
+                }
+                try:
+                    sent_bytes = send_frame(self.request, fallback)
+                    if sent_bytes is not None:
+                        self.server._frame_byte_admission.observe_frame(
+                            'response', max(0, sent_bytes - 4))
+                    return
+                except (OSError, StorageError):
+                    logger.debug(
+                        'storage fallback response channel closed operation=%s '
+                        'operation_id=%s', operation or 'unknown', request_id)
+                    return
+            except OSError:
+                logger.debug(
+                    'storage response channel closed operation=%s '
+                    'operation_id=%s', operation or 'unknown', request_id)
+        finally:
+            self.server._frame_byte_admission.release(
+                reserved_response_bytes)
 
     def _dispatch(self, request: Mapping[str, Any], request_id: str) -> dict[str, Any]:
         if request.get('protocol') != PROTOCOL_VERSION:
@@ -421,8 +492,10 @@ class _StorageHandler(socketserver.BaseRequestHandler):
                     raise StorageError(
                         'database_protocol_error',
                         'Storage payload must be an object')
-                receipt_required, callback = resolve_operation(
+                receipt_required, callback, transaction_timeout_s = (
+                    resolve_operation_contract(
                     operation, kind, payload)
+                )
                 if receipt_required:
                     raise StorageError(
                         'database_protocol_error',
@@ -438,13 +511,16 @@ class _StorageHandler(socketserver.BaseRequestHandler):
                     callback,
                     deadline_at,
                     receipt_required=False,
+                    transaction_timeout_s=transaction_timeout_s,
                 )
         elif kind in {'query', 'command'}:
             payload = request.get('payload')
             if not isinstance(payload, Mapping):
                 raise StorageError(
                     'database_protocol_error', 'Storage payload must be an object')
-            receipt_required, callback = resolve_operation(operation, kind, payload)
+            receipt_required, callback, transaction_timeout_s = (
+                resolve_operation_contract(operation, kind, payload)
+            )
             if kind == 'query':
                 result = self.server.backend.query(
                     operation, callback, deadline_at)
@@ -483,6 +559,7 @@ class _StorageHandler(socketserver.BaseRequestHandler):
                     callback,
                     deadline_at,
                     receipt_required=receipt_required,
+                    transaction_timeout_s=transaction_timeout_s,
                 )
                 if logical_outbox is not None:
                     logical_outbox.notify(captured_record_bytes[0])
@@ -499,6 +576,7 @@ class _StorageHandler(socketserver.BaseRequestHandler):
 
 def create_server(
     backend, token: str, *, rpc_capacity: int = 8,
+    rpc_inflight_bytes: int = 128 * 1024 * 1024,
     read_only_preview: bool = False, logical_outbox=None,
     idle_trim_rss_bytes: int = 0,
     idle_trim_cooldown_s: float = 300.0,
@@ -506,6 +584,7 @@ def create_server(
     return _StorageTCPServer(
         ('127.0.0.1', 0), _StorageHandler, backend=backend, token=token,
         rpc_capacity=rpc_capacity, read_only_preview=read_only_preview,
+        rpc_inflight_bytes=rpc_inflight_bytes,
         logical_outbox=logical_outbox,
         idle_trim_rss_bytes=idle_trim_rss_bytes,
         idle_trim_cooldown_s=idle_trim_cooldown_s,

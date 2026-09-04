@@ -100,6 +100,20 @@ def _to_thread_spans(tree):
     return spans
 
 
+def _guarded_helper_name(node):
+    """Return the guarded helper referenced by a Name/Attribute node.
+
+    The helpers migrated behind the lazy ``_daily_report`` seam, so the
+    route references them as ``_daily_report.<helper>`` (an Attribute) rather
+    than as a bare Name. Both shapes pin the same offload.
+    """
+    if isinstance(node, ast.Name):
+        return node.id if node.id in _GUARDED_HELPERS else ''
+    if isinstance(node, ast.Attribute):
+        return node.attr if node.attr in _GUARDED_HELPERS else ''
+    return ''
+
+
 def _scan_daily_report(src):
     """Return (violations, wrapped_count) for the AST rule.
 
@@ -116,16 +130,17 @@ def _scan_daily_report(src):
         spans = _to_thread_spans(node)
         first_arg_lines = set()
         for a, b, first in spans:
-            if isinstance(first, ast.Name) and first.id in _GUARDED_HELPERS:
+            if _guarded_helper_name(first):
                 first_arg_lines.add(first.lineno)
                 wrapped += 1
         for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and sub.id in _GUARDED_HELPERS:
-                if sub.lineno in first_arg_lines:
-                    continue
-                in_span = any(a <= sub.lineno <= b for a, b, _ in spans)
-                if not in_span:
-                    violations.append(sub.lineno)
+            if not _guarded_helper_name(sub):
+                continue
+            if sub.lineno in first_arg_lines:
+                continue
+            in_span = any(a <= sub.lineno <= b for a, b, _ in spans)
+            if not in_span:
+                violations.append(sub.lineno)
     return violations, wrapped
 
 

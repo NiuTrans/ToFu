@@ -51,49 +51,42 @@ def _snapshot(
 
 
 def test_activity_counts_each_conversation_once_per_active_day(monkeypatch):
-    snapshots = [
-        _snapshot('multi', [
-            {'role': 'user', 'timestamp': _ms(1), 'content': 'a'},
-            {'role': 'assistant', 'timestamp': _ms(2), 'content': 'b'},
-            {'role': 'user', 'timestamp': _ms(2), 'content': 'c'},
-        ]),
-        _snapshot('same-day', [
-            {'role': 'user', 'timestamp': _ms(2), 'content': 'd'},
-        ]),
-    ]
     calls = []
 
-    def list_snapshots(**kwargs):
+    def count_activity(**kwargs):
         calls.append(kwargs)
-        return len(snapshots), iter(snapshots)
+        counts = [0] * (len(kwargs['day_boundaries_ms']) - 1)
+        counts[0] = 1
+        counts[1] = 2
+        return 2, counts
 
     monkeypatch.setattr(
-        'lib.conversations.repository.scan_conversations_bounded',
-        list_snapshots)
+        'lib.conversations.repository.count_conversation_activity_intervals',
+        count_activity)
     start, end = _range()
 
     assert conversations._activity_counts_for_range(
         start, end, owner_user_id=OWNER_USER_ID) == {1: 1, 2: 2}
-    assert calls == [{
-        'user_id': OWNER_USER_ID,
-        'updated_at_gte': start,
-        'created_at_lt': end,
-        'limit': 10_000,
-        'settings_keys': [],
-    }]
+    assert len(calls) == 1
+    assert calls[0]['user_id'] == OWNER_USER_ID
+    assert calls[0]['updated_at_gte'] == start
+    assert calls[0]['created_at_lt'] == end
+    assert calls[0]['limit'] == 10_000
+    assert calls[0]['day_boundaries_ms'][0] == start
+    assert calls[0]['day_boundaries_ms'][-1] == end
+    assert len(calls[0]['day_boundaries_ms']) == 32
 
 
-def test_missing_message_timestamp_uses_snapshot_update_time(monkeypatch):
+def test_activity_projection_maps_single_interval_to_requested_day(monkeypatch):
     monkeypatch.setattr(
-        'lib.conversations.repository.scan_conversations_bounded',
-        lambda **_kwargs: (1, iter([_snapshot(
-            'legacy', [{'role': 'user', 'content': 'legacy'}],
-            created_at=_ms(1), updated_at=_ms(4))])),
+        'lib.conversations.repository.count_conversation_activity_intervals',
+        lambda **kwargs: (1, [1] + [0] * (
+            len(kwargs['day_boundaries_ms']) - 2)),
     )
     start, end = _range()
 
     assert conversations._activity_counts_for_range(
-        start, end, owner_user_id=OWNER_USER_ID) == {4: 1}
+        start, end, owner_user_id=OWNER_USER_ID) == {1: 1}
 
 
 def test_activity_scan_fails_closed_when_authority_is_unavailable(monkeypatch):
@@ -101,7 +94,8 @@ def test_activity_scan_fails_closed_when_authority_is_unavailable(monkeypatch):
         raise RuntimeError('authority unavailable')
 
     monkeypatch.setattr(
-        'lib.conversations.repository.scan_conversations_bounded', unavailable)
+        'lib.conversations.repository.count_conversation_activity_intervals',
+        unavailable)
     start, end = _range()
 
     assert conversations._activity_counts_for_range(
@@ -118,10 +112,14 @@ def test_report_extraction_uses_exact_snapshot_transcript(monkeypatch):
         },
         {'role': 'assistant', 'timestamp': _ms(3), 'content': 'future'},
     ]
+    calls = []
+
+    def scan(**kwargs):
+        calls.append(kwargs)
+        return 1, iter([_snapshot('report', rows)])
+
     monkeypatch.setattr(
-        'lib.conversations.repository.scan_conversations_bounded',
-        lambda **_kwargs: (1, iter([_snapshot('report', rows)])),
-    )
+        'lib.conversations.repository.scan_conversations_bounded', scan)
 
     got = conversations._extract_convs_for_date(
         '2026-08-02', owner_user_id=OWNER_USER_ID)
@@ -134,6 +132,30 @@ def test_report_extraction_uses_exact_snapshot_transcript(monkeypatch):
     assert 'today answer' in got[0]['transcript']
     assert 'old' not in got[0]['transcript']
     assert 'future' not in got[0]['transcript']
+    assert calls == [{
+        'user_id': OWNER_USER_ID,
+        'updated_at_gte': int(dt.datetime(2026, 8, 2).timestamp() * 1000),
+        'created_at_lt': int(dt.datetime(2026, 8, 3).timestamp() * 1000),
+        'limit': 10_000,
+        'settings_keys': [],
+    }]
+
+
+def test_report_extraction_discards_partial_day_on_lazy_hydration_error(
+        monkeypatch):
+    def snapshots():
+        yield _snapshot('partial', [
+            {'role': 'user', 'timestamp': _ms(2), 'content': 'partial'},
+        ])
+        raise RuntimeError('later transcript batch failed')
+
+    monkeypatch.setattr(
+        'lib.conversations.repository.scan_conversations_bounded',
+        lambda **_kwargs: (2, snapshots()),
+    )
+
+    assert conversations._extract_convs_for_date(
+        '2026-08-02', owner_user_id=OWNER_USER_ID) == []
 
 
 def test_cost_scan_uses_usage_from_authority_snapshot(monkeypatch):

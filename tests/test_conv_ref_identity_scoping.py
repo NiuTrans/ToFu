@@ -61,7 +61,8 @@ class TestUserIdReachesTheAuthority:
         from lib.conv_ref import _detail
         seen = {}
 
-        def _read(conversation_id, *, user_id):
+        def _read(conversation_id, *, user_id, **projection):
+            del projection
             seen['conversation_id'] = conversation_id
             seen['user_id'] = user_id
             return None
@@ -74,7 +75,8 @@ class TestUserIdReachesTheAuthority:
         from lib.conv_ref import _detail
         seen = {}
 
-        def _read(conversation_id, *, user_id):
+        def _read(conversation_id, *, user_id, **projection):
+            del conversation_id, projection
             seen['user_id'] = user_id
             return None
 

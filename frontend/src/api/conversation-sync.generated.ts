@@ -118,6 +118,14 @@ export const CONVERSATION_SYNC_SCHEMAS = {
             },
             "type": "array"
           },
+          "dispatchState": {
+            "description": "Scheduler detail subordinate to durable attempt status.",
+            "enum": [
+              "queued",
+              "running"
+            ],
+            "type": "string"
+          },
           "phase": {},
           "projection": {
             "$ref": "#/components/schemas/TurnProjection"
@@ -182,6 +190,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "continue",
       "checkpoint_resume",
       "regenerate",
+      "answer_guidance",
       "ingest"
     ],
     "type": "string"
@@ -209,6 +218,17 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "operation": {
         "$ref": "#/components/schemas/AttemptOperation"
       },
+      "queueBinding": {
+        "description": "Present only while this pending attempt is held in the queue lane.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/QueueBinding"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "resumeAnchor": {
         "$ref": "#/components/schemas/JsonObject"
       },
@@ -224,6 +244,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         ]
       },
       "startedAt": {
+        "description": "Physical execution-worker entry time; null while pending/queued.",
         "oneOf": [
           {
             "minimum": 0,
@@ -238,6 +259,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "$ref": "#/components/schemas/AttemptStatus"
       },
       "taskId": {
+        "description": "Empty during dispatch preparation; set once accepted by the task scheduler.",
         "type": "string"
       },
       "turnId": {
@@ -259,6 +281,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     "type": "object"
   },
   "AttemptStatus": {
+    "description": "Durable attempt lifecycle. A pending attempt may be unbound during dispatch preparation or bound/queued while waiting for a server task slot. Only the fenced physical worker-entry command changes it to running; every other value is terminal.",
     "enum": [
       "pending",
       "running",
@@ -450,8 +473,14 @@ export const CONVERSATION_SYNC_SCHEMAS = {
   "ConversationQueueItem": {
     "additionalProperties": false,
     "properties": {
+      "attemptId": {
+        "type": "string"
+      },
       "fromConv": {
         "type": "string"
+      },
+      "hasAttachments": {
+        "type": "boolean"
       },
       "hasImages": {
         "type": "boolean"
@@ -465,6 +494,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "hasRefs": {
         "type": "boolean"
       },
+      "inputTurnId": {
+        "type": "string"
+      },
       "isPeerHuman": {
         "type": "boolean"
       },
@@ -472,6 +504,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "type": "boolean"
       },
       "kind": {
+        "type": "string"
+      },
+      "outputTurnId": {
         "type": "string"
       },
       "position": {
@@ -541,6 +576,10 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "cursor": {
         "type": "string"
       },
+      "hasArtifacts": {
+        "description": "True when the owner conversation has any live chat artifact. Present only when artifactHint=has-any; it carries no metadata and false authorizes the browser to project an empty artifact model.",
+        "type": "boolean"
+      },
       "heartbeatIntervalMs": {
         "minimum": 1000,
         "type": "integer"
@@ -557,15 +596,29 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         },
         "type": "array"
       },
+      "scope": {
+        "$ref": "#/components/schemas/ThreadScope"
+      },
       "serverBootId": {
         "type": "string"
       },
       "settings": {
         "$ref": "#/components/schemas/JsonObject"
       },
+      "sharedToolDocuments": {
+        "$ref": "#/components/schemas/SnapshotSharedToolDocuments",
+        "description": "Request-local content-addressed values removed from repeated tool round fields. Omitted unless segmentPayload=refs finds a repeated document large enough to amortize its reference."
+      },
+      "snapshotProjectionRefs": {
+        "$ref": "#/components/schemas/SnapshotProjectionReferences",
+        "description": "Request-local per-Turn references for exact terminal projection fields duplicated by stable segments. The generated browser restores each value before TurnStore and discards this dictionary."
+      },
       "syncSeq": {
         "minimum": 0,
         "type": "integer"
+      },
+      "turnWindow": {
+        "$ref": "#/components/schemas/ConversationTurnWindow"
       },
       "turns": {
         "items": {
@@ -577,6 +630,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     "required": [
       "ok",
       "contract",
+      "scope",
       "conversationId",
       "conversationRevision",
       "syncSeq",
@@ -587,6 +641,130 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "turns",
       "attempts",
       "queueItems"
+    ],
+    "type": "object"
+  },
+  "ConversationTurnPage": {
+    "additionalProperties": false,
+    "properties": {
+      "attempts": {
+        "items": {
+          "$ref": "#/components/schemas/AttemptRecord"
+        },
+        "maxItems": 256,
+        "type": "array"
+      },
+      "beforeOrdinal": {
+        "maximum": 9223372036854775807,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "contract": {
+        "const": "tofu.conversation-sync.turn-page/v1"
+      },
+      "conversationId": {
+        "type": "string"
+      },
+      "conversationRevision": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "cursor": {
+        "type": "string"
+      },
+      "hasMore": {
+        "type": "boolean"
+      },
+      "laneId": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "nextBeforeOrdinal": {
+        "oneOf": [
+          {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "ok": {
+        "const": true
+      },
+      "sharedToolDocuments": {
+        "$ref": "#/components/schemas/SnapshotSharedToolDocuments"
+      },
+      "snapshotProjectionRefs": {
+        "$ref": "#/components/schemas/SnapshotProjectionReferences"
+      },
+      "syncSeq": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "totalTurns": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "turns": {
+        "items": {
+          "$ref": "#/components/schemas/TurnRecord"
+        },
+        "maxItems": 256,
+        "type": "array"
+      }
+    },
+    "required": [
+      "ok",
+      "contract",
+      "conversationId",
+      "conversationRevision",
+      "syncSeq",
+      "cursor",
+      "laneId",
+      "beforeOrdinal",
+      "nextBeforeOrdinal",
+      "hasMore",
+      "totalTurns",
+      "turns",
+      "attempts"
+    ],
+    "type": "object"
+  },
+  "ConversationTurnWindow": {
+    "additionalProperties": false,
+    "properties": {
+      "hasMore": {
+        "type": "boolean"
+      },
+      "laneId": {
+        "const": "main"
+      },
+      "nextBeforeOrdinal": {
+        "oneOf": [
+          {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "totalTurns": {
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "laneId",
+      "nextBeforeOrdinal",
+      "hasMore",
+      "totalTurns"
     ],
     "type": "object"
   },
@@ -608,6 +786,11 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "expectedProjectionRevision": {
         "minimum": 0,
         "type": "integer"
+      },
+      "humanResponse": {
+        "maxLength": 32768,
+        "minLength": 1,
+        "type": "string"
       },
       "inputUpdate": {},
       "operation": {
@@ -939,6 +1122,510 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "string"
   },
+  "QueueBinding": {
+    "additionalProperties": false,
+    "properties": {
+      "queueId": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "state": {
+        "const": "pending"
+      }
+    },
+    "required": [
+      "queueId",
+      "state"
+    ],
+    "type": "object"
+  },
+  "QueueCancelResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cancelled": {
+        "type": "boolean"
+      },
+      "conversationId": {
+        "type": "string"
+      },
+      "conversationRevision": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "deletedTurnIds": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 2,
+        "type": "array"
+      },
+      "inputTurn": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TurnRecord"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "ok": {
+        "const": true
+      },
+      "queueId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "ok",
+      "conversationId",
+      "conversationRevision",
+      "queueId",
+      "cancelled",
+      "deletedTurnIds"
+    ],
+    "type": "object"
+  },
+  "RawArchiveRef": {
+    "additionalProperties": false,
+    "properties": {
+      "archiveId": {
+        "type": "string"
+      },
+      "byteCount": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "integrity": {
+        "enum": [
+          "complete",
+          "partial"
+        ],
+        "type": "string"
+      },
+      "sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "summary": {
+        "type": "string"
+      },
+      "truncationReason": {
+        "enum": [
+          "attempt_limit",
+          "quota_exhausted",
+          "secret_scrubbed",
+          "transport_interrupted"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "summary",
+      "byteCount",
+      "sha256",
+      "integrity"
+    ],
+    "type": "object"
+  },
+  "RecordPerceptionRequest": {
+    "additionalProperties": false,
+    "properties": {
+      "attemptId": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "clientDroppedBefore": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "clientId": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "detailKey": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "durationMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "generation": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "healthState": {
+        "$ref": "#/components/schemas/ConnectionHealthState"
+      },
+      "kind": {
+        "enum": [
+          "phase_painted",
+          "terminal_painted",
+          "transport_degraded",
+          "transport_recovered"
+        ],
+        "type": "string"
+      },
+      "observationId": {
+        "maxLength": 160,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:~-]*$",
+        "type": "string"
+      },
+      "observedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "paintedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "phase": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "projectionRevision": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "reason": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "receivedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "retryCount": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "serverEmittedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "visibility": {
+        "enum": [
+          "visible",
+          "hidden"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "observationId",
+      "attemptId",
+      "kind",
+      "clientId"
+    ],
+    "type": "object"
+  },
+  "RouteModelRef": {
+    "additionalProperties": false,
+    "properties": {
+      "creator_id": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "model_id": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "creator_id",
+      "model_id"
+    ],
+    "type": "object"
+  },
+  "RouteProviderOfferingRef": {
+    "additionalProperties": false,
+    "properties": {
+      "offering_id": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "provider_id": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "provider_id",
+      "offering_id"
+    ],
+    "type": "object"
+  },
+  "RouteSnapshot": {
+    "additionalProperties": false,
+    "properties": {
+      "actual_model": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RouteModelRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "connection_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "contract_version": {
+        "const": "tofu.route-snapshot/v2"
+      },
+      "credential": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RouteSnapshotCredential"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "degradation_reasons": {
+        "items": {
+          "maxLength": 256,
+          "type": "string"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "deployment_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "legacy": {
+        "type": "boolean"
+      },
+      "offering_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "preferred_provider_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "provider_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "provider_scoped_selection": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RouteProviderOfferingRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "recorded_at": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "selected_model": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RouteModelRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "transitions": {
+        "items": {
+          "$ref": "#/components/schemas/RouteSnapshotTransition"
+        },
+        "maxItems": 32,
+        "type": "array"
+      },
+      "wire_model_id": {
+        "maxLength": 256,
+        "type": "string"
+      }
+    },
+    "required": [
+      "contract_version",
+      "selected_model",
+      "provider_scoped_selection",
+      "preferred_provider_id",
+      "actual_model",
+      "provider_id",
+      "offering_id",
+      "deployment_id",
+      "connection_id",
+      "credential",
+      "wire_model_id",
+      "transitions",
+      "degradation_reasons",
+      "recorded_at"
+    ],
+    "type": "object"
+  },
+  "RouteSnapshotCredential": {
+    "additionalProperties": false,
+    "properties": {
+      "credential_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "key_hint": {
+        "maxLength": 64,
+        "type": "string"
+      },
+      "kind": {
+        "maxLength": 64,
+        "type": "string"
+      }
+    },
+    "required": [
+      "credential_id",
+      "kind",
+      "key_hint"
+    ],
+    "type": "object"
+  },
+  "RouteSnapshotTransition": {
+    "additionalProperties": false,
+    "properties": {
+      "from": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RouteTransitionEndpoint"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "kind": {
+        "enum": [
+          "initial",
+          "provider_failover",
+          "model_fallback"
+        ],
+        "type": "string"
+      },
+      "reason": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "to": {
+        "$ref": "#/components/schemas/RouteTransitionEndpoint"
+      }
+    },
+    "required": [
+      "kind",
+      "from",
+      "to",
+      "reason"
+    ],
+    "type": "object"
+  },
+  "RouteTransitionEndpoint": {
+    "additionalProperties": false,
+    "properties": {
+      "deployment_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "offering_id": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "provider_id": {
+        "maxLength": 256,
+        "type": "string"
+      }
+    },
+    "required": [
+      "provider_id",
+      "offering_id",
+      "deployment_id"
+    ],
+    "type": "object"
+  },
+  "SnapshotDocumentKey": {
+    "pattern": "^sha256:[0-9a-f]{64}$",
+    "type": "string"
+  },
+  "SnapshotDocumentReferences": {
+    "additionalProperties": false,
+    "maxProperties": 2,
+    "minProperties": 1,
+    "properties": {
+      "results": {
+        "$ref": "#/components/schemas/SnapshotDocumentKey"
+      },
+      "toolContent": {
+        "$ref": "#/components/schemas/SnapshotDocumentKey"
+      }
+    },
+    "type": "object"
+  },
+  "SnapshotProjectionReferences": {
+    "additionalProperties": {
+      "$ref": "#/components/schemas/SnapshotTurnProjectionReferences"
+    },
+    "maxProperties": 4096,
+    "minProperties": 1,
+    "type": "object"
+  },
+  "SnapshotRoundThinkingReferences": {
+    "additionalProperties": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "maxProperties": 4096,
+    "minProperties": 1,
+    "type": "object"
+  },
+  "SnapshotSharedToolDocuments": {
+    "additionalProperties": {},
+    "maxProperties": 256,
+    "minProperties": 1,
+    "propertyNames": {
+      "$ref": "#/components/schemas/SnapshotDocumentKey"
+    },
+    "type": "object"
+  },
+  "SnapshotTurnProjectionReferences": {
+    "additionalProperties": false,
+    "maxProperties": 2,
+    "minProperties": 1,
+    "properties": {
+      "content": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "roundThinking": {
+        "$ref": "#/components/schemas/SnapshotRoundThinkingReferences"
+      }
+    },
+    "type": "object"
+  },
   "SyncHeartbeat": {
     "additionalProperties": false,
     "properties": {
@@ -1005,6 +1692,162 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "conversationId",
       "cursor",
       "reason"
+    ],
+    "type": "object"
+  },
+  "ThreadScope": {
+    "additionalProperties": false,
+    "properties": {
+      "kind": {
+        "enum": [
+          "conversation",
+          "diagnostic",
+          "paper_report"
+        ],
+        "type": "string"
+      },
+      "ownerId": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          }
+        ]
+      },
+      "threadId": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "ownerId",
+      "threadId"
+    ],
+    "type": "object"
+  },
+  "ToolResultEvidence": {
+    "additionalProperties": false,
+    "properties": {
+      "artifactRef": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "contractVersion": {
+        "enum": [
+          "tofu.tool-result-evidence/v1"
+        ],
+        "type": "string"
+      },
+      "cursor": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "envelopeBytes": {
+        "maximum": 1000000000,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "error": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 96,
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "next_action": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "retryable",
+          "next_action",
+          "message"
+        ],
+        "type": "object"
+      },
+      "evidenceId": {
+        "maxLength": 128,
+        "type": "string"
+      },
+      "freshness": {
+        "additionalProperties": false,
+        "properties": {
+          "observedAtMs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "worldVersion": {
+            "maxLength": 256,
+            "type": "string"
+          }
+        },
+        "required": [
+          "observedAtMs",
+          "worldVersion"
+        ],
+        "type": "object"
+      },
+      "projectionKind": {
+        "enum": [
+          "text",
+          "json_value",
+          "summary_items",
+          "partial",
+          "error"
+        ],
+        "type": "string"
+      },
+      "rawBytes": {
+        "maximum": 1000000000,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "resultContractVersion": {
+        "enum": [
+          "tofu.tool-result/v2"
+        ],
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "ok",
+          "partial",
+          "error"
+        ],
+        "type": "string"
+      },
+      "truncated": {
+        "type": "boolean"
+      },
+      "visibleBytes": {
+        "maximum": 1000000000,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "contractVersion",
+      "resultContractVersion",
+      "status",
+      "projectionKind",
+      "truncated",
+      "rawBytes",
+      "visibleBytes",
+      "envelopeBytes",
+      "evidenceId"
     ],
     "type": "object"
   },
@@ -1299,6 +2142,131 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     },
     "type": "object"
   },
+  "TurnClientPerceptionObservation": {
+    "additionalProperties": false,
+    "properties": {
+      "attemptId": {
+        "maxLength": 128,
+        "type": "string"
+      },
+      "clientDroppedBefore": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "clientId": {
+        "maxLength": 64,
+        "type": "string"
+      },
+      "clockSkewSuspected": {
+        "type": "boolean"
+      },
+      "detailKey": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "durationMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "generation": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "healthState": {
+        "$ref": "#/components/schemas/ConnectionHealthState"
+      },
+      "kind": {
+        "enum": [
+          "phase_painted",
+          "terminal_painted",
+          "transport_degraded",
+          "transport_recovered"
+        ],
+        "type": "string"
+      },
+      "observationId": {
+        "maxLength": 160,
+        "minLength": 1,
+        "type": "string"
+      },
+      "observedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "paintedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "phase": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "projectionRevision": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "reason": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "receivedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "recordedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "renderMs": {
+        "maximum": 600000,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "retryCount": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "serverEmittedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "taskId": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "transportMs": {
+        "maximum": 86400000,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "visibility": {
+        "enum": [
+          "visible",
+          "hidden"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "observationId",
+      "kind",
+      "taskId",
+      "attemptId",
+      "clientId",
+      "recordedAt"
+    ],
+    "type": "object"
+  },
   "TurnCommandResponse": {
     "additionalProperties": true,
     "properties": {
@@ -1307,6 +2275,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "attempt": {
         "$ref": "#/components/schemas/AttemptRecord"
+      },
+      "blockId": {
+        "type": "string"
       },
       "conversationId": {
         "type": "string"
@@ -1327,6 +2298,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "idempotentReplay": {
         "type": "boolean"
+      },
+      "injectionId": {
+        "type": "string"
       },
       "latestTurn": {
         "$ref": "#/components/schemas/TurnRecord"
@@ -1582,6 +2556,12 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "caption": {
         "type": "string"
       },
+      "mimeType": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
       "pdfImageSource": {
         "type": "string"
       },
@@ -1608,6 +2588,12 @@ export const CONVERSATION_SYNC_SCHEMAS = {
             "type": "string"
           }
         ]
+      },
+      "sourceTool": {
+        "type": "string"
+      },
+      "toolCallId": {
+        "type": "string"
       }
     },
     "type": "object"
@@ -1718,6 +2704,149 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     },
     "type": "object"
   },
+  "TurnLastRoundUsage": {
+    "additionalProperties": false,
+    "properties": {
+      "keyName": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "keyTail": {
+        "maxLength": 32,
+        "type": "string"
+      },
+      "model": {
+        "maxLength": 512,
+        "type": "string"
+      },
+      "providerId": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "resolvedModel": {
+        "maxLength": 512,
+        "type": "string"
+      },
+      "round": {
+        "oneOf": [
+          {
+            "maximum": 2147483647,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "maxLength": 24,
+            "type": "string"
+          }
+        ]
+      },
+      "tag": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "tokensIn": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "tokensOut": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "type": "object"
+  },
+  "TurnMediaAttachment": {
+    "additionalProperties": false,
+    "properties": {
+      "attachmentId": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "avgFrameBytes": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "durationSeconds": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "error": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "frameCount": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "height": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "enum": [
+          "document",
+          "video"
+        ],
+        "type": "string"
+      },
+      "method": {
+        "type": "string"
+      },
+      "mimeType": {
+        "maxLength": 255,
+        "type": "string"
+      },
+      "name": {
+        "maxLength": 240,
+        "minLength": 1,
+        "type": "string"
+      },
+      "pages": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "previewUrl": {
+        "type": "string"
+      },
+      "sizeBytes": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sourceUrl": {
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "processing",
+          "ready",
+          "failed",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "textChars": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "transcriptStatus": {
+        "type": "string"
+      },
+      "width": {
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "attachmentId",
+      "kind",
+      "name",
+      "status"
+    ],
+    "type": "object"
+  },
   "TurnMessageInjection": {
     "additionalProperties": true,
     "properties": {
@@ -1747,6 +2876,46 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     },
     "required": [
       "blockId"
+    ],
+    "type": "object"
+  },
+  "TurnModelRoute": {
+    "additionalProperties": false,
+    "properties": {
+      "kind": {
+        "enum": [
+          "selected",
+          "role_tier"
+        ],
+        "type": "string"
+      },
+      "resolvedModel": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "role": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "selectedModel": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "tier": {
+        "enum": [
+          "light",
+          "standard",
+          "heavy"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "selectedModel",
+      "resolvedModel",
+      "role",
+      "tier",
+      "kind"
     ],
     "type": "object"
   },
@@ -1807,6 +2976,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
             "type": "string"
           }
         ]
+      },
+      "modelRoute": {
+        "$ref": "#/components/schemas/TurnModelRoute"
       },
       "nextPhase": {
         "type": "string"
@@ -2085,6 +3257,13 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         },
         "type": "array"
       },
+      "attachments": {
+        "items": {
+          "$ref": "#/components/schemas/TurnMediaAttachment"
+        },
+        "maxItems": 20,
+        "type": "array"
+      },
       "boardTaskId": {
         "type": "string"
       },
@@ -2102,6 +3281,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "$ref": "#/components/schemas/TurnConversationReference"
         },
         "type": "array"
+      },
+      "cost": {
+        "$ref": "#/components/schemas/JsonObject"
       },
       "error": {},
       "fallbackFrom": {
@@ -2126,10 +3308,11 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "items": {
           "$ref": "#/components/schemas/TurnImageAttachment"
         },
+        "maxItems": 20,
         "type": "array"
       },
       "lastRoundUsage": {
-        "$ref": "#/components/schemas/JsonObject"
+        "$ref": "#/components/schemas/TurnLastRoundUsage"
       },
       "model": {
         "type": "string"
@@ -2183,6 +3366,16 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         },
         "type": "array"
       },
+      "rolledBack": {
+        "items": {
+          "$ref": "#/components/schemas/TurnRolledBackEntry"
+        },
+        "maxItems": 4,
+        "type": "array"
+      },
+      "routeSnapshot": {
+        "$ref": "#/components/schemas/RouteSnapshot"
+      },
       "segments": {
         "items": {
           "$ref": "#/components/schemas/TurnContentSegment"
@@ -2212,6 +3405,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           }
         ]
       },
+      "timingTrace": {
+        "$ref": "#/components/schemas/TurnTimingTrace"
+      },
       "todoState": {
         "$ref": "#/components/schemas/JsonObject"
       },
@@ -2235,6 +3431,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "$ref": "#/components/schemas/TurnVideoAttachment"
         },
         "type": "array"
+      },
+      "waitingOn": {
+        "$ref": "#/components/schemas/JsonObject"
       }
     },
     "type": "object"
@@ -2309,6 +3508,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "mcpLoginHint": {
         "$ref": "#/components/schemas/JsonObject"
       },
+      "mcpToolsDelta": {
+        "$ref": "#/components/schemas/JsonObject"
+      },
       "memoryPrefetch": {
         "$ref": "#/components/schemas/JsonObject"
       },
@@ -2320,6 +3522,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "$ref": "#/components/schemas/JsonObject"
         },
         "type": "array"
+      },
+      "projectPathChange": {
+        "$ref": "#/components/schemas/JsonObject"
       },
       "relatedConversations": {
         "$ref": "#/components/schemas/JsonObject"
@@ -2373,6 +3578,10 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           }
         ]
       },
+      "presentationId": {
+        "description": "Stable browser identity across optimistic acceptance, queue activation, and reconnect.",
+        "type": "string"
+      },
       "projection": {
         "$ref": "#/components/schemas/TurnProjection"
       },
@@ -2399,6 +3608,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     },
     "required": [
       "turnId",
+      "presentationId",
       "conversationId",
       "laneId",
       "ordinal",
@@ -2418,7 +3628,8 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     "enum": [
       "continue",
       "checkpoint_resume",
-      "regenerate"
+      "regenerate",
+      "answer_guidance"
     ],
     "type": "string"
   },
@@ -2438,9 +3649,37 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "object"
   },
+  "TurnRolledBackEntry": {
+    "additionalProperties": false,
+    "properties": {
+      "at": {
+        "minimum": 1,
+        "type": "integer"
+      },
+      "attemptId": {
+        "type": "string"
+      },
+      "blockId": {
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      },
+      "thinking": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "blockId"
+    ],
+    "type": "object"
+  },
   "TurnRuntimeStateChange": {
     "additionalProperties": false,
     "properties": {
+      "actor": {
+        "$ref": "#/components/schemas/TurnActor"
+      },
       "currentAttemptId": {
         "oneOf": [
           {
@@ -2450,6 +3689,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
             "type": "null"
           }
         ]
+      },
+      "kind": {
+        "type": "string"
       },
       "settlement": {
         "$ref": "#/components/schemas/TurnSettlement"
@@ -2565,6 +3807,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     "type": "object"
   },
   "TurnStatus": {
+    "description": "Durable lifecycle state. pending means accepted but no execution worker has entered; running means a worker has physically entered the attempt; every other value is terminal.",
     "enum": [
       "pending",
       "running",
@@ -2592,6 +3835,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
   "TurnTextSegment": {
     "additionalProperties": true,
     "properties": {
+      "attemptId": {
+        "type": "string"
+      },
       "blockId": {
         "type": "string"
       },
@@ -2611,6 +3857,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "resumable": {
         "type": "boolean"
+      },
+      "taskId": {
+        "type": "string"
       },
       "terminal": {
         "type": "boolean"
@@ -2635,6 +3884,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
   "TurnThinkingSegment": {
     "additionalProperties": true,
     "properties": {
+      "attemptId": {
+        "type": "string"
+      },
       "blockId": {
         "type": "string"
       },
@@ -2655,6 +3907,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "signature": {
         "type": "string"
       },
+      "taskId": {
+        "type": "string"
+      },
       "terminal": {
         "type": "boolean"
       },
@@ -2672,6 +3927,498 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "type",
       "blockId",
       "text"
+    ],
+    "type": "object"
+  },
+  "TurnThreadSnapshot": {
+    "additionalProperties": false,
+    "properties": {
+      "attempts": {
+        "items": {
+          "$ref": "#/components/schemas/AttemptRecord"
+        },
+        "type": "array"
+      },
+      "queueItems": {
+        "items": {
+          "$ref": "#/components/schemas/ConversationQueueItem"
+        },
+        "type": "array"
+      },
+      "scope": {
+        "$ref": "#/components/schemas/ThreadScope"
+      },
+      "turns": {
+        "items": {
+          "$ref": "#/components/schemas/TurnRecord"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "scope",
+      "turns",
+      "attempts",
+      "queueItems"
+    ],
+    "type": "object"
+  },
+  "TurnTimingGap": {
+    "additionalProperties": false,
+    "properties": {
+      "tEnd": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "tStart": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "tStart",
+      "tEnd"
+    ],
+    "type": "object"
+  },
+  "TurnTimingOverBudgetSpan": {
+    "additionalProperties": false,
+    "properties": {
+      "budgetMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "elapsedMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "name": {
+        "maxLength": 400,
+        "type": "string"
+      },
+      "spanId": {
+        "maxLength": 256,
+        "type": "string"
+      }
+    },
+    "required": [
+      "spanId",
+      "kind",
+      "name",
+      "elapsedMs",
+      "budgetMs"
+    ],
+    "type": "object"
+  },
+  "TurnTimingSpan": {
+    "additionalProperties": false,
+    "properties": {
+      "attrs": {
+        "$ref": "#/components/schemas/JsonObject"
+      },
+      "budgetMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "depth": {
+        "maximum": 64,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "name": {
+        "maxLength": 400,
+        "type": "string"
+      },
+      "overBudget": {
+        "type": "boolean"
+      },
+      "parent": {
+        "oneOf": [
+          {
+            "maxLength": 256,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "spanId": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "running",
+          "done",
+          "error",
+          "aborted",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "tEnd": {
+        "oneOf": [
+          {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "tStart": {
+        "oneOf": [
+          {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "spanId",
+      "parent",
+      "depth",
+      "kind",
+      "name",
+      "tStart",
+      "tEnd",
+      "status",
+      "attrs"
+    ],
+    "type": "object"
+  },
+  "TurnTimingStatusEntry": {
+    "additionalProperties": false,
+    "properties": {
+      "active": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "attempt": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "attention": {
+        "enum": [
+          "progress",
+          "wait",
+          "stall"
+        ],
+        "type": "string"
+      },
+      "bucket": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "capacity": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "count": {
+        "maximum": 2147483647,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "detail": {
+        "maxLength": 400,
+        "type": "string"
+      },
+      "detailArgs": {
+        "$ref": "#/components/schemas/JsonObject"
+      },
+      "detailKey": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "id": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "lastObservedAt": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "model": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "phase": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "queuePosition": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "queued": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "reason": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "roundNum": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "statusCode": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "tEnd": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "tStart": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "terminalBoundary": {
+        "type": "boolean"
+      },
+      "waitSeconds": {
+        "minimum": 0,
+        "type": "number"
+      }
+    },
+    "required": [
+      "id",
+      "phase",
+      "attention",
+      "tStart",
+      "lastObservedAt",
+      "count"
+    ],
+    "type": "object"
+  },
+  "TurnTimingSummary": {
+    "additionalProperties": false,
+    "properties": {
+      "approvalWaitMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "compactionMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "llmMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "overBudget": {
+        "items": {
+          "$ref": "#/components/schemas/TurnTimingOverBudgetSpan"
+        },
+        "maxItems": 256,
+        "type": "array"
+      },
+      "toolMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "totalMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "ttftMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "unattributedMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "waitMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "totalMs",
+      "llmMs",
+      "toolMs",
+      "waitMs",
+      "compactionMs",
+      "approvalWaitMs",
+      "unattributedMs",
+      "ttftMs",
+      "overBudget"
+    ],
+    "type": "object"
+  },
+  "TurnTimingTrace": {
+    "additionalProperties": false,
+    "properties": {
+      "clientObservationDroppedCount": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "clientObservations": {
+        "items": {
+          "$ref": "#/components/schemas/TurnClientPerceptionObservation"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "compacted": {
+        "type": "boolean"
+      },
+      "coverage": {
+        "enum": [
+          "full",
+          "partial"
+        ],
+        "type": "string"
+      },
+      "coverageReason": {
+        "maxLength": 80,
+        "type": "string"
+      },
+      "detailCompacted": {
+        "type": "boolean"
+      },
+      "droppedGaps": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "droppedSpans": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "eventLogAvailable": {
+        "type": "boolean"
+      },
+      "eventsAvailable": {
+        "type": "boolean"
+      },
+      "gaps": {
+        "items": {
+          "$ref": "#/components/schemas/TurnTimingGap"
+        },
+        "maxItems": 128,
+        "type": "array"
+      },
+      "overBudgetDroppedCount": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "running": {
+        "type": "boolean"
+      },
+      "source": {
+        "enum": [
+          "event-log",
+          "live-projection",
+          "turn-snapshot",
+          "attempt-receipts"
+        ],
+        "type": "string"
+      },
+      "spans": {
+        "items": {
+          "$ref": "#/components/schemas/TurnTimingSpan"
+        },
+        "maxItems": 256,
+        "type": "array"
+      },
+      "status": {
+        "enum": [
+          "running",
+          "done",
+          "error",
+          "aborted"
+        ],
+        "type": "string"
+      },
+      "statusDroppedCount": {
+        "maximum": 2147483647,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "statusHistory": {
+        "items": {
+          "$ref": "#/components/schemas/TurnTimingStatusEntry"
+        },
+        "maxItems": 128,
+        "type": "array"
+      },
+      "summary": {
+        "$ref": "#/components/schemas/TurnTimingSummary"
+      },
+      "tEnd": {
+        "oneOf": [
+          {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "tStart": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "taskId": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "totalMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "version": {
+        "const": 1
+      }
+    },
+    "required": [
+      "version",
+      "taskId"
     ],
     "type": "object"
   },
@@ -2736,12 +4483,48 @@ export const CONVERSATION_SYNC_SCHEMAS = {
   "TurnToolRound": {
     "additionalProperties": true,
     "properties": {
+      "_programCallId": {
+        "type": "string"
+      },
+      "_programSynthetic": {
+        "type": "boolean"
+      },
       "_rejected": {
         "$ref": "#/components/schemas/TurnToolRejection",
         "deprecated": true
       },
+      "_snapshotDocumentRefs": {
+        "$ref": "#/components/schemas/SnapshotDocumentReferences",
+        "description": "Snapshot-only references for repeated, immutable browser fields. The generated browser client resolves every entry from ConversationSyncSnapshot.sharedToolDocuments before TurnStore."
+      },
       "assistantContent": {
         "type": "string"
+      },
+      "attemptId": {
+        "type": "string"
+      },
+      "attentionKind": {
+        "description": "Stable semantic importance; live/error state is derived from status.",
+        "enum": [
+          "routine",
+          "important",
+          "interactive"
+        ],
+        "type": "string"
+      },
+      "childCallIds": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "childToolNames": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "type": "array"
       },
       "deadlineTs": {
         "type": "number"
@@ -2759,6 +4542,31 @@ export const CONVERSATION_SYNC_SCHEMAS = {
             "type": "null"
           }
         ]
+      },
+      "parentToolCallId": {
+        "description": "Presentation-only parent edge for nested or recovery calls.",
+        "maxLength": 256,
+        "type": "string"
+      },
+      "programBackend": {
+        "type": "string"
+      },
+      "programCode": {
+        "type": "string"
+      },
+      "programFingerprint": {
+        "type": "string"
+      },
+      "programLimits": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "programResult": {},
+      "programSource": {
+        "type": "string"
+      },
+      "programStatus": {
+        "type": "string"
       },
       "query": {
         "type": "string"
@@ -2780,8 +4588,14 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "status": {
         "type": "string"
       },
+      "tEnd": {
+        "type": "number"
+      },
       "tStart": {
         "type": "number"
+      },
+      "taskId": {
+        "type": "string"
       },
       "thinking": {
         "type": "string"
@@ -2796,6 +4610,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "toolContent": {},
       "toolName": {
         "type": "string"
+      },
+      "toolResultEvidence": {
+        "$ref": "#/components/schemas/ToolResultEvidence"
       }
     },
     "type": "object"
@@ -2805,6 +4622,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     "properties": {
       "_round": {
         "$ref": "#/components/schemas/TurnToolRound"
+      },
+      "attemptId": {
+        "type": "string"
       },
       "blockId": {
         "type": "string"
@@ -2829,6 +4649,13 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "result": {
         "$ref": "#/components/schemas/TurnToolResult"
+      },
+      "roundRef": {
+        "description": "In a refs snapshot, resolves input and result from the unique sibling TurnToolRound whose toolCallId equals this value.",
+        "type": "string"
+      },
+      "taskId": {
+        "type": "string"
       },
       "type": {
         "const": "tool_use"
@@ -2986,15 +4813,44 @@ export type TurnToolRejection = {
   [key: string]: unknown;
 };
 
+export type ToolResultEvidence = {
+  "contractVersion": "tofu.tool-result-evidence/v1";
+  "resultContractVersion": "tofu.tool-result/v2";
+  "status": "ok" | "partial" | "error";
+  "projectionKind": "text" | "json_value" | "summary_items" | "partial" | "error";
+  "truncated": boolean;
+  "rawBytes": number;
+  "visibleBytes": number;
+  "envelopeBytes": number;
+  "evidenceId": string;
+  "artifactRef"?: string;
+  "cursor"?: string;
+  "freshness"?: {
+  "observedAtMs": number;
+  "worldVersion": string;
+};
+  "error"?: {
+  "code": string;
+  "retryable": boolean;
+  "next_action": string;
+  "message": string;
+};
+};
+
 export type TurnToolRound = {
+  "attemptId"?: string;
+  "taskId"?: string;
   "roundNum"?: number;
   "llmRound"?: (number) | (null);
   "toolCallId"?: string;
   "toolName"?: string;
   "toolArgs"?: unknown;
   "toolContent"?: unknown;
+  "toolResultEvidence"?: ToolResultEvidence;
   "query"?: string;
   "status"?: string;
+  "attentionKind"?: "routine" | "important" | "interactive";
+  "parentToolCallId"?: string;
   "rejection"?: TurnToolRejection;
   "_rejected"?: TurnToolRejection;
   "assistantContent"?: string;
@@ -3005,12 +4861,53 @@ export type TurnToolRound = {
   "tStart"?: number;
   "execStartTs"?: number;
   "deadlineTs"?: number;
+  "tEnd"?: number;
+  "_programSynthetic"?: boolean;
+  "_programCallId"?: string;
+  "programCode"?: string;
+  "programStatus"?: string;
+  "programSource"?: string;
+  "programBackend"?: string;
+  "programResult"?: unknown;
+  "programFingerprint"?: string;
+  "childCallIds"?: ReadonlyArray<string>;
+  "childToolNames"?: ReadonlyArray<string>;
+  "programLimits"?: {
   [key: string]: unknown;
+};
+  "_snapshotDocumentRefs"?: SnapshotDocumentReferences;
+  [key: string]: unknown;
+};
+
+export type SnapshotDocumentReferences = {
+  "toolContent"?: SnapshotDocumentKey;
+  "results"?: SnapshotDocumentKey;
+};
+
+export type SnapshotDocumentKey = string;
+
+export type SnapshotSharedToolDocuments = {
+  [key: string]: unknown;
+};
+
+export type SnapshotRoundThinkingReferences = {
+  [key: string]: string;
+};
+
+export type SnapshotTurnProjectionReferences = {
+  "content"?: string;
+  "roundThinking"?: SnapshotRoundThinkingReferences;
+};
+
+export type SnapshotProjectionReferences = {
+  [key: string]: SnapshotTurnProjectionReferences;
 };
 
 export type TurnTextSegment = {
   "type": "text";
   "blockId": string;
+  "attemptId"?: string;
+  "taskId"?: string;
   "text": string;
   "translatedText"?: string;
   "deliverable"?: boolean;
@@ -3023,6 +4920,8 @@ export type TurnTextSegment = {
 export type TurnThinkingSegment = {
   "type": "thinking";
   "blockId": string;
+  "attemptId"?: string;
+  "taskId"?: string;
   "text": string;
   "translatedText"?: string;
   "deliverable"?: boolean;
@@ -3035,11 +4934,14 @@ export type TurnThinkingSegment = {
 export type TurnToolUseSegment = {
   "type": "tool_use";
   "blockId": string;
+  "attemptId"?: string;
+  "taskId"?: string;
   "id": string;
   "name": string;
   "input"?: unknown;
   "llmRound"?: (number) | (null);
   "result": TurnToolResult;
+  "roundRef"?: string;
   "_round"?: TurnToolRound;
   [key: string]: unknown;
 };
@@ -3062,6 +4964,10 @@ export type TurnImageAttachment = {
   "preview"?: string;
   "caption"?: string;
   "sizeKB"?: (number) | (string);
+  "name"?: string;
+  "mimeType"?: string;
+  "sourceTool"?: string;
+  "toolCallId"?: string;
   "pdfPage"?: number;
   "pdfTotal"?: number;
   "pdfName"?: string;
@@ -3096,6 +5002,27 @@ export type TurnDocumentAttachment = {
   "isScanned"?: boolean;
   "method"?: string;
   [key: string]: unknown;
+};
+
+export type TurnMediaAttachment = {
+  "attachmentId": string;
+  "kind": "document" | "video";
+  "name": string;
+  "status": "processing" | "ready" | "failed" | "unavailable";
+  "mimeType"?: string;
+  "sizeBytes"?: number;
+  "sourceUrl"?: string;
+  "previewUrl"?: string;
+  "pages"?: number;
+  "textChars"?: number;
+  "method"?: string;
+  "durationSeconds"?: number;
+  "width"?: number;
+  "height"?: number;
+  "frameCount"?: number;
+  "avgFrameBytes"?: number;
+  "transcriptStatus"?: string;
+  "error"?: string;
 };
 
 export type TurnConversationReference = {
@@ -3152,6 +5079,14 @@ export type TurnFileChangesBlock = {
   "files": ReadonlyArray<TurnFileChange>;
 };
 
+export type TurnModelRoute = {
+  "selectedModel": string;
+  "resolvedModel": string;
+  "role": string;
+  "tier": "light" | "standard" | "heavy";
+  "kind": "selected" | "role_tier";
+};
+
 export type TurnOrchestration = {
   "iteration"?: (number) | (string);
   "approved"?: boolean;
@@ -3159,12 +5094,15 @@ export type TurnOrchestration = {
   "stuck"?: boolean;
   "flowNodeId"?: string;
   "flowRunId"?: string;
+  "modelRoute"?: TurnModelRoute;
 };
 
 export type TurnProvenance = {
   "blockId": string;
   "memoryPrefetch"?: JsonObject;
   "mcpLoginHint"?: JsonObject;
+  "mcpToolsDelta"?: JsonObject;
+  "projectPathChange"?: JsonObject;
   "preferencesApplied"?: JsonObject;
   "preferencesLearned"?: ReadonlyArray<JsonObject>;
   "relatedConversations"?: JsonObject;
@@ -3209,6 +5147,14 @@ export type TurnCompaction = {
   "reductionPercent"?: number;
   "foldedToolRounds"?: number;
   "estimatedPromptTokens"?: number;
+};
+
+export type TurnRolledBackEntry = {
+  "blockId": string;
+  "attemptId"?: string;
+  "at"?: number;
+  "content"?: string;
+  "thinking"?: string;
 };
 
 export type TurnTranslation = {
@@ -3267,6 +5213,53 @@ export type TurnPlanExecution = {
   "planText": string;
 };
 
+export type RouteModelRef = {
+  "creator_id": string;
+  "model_id": string;
+};
+
+export type RouteProviderOfferingRef = {
+  "provider_id": string;
+  "offering_id": string;
+};
+
+export type RouteTransitionEndpoint = {
+  "provider_id": string;
+  "offering_id": string;
+  "deployment_id": string;
+};
+
+export type RouteSnapshotTransition = {
+  "kind": "initial" | "provider_failover" | "model_fallback";
+  "from": (RouteTransitionEndpoint) | (null);
+  "to": RouteTransitionEndpoint;
+  "reason": string;
+};
+
+export type RouteSnapshotCredential = {
+  "credential_id": string;
+  "kind": string;
+  "key_hint": string;
+};
+
+export type RouteSnapshot = {
+  "contract_version": "tofu.route-snapshot/v2";
+  "legacy"?: boolean;
+  "selected_model": (RouteModelRef) | (null);
+  "provider_scoped_selection": (RouteProviderOfferingRef) | (null);
+  "preferred_provider_id": string;
+  "actual_model": (RouteModelRef) | (null);
+  "provider_id": string;
+  "offering_id": string;
+  "deployment_id": string;
+  "connection_id": string;
+  "credential": (RouteSnapshotCredential) | (null);
+  "wire_model_id": string;
+  "transitions": ReadonlyArray<RouteSnapshotTransition>;
+  "degradation_reasons": ReadonlyArray<string>;
+  "recorded_at": number;
+};
+
 export type TurnActivityEntry = {
   "id": string;
   "spanId": string;
@@ -3321,24 +5314,158 @@ export type TurnActivityTimeline = {
   "droppedCount"?: number;
 };
 
+export type TurnLastRoundUsage = {
+  "round"?: (number) | (string);
+  "model"?: string;
+  "resolvedModel"?: string;
+  "providerId"?: string;
+  "keyName"?: string;
+  "keyTail"?: string;
+  "tag"?: string;
+  "tokensIn"?: number;
+  "tokensOut"?: number;
+};
+
+export type TurnTimingOverBudgetSpan = {
+  "spanId": string;
+  "kind": string;
+  "name": string;
+  "elapsedMs": number;
+  "budgetMs": number;
+};
+
+export type TurnTimingSummary = {
+  "totalMs": number;
+  "llmMs": number;
+  "toolMs": number;
+  "waitMs": number;
+  "compactionMs": number;
+  "approvalWaitMs": number;
+  "unattributedMs": number;
+  "ttftMs": number;
+  "overBudget": ReadonlyArray<TurnTimingOverBudgetSpan>;
+};
+
+export type TurnTimingSpan = {
+  "spanId": string;
+  "parent": (string) | (null);
+  "depth": number;
+  "kind": string;
+  "name": string;
+  "tStart": (number) | (null);
+  "tEnd": (number) | (null);
+  "status": "running" | "done" | "error" | "aborted" | "unknown";
+  "attrs": JsonObject;
+  "budgetMs"?: number;
+  "overBudget"?: boolean;
+  "truncated"?: boolean;
+};
+
+export type TurnTimingGap = {
+  "tStart": number;
+  "tEnd": number;
+};
+
+export type TurnTimingStatusEntry = {
+  "id": string;
+  "phase": string;
+  "attention": "progress" | "wait" | "stall";
+  "tStart": number;
+  "tEnd"?: number;
+  "lastObservedAt": number;
+  "count": number;
+  "detail"?: string;
+  "detailKey"?: string;
+  "detailArgs"?: JsonObject;
+  "model"?: string;
+  "bucket"?: string;
+  "reason"?: string;
+  "attempt"?: number;
+  "statusCode"?: number;
+  "roundNum"?: number;
+  "queuePosition"?: number;
+  "queued"?: number;
+  "active"?: number;
+  "capacity"?: number;
+  "waitSeconds"?: number;
+  "terminalBoundary"?: boolean;
+};
+
+export type TurnClientPerceptionObservation = {
+  "observationId": string;
+  "kind": "phase_painted" | "terminal_painted" | "transport_degraded" | "transport_recovered";
+  "taskId": string;
+  "attemptId": string;
+  "clientId": string;
+  "recordedAt": number;
+  "phase"?: string;
+  "detailKey"?: string;
+  "reason"?: string;
+  "healthState"?: ConnectionHealthState;
+  "visibility"?: "visible" | "hidden";
+  "serverEmittedAt"?: number;
+  "receivedAt"?: number;
+  "paintedAt"?: number;
+  "observedAt"?: number;
+  "durationMs"?: number;
+  "generation"?: number;
+  "projectionRevision"?: number;
+  "retryCount"?: number;
+  "clientDroppedBefore"?: number;
+  "renderMs"?: number;
+  "transportMs"?: number;
+  "clockSkewSuspected"?: boolean;
+};
+
+export type TurnTimingTrace = {
+  "version": 1;
+  "taskId": string;
+  "eventsAvailable"?: boolean;
+  "eventLogAvailable"?: boolean;
+  "source"?: "event-log" | "live-projection" | "turn-snapshot" | "attempt-receipts";
+  "status"?: "running" | "done" | "error" | "aborted";
+  "running"?: boolean;
+  "coverage"?: "full" | "partial";
+  "coverageReason"?: string;
+  "tStart"?: number;
+  "tEnd"?: (number) | (null);
+  "totalMs"?: number;
+  "summary"?: TurnTimingSummary;
+  "spans"?: ReadonlyArray<TurnTimingSpan>;
+  "gaps"?: ReadonlyArray<TurnTimingGap>;
+  "statusHistory"?: ReadonlyArray<TurnTimingStatusEntry>;
+  "clientObservations"?: ReadonlyArray<TurnClientPerceptionObservation>;
+  "droppedSpans"?: number;
+  "droppedGaps"?: number;
+  "statusDroppedCount"?: number;
+  "clientObservationDroppedCount"?: number;
+  "overBudgetDroppedCount"?: number;
+  "detailCompacted"?: boolean;
+  "compacted"?: boolean;
+};
+
 export type TurnProjection = {
   "content"?: string;
   "thinking"?: string;
   "toolRounds"?: ReadonlyArray<TurnToolRound>;
   "activityTimeline"?: TurnActivityTimeline;
+  "timingTrace"?: TurnTimingTrace;
   "segments"?: ReadonlyArray<TurnContentSegment>;
   "usage"?: JsonObject;
+  "cost"?: JsonObject;
   "apiRounds"?: ReadonlyArray<JsonObject>;
-  "lastRoundUsage"?: JsonObject;
+  "lastRoundUsage"?: TurnLastRoundUsage;
   "model"?: string;
   "preset"?: string;
   "providerId"?: string;
+  "routeSnapshot"?: RouteSnapshot;
   "provider_id"?: string;
   "thinkingDepth"?: (string) | (number);
   "modifiedFiles"?: number;
   "modifiedFileList"?: ReadonlyArray<TurnFileChange>;
   "fileChanges"?: TurnFileChangesBlock;
   "todoState"?: JsonObject;
+  "waitingOn"?: JsonObject;
   "fallbackModel"?: string;
   "fallbackFrom"?: string;
   "fallbackReason"?: string;
@@ -3362,6 +5489,7 @@ export type TurnProjection = {
   "_showingTranslation"?: boolean;
   "timestamp"?: (number) | (string);
   "images"?: ReadonlyArray<TurnImageAttachment>;
+  "attachments"?: ReadonlyArray<TurnMediaAttachment>;
   "videos"?: ReadonlyArray<TurnVideoAttachment>;
   "pdfTexts"?: ReadonlyArray<TurnDocumentAttachment>;
   "convRefs"?: ReadonlyArray<TurnConversationReference>;
@@ -3372,6 +5500,7 @@ export type TurnProjection = {
   "origin"?: TurnOrigin;
   "contextSnapshot"?: TurnContextSnapshot;
   "compaction"?: TurnCompaction;
+  "rolledBack"?: ReadonlyArray<TurnRolledBackEntry>;
   "_initiator"?: string;
   "_peerMessage"?: boolean;
   "_peerHuman"?: boolean;
@@ -3408,7 +5537,7 @@ export type TurnProjection = {
   "_stallNudges"?: ReadonlyArray<TurnStallInjection>;
 };
 
-export type TurnResumeOperation = "continue" | "checkpoint_resume" | "regenerate";
+export type TurnResumeOperation = "continue" | "checkpoint_resume" | "regenerate" | "answer_guidance";
 
 export type TurnResumeOption = {
   "operation": TurnResumeOperation;
@@ -3447,14 +5576,45 @@ export type ConversationQueueItem = {
   "sourceMessageId"?: string;
   "hasImages"?: boolean;
   "hasPdfs"?: boolean;
+  "hasAttachments"?: boolean;
   "hasRefs"?: boolean;
   "hasQuotes"?: boolean;
   "isPeerMessage"?: boolean;
   "fromConv"?: string;
   "isPeerHuman"?: boolean;
+  "inputTurnId"?: string;
+  "outputTurnId"?: string;
+  "attemptId"?: string;
 };
 
-export type AttemptOperation = "generate" | "continue" | "checkpoint_resume" | "regenerate" | "ingest";
+export type ThreadScope = {
+  "kind": "conversation" | "diagnostic" | "paper_report";
+  "ownerId": (string) | (number);
+  "threadId": string;
+};
+
+export type RawArchiveRef = {
+  "summary": string;
+  "byteCount": number;
+  "sha256": string;
+  "integrity": "complete" | "partial";
+  "truncationReason"?: "attempt_limit" | "quota_exhausted" | "secret_scrubbed" | "transport_interrupted";
+  "archiveId"?: string;
+};
+
+export type QueueBinding = {
+  "queueId": string;
+  "state": "pending";
+};
+
+export type TurnThreadSnapshot = {
+  "scope": ThreadScope;
+  "turns": ReadonlyArray<TurnRecord>;
+  "attempts": ReadonlyArray<AttemptRecord>;
+  "queueItems": ReadonlyArray<ConversationQueueItem>;
+};
+
+export type AttemptOperation = "generate" | "continue" | "checkpoint_resume" | "regenerate" | "answer_guidance" | "ingest";
 
 export type ProjectionPatchPath = ReadonlyArray<(string) | (number)>;
 
@@ -3497,6 +5657,8 @@ export type TurnProjectionChange = {
 export type TurnRuntimeStateChange = {
   "turnId": string;
   "status": TurnStatus;
+  "actor"?: TurnActor;
+  "kind"?: string;
   "currentAttemptId": (string) | (null);
   "settlement": TurnSettlement;
   "updatedAt": number;
@@ -3504,6 +5666,7 @@ export type TurnRuntimeStateChange = {
 
 export type TurnRecord = {
   "turnId": string;
+  "presentationId": string;
   "conversationId": string;
   "laneId": string;
   "parentTurnId"?: (string) | (null);
@@ -3532,6 +5695,7 @@ export type AttemptRecord = {
   "resumeAnchor": JsonObject;
   "createdAt": number;
   "startedAt"?: (number) | (null);
+  "queueBinding"?: (QueueBinding) | (null);
   "settledAt"?: (number) | (null);
 };
 
@@ -3547,6 +5711,7 @@ export type AttemptEvent = {
   "projectionPatch"?: ProjectionPatch;
   "turnState"?: TurnRuntimeStateChange;
   "status"?: TurnStatus;
+  "dispatchState"?: "queued" | "running";
   "settlement"?: TurnSettlement;
   "request"?: unknown;
   "turns"?: ReadonlyArray<TurnRecord>;
@@ -3592,6 +5757,7 @@ export type ConversationSyncEvent = (ConversationChange) | (SyncHeartbeat) | (Sy
 export type ConversationSyncSnapshot = {
   "ok": true;
   "contract": "tofu.conversation-sync.snapshot/v1";
+  "scope": ThreadScope;
   "conversationId": string;
   "conversationRevision": number;
   "syncSeq": number;
@@ -3602,7 +5768,36 @@ export type ConversationSyncSnapshot = {
   "turns": ReadonlyArray<TurnRecord>;
   "attempts": ReadonlyArray<AttemptRecord>;
   "queueItems": ReadonlyArray<ConversationQueueItem>;
+  "hasArtifacts"?: boolean;
+  "turnWindow"?: ConversationTurnWindow;
+  "sharedToolDocuments"?: SnapshotSharedToolDocuments;
+  "snapshotProjectionRefs"?: SnapshotProjectionReferences;
   "pushWithheld"?: boolean;
+};
+
+export type ConversationTurnWindow = {
+  "laneId": "main";
+  "nextBeforeOrdinal": (number) | (null);
+  "hasMore": boolean;
+  "totalTurns": number;
+};
+
+export type ConversationTurnPage = {
+  "ok": true;
+  "contract": "tofu.conversation-sync.turn-page/v1";
+  "conversationId": string;
+  "conversationRevision": number;
+  "syncSeq": number;
+  "cursor": string;
+  "laneId": string;
+  "beforeOrdinal": number;
+  "nextBeforeOrdinal": (number) | (null);
+  "hasMore": boolean;
+  "totalTurns": number;
+  "turns": ReadonlyArray<TurnRecord>;
+  "attempts": ReadonlyArray<AttemptRecord>;
+  "sharedToolDocuments"?: SnapshotSharedToolDocuments;
+  "snapshotProjectionRefs"?: SnapshotProjectionReferences;
 };
 
 export type ConversationInvalidation = {
@@ -3659,6 +5854,27 @@ export type UpdateTurnRequest = {
   "projection": TurnProjection;
 };
 
+export type RecordPerceptionRequest = {
+  "observationId": string;
+  "attemptId": string;
+  "kind": "phase_painted" | "terminal_painted" | "transport_degraded" | "transport_recovered";
+  "clientId": string;
+  "phase"?: string;
+  "detailKey"?: string;
+  "reason"?: string;
+  "healthState"?: ConnectionHealthState;
+  "visibility"?: "visible" | "hidden";
+  "serverEmittedAt"?: number;
+  "receivedAt"?: number;
+  "paintedAt"?: number;
+  "observedAt"?: number;
+  "durationMs"?: number;
+  "generation"?: number;
+  "projectionRevision"?: number;
+  "retryCount"?: number;
+  "clientDroppedBefore"?: number;
+};
+
 export type FileChangesCommandRequest = {
   "commandId": string;
   "expectedProjectionRevision": number;
@@ -3680,6 +5896,7 @@ export type CreateAttemptRequest = {
   "resumeAnchor"?: JsonObject;
   "inputUpdate"?: unknown;
   "expectedInputProjectionRevision"?: number;
+  "humanResponse"?: string;
 };
 
 export type CreateLaneRequest = {
@@ -3705,6 +5922,8 @@ export type TurnCommandResponse = {
   "idempotentReplay"?: boolean;
   "aborted"?: boolean;
   "steered"?: boolean;
+  "injectionId"?: string;
+  "blockId"?: string;
   "queued"?: boolean;
   "queueId"?: string;
   "position"?: number;
@@ -3712,6 +5931,16 @@ export type TurnCommandResponse = {
   "latestTurn"?: TurnRecord;
   "deletedTurnIds"?: ReadonlyArray<string>;
   [key: string]: unknown;
+};
+
+export type QueueCancelResponse = {
+  "ok": true;
+  "conversationId": string;
+  "conversationRevision": number;
+  "queueId": string;
+  "cancelled": boolean;
+  "inputTurn"?: (TurnRecord) | (null);
+  "deletedTurnIds": ReadonlyArray<string>;
 };
 
 export type TurnMutationResponse = {
@@ -3742,6 +5971,107 @@ function schemaRefName(ref: string): string {
   return ref.slice(prefix.length);
 }
 
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => jsonValuesEqual(item, right[index]));
+  }
+  const leftObject = record(left);
+  const rightObject = record(right);
+  if (!leftObject || !rightObject) return false;
+  const fields = Object.keys(leftObject);
+  return fields.length === Object.keys(rightObject).length
+    && fields.every((field) => Object.prototype.hasOwnProperty.call(rightObject, field)
+      && jsonValuesEqual(leftObject[field], rightObject[field]));
+}
+
+function isValidNode(schemaValue: unknown, value: unknown): boolean {
+  const schema = record(schemaValue) ?? {};
+  const ref = typeof schema.$ref === 'string' ? schema.$ref : '';
+  if (ref) {
+    const name = schemaRefName(ref);
+    const target = (CONVERSATION_SYNC_SCHEMAS as Record<string, unknown>)[name];
+    return target !== undefined && isValidNode(target, value);
+  }
+  if (Array.isArray(schema.oneOf)) {
+    let matches = 0;
+    for (const item of schema.oneOf) {
+      if (isValidNode(item, value)) {
+        matches += 1;
+        if (matches > 1) return false;
+      }
+    }
+    return matches === 1;
+  }
+  if (Array.isArray(schema.anyOf)) {
+    return schema.anyOf.some((item) => isValidNode(item, value));
+  }
+  if (Object.prototype.hasOwnProperty.call(schema, 'const')
+      && !jsonValuesEqual(value, schema.const)) {
+    return false;
+  }
+  if (Array.isArray(schema.enum)
+      && !schema.enum.some((choice) => jsonValuesEqual(value, choice))) return false;
+
+  const kind = schema.type;
+  if (kind === 'null') return value === null;
+  if (kind === 'string') {
+    return typeof value === 'string'
+      && (typeof schema.minLength !== 'number' || value.length >= schema.minLength)
+      && (typeof schema.maxLength !== 'number' || value.length <= schema.maxLength)
+      && (typeof schema.pattern !== 'string' || (new RegExp(schema.pattern)).test(value));
+  }
+  if (kind === 'integer' || kind === 'number') {
+    return typeof value === 'number'
+      && Number.isFinite(value)
+      && (kind !== 'integer' || Number.isInteger(value))
+      && (typeof schema.minimum !== 'number' || value >= schema.minimum)
+      && (typeof schema.maximum !== 'number' || value <= schema.maximum);
+  }
+  if (kind === 'boolean') return typeof value === 'boolean';
+  if (kind === 'array') {
+    if (!Array.isArray(value)) return false;
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) {
+      return false;
+    }
+    return value.every((item) => isValidNode(schema.items, item));
+  }
+  if (kind === 'object' || schema.properties) {
+    const object = record(value);
+    if (!object) return false;
+    const fields = Object.keys(object);
+    if (typeof schema.minProperties === 'number'
+        && fields.length < schema.minProperties) return false;
+    if (typeof schema.maxProperties === 'number'
+        && fields.length > schema.maxProperties) return false;
+
+    const propertyNames = record(schema.propertyNames);
+    if (propertyNames
+        && fields.some((field) => !isValidNode(propertyNames, field))) return false;
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    for (const field of required) {
+      if (typeof field === 'string'
+          && !Object.prototype.hasOwnProperty.call(object, field)) return false;
+    }
+
+    const properties = record(schema.properties) ?? {};
+    const additionalSchema = record(schema.additionalProperties);
+    for (const field of fields) {
+      if (Object.prototype.hasOwnProperty.call(properties, field)) {
+        if (!isValidNode(properties[field], object[field])) return false;
+      } else if (schema.additionalProperties === false) {
+        return false;
+      } else if (additionalSchema && !isValidNode(additionalSchema, object[field])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return true;
+}
+
 function validateNode(schemaValue: unknown, value: unknown, path: string): string[] {
   const schema = record(schemaValue) ?? {};
   const ref = typeof schema.$ref === 'string' ? schema.$ref : '';
@@ -3758,10 +6088,12 @@ function validateNode(schemaValue: unknown, value: unknown, path: string): strin
     return schema.anyOf.some((item) => validateNode(item, value, path).length === 0)
       ? [] : [`${path}: expected a contract variant`];
   }
-  if (Object.prototype.hasOwnProperty.call(schema, 'const') && value !== schema.const) {
+  if (Object.prototype.hasOwnProperty.call(schema, 'const')
+      && !jsonValuesEqual(value, schema.const)) {
     return [`${path}: expected ${JSON.stringify(schema.const)}`];
   }
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+  if (Array.isArray(schema.enum)
+      && !schema.enum.some((choice) => jsonValuesEqual(value, choice))) {
     return [`${path}: value is outside the declared vocabulary`];
   }
   const kind = schema.type;
@@ -3773,6 +6105,9 @@ function validateNode(schemaValue: unknown, value: unknown, path: string): strin
     }
     if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) {
       return [`${path}: string is longer than ${schema.maxLength}`];
+    }
+    if (typeof schema.pattern === 'string' && !(new RegExp(schema.pattern)).test(value)) {
+      return [`${path}: string does not match the declared pattern`];
     }
     return [];
   }
@@ -3805,6 +6140,20 @@ function validateNode(schemaValue: unknown, value: unknown, path: string): strin
     const properties = record(schema.properties) ?? {};
     const required = Array.isArray(schema.required) ? schema.required : [];
     const errors: string[] = [];
+    if (typeof schema.minProperties === 'number'
+        && Object.keys(object).length < schema.minProperties) {
+      errors.push(`${path}: object has too few properties`);
+    }
+    if (typeof schema.maxProperties === 'number'
+        && Object.keys(object).length > schema.maxProperties) {
+      errors.push(`${path}: object has too many properties`);
+    }
+    const propertyNames = record(schema.propertyNames);
+    if (propertyNames) {
+      for (const field of Object.keys(object)) {
+        errors.push(...validateNode(propertyNames, field, `${path}.${field}`));
+      }
+    }
     for (const field of required) {
       if (typeof field === 'string' && !Object.prototype.hasOwnProperty.call(object, field)) {
         errors.push(`${path}.${field}: required`);
@@ -3819,6 +6168,15 @@ function validateNode(schemaValue: unknown, value: unknown, path: string): strin
       for (const field of Object.keys(object)) {
         if (!Object.prototype.hasOwnProperty.call(properties, field)) {
           errors.push(`${path}.${field}: undeclared field`);
+        }
+      }
+    } else {
+      const additionalSchema = record(schema.additionalProperties);
+      if (additionalSchema) {
+        for (const [field, child] of Object.entries(object)) {
+          if (!Object.prototype.hasOwnProperty.call(properties, field)) {
+            errors.push(...validateNode(additionalSchema, child, `${path}.${field}`));
+          }
         }
       }
     }
@@ -3842,6 +6200,7 @@ export class ConversationSyncContractError extends Error {
 export function assertConversationSyncSchema<T>(schemaName: string, value: unknown): T {
   const schema = (CONVERSATION_SYNC_SCHEMAS as Record<string, unknown>)[schemaName];
   if (!schema) throw new ConversationSyncContractError(schemaName, ['schema is not registered']);
+  if (isValidNode(schema, value)) return value as T;
   const violations = validateNode(schema, value, '$');
   if (violations.length) throw new ConversationSyncContractError(schemaName, violations);
   return value as T;
@@ -3950,8 +6309,12 @@ export interface ConversationSyncApi {
   snapshot(conversationId: string, options?: RequestOptions): Promise<ConversationSyncSnapshot>;
   eventsUrl(conversationId: string, after?: string, streamClientId?: string, streamGeneration?: number): string;
   createTurn(conversationId: string, body: CreateTurnRequest, options?: RequestOptions): Promise<TurnCommandResponse>;
+  cancelQueue(conversationId: string, queueId: string, options?: RequestOptions): Promise<QueueCancelResponse>;
+  turnPage(conversationId: string, laneId: string, syncSeq: number, beforeOrdinal?: number, limit?: number, options?: RequestOptions): Promise<ConversationTurnPage>;
+  turnImageUrl(conversationId: string, turnId: string, imageIndex: number, projectionRevision: number, ownerScope: string): string;
   appendSettledTurn(conversationId: string, body: AppendSettledTurnRequest, options?: RequestOptions): Promise<TurnMutationResponse>;
   updateTurn(conversationId: string, turnId: string, body: UpdateTurnRequest, options?: RequestOptions): Promise<TurnMutationResponse>;
+  recordPerception(conversationId: string, turnId: string, body: RecordPerceptionRequest, options?: RequestOptions): Promise<TurnMutationResponse>;
   executePlan(conversationId: string, turnId: string, body: ExecutePlanRequest, options?: RequestOptions): Promise<TurnCommandResponse>;
   createAttempt(conversationId: string, turnId: string, body: CreateAttemptRequest, options?: RequestOptions): Promise<TurnCommandResponse>;
   createLane(conversationId: string, turnId: string, body: CreateLaneRequest, options?: RequestOptions): Promise<TurnMutationResponse>;
@@ -3962,12 +6325,12 @@ export interface ConversationSyncApi {
   abortAttempt(attemptId: string, options?: RequestOptions): Promise<AbortAttemptResponse>;
 }
 
-const segment = (value: string): string => encodeURIComponent(value);
+const segment = (value: string | number): string => encodeURIComponent(String(value));
 
 export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
   async snapshot(conversationId, options = {}) {
     const value = await request<unknown>(
-      `/api/v3/conversations/${segment(conversationId)}/sync`,
+      `/api/v3/conversations/${segment(conversationId)}/sync?segmentPayload=refs&turnWindow=tail-96&artifactHint=has-any`,
       { ...options, method: 'GET' },
     );
     return assertConversationSyncSchema<ConversationSyncSnapshot>('ConversationSyncSnapshot', value);
@@ -3991,6 +6354,37 @@ export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
     ), command, options);
     return assertConversationSyncSchema<TurnCommandResponse>('TurnCommandResponse', value);
   },
+  async cancelQueue(conversationId, queueId, options = {}) {
+    const value = await request<unknown>(
+      `/api/v3/conversations/${segment(conversationId)}/queue/${segment(queueId)}`,
+      { ...options, method: 'DELETE' },
+    );
+    return assertConversationSyncSchema<QueueCancelResponse>('QueueCancelResponse', value);
+  },
+  async turnPage(conversationId, laneId, syncSeq, beforeOrdinal = undefined, limit = 64, options = {}) {
+    const base = resolvePath(`/api/v3/conversations/${segment(conversationId)}/turns/history?segmentPayload=refs`);
+    const query = [
+      `laneId=${encodeURIComponent(laneId)}` ,
+      `syncSeq=${encodeURIComponent(String(syncSeq))}` ,
+      Number.isInteger(beforeOrdinal)
+        ? `beforeOrdinal=${encodeURIComponent(String(beforeOrdinal))}` : '',
+      Number.isInteger(limit)
+        ? `limit=${encodeURIComponent(String(limit))}` : '',
+    ].filter(Boolean).join('&');
+    const value = await request<unknown>(
+      `${base}&${query}`,
+      { ...options, method: 'GET' },
+    );
+    return assertConversationSyncSchema<ConversationTurnPage>('ConversationTurnPage', value);
+  },
+  turnImageUrl(conversationId, turnId, imageIndex, projectionRevision, ownerScope) {
+    const base = resolvePath(`/api/v3/conversations/${segment(conversationId)}/turns/${segment(turnId)}/images/${segment(imageIndex)}`);
+    const query = [
+      `projectionRevision=${encodeURIComponent(String(projectionRevision))}`,
+      `ownerScope=${encodeURIComponent(ownerScope)}`,
+    ].join('&');
+    return `${base}?${query}`;
+  },
   async appendSettledTurn(conversationId, body, options = {}) {
     const command = snapshotConversationCommand<AppendSettledTurnRequest>('AppendSettledTurnRequest', body);
     const value = await idempotentCommand(() => request<unknown>(
@@ -4004,6 +6398,14 @@ export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
     const value = await request<unknown>(
       `/api/v3/conversations/${segment(conversationId)}/turns/${segment(turnId)}`,
       { ...options, method: 'PATCH', json: command },
+    );
+    return assertConversationSyncSchema<TurnMutationResponse>('TurnMutationResponse', value);
+  },
+  async recordPerception(conversationId, turnId, body, options = {}) {
+    const command = assertConversationSyncSchema<RecordPerceptionRequest>('RecordPerceptionRequest', body);
+    const value = await request<unknown>(
+      `/api/v3/conversations/${segment(conversationId)}/turns/${segment(turnId)}/perception`,
+      { ...options, method: 'POST', json: command },
     );
     return assertConversationSyncSchema<TurnMutationResponse>('TurnMutationResponse', value);
   },

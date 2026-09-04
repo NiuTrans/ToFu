@@ -117,12 +117,12 @@ def test_record_usage_stores_total_not_residual():
                         'cache_creation_input_tokens': 0,
                         'output_tokens': 10}),
                    raising=True)
-        mp.setattr(strm, 'make_task_abort_check', lambda _task: None)
+        mp.setattr(strm, 'make_provider_abort_check', lambda _task: None)
         mp.setattr(strm, 'append_event', lambda *a, **kw: None, raising=True)
         mp.setattr(strm, 'checkpoint_task_partial', lambda *a, **kw: None,
                    raising=True)
 
-        task = {'id': 't0anchor00', 'convId': conv, 'content': '',
+        task = {'id': 't0anchor00', 'convId': conv, '_userId': 1, 'content': '',
                 'thinking': '', 'content_lock': threading.Lock(),
                 'config': {'model': 'kimi-k3'}, 'aborted': False}
         body = {'model': 'kimi-k3',
@@ -159,12 +159,12 @@ def test_record_usage_openai_convention_unchanged():
                         'prompt_tokens_details': {'cached_tokens': 73472},
                         'completion_tokens': 10}),
                    raising=True)
-        mp.setattr(strm, 'make_task_abort_check', lambda _task: None)
+        mp.setattr(strm, 'make_provider_abort_check', lambda _task: None)
         mp.setattr(strm, 'append_event', lambda *a, **kw: None, raising=True)
         mp.setattr(strm, 'checkpoint_task_partial', lambda *a, **kw: None,
                    raising=True)
 
-        task = {'id': 't0anchor01', 'convId': conv, 'content': '',
+        task = {'id': 't0anchor01', 'convId': conv, '_userId': 1, 'content': '',
                 'thinking': '', 'content_lock': threading.Lock(),
                 'config': {'model': 'kimi-k3'}, 'aborted': False}
         body = {'model': 'kimi-k3',

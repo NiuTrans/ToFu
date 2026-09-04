@@ -1,9 +1,9 @@
 """lib/transcription — provider-agnostic speech-to-text (STT / ASR).
 
-Turns an uploaded audio blob into text by routing through the existing
-``llm_dispatch`` slot pool. The design mirrors how vision is modelled
-(``lib/model_info.model_supports_vision``): a *capability* on a slot, not a
-hard-coded vendor branch.
+Turns an uploaded audio blob into text through an owner-scoped model-routing
+v2 capability route. The route mints a bounded request-only ``llm_dispatch``
+slot group; provider-only internals run under that group's hard pin. The
+capability, not a hard-coded vendor branch, selects the wire mechanism.
 
 Two transcription mechanisms (both provider-agnostic)
 -----------------------------------------------------
@@ -15,7 +15,7 @@ declares which one it speaks via its capability:
    audio (OpenAI ``gpt-4o-transcribe``, Groq ``whisper-large-v3-turbo``). The
    chat dispatch layer (``dispatch_chat`` / ``dispatch_stream``) drives the
    chat-completions JSON+SSE shape and CANNOT carry this multipart body, so we
-   reuse only its SLOT SELECTION and issue the POST ourselves
+    reuse only its provider-only slot selection and issue the POST ourselves
    (:func:`_post_to_provider`).
 
 2. ``audio_chat`` — omni CHAT models that accept audio INLINE as an
@@ -31,9 +31,10 @@ the capability on the slot — not the vendor — selects the mechanism.
 
 Graceful disable
 ----------------
-When no transcription-capable slot is configured, :func:`transcription_available`
-returns ``False`` and the route reports the feature as disabled (the frontend
-hides the mic button) rather than erroring — no vendor is assumed to exist.
+When the authenticated owner has no runnable transcription route,
+:func:`transcription_available` returns ``False`` and the route reports the
+feature as disabled (the frontend hides the mic button) rather than erroring —
+no vendor or process-global credential is assumed to exist.
 
 LLM correction pass
 -------------------

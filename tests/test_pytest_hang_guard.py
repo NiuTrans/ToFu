@@ -88,41 +88,40 @@ class TestHangGuardConfigured(unittest.TestCase):
             'silently inert')
 
 
-class TestHangGuardActuallyBites(unittest.TestCase):
+class TestHangGuardActuallyBites:
     """End-to-end: a wedged test really does get aborted by the config."""
 
     @pytest.mark.slow
-    def test_wedged_test_is_aborted_by_config(self):
-        # The probe MUST live inside the repo: pytest resolves its config from
-        # the rootdir it discovers, so a probe in /tmp gets `inifile: None`
-        # and inherits NONE of our settings (that mistake made the first draft
-        # of this test fail for the wrong reason).
-        probe = os.path.join(_ROOT, 'tests', 'test_zz_hang_probe_generated.py')
-        with open(probe, 'w', encoding='utf-8') as f:
-            f.write(textwrap.dedent('''
-                import time
-                def test_wedged():
-                    time.sleep(600)
-            '''))
-        try:
-            env = dict(os.environ)
-            env['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'
-            # Inherit the repo config (so `-p pytest_timeout` from addopts is
-            # what makes the plugin available at all) but shorten the window
-            # so this test is quick. If `-p pytest_timeout` were missing,
-            # --timeout would be an "unrecognized argument" and this fails.
-            r = subprocess.run(
-                [sys.executable, '-m', 'pytest', probe, '-q',
-                 '-p', 'no:cacheprovider', '--timeout=6'],
-                cwd=_ROOT, env=env, capture_output=True, text=True,
-                timeout=180)
-            self.assertIn('1 failed', r.stdout,
-                          f'wedged test was not aborted.\n{r.stdout[-2000:]}')
-            self.assertIn('Timeout', r.stdout,
-                          'aborted, but not by the timeout mechanism')
-        finally:
-            if os.path.exists(probe):
-                os.remove(probe)
+    def test_wedged_test_is_aborted_by_config(self, tmp_path):
+        # The probe lives under pytest's ``tmp_path`` — never in the live repo
+        # ``tests/`` tree, where a crash before the finally could leave a 600s
+        # sleeper for a concurrent pytest to collect. Point pytest at the
+        # repo's pyproject.toml explicitly (``-c``) so addopts still name
+        # ``-p pytest_timeout`` under PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, and
+        # use ``--confcutdir`` so collection stays hermetic: the probe only
+        # needs the timeout plugin, not the heavy repo tests/conftest.py.
+        probe = tmp_path / 'test_zz_hang_probe_generated.py'
+        probe.write_text(textwrap.dedent('''
+            import time
+            def test_wedged():
+                time.sleep(600)
+        '''), encoding='utf-8')
+        env = dict(os.environ)
+        env['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'
+        # Shorten the window so this test is quick; the plugin is loaded by
+        # `-p pytest_timeout` in the repo addopts. If that were missing,
+        # --timeout would be an "unrecognized argument" and this fails.
+        r = subprocess.run(
+            [sys.executable, '-m', 'pytest', str(probe), '-q',
+             '-p', 'no:cacheprovider', '--timeout=6',
+             '-c', os.path.join(_ROOT, 'pyproject.toml'),
+             '--confcutdir', str(tmp_path)],
+            cwd=_ROOT, env=env, capture_output=True, text=True,
+            timeout=180)
+        assert '1 failed' in r.stdout, (
+            f'wedged test was not aborted.\n{r.stdout[-2000:]}')
+        assert 'Timeout' in r.stdout, (
+            'aborted, but not by the timeout mechanism')
 
 
 if __name__ == '__main__':

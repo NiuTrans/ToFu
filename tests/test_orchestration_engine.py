@@ -753,9 +753,12 @@ class HumanNodeTest(unittest.TestCase):
             if ev.get('type') == 'human_request':
                 # resolve in a separate thread so the blocking wait unblocks
                 threading.Thread(target=lambda: (time.sleep(0.05),
-                                 resolve_write_approval(ev['request_id'], True))).start()
+                                 resolve_write_approval(
+                                     ev['request_id'], True,
+                                     owner_user_id=1))).start()
         out = FlowExecutor(self._defn('approve'), agent_runner=_MockRunner(),
-                           on_event=_approve_when_asked).run()
+                           on_event=_approve_when_asked,
+                           human_gate_owner_user_id=1).run()
         self.assertTrue(out['ok'])
         self.assertTrue(any(e['type'] == 'human_resolved' and e.get('approved')
                             for e in events))
@@ -770,9 +773,12 @@ class HumanNodeTest(unittest.TestCase):
             events.append(ev)
             if ev.get('type') == 'human_request':
                 threading.Thread(target=lambda: (time.sleep(0.05),
-                                 resolve_write_approval(ev['request_id'], False))).start()
+                                 resolve_write_approval(
+                                     ev['request_id'], False,
+                                     owner_user_id=1))).start()
         out = FlowExecutor(self._defn('approve'), agent_runner=_MockRunner(),
-                           on_event=_reject_when_asked).run()
+                           on_event=_reject_when_asked,
+                           human_gate_owner_user_id=1).run()
         # rejection unwinds the walk via abort path → not completed
         self.assertEqual(out['status'], 'aborted')
         # downstream agent must NOT have run
@@ -792,9 +798,12 @@ class HumanNodeTest(unittest.TestCase):
             events.append(ev)
             if ev.get('type') == 'human_request':
                 threading.Thread(target=lambda: (time.sleep(0.05),
-                                 resolve_human_guidance(ev['request_id'], 'USE PLAN B'))).start()
+                                 resolve_human_guidance(
+                                     ev['request_id'], 'USE PLAN B',
+                                     owner_user_id=1))).start()
         out = FlowExecutor(self._defn('input'), agent_runner=runner,
-                           on_event=_answer_when_asked).run()
+                           on_event=_answer_when_asked,
+                           human_gate_owner_user_id=1).run()
         self.assertTrue(out['ok'])
         self.assertTrue(downstream_ctx)
         self.assertIn('USE PLAN B', downstream_ctx[0])

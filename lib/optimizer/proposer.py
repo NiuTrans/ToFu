@@ -288,14 +288,18 @@ def propose(evidence: EvidenceBundle,
         if llm_override is not None:
             content, usage = llm_override(messages)
         else:
+            from lib.key_stats import strict_billing_stop_admission
             from lib.llm_dispatch import smart_chat
-            content, usage = smart_chat(
-                messages=messages,
-                max_tokens=2048,
-                temperature=0,
-                capability='cheap',
-                log_prefix='[Optimizer]',
-            )
+            from lib.production.llm_policy import optional_llm_max_429_attempts
+            with strict_billing_stop_admission():
+                content, usage = smart_chat(
+                    messages=messages,
+                    max_tokens=2048,
+                    temperature=0,
+                    capability='cheap',
+                    log_prefix='[Optimizer]',
+                    max_429_attempts=optional_llm_max_429_attempts(),
+                )
     except Exception as e:
         logger.error('[Optimizer.proposer] LLM call failed: %s', e, exc_info=True)
         return []

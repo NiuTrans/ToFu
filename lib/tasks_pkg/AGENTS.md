@@ -18,8 +18,10 @@ context composition, compaction, event folding, and settlement. Read
   approval, execution, and result settlement retain distinct owners.
 - Persist only through declared task/conversation repository operations after
   the relevant commit boundary. A wake/push hint never substitutes for commit.
-- Preserve cancellation and disconnect propagation through model streams,
-  tools, subprocesses, child agents, persistence, and final event emission.
+- Preserve explicit owner cancellation through model streams, tools,
+  subprocesses, child agents, persistence, and final event emission. An
+  HTTP/SSE/push observer disconnect never cancels an already-started provider
+  dispatch; see `docs/API_CONTRACT.md` §2.11.
 - Bound rounds, fan-out, retries, context, tool output, queues, server messages,
   and retained stream state. Fault injection and rollback paths remain usable.
 

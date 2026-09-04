@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Unit tests for lib.request_parser."""
 
+import ast
 import asyncio
 import json
 import os
 import sys
+
+import pytest
+
+pytestmark = pytest.mark.unit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,6 +45,23 @@ def _expect_bad_request(fn, *args, **kw):
     except BadRequest as e:
         return e
     raise AssertionError(f'Expected BadRequest from {fn.__name__}')
+
+
+_ROUTES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'routes')
+
+
+def _route_syntax_trees():
+    """Yield each retained route once for structural boundary guards."""
+    for root, dirs, files in os.walk(_ROUTES_DIR):
+        dirs[:] = [name for name in dirs if not name.startswith(('.', '__'))]
+        for name in sorted(files):
+            if not name.endswith('.py'):
+                continue
+            path = os.path.join(root, name)
+            with open(path, encoding='utf-8') as source_file:
+                tree = ast.parse(source_file.read(), filename=path)
+            yield os.path.relpath(path, _ROUTES_DIR), tree
 
 
 # ─── parse_body ──────────────────────────────────────────────────
@@ -95,6 +117,120 @@ def test_parse_body_non_dict_raises():
         _ok('parse_body() on top-level list → BadRequest')
         return
     raise AssertionError('expected BadRequest')
+
+
+def test_routes_do_not_bypass_shared_json_parser():
+    """Every Quart request-body read stays behind request_parser.
+
+    This is the executable half of docs/API_CONTRACT.md section 3.  An AST
+    scan avoids freezing comments/docstrings and recognizes local aliases of
+    Quart/Flask's request proxy.
+    """
+    offenders = []
+    for relative_path, tree in _route_syntax_trees():
+        request_aliases = {'request'}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.ImportFrom)
+                    and node.module in ('quart', 'flask')):
+                for alias in node.names:
+                    if alias.name == 'request':
+                        request_aliases.add(alias.asname or alias.name)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'get_json'):
+                continue
+            owner = node.func.value
+            direct_proxy = (
+                isinstance(owner, ast.Name)
+                and owner.id in request_aliases
+            )
+            module_proxy = (
+                isinstance(owner, ast.Attribute)
+                and owner.attr == 'request'
+                and isinstance(owner.value, ast.Name)
+                and owner.value.id in ('quart', 'flask')
+            )
+            if direct_proxy or module_proxy:
+                offenders.append(f'{relative_path}:{node.lineno}')
+    assert not offenders, (
+        'routes must use parse_body()/async_parse_body(), not raw '
+        'request.get_json(): ' + ', '.join(sorted(offenders)))
+
+
+def test_body_validation_is_not_reclassified_as_internal_failure():
+    """A broad operational handler must not swallow parser BadRequest.
+
+    The one carve-out is pre-auth browser telemetry: failure to decode an
+    already-unauthorized poll must not replace its authoritative 401.  Keeping
+    the exception exact and requiring it to remain observed makes the registry
+    fail when that diagnostic branch is later removed or relocated.
+    """
+    allowed = {
+        ('browser.py', 'browser_poll'):
+            'best-effort locked-out telemetry after auth already failed',
+    }
+    observed_allowed = set()
+    offenders = []
+
+    def _is_parser_call(node):
+        if not isinstance(node, ast.Call):
+            return False
+        return (
+            isinstance(node.func, ast.Name)
+            and node.func.id in ('parse_body', 'async_parse_body')
+        ) or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in ('parse_body', 'async_parse_body')
+        )
+
+    def _is_broad_handler(handler):
+        caught = handler.type
+        if caught is None:
+            return True
+        names = (
+            caught.elts if isinstance(caught, ast.Tuple) else (caught,)
+        )
+        return any(
+            isinstance(name, ast.Name)
+            and name.id in ('Exception', 'BaseException')
+            for name in names
+        )
+
+    for relative_path, tree in _route_syntax_trees():
+        functions = (
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        for function in functions:
+            for node in ast.walk(function):
+                if not isinstance(node, ast.Try):
+                    continue
+                body_tree = ast.Module(body=node.body, type_ignores=[])
+                parser_calls = [
+                    call for call in ast.walk(body_tree)
+                    if _is_parser_call(call)
+                ]
+                if not parser_calls or not any(
+                        _is_broad_handler(handler)
+                        for handler in node.handlers):
+                    continue
+                key = (relative_path, function.name)
+                if key in allowed:
+                    observed_allowed.add(key)
+                    continue
+                offenders.append(
+                    f'{relative_path}:{function.name}:{parser_calls[0].lineno}')
+
+    assert not offenders, (
+        'parse_body()/async_parse_body() must run before broad operational '
+        'try/except blocks so BadRequest remains a 400: '
+        + ', '.join(sorted(offenders)))
+    assert observed_allowed == set(allowed), (
+        'stale request-parser broad-exception carve-out(s): '
+        + ', '.join(
+            f'{path}:{function} ({allowed[(path, function)]})'
+            for path, function in sorted(set(allowed) - observed_allowed)))
 
 
 # ─── require_str ──────────────────────────────────────────────────
@@ -166,6 +302,18 @@ def test_optional_str_present():
     from lib.request_parser import optional_str
     assert optional_str({'x': 'value'}, 'x') == 'value'
     _ok('optional_str returns value when present')
+
+
+def test_extractors_accept_read_only_mappings():
+    """Field readers depend on Mapping, not mutable route-owned dicts."""
+    from types import MappingProxyType
+    from lib.request_parser import optional_int, optional_str, require_bool
+
+    body = MappingProxyType({'name': ' Tofu ', 'count': '2', 'ready': True})
+    assert optional_str(body, 'name') == 'Tofu'
+    assert optional_int(body, 'count') == 2
+    assert require_bool(body, 'ready') is True
+    _ok('extractors accept read-only Mapping implementations')
 
 
 # ─── require_int ──────────────────────────────────────────────────
@@ -485,6 +633,8 @@ def main():
         test_parse_body_dict,
         test_parse_body_empty,
         test_parse_body_non_dict_raises,
+        test_routes_do_not_bypass_shared_json_parser,
+        test_body_validation_is_not_reclassified_as_internal_failure,
         test_require_str_present,
         test_require_str_strip_default,
         test_require_str_no_strip,
@@ -495,6 +645,7 @@ def main():
         test_require_str_max_len,
         test_optional_str_default,
         test_optional_str_present,
+        test_extractors_accept_read_only_mappings,
         test_require_int_basic,
         test_require_int_string_coerced,
         test_require_int_float_with_integer_value,

@@ -10,11 +10,10 @@ pip install tofu-sdk
 
 Use `pip install 'tofu-sdk[cli]'` for the optional `tofu` command.
 
-## Managed-model quick start
+## Structured-model quick start
 
-The recommended deployment configures endpoint/key/model once on the Tofu
-sidecar. Application code then needs only its URL and bearer token; `model` is
-optional:
+Configure the owner-scoped `tofu.model-routing/v2` aggregate once, then select
+the official model independently from its provider:
 
 ```python
 from tofu_sdk import Tofu
@@ -26,23 +25,26 @@ tofu = Tofu(
 
 result = tofu.agents.run(
     messages=[{"role": "user", "content": "Research this issue"}],
+    model={"creator_id": "anthropic", "model_id": "claude-opus-4-7"},
     config={"thinking": "high", "tools": ["search", "fetch"]},
 )
 print(result["content"])
 ```
 
-For a one-off model override, pass one provider block:
+To prefer one eligible ProviderAccess without changing model identity:
 
 ```python
 result = tofu.agents.run(
     messages=[{"role": "user", "content": "Evaluate this model"}],
-    provider={
-        "endpoint": "https://models.example/v1",
-        "api_key": "sk-...",
-        "model": "model-name",
-    },
+    model={"creator_id": "anthropic", "model_id": "claude-opus-4-7"},
+    routing={"preferred_provider_id": "provider-cluster-a"},
 )
 ```
+
+Native calls reject plain model strings, `model@provider`, and inline
+secret-bearing provider blocks. A standalone `tofu-agent` that advertises a
+configured default in `/api/v1/capabilities` may omit `model`; full ChatUI
+native endpoints require the structured identity.
 
 ## Async and resumable streaming
 
@@ -55,6 +57,7 @@ async with AsyncTofu(
 ) as tofu:
     async for event in tofu.agents.stream(
         messages=[{"role": "user", "content": "Inspect this project"}],
+        model={"creator_id": "anthropic", "model_id": "claude-opus-4-7"},
         config={"tools": ["search", "fetch"]},
     ):
         print(event)

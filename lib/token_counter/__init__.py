@@ -59,6 +59,8 @@ Public API (imported from ``lib.token_counter``):
 
   :func:`count_tokens`   Full-request counter (messages + system + tools).
   :func:`count_text`     Fast single-string count.
+  :func:`cached_cheap_estimate_text`
+                         Entropy safety estimate with bounded digest reuse.
   :func:`record_usage`   Feed the last response's usage into the cache.
                          Called from ``lib/llm/stream.py`` after every
                          successful stream.
@@ -67,11 +69,17 @@ Public API (imported from ``lib.token_counter``):
 
 from __future__ import annotations
 
-from .api import count_tokens, count_text, invalidate, record_usage
+from .api import (
+    cached_cheap_estimate_text,
+    count_text,
+    count_tokens,
+    invalidate,
+    record_usage,
+)
 from .base import CountResult
 
 __all__ = [
-    'count_tokens', 'count_text',
+    'count_tokens', 'count_text', 'cached_cheap_estimate_text',
     'record_usage', 'invalidate',
     'CountResult',
 ]

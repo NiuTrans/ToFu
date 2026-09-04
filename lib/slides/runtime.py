@@ -35,15 +35,34 @@ def _slides_index_register(key: tuple, task_id: str) -> None:
 
 def _new_slides_task(task_id: str, *, topic: str, workdir: str, lang: str,
                      style: str, max_pages: int, size: tuple,
-                     user_id: int, conv_id: str = '', model: str = ''):
+                     user_id: int, conv_id: str = '', model: str = '',
+                     creative_mode: str = 'director'):
     return _production.create_task(
         task_id,
         user_id=user_id,
         meta={'topic': topic, 'lang': lang, 'style': style,
-              'max_pages': max_pages, 'model': model},
+              'max_pages': max_pages, 'model': model,
+              'creative_mode': creative_mode},
         fields={'topic': topic, 'workdir': workdir, 'lang': lang,
                 'style': style, 'max_pages': max_pages, 'size': tuple(size),
-                'conv_id': conv_id, 'model': model})
+                'conv_id': conv_id, 'model': model,
+                'creative_mode': creative_mode})
+
+
+def _claim_slides_task(key: tuple, task_id: str, *, topic: str,
+                       workdir: str, lang: str, style: str, max_pages: int,
+                       size: tuple, user_id: int, conv_id: str = '',
+                       model: str = '', creative_mode: str = 'director'):
+    """Atomically join or create one topic-deck task."""
+    return _production.claim_task(
+        key, task_id, user_id=user_id,
+        meta={'topic': topic, 'lang': lang, 'style': style,
+              'max_pages': max_pages, 'model': model,
+              'creative_mode': creative_mode},
+        fields={'topic': topic, 'workdir': workdir, 'lang': lang,
+                'style': style, 'max_pages': max_pages, 'size': tuple(size),
+                'conv_id': conv_id, 'model': model,
+                'creative_mode': creative_mode})
 
 
 def _append_slides_event(task, event):
@@ -61,5 +80,5 @@ def _slides_task_id():
 __all__ = [
     '_production', '_slides_runtime', '_slides_index_get',
     '_slides_index_register', '_new_slides_task', '_append_slides_event',
-    '_cleanup_stale_slides_tasks', '_slides_task_id',
+    '_claim_slides_task', '_cleanup_stale_slides_tasks', '_slides_task_id',
 ]

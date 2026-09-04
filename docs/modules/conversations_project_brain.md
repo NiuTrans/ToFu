@@ -1,220 +1,171 @@
 # Conversations & Project Brain
 
-This map covers `lib/conversations/`: the owner-scoped coordination substrate
-shared by conversations working on one project, plus conversation-domain
-metadata/search/reconciliation helpers. Git publication is adjacent but has a
-separate authority in `lib/integration_control.py`.
+Project Brain is a signal-driven, owner-scoped read model for project work. It
+does not ask a model to maintain coordination state and it never dispatches,
+claims, transfers, reopens, or blocks work. Git publication remains adjacent
+in [`project_integration.md`](project_integration.md).
 
-Read with [`project_integration.md`](project_integration.md) for the Git
-publication state machine and [`../STORAGE.md`](../STORAGE.md) for the Sidecar
-authority contract.
+The public schema authority is
+[`contracts/project_brain_v1.schema.json`](../../contracts/project_brain_v1.schema.json).
 
 ## Ownership map
 
 | Concern | Runtime owner |
 |---|---|
-| Delete, restore, clone lifecycle | `contracts/conversation_lifecycle_v1.yaml`, `routes/conversations.py`, `lib/storage_sidecar/operations_pkg/_conversations.py` |
-| Project path normalization and feed | `project_feed.py` |
-| Shared charter and decisions | `project_charter.py` |
-| Epic lifecycle, leases, write-sets, human blocks | `project_board.py`, `project_board_policy.py` |
-| Autonomous selection, queueing, stranded recovery | `project_dispatch.py` |
-| Peer status/messages/intervention | `project_peer.py` |
-| Human-facing status trail | `project_status.py` |
-| Standing watch items | `project_watch.py` |
-| Compact UI summary | `project_brain_summary.py` |
-| Sibling work digest | `project_summary.py` |
-| Conversation metadata/search/reconciliation | `catalog.py`, `repository.py`, `meta_cache.py`, `settings_store.py`, `search_index.py`, `reconcile.py`, `title_gen.py` |
-| Presence | `lib/presence/` |
-| Isolated-writer Git publication | `lib/integration_control.py` and its repository/sidecar domain |
+| Event append, projection fold, receipt, checkpoint | `lib/storage_sidecar/operations_pkg/_project_brain.py` |
+| Operation registration | `lib/storage_sidecar/operation_domains/project_brain.py` |
+| Automatic work signals, context, overlap, Checkers | `lib/conversations/project_brain.py` |
+| Backup-backed cutover and restart reconciliation | `lib/conversations/project_brain_startup.py` |
+| Read projection and human command HTTP API | `routes/api_v1/project_brain.py` |
+| Retained browser UI | `frontend/src/runtime/sections/project-brain.js` |
+| Git publication and quarantine | `lib/integration_control.py` |
 
-Modules call one another through public verbs. Routes do not reproduce joins or
-write directly to Project Brain tables.
+## Authority and identity
 
-## Standing invariants
+- `storage_events` is the only event authority. Every project event carries an
+  explicit `owner_user_id`, normalized `project_key`, and monotonic
+  `project_sequence`.
+- `storage_project_brain_projects` is a reconstructible fold, never a second
+  write authority. One semantic Sidecar transaction appends the event, folds
+  the projection, records the idempotency receipt, and returns a push hint.
+- Every call is scoped by positive `user_id + normalized project`; application
+  modules do not issue SQL or infer identity from a process global.
+- Project rename rekeys retained events and the projection atomically.
+- Work history retains 100 recent terminal items, narrative retains 500 entries,
+  and cursor/active/checker/watch/decision collections have explicit capacity
+  ceilings. Long-lived Charter, Checker, and Watch state rejects overflow rather
+  than silently evicting state.
+- Periodic projection checkpoint events retain the full rebuild state before an
+  old reconstructible event prefix is reclaimed. `project_brain.rebuild`
+  verifies ownership and every sequence before replacing a projection.
 
-### Ownership and storage
+## Automatic work lifecycle
 
-- Every durable Project Brain read and mutation receives explicit `user_id`.
-  User identity is not inferred from a module global.
-- `normalize_project_path` is the shared project identity seam. Durable rows
-  are owner + normalized-project scoped.
-- Business logic uses semantic sidecar operations through `get_storage_client`
-  or a repository. SQLite/Postgres details stay in the storage layer.
-- Delete, restore, and clone are atomic Sidecar lifecycle transitions. Browser
-  caches never upload transcript arrays or serve as recovery authority.
-- Feed/status/watch writes are append-only or lifecycle-specific commands with
-  idempotency identities. A retry must not duplicate a logical transition.
-
-### Board and dispatch
-
-- Effective status is evaluated at read time. A claimed epic with an expired
-  soft lease reads as open and has no effective owner.
-- `claims_by_conv` is the single claimed-epic-to-conversation join used by
-  summaries and peer status.
-- Dependencies are satisfied only by completed epics. Live claimed, blocked,
-  and lease-kind rows are not dispatchable work.
-- A declared `write_set` travels from board post through isolation origin
-  metadata to the integration gate. Dispatch uses it to reduce concurrent
-  overlap; Git integration treats it as an enforced boundary.
-- Claim + workflow enqueue is one atomic sidecar command. The dispatcher does
-  not create a claimed epic without its durable kickoff.
-- A kickoff already present in the queue is the durable anti-duplication fact,
-  including after the board lease expires.
-- Isolation is fail-closed. If an isolated workspace cannot be created, the
-  epic is blocked and no agent runs against the shared canonical tree.
-
-### Attribution and recovery
-
-- Queue workflow payloads store `boardTaskId`. On drain the canonical user turn
-  stores `_boardTaskId`, `_brainDispatch`, and `_brainEpic`; task API messages
-  may omit private attribution fields, but the durable turn must retain them.
-- A sweep first reconciles stranded workflow kickoffs in idle conversations,
-  including kickoffs whose board lease has expired, then selects new work.
-- Draining and normal selection in one sweep must never spawn two tasks for the
-  same epic.
-- Completing one epic triggers a best-effort dependency re-evaluation. A
-  follow-up kickoff may remain queued when its target conversation is busy and
-  is recovered by a later sweep.
-
-### Cross-pillar behavior
-
-- Durable pillars define ownership. Presence is ephemeral: its TTL sweeper
-  exists only while peers do and it may enrich but never authorize a view.
-- Cross-pillar warm triggers are best-effort: failure to emit a feed/push/status
-  hint does not roll back an already committed board transition.
-- Status/watch/summary warm triggers share the probed per-lane queue budget;
-  overflow is counted, repeated scopes coalesce with force preserved, and
-  durable state reconstructs rejected work. Consumers retire after the probed
-  idle window; submit and timeout exit share one condition, so accepted work
-  always owns a live or newly started worker.
-- Pending undo records remain durable in each project's session file. Their
-  process-local acceleration layer is an observable LRU bounded by the probed
-  `TOFU_PROJECT_UNDO_CACHE_CAPACITY`; eviction never removes an undo record and
-  a later access reloads it from disk.
-- Human-gated blocks that claim a question card exists must carry a structured
-  question. Sibling blocks do not masquerade as human questions.
-- Reconciliation is cleanup/projection logic; removing a ghost message never
-  auto-starts a generation.
-
-### Cross-conversation awareness
-
-- Structured `convRefs`/`convRefTexts` on a user turn are the authoritative
-  explicit reference signal. Assistant prose never enables conversation tools.
-- `list_conversations` scopes by normalized project when one is present,
-  excludes the current conversation, and searches current owner-visible state.
-- One owner/project-filtered sibling snapshot feeds the bounded digest and UI
-  metadata; one board snapshot feeds active-claim gating/rendering. Neither is a store.
-- Summary refresh keys content revision/message count and degrades to the title;
-  failure must not block the current task or inject stale foreign-owner data.
-
-### Conversation catalog reads
-
-- Same-owner, same-shape metadata-list arrivals share one repository read. The
-  gather closes before that read starts, so a later request never reuses an
-  already-started snapshot; no TTL or completed result survives the callers.
-- The process-local gather registry is capped by the launch-probed Sidecar RPC
-  capacity, fails open at saturation, creates no worker pool, and returns
-  independent metadata copies. Different owners and projection keys never
-  share a flight.
-
-## Core flows
-
-### Epic post to autonomous start
+One physical task maps to one deterministic work ID:
 
 ```text
-post_task
-  -> persist epic + write_set
-  -> create/register isolated writer workspace
-       failure -> block epic, stop
-  -> on_epic_posted
-  -> select dispatchable target
-  -> atomic board.dispatch (claim + workflow queue row)
-  -> drain only when target conversation is idle
-  -> create task + spawn agent
+pw_ + sha256(taskId)[:24]
 ```
 
-An epic posted mid-turn sees its target as busy, so the post-time hook defers.
-The scheduler sweep later claims and self-drains it. This is the cold-start path,
-not an exceptional fallback.
+The first successful signal creates the item:
 
-### Completion and dependent work
+1. accepted `todo_write`;
+2. successful project file write;
+3. an execution already started in an isolated workspace.
 
-```text
-complete_task(A)
-  -> durable A=done
-  -> append completion evidence
-  -> re-evaluate dependent B
-  -> atomic claim + enqueue B
-  -> drain now if idle, otherwise later reconciliation
-```
+Concurrent signals share the same command identity, so only one `work_started`
+event is possible. At physical worker entry, the runtime checks whether the
+deterministic work ID already owns an active Integration workspace; this check
+is fail-soft and later todo/file signals remain authoritative fallbacks.
+`conversationId` is captured at creation and is immutable.
+Title priority is active todo, unfinished todo, Goal title, request first line,
+then first edited path. One later higher-priority signal may refine the title.
 
-### Isolated Git publication
+`ProjectWorkItem.status` is exactly `active | completed | failed | cancelled`.
+Normal task settlement, including a reply that asks the human a question, is
+`completed`; execution errors are `failed`; user abort/revocation is
+`cancelled`. There is no open/claimed/blocked/lease/dependency/reopen/transfer
+state. A later user turn is a new physical task and therefore a new work item.
 
-```text
-writer edits isolated worktree
-  -> checkpoint (alternate index; writer index untouched)
-  -> submit immutable commit
-  -> integration worker merges into refs/tofu/candidate
-       conflict/gate failure -> quarantined
-       success -> merged
-  -> explicit gated promotion -> refs/tofu/stable
-```
+A terminal `work_result` narrative is emitted only when the work produced
+changed paths/artifacts or ended failed/cancelled. Ordinary no-output success
+does not grow Feed. Startup reconciles orphaned `active` items against the task
+authority and terminally settles them without changing conversation ownership.
 
-If canonical HEAD advanced independently, the explicit `reconcile-head` action
-can merge its committed history into candidate under the same project gate.
-Dirty files and conflicts fail closed. The canonical branch remains
-observation-only. Full transition and gate rules live in
-[`project_integration.md`](project_integration.md).
+## Project Context and narrative acknowledgement
 
-## Read models
+Project Brain never changes the system message. When unseen narrative exists,
+the context composer appends one final user-role `[Project Context]` meta message
+containing the current executable Charter, active Watch, active work, and the
+next narrative page. It uses no `<system-reminder>` wrapper.
 
-- `build_brain_summary` is the small, hot UI projection: board counts,
-  claims-by-conversation, charter/proposal signals, peer presence, and current
-  status.
-- `collect_pillar_state` is the richer status/watch evidence projection. It may
-  read more fields than the UI summary but must compose the same primitive
-  owners instead of reimplementing them.
-- A third composite reader should project one of these existing read models or
-  justify a new contract; it must not hand-roll board/charter/presence joins.
+- New conversations and project switches initialize their cursor at the current
+  head and receive no history snapshot.
+- A steady-state turn with no unseen narrative injects zero Project Brain tokens.
+- A page contains at most 12 entries and 900 tokens in sequence order. Each
+  stored narrative summary is capped at 720 UTF-8 bytes so a row is never
+  clipped during delivery and then incorrectly acknowledged.
+- The cursor advances only after the first model call successfully returns.
+  Request failure or a lost acknowledgement replays the same page. The agent
+  core invokes the semantic `ConversationStore.confirm_project_context_delivery`
+  port; only the host adapter knows the Project Brain sidecar operation and
+  owner-scoped Push hint.
+- Compaction and restart restore the cursor projection and never synthesize a
+  snapshot fallback.
+- Human Watch mutations fold a bounded narrative on their existing event, so
+  current Watch state reaches existing conversations without a second event.
 
-## Failure semantics
+## File overlap advisory
 
-- Missing/invalid input returns a structured unsuccessful result at public
-  conversation-tool seams; storage authority failures retain their typed
-  taxonomy at HTTP/repository boundaries.
-- Board claim conflicts, dependency blocks, and cooldowns are expected domain
-  outcomes, not generic internal errors.
-- Dispatch logs and continues on optional notification failure, but it does not
-  fail open across storage, ownership, queue atomicity, or isolation boundaries.
-- Git conflicts and red gates quarantine immutable evidence. They do not move
-  candidate/stable or consume another model turn automatically.
+After a successful write, the runtime compares normalized changed paths against
+other running tasks owned by the same user/project. A prefix overlap queues one
+user-role advisory for both tasks before their next tool round and pushes a UI
+hint. Deduplication is by task pair plus overlap path, with at most 20 keys per
+task. Settlement discards undelivered advice. This data is process-local: it is
+never written to Feed, Attention, Board, or a persistent inbox, and detection
+failure is fail-soft.
 
-## Test map
+## Executable Charter and Checkers
 
-| Behavior | Tests |
-|---|---|
-| Board CRUD, leases, dependencies, write-sets, blocks | `test_project_board*`, `test_project_board_sidecar.py` |
-| Dispatch selection, atomic queueing, dedupe | `test_project_dispatch*`, `test_project_brain_dispatch_dedup.py` |
-| Cold start, dependent dispatch, stranded recovery | `test_project_brain_integration.py` |
-| Isolation failure is fail-closed | `test_project_board_isolation_fail_closed.py` |
-| Queue attribution/provenance | `test_brain_dispatch_provenance.py`, `test_project_brain_integration.py` |
-| Summary, feed, charter, status, watch | corresponding `test_project_*` modules |
-| Git control plane | `test_integration_control.py`, `test_integration_control_repository.py` |
-| Integration REST/UI | `test_api_v1_integration_control.py`, `test_frontend_project_brain_integration.py` |
+`CheckerDefinition` versions are immutable. They carry `checkerId`, `version`,
+`label`, `argv`, `cwd`, `pathGlobs`, `timeoutMs`, and `enabled`. Execution passes
+`argv` directly to the process API with `shell=False`; `cwd` must remain inside
+the project and output is bounded.
 
-Use the smallest row first. For a dispatch-to-Git change, verify board/queue
-contracts before the broader flywheel and integration suites.
+`CharterDecision` always references one registered `{id, version}` and records
+its source conversation/turn plus the latest verification. Assistant-turn
+promotion pre-fills the conclusion and requires the human to select an exact
+Checker version. Text without a Checker cannot enter Charter or prompt; it can
+remain Attention or be explicitly exported to docs.
 
-## Change routing
+Checkers run manually, after a terminal work item whose changed paths match
+`pathGlobs`, and as a complete enabled set before Integration/release. Failure
+or timeout adds one narrative and one Attention item, and release is rejected or
+quarantined. It never changes a terminal work item or creates a block state.
 
-- Add or change a persisted field: define it once in the semantic storage
-  operation and update its public projection/tests.
-- Change dispatch eligibility: edit `project_dispatch.py`; do not add a second
-  filter in scheduler or UI code.
-- Change lease/cooldown rules: edit `project_board_policy.py` and keep reads and
-  mutations aligned.
-- Change Git state/ref behavior: edit `lib/integration_control.py` plus its
-  repository/sidecar transition contract; do not revive `project_commit` as a
-  parallel authority.
-- Change retained Project Brain UI: edit source sections under
-  `frontend/src/runtime/sections/`, never generated `app-runtime.js`.
+## HTTP and UI
+
+Read projections:
+
+- `GET /api/v1/project/board` → `{active, recentOutcomes}`
+- `GET /api/v1/project/feed` → `NarrativeEvent[]`
+- `GET /api/v1/project/charter`
+- `GET /api/v1/project/brain/status`
+- `GET /api/v1/project/brain/attention`
+- `GET /api/v1/project/brain/watch`
+
+Human commands:
+
+- save an unchecked conclusion as non-prompt `pending_decision` Attention;
+- Watch add/update/delete;
+- Checker catalog/register/run;
+- `POST /api/v1/project/charter/decision/promote`;
+- existing Integration review/promote operations, keyed by automatic work ID.
+
+Board has no mutation API or UI controls. Legacy Charter proposals, peer
+messaging/intervention, synthesized status Q&A, Board mutations, and Watch
+promotion/follow-up routes are not registered. Model tools retain only
+`integration_checkpoint` and `integration_submit`; all Project Brain read/write
+tools and `integration_status` are absent from the model schema.
+
+## Cutover and rollback
+
+Startup readiness first creates a standard SQLite backup (or requires an
+explicit platform PostgreSQL backup receipt), then runs one atomic cutover.
+Migration keeps current Watch state and its newest result. Normalized,
+deduplicated legacy Charter/North Star/decision text becomes non-prompt legacy
+Attention. Old Board, Feed, and Status history is not imported. Verification
+precedes removal of legacy tables/records; any failure rolls back the Sidecar
+transaction and keeps readiness closed.
+
+There is no dual read/write or compatibility alias. Rollback means restore the
+pre-cutover backup and run the old release.
+
+## Verification
+
+Primary guard: `tests/test_project_brain_signal_driven.py`.
+
+Also run storage process-boundary tests, Project Brain/Integration route tests,
+tool inventory generation, i18n/runtime composition checks, frontend build, and
+the docs catalog gate. Full-suite results are a moving target when another
+writer is changing shared generated/runtime files.

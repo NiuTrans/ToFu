@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 
 class Session(Protocol):
     backend: str
+    turn_projection_cache: Any | None
 
     def lock_key(self, namespace: str, key: str) -> None: ...
     def index_exists(self, index_name: str) -> bool: ...
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> int: ...
+    def execute_many_exact(
+        self, sql: str, params: Sequence[tuple[Any, ...]],
+    ) -> int: ...
     def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> Mapping[str, Any] | None: ...
     def fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[Mapping[str, Any]]: ...
     def fetch_one_for_update_skip_locked(
@@ -46,6 +50,13 @@ def receipt_cacheable(response: Any) -> bool:
 class Backend(ABC):
     name: str
 
+    def diagnostic_locator(self) -> dict[str, Any]:
+        """Credential-free backend identity published in the project lease."""
+        return {
+            'format': 'tofu.storage-locator/v1',
+            'backend': self.name,
+        }
+
     @abstractmethod
     def start(self) -> dict[str, Any]: ...
 
@@ -65,6 +76,7 @@ class Backend(ABC):
         deadline_at: float,
         *,
         receipt_required: bool,
+        transaction_timeout_s: float | None = None,
     ) -> Any: ...
 
     @abstractmethod

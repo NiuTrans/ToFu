@@ -29,6 +29,8 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {'lib/a.py'}
 import json
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -130,7 +132,7 @@ def test_non_dict_args_pass_through_bounded():
 #  (reload recovery replays tool_log — two independent formatters could drift).
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_agent(on_event, artifact_store=None):
+def _make_agent(on_event, artifact_store=None, tool_event_sink=None):
     from lib.swarm.agent import SubAgent
     from lib.swarm.protocol import SubTaskSpec
     spec = SubTaskSpec(id='wb', role='general', objective='wiring probe')
@@ -140,6 +142,8 @@ def _make_agent(on_event, artifact_store=None):
         all_tools=[], model='', thinking_enabled=False,
         on_event=on_event, abort_check=None,
         project_path='', artifact_store=artifact_store,
+
+        tool_event_sink=tool_event_sink,
     )
 
 
@@ -169,6 +173,95 @@ def test_swarm_agent_tool_log_and_sse_share_one_formatter(monkeypatch):
     briefs = [e['argsBrief'] for e in events
               if e.get('type') == 'swarm_agent_tool_call']
     assert briefs and set(briefs) == {'BRIEF::read_artifact'}
+
+
+def test_flow_tool_observer_emits_live_lifecycle_and_reuses_persisted_id(
+        monkeypatch):
+    import lib.swarm.agent as agent_mod
+    from lib.swarm.artifact_store import ArtifactStore
+
+    canonical = []
+    agent = _make_agent(
+        lambda _event: None,
+        artifact_store=ArtifactStore(),
+        tool_event_sink=canonical.append,
+    )
+    monkeypatch.setattr(
+        agent_mod, 'format_tool_args_brief',
+        lambda _name, _args, **_kw: 'Read missing artifact')
+    agent._execute_single_tool(
+        {'id': 'provider-recycled', 'function': {
+            'name': 'read_artifact',
+            'arguments': json.dumps({'key': 'missing'}),
+        }},
+        round_num=3,
+    )
+
+    assert [event['type'] for event in canonical] == [
+        'tool_start', 'tool_result', 'tool_complete']
+    ids = {event['toolCallId'] for event in canonical}
+    assert len(ids) == 1
+    occurrence_id = ids.pop()
+    assert occurrence_id.startswith('flow-tool-')
+    assert occurrence_id != 'provider-recycled'
+    row = agent.result.tool_log[0]
+    assert row['tool_call_id'] == occurrence_id
+    assert row['provider_tool_call_id'] == 'provider-recycled'
+    assert row['status'] == 'done'
+
+
+def test_parallel_same_name_tools_settle_their_own_bounded_rows(monkeypatch):
+    """Same-name calls may finish out of order without sharing one log row."""
+    import lib.swarm.agent as agent_mod
+    from lib.swarm.artifact_store import ArtifactStore
+
+    events = []
+    agent = _make_agent(events.append, artifact_store=ArtifactStore())
+    barrier = threading.Barrier(2)
+    monkeypatch.setattr(
+        agent_mod, 'format_tool_args_brief',
+        lambda _name, args, **_kw: args['key'])
+
+    def fake_read(args):
+        barrier.wait(timeout=5)
+        return args['key'] * 5000
+
+    monkeypatch.setattr(agent, '_handle_read_artifact', fake_read)
+    calls = [
+        {'id': f'call-{key}', 'function': {
+            'name': 'read_artifact',
+            'arguments': json.dumps({'key': key}),
+        }}
+        for key in ('A', 'B')
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda call: agent._execute_single_tool(call, round_num=1), calls))
+
+    assert results == ['A' * 5000, 'B' * 5000]
+    rows = {row['args_brief']: row for row in agent.result.tool_log}
+    assert set(rows) == {'A', 'B'}
+    for key in ('A', 'B'):
+        assert rows[key]['preview'] == key * 2000
+        assert rows[key]['preview_full_chars'] == 5000
+        assert rows[key]['preview_truncated'] is True
+
+    occurrence_ids = {
+        row['tool_call_id'] for row in agent.result.tool_log
+    }
+    assert len(occurrence_ids) == 2
+    assert all(identity.startswith('flow-tool-')
+               for identity in occurrence_ids)
+
+    finished = {
+        event['callId']: event
+        for event in events
+        if (event.get('type') == 'swarm_agent_tool_call'
+            and event.get('callStatus') == 'done')
+    }
+    assert finished['call-A']['preview'] == 'A' * 2000
+    assert finished['call-B']['preview'] == 'B' * 2000
+    assert all(event['previewTruncated'] for event in finished.values())
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -193,8 +193,30 @@ def ingest_tool_call(
         / ``.parse_error`` → return the error to the LLM, skip execution;
         else dispatch ``.fn_name`` with ``.fn_args``.
     """
-    fn_obj = (tool_call or {}).get('function') or {}
-    raw_name = fn_obj.get('name', '') or ''
+    if not isinstance(tool_call, dict):
+        return IngestedToolCall(
+            raw_name='', fn_name='', drop_reason='malformed_shape',
+            parse_error=(
+                'ERROR: Tool call was NOT executed because the provider '
+                'returned a non-object tool_call entry.'),
+        )
+    fn_obj = tool_call.get('function') or {}
+    if not isinstance(fn_obj, dict):
+        return IngestedToolCall(
+            raw_name='', fn_name='', drop_reason='malformed_shape',
+            parse_error=(
+                'ERROR: Tool call was NOT executed because its function '
+                'field was not an object.'),
+        )
+    raw_name_value = fn_obj.get('name', '')
+    if raw_name_value is not None and not isinstance(raw_name_value, str):
+        return IngestedToolCall(
+            raw_name='', fn_name='', drop_reason='malformed_shape',
+            parse_error=(
+                'ERROR: Tool call was NOT executed because its function '
+                'name was not a string.'),
+        )
+    raw_name = raw_name_value or ''
 
     # ── Stage 1: drop guard ──
     drop = _tool_name_drop_reason(raw_name)
@@ -291,16 +313,24 @@ def ingest_tool_call(
         clear_rejection(conv_id, fn_name)
 
     # ── Stage 3: JSON decode + repair ──
-    raw_args = fn_obj.get('arguments', '') or ''
+    raw_args = fn_obj.get('arguments', '')
+    if raw_args is None:
+        raw_args = ''
     json_repaired = False
     parse_error = None
     fn_args: dict[str, Any] = {}
     try:
         if isinstance(raw_args, dict):
             fn_args = raw_args
-        else:
-            _s = raw_args if isinstance(raw_args, str) else ''
+        elif isinstance(raw_args, str):
+            _s = raw_args
             fn_args = json.loads(_s) if _s.strip() else {}
+        else:
+            parse_error = (
+                f'ERROR: Your tool call for `{fn_name}` was NOT executed '
+                'because `function.arguments` must be a JSON object or a '
+                f'JSON string, not {type(raw_args).__name__}.')
+            fn_args = {}
     except (json.JSONDecodeError, TypeError, KeyError) as e:
         try:
             from lib.utils import repair_json as _repair_json
@@ -347,9 +377,14 @@ def ingest_tool_call(
                     repair_log.append(('$', 'schema_default'))
         except ToolContractError as exc:
             contract_error = exc.to_dict()
+            # The bare code/path leaves weak models guessing the correct
+            # shape (conv mtdqz4bkuyitzj retried blindly); the hint names
+            # the expected keys so the recovery round can self-correct.
+            _hint = schema_hint(fn_name)
             parse_error = (
                 f'ERROR: Tool call `{fn_name}` was NOT executed. '
-                f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}')
+                f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}'
+                + (f' {_hint}' if _hint else ''))
             logger.warning(
                 '[ToolContract] rejected tool=%s code=%s path=%s model=%s '
                 'conv=%s', fn_name, exc.code, exc.path, model, conv_id)

@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 
+from lib.goal_runs.contract import GOAL_POLICY_DIRECTIVE
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -90,6 +91,7 @@ VU_ROLE_PROMPT = (
     'actually met.\n\n'
     'Trust nothing you have not checked. The assistant\'s self-report '
     '("done", "tests pass", "I created X") is a claim, not evidence.\n\n'
+    f'Governing GoalRun policy: {GOAL_POLICY_DIRECTIVE}\n\n'
     'Before you reply, do this:\n'
     '1. VERIFY the assistant\'s most consequential claim using your '
     'tools. If it said tests pass, run or inspect them; if it said it '
@@ -142,6 +144,14 @@ VU_ROLE_PROMPT = (
     'actually correct, the behavior actually works) — not when the '
     'assistant says so. When (and only when) that is true, reply '
     f'EXACTLY: {VU_DONE_SENTINEL}\n'
+    '- The runtime audits your completion claim before accepting it: '
+    f'{VU_DONE_SENTINEL} with remaining>0 is rejected outright, and the '
+    'first completion claim is CHALLENGED and sent back when you never '
+    'used your own tools this run while the assistant changed real '
+    'state, or when nothing was resolved and nothing was built anywhere '
+    'in the run. A challenge is not a formality: re-issue the claim only '
+    'with the verification evidence or the no-work justification the '
+    'challenge demanded.\n'
     '- If the objective is NOT yet met, give the assistant the specific '
     'unmet criterion or the next concrete step. Do not emit '
     f'{VU_DONE_SENTINEL} while anything remains unresolved.\n'

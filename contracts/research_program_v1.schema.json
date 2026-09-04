@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/research_program_v1.schema.json",
+  "title": "Tofu scientific research program",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "revision", "direction", "lang", "stage",
+    "selected_idea_id", "hypothesis", "protocol", "capability_bindings",
+    "runs", "claims", "manuscript", "source_files", "figures", "tables",
+    "compilation", "publication", "updated_at"
+  ],
+  "properties": {
+    "contract_version": {"const": "tofu.research-program/v1"},
+    "revision": {"type": "integer", "minimum": 0},
+    "direction": {"type": "string", "maxLength": 2000},
+    "lang": {"enum": ["en", "zh"]},
+    "stage": {"enum": ["selection", "experiment", "evidence", "writing", "submission"]},
+    "selected_idea_id": {"type": "string", "maxLength": 160},
+    "hypothesis": {"type": "string", "maxLength": 12000},
+    "protocol": {"$ref": "#/$defs/protocol"},
+    "capability_bindings": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {"$ref": "#/$defs/capabilityBinding"}
+    },
+    "runs": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/run"}},
+    "claims": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/claim"}},
+    "manuscript": {"$ref": "#/$defs/manuscript"},
+    "source_files": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {"$ref": "#/$defs/sourceFile"}
+    },
+    "figures": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/visual"}},
+    "tables": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/visual"}},
+    "compilation": {"$ref": "#/$defs/compilation"},
+    "publication": {"$ref": "#/$defs/publication"},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "shortText": {"type": "string", "maxLength": 1000},
+    "longText": {"type": "string", "maxLength": 12000},
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_metric", "baseline", "dataset", "falsifier", "resources",
+        "evaluation_protocol", "environment", "random_seeds", "stop_conditions"
+      ],
+      "properties": {
+        "primary_metric": {"$ref": "#/$defs/longText"},
+        "baseline": {"$ref": "#/$defs/longText"},
+        "dataset": {"$ref": "#/$defs/longText"},
+        "falsifier": {"$ref": "#/$defs/longText"},
+        "resources": {"$ref": "#/$defs/longText"},
+        "evaluation_protocol": {"$ref": "#/$defs/longText"},
+        "environment": {"$ref": "#/$defs/longText"},
+        "random_seeds": {"type": "array", "maxItems": 32, "items": {"type": "integer"}},
+        "stop_conditions": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/shortText"}}
+      }
+    },
+    "capabilityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "provider", "tool", "schema_hash", "enabled", "argument_defaults", "notes"],
+      "properties": {
+        "capability": {
+          "type": "string",
+          "maxLength": 120,
+          "pattern": "^(literature|experiment|compute|evaluation|figure|manuscript|publication)\\.[a-z0-9_.-]+$"
+        },
+        "provider": {"type": "string", "maxLength": 120},
+        "tool": {"type": "string", "maxLength": 240},
+        "schema_hash": {"type": "string", "maxLength": 128},
+        "enabled": {"type": "boolean"},
+        "argument_defaults": {"type": "object", "maxProperties": 48},
+        "notes": {"type": "string", "maxLength": 2000}
+      }
+    },
+    "toolReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "call_id", "status", "artifact_ref", "result_digest", "result_excerpt", "observed_at"],
+      "properties": {
+        "tool": {"type": "string", "maxLength": 240},
+        "call_id": {"type": "string", "maxLength": 240},
+        "status": {"enum": ["done", "rejected", "error"]},
+        "artifact_ref": {"type": "string", "maxLength": 1000},
+        "result_digest": {"type": "string", "maxLength": 128},
+        "result_excerpt": {"type": "string", "maxLength": 4000},
+        "observed_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "label", "status", "metric", "baseline", "delta", "artifact_ref",
+        "artifact_refs", "backend", "remote_job_id", "spec_digest", "task_id",
+        "notes", "tool_receipts", "started_at", "finished_at", "updated_at"
+      ],
+      "properties": {
+        "id": {"type": "string", "maxLength": 96},
+        "label": {"type": "string", "maxLength": 240},
+        "status": {"enum": ["planned", "running", "passed", "failed", "inconclusive"]},
+        "metric": {"type": "string", "maxLength": 500},
+        "baseline": {"type": "string", "maxLength": 500},
+        "delta": {"type": "string", "maxLength": 500},
+        "artifact_ref": {"type": "string", "maxLength": 1000},
+        "artifact_refs": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 1000}},
+        "backend": {"type": "string", "maxLength": 240},
+        "remote_job_id": {"type": "string", "maxLength": 500},
+        "spec_digest": {"type": "string", "maxLength": 128},
+        "task_id": {"type": "string", "maxLength": 160},
+        "notes": {"$ref": "#/$defs/longText"},
+        "tool_receipts": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/toolReceipt"}},
+        "started_at": {"type": "integer", "minimum": 0},
+        "finished_at": {"type": "integer", "minimum": 0},
+        "updated_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "status", "evidence_refs"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 96},
+        "text": {"$ref": "#/$defs/longText"},
+        "status": {"enum": ["draft", "supported", "contested", "rejected"]},
+        "evidence_refs": {"type": "array", "maxItems": 24, "items": {"type": "string", "maxLength": 1000}}
+      }
+    },
+    "manuscript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title", "venue", "abstract", "keywords", "method", "results", "limitations",
+        "introduction", "related_work", "experiments", "conclusion", "ethics"
+      ],
+      "properties": {
+        "title": {"$ref": "#/$defs/longText"},
+        "venue": {"$ref": "#/$defs/longText"},
+        "abstract": {"$ref": "#/$defs/longText"},
+        "keywords": {"$ref": "#/$defs/longText"},
+        "method": {"$ref": "#/$defs/longText"},
+        "results": {"$ref": "#/$defs/longText"},
+        "limitations": {"$ref": "#/$defs/longText"},
+        "introduction": {"$ref": "#/$defs/longText"},
+        "related_work": {"$ref": "#/$defs/longText"},
+        "experiments": {"$ref": "#/$defs/longText"},
+        "conclusion": {"$ref": "#/$defs/longText"},
+        "ethics": {"$ref": "#/$defs/longText"}
+      }
+    },
+    "sourceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "content", "sha256", "updated_at"],
+      "properties": {
+        "path": {"type": "string", "maxLength": 240, "pattern": "^[A-Za-z0-9_./-]+$"},
+        "content": {"type": "string", "maxLength": 65536},
+        "sha256": {"type": "string", "maxLength": 64},
+        "updated_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "visual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "caption", "data_ref", "script_ref", "output_ref", "status"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 96},
+        "title": {"type": "string", "maxLength": 500},
+        "caption": {"type": "string", "maxLength": 4000},
+        "data_ref": {"type": "string", "maxLength": 1000},
+        "script_ref": {"type": "string", "maxLength": 1000},
+        "output_ref": {"type": "string", "maxLength": 1000},
+        "status": {"enum": ["planned", "generated", "verified", "rejected"]}
+      }
+    },
+    "compilation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "detail", "source_digest", "engine", "compiled_at"],
+      "properties": {
+        "mode": {"enum": ["unconfigured", "local_tectonic", "bound_tool", "overleaf_mcp"]},
+        "status": {"enum": ["not_run", "passing", "failing"]},
+        "detail": {"type": "string", "maxLength": 4000},
+        "source_digest": {"type": "string", "maxLength": 128},
+        "engine": {"type": "string", "maxLength": 240},
+        "compiled_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "status", "project_ref", "project_url", "source_digest", "published_at", "detail"],
+      "properties": {
+        "provider": {"type": "string", "maxLength": 120},
+        "status": {"enum": ["not_started", "syncing", "published", "conflict", "failed"]},
+        "project_ref": {"type": "string", "maxLength": 1000},
+        "project_url": {"type": "string", "maxLength": 2000},
+        "source_digest": {"type": "string", "maxLength": 128},
+        "published_at": {"type": "integer", "minimum": 0},
+        "detail": {"type": "string", "maxLength": 4000}
+      }
+    }
+  }
+}

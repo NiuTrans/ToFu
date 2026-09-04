@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
 import {
   paperAttachPush,
@@ -45,7 +46,6 @@ interface DeepenJob extends PaperPushState {
 type PaperWindow = Window & {
   Api?: { paper?: DeepenApi };
   t?: (key: string) => string;
-  escapeHtml?: (value: unknown) => string;
   renderMarkdown?: (text: string) => string;
   errorEnvelopeMessage?: (error: unknown) => string;
   _paperHash?: string;
@@ -71,14 +71,6 @@ function globals(): PaperWindow {
 function translate(key: I18nKey): string {
   const translator = globals().t;
   return typeof translator === 'function' ? translator(key) : key;
-}
-
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (typeof helper === 'function') return helper(value);
-  const node = document.createElement('span');
-  node.textContent = value == null ? '' : String(value);
-  return node.innerHTML;
 }
 
 function api(): DeepenApi {

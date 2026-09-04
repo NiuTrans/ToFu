@@ -24,6 +24,7 @@ def test_receipt_is_bounded_finite_and_does_not_duplicate_summary_text():
         summary_generated=True,
         summary_text=summary,
         summary_usage={'input_tokens': 1200, 'output_tokens': 300},
+        durable_objective_applied=True,
         recent_files=[f'lib/file-{index}.py' for index in range(20)],
         economics={
             'dropped_tokens': 10_000,
@@ -40,6 +41,7 @@ def test_receipt_is_bounded_finite_and_does_not_duplicate_summary_text():
     assert receipt['summary']['chars'] == len(summary)
     assert summary not in encoded.decode('utf-8')
     assert len(receipt['retention']['recentFiles']) == 8
+    assert receipt['retention']['durableObjectiveApplied'] is True
     assert receipt['economics']['paybackRounds'] is None
     assert receipt['economics']['paybackLimitRounds'] == 6
     assert receipt['economics']['paybackPolicy'] == 'adaptive_expected_horizon'

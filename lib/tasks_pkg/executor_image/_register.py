@@ -118,6 +118,7 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
 
         try:
             with log_context('generate_image_tool', logger=logger):
+                from lib.tasks_pkg.manager import task_user_id
                 result = generate_image(
                     prompt=prompt,
                     aspect_ratio=aspect_ratio,
@@ -125,6 +126,8 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                     history=history or None,
                     source_images=source_images,
                     on_429=_on_429,
+                    owner_user_id=task_user_id(task),
+                    tenant_id=task.get('_tenant_id'),
                 )
         except Exception as e:
             logger.error('[Tool:generate_image] failed: %s', e, exc_info=True)

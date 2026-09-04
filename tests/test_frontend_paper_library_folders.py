@@ -24,6 +24,7 @@ import shutil
 import subprocess
 
 import pytest
+from tests._paper_vite import compiled_typescript
 
 pytestmark = pytest.mark.unit
 
@@ -75,12 +76,13 @@ global.Api = win.Api = {
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // compiled native library owner
 if (typeof win._renderPaperLibrary === 'function') {
+  const featureState = win.__tofuTestFeatureRegistry;
   for (const name of ['_paperFolders', '_paperLibrary', '_activePaperId',
     '_activePaperFolderId', '_paperLibraryLoading']) {
     Object.defineProperty(globalThis, name, {
       configurable: true,
-      get() { return win[name]; },
-      set(value) { win[name] = value; },
+      get() { return featureState[name]; },
+      set(value) { featureState[name] = value; },
     });
   }
   for (const name of ['_renderPaperLibrary', '_assignPaperFolder',
@@ -118,6 +120,7 @@ _activePaperId = 'p1';
   // ── 2. Assign p2 into pf_a → entry mutated + upsert called with folderId.
   upserts = [];
   _assignPaperFolder('p2', 'pf_a');
+  await Promise.resolve();
   const p2 = _paperLibrary.find(p => p.id === 'p2');
   check('assign_mutated_entry', p2.folderId === 'pf_a');
   check('assign_persisted', upserts.length === 1 && upserts[0].id === 'p2'
@@ -139,6 +142,7 @@ _activePaperId = 'p1';
   // ── 4. Unassign p1 (move to no folder) → folder count drops to 1.
   upserts = [];
   _assignPaperFolder('p1', '');
+  await Promise.resolve();
   check('unassign_empty_folderId', _paperLibrary.find(p => p.id==='p1').folderId === '');
   check('unassign_persisted_empty', upserts.length === 1 && upserts[0].body.folderId === '');
 
@@ -176,14 +180,12 @@ def _run(js_path: str):
 
 @pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
                     reason='node + jsdom + vite test bundler dev-deps not installed')
-def test_vite_paper_library_folders_match_classic_contract(tmp_path):
-    built = tmp_path / 'paper-library.js'
-    compiled = subprocess.run(
-        [ESBUILD, LIBRARY_TS, '--bundle', '--format=iife',
-         '--platform=browser', f'--outfile={built}'],
-        capture_output=True, text=True, timeout=60)
-    assert compiled.returncode == 0, compiled.stderr
-    lines = _run(str(built))
+def test_vite_paper_library_folders_match_classic_contract():
+    with compiled_typescript(
+        LIBRARY_TS,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        lines = _run(built)
     failures = [line for line in lines if line.startswith('FAIL')]
     assert not failures, 'Vite paper library folder failures:\n' + '\n'.join(lines)
     assert len(lines) >= 15

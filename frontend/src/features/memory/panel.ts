@@ -1,5 +1,7 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtmlText as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
+import { attachMemorySkillDropZone } from './skill-package-install';
 interface MemoryItem {
   id: string;
   name: string;
@@ -28,20 +30,19 @@ interface MemoryApi {
 type MemoryWindow = Window & {
   Api?: { memory?: MemoryApi };
   t?: (key: string, values?: Record<string, unknown>) => string;
-  escapeHtml?: (value: unknown) => string;
   marked?: { parse(markdown: string): string };
   debugLog?: (message: string, kind?: string) => void;
   showConfirm?: (message: string, options?: { danger?: boolean }) => Promise<boolean>;
   _applyMemoryUI?: (enabled: boolean) => void;
   captureActiveConversationSettings?: () => void;
   updateSubmenuCounts?: () => void;
-  _attachMemoryDropZone?: () => void;
+  openSettings?: () => void;
+  switchSettingsTab?: (tab: string) => void;
   toggleMemory?: () => void;
   toggleMemoryFromModal?: () => void;
   openMemoryModal?: () => void;
   closeMemoryModal?: () => void;
   toggleMemoryAddForm?: () => void;
-  openMemoryCreateForm?: () => void;
   switchMemoryTab?: (scope: string) => void;
   filterMemoryList?: (query: string) => void;
   refreshMemoryList?: (scope?: string, targetId?: string) => Promise<void>;
@@ -52,6 +53,7 @@ type MemoryWindow = Window & {
   _renderMemoryCards?: (items: MemoryItem[]) => void;
   _updateMemoryModalBtn?: () => void;
   _updateMemoryStats?: (memories: MemoryItem[]) => void;
+  _openSkillsStoreFromMemory?: () => void;
   _memoryCache?: MemoryItem[];
   readonly memoryEnabled?: boolean;
 };
@@ -59,17 +61,22 @@ type MemoryWindow = Window & {
 let memoryCache: MemoryItem[] = [];
 let memoryFilter = '';
 let currentTargetId = 'memoryList';
+const MEMORY_PAGE_SIZE = 100;
+const memoryPages = new Map<string, number>();
 const requestGenerations = new Map<string, number>();
 let listenerAttached = false;
+let memoryListEpoch = 0;
+let activeMemoryListRequest: {
+  epoch: number;
+  promise: Promise<MemoryItem[]>;
+} | undefined;
+let trailingMemoryListEpoch = 0;
+let trailingMemoryListRequest: Promise<MemoryItem[]> | undefined;
 
 function globals(): MemoryWindow { return featureRegistry as unknown as MemoryWindow; }
 function isMemoryEnabled(): boolean { return globals().memoryEnabled ?? true; }
 function translate(key: I18nKey, values?: Record<string, unknown>): string {
   return globals().t?.(key, values) || key;
-}
-function escape(value: unknown): string {
-  return globals().escapeHtml?.(value) || String(value ?? '').replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -123,7 +130,7 @@ export function openMemoryModal(): void {
   if (search) search.value = '';
   void refreshMemoryList();
   updateModalButton();
-  globals()._attachMemoryDropZone?.();
+  attachMemorySkillDropZone();
 }
 
 export function closeMemoryModal(): void {
@@ -131,6 +138,13 @@ export function closeMemoryModal(): void {
   const add = document.getElementById('memoryAddSection');
   if (add instanceof HTMLElement) add.style.display = 'none';
   requestGenerations.set('memoryList', (requestGenerations.get('memoryList') || 0) + 1);
+  memoryListEpoch += 1;
+}
+
+export function openSkillsStoreFromMemory(): void {
+  closeMemoryModal();
+  globals().openSettings?.();
+  window.setTimeout(() => globals().switchSettingsTab?.('skills'), 50);
 }
 
 export function toggleMemoryAddForm(): void {
@@ -139,16 +153,6 @@ export function toggleMemoryAddForm(): void {
   const hidden = !section.style.display || section.style.display === 'none';
   section.style.display = hidden ? 'block' : 'none';
   if (hidden) try { section.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch { /* optional */ }
-}
-
-export function openMemoryCreateForm(): void {
-  openMemoryModal();
-  const section = document.getElementById('memoryAddSection');
-  if (section instanceof HTMLElement) section.style.display = 'block';
-  window.setTimeout(() => {
-    try { section?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch { /* optional */ }
-  }, 50);
-  window.setTimeout(() => input('memoryNewName')?.focus(), 60);
 }
 
 export function switchMemoryTab(scope: string): void {
@@ -160,6 +164,7 @@ export function switchMemoryTab(scope: string): void {
 
 export function filterMemoryList(query: string): void {
   memoryFilter = String(query || '').toLowerCase().trim();
+  memoryPages.set('memoryList', 0);
   renderMemoryCards(memoryCache, 'memoryList');
 }
 
@@ -175,6 +180,43 @@ function updateStats(memories: MemoryItem[]): void {
     <div class="memory-stat"><span class="memory-stat-num">${global}</span><span class="memory-stat-label">${escape(translate('memory.statGlobal'))}</span></div>`;
 }
 
+function startMemoryListRequest(epoch: number): Promise<MemoryItem[]> {
+  const promise = api().list('all').then((data) => {
+    if (!data) throw new Error('empty response');
+    return Array.isArray(data.memories) ? data.memories : [];
+  });
+  const flight = { epoch, promise };
+  activeMemoryListRequest = flight;
+  void promise.then(
+    () => { if (activeMemoryListRequest === flight) activeMemoryListRequest = undefined; },
+    () => { if (activeMemoryListRequest === flight) activeMemoryListRequest = undefined; },
+  );
+  return promise;
+}
+
+function loadMemoryList(): Promise<MemoryItem[]> {
+  if (!activeMemoryListRequest) return startMemoryListRequest(memoryListEpoch);
+  if (activeMemoryListRequest.epoch === memoryListEpoch) {
+    return activeMemoryListRequest.promise;
+  }
+
+  // Closing/reopening invalidates presentation ownership, so preserve one
+  // trailing authoritative refresh. Repeated clicks or tab switches collapse
+  // onto that demand instead of starting unbounded network-filesystem scans.
+  trailingMemoryListEpoch = memoryListEpoch;
+  if (trailingMemoryListRequest) return trailingMemoryListRequest;
+  const current = activeMemoryListRequest.promise;
+  const trailing = current.catch(() => undefined).then(
+    () => startMemoryListRequest(trailingMemoryListEpoch),
+  );
+  trailingMemoryListRequest = trailing;
+  void trailing.then(
+    () => { if (trailingMemoryListRequest === trailing) trailingMemoryListRequest = undefined; },
+    () => { if (trailingMemoryListRequest === trailing) trailingMemoryListRequest = undefined; },
+  );
+  return trailing;
+}
+
 export async function refreshMemoryList(scope?: string, targetId = 'memoryList'): Promise<void> {
   ensureListener();
   currentTargetId = targetId;
@@ -185,13 +227,15 @@ export async function refreshMemoryList(scope?: string, targetId = 'memoryList')
   requestGenerations.set(targetId, generation);
   list.innerHTML = `<div class="memory-loading"><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><span>${escape(translate('memory.loading'))}</span></div>`;
   try {
-    const data = await api().list(selected);
+    const allMemories = await loadMemoryList();
     if (requestGenerations.get(targetId) !== generation) return;
-    if (!data) throw new Error('empty response');
-    const memories = Array.isArray(data.memories) ? data.memories : [];
+    const memories = selected === 'all'
+      ? allMemories
+      : allMemories.filter((item) => item.scope === selected);
     memoryCache = memories;
     globals()._memoryCache = memoryCache;
     updateStats(memories);
+    memoryPages.set(targetId, 0);
     renderMemoryCards(memories, targetId);
   } catch (error: unknown) {
     if (requestGenerations.get(targetId) !== generation) return;
@@ -232,9 +276,36 @@ export function renderMemoryCards(memories: MemoryItem[], targetId = currentTarg
     list.innerHTML = `<div class="memory-empty"><span class="memory-empty-icon"></span><div class="memory-empty-title">${escape(title)}</div></div>`;
     return;
   }
+  const lastPage = Math.max(0, Math.ceil(filtered.length / MEMORY_PAGE_SIZE) - 1);
+  const page = Math.min(Math.max(0, memoryPages.get(targetId) || 0), lastPage);
+  memoryPages.set(targetId, page);
+  const start = page * MEMORY_PAGE_SIZE;
+  const visible = filtered.slice(start, start + MEMORY_PAGE_SIZE);
   const fragment = document.createDocumentFragment();
-  for (const item of filtered) fragment.appendChild(buildCard(item));
+  if (filtered.length > MEMORY_PAGE_SIZE) {
+    const controls = document.createElement('div');
+    controls.className = 'memory-page-controls';
+    controls.innerHTML = `<button class="memory-retry-btn" type="button" data-memory-action="page-previous" data-target-id="${escape(targetId)}"${page === 0 ? ' disabled' : ''}>${escape(translate('memory.pagePrevious'))}</button>
+      <span class="memory-page-status" aria-live="polite">${escape(translate('memory.pageStatus', {
+        from: start + 1,
+        to: start + visible.length,
+        total: filtered.length,
+      }))}</span>
+      <button class="memory-retry-btn" type="button" data-memory-action="page-next" data-target-id="${escape(targetId)}"${page === lastPage ? ' disabled' : ''}>${escape(translate('memory.pageNext'))}</button>`;
+    fragment.appendChild(controls);
+  }
+  for (const item of visible) fragment.appendChild(buildCard(item));
   list.replaceChildren(fragment);
+}
+
+function moveMemoryPage(targetId: string, direction: -1 | 1): void {
+  const current = memoryPages.get(targetId) || 0;
+  memoryPages.set(targetId, Math.max(0, current + direction));
+  renderMemoryCards(memoryCache, targetId);
+  const list = document.getElementById(targetId);
+  if (typeof list?.scrollTo === 'function') {
+    list.scrollTo({ top: 0, behavior: 'auto' });
+  }
 }
 
 export async function toggleMemoryBody(header: Element): Promise<void> {
@@ -316,6 +387,7 @@ export async function deleteMemory(id: string): Promise<void> {
     memoryCache = memoryCache.filter((item) => item.id !== id);
     globals()._memoryCache = memoryCache;
     cards.forEach((card) => card.remove());
+    renderMemoryCards(memoryCache, currentTargetId);
     updateStats(memoryCache);
     globals().debugLog?.('Memory deleted', 'success');
   } catch (error: unknown) {
@@ -344,6 +416,7 @@ export async function createMemoryFromModal(): Promise<void> {
     if (status) status.textContent = '';
     const created = (data.memory && typeof data.memory === 'object' ? data.memory : data) as unknown as MemoryItem;
     memoryCache.unshift(created);
+    memoryPages.set('memoryList', 0);
     renderMemoryCards(memoryCache, 'memoryList');
     updateStats(memoryCache);
     globals().debugLog?.(`Memory created: ${name}`, 'success');
@@ -363,6 +436,11 @@ function onMemoryClick(event: Event): void {
   else if (action === 'toggle') { event.stopPropagation(); void toggleMemoryEnabled(id); }
   else if (action === 'delete') { event.stopPropagation(); void deleteMemory(id); }
   else if (action === 'retry') void refreshMemoryList(undefined, target.dataset.targetId || 'memoryList');
+  else if (action === 'page-previous') {
+    moveMemoryPage(target.dataset.targetId || currentTargetId, -1);
+  } else if (action === 'page-next') {
+    moveMemoryPage(target.dataset.targetId || currentTargetId, 1);
+  }
 }
 
 ensureListener();
@@ -371,8 +449,8 @@ bridge.toggleMemory = toggleMemory;
 bridge.toggleMemoryFromModal = toggleMemoryFromModal;
 bridge.openMemoryModal = openMemoryModal;
 bridge.closeMemoryModal = closeMemoryModal;
+bridge._openSkillsStoreFromMemory = openSkillsStoreFromMemory;
 bridge.toggleMemoryAddForm = toggleMemoryAddForm;
-bridge.openMemoryCreateForm = openMemoryCreateForm;
 bridge.switchMemoryTab = switchMemoryTab;
 bridge.filterMemoryList = filterMemoryList;
 bridge.refreshMemoryList = refreshMemoryList;

@@ -30,7 +30,8 @@ import re
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
+from tests._paper_vite import compiled_typescript
 
 pytestmark = pytest.mark.unit
 
@@ -38,15 +39,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 SETTINGS_CSS = os.path.join(ROOT, 'static', 'settings.css')
 PANEL_HTML = os.path.join(ROOT, 'static', 'settings_panels', 'skills.html')
-SKILLS_JS = os.path.join(JS_DIR, 'skills.js')
+SKILLS_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'skills', 'panel.ts')
 
 # ── 1. jsdom render pins ─────────────────────────────────────────────
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
-const { check, report } = setup({
+const { document, check, report } = setup({
   root: process.argv[3],
-  html: '<!DOCTYPE html><body></body>',
+  html: '<!DOCTYPE html><body>'
+    + '<div id="skillsTotalCount"></div>'
+    + '<div id="skillsCatalogCount"></div>'
+    + '<div id="skillsCategoryBar"></div>'
+    + '<div id="skillsCatalogGrid"></div>'
+    + '</body>',
   targets: [process.argv[2]],
   globals: {
     t: function (key, vars) {
@@ -64,62 +71,74 @@ const { check, report } = setup({
       };
       return dict[key] || 'T[' + key + ']';
     },
-    escapeHtml: function (s) {
-      return String(s === undefined || s === null ? '' : s)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    },
     Icon: function () { return '<svg class="icon-stub"></svg>'; },
+    Api: { skills: {
+      catalog: async () => ({ catalog: window._testCatalog }),
+      list: async () => ({ skills: [] }),
+      envStatus: async () => ({ env: [] }),
+      catalogSearch: async () => ({ catalog: [], online: {} }),
+    }},
   },
 });
 
-try {
-  // ── Card A: featured + official + note + requirements + install CTA ──
-  var a = _skillsRenderCatalogCard({
-    id: 'flyai', name: '飞猪 FlyAI（出行旅游）', author: 'Alibaba Fliggy',
-    description: '阿里飞猪官方出行 skill',
-    install_note: '八个搜索命令零配置即可用',
-    requires: { bins: ['node'], env: ['FLYAI_API_KEY'] },
-    homepage: 'https://example.com/repo',
-    featured: true, installed: false,
-  });
-  check('featured_stamp', a.indexOf('skill-badge-featured') !== -1 && a.indexOf('推荐') !== -1);
-  check('warn_bins', a.indexOf('skill-badge-warn') !== -1 && a.indexOf('需要 node') !== -1);
-  check('warn_env', a.indexOf('需要环境变量 FLYAI_API_KEY') !== -1);
-  check('note_rendered', a.indexOf('mcp-app-note') !== -1 && a.indexOf('八个搜索命令零配置即可用') !== -1);
-  check('install_cta_primary', a.indexOf('btn btn-primary btn-xs') !== -1
-    && a.indexOf("_skillsCatalogInstall('flyai'") !== -1);
-  check('repo_link', a.indexOf('mcp-app-repo') !== -1 && a.indexOf('https://example.com/repo') !== -1);
-  check('no_installed_tag_when_absent', a.indexOf('skill-installed-tag') === -1);
-  check('footer_axis', a.indexOf('skill-card-footer') !== -1 && a.indexOf('skill-card-actions') !== -1);
+(async () => {
+  try {
+    // ── Card A: featured + note + requirements + install CTA ──
+    window._testCatalog = [{
+      id: 'flyai', name: '飞猪 FlyAI（出行旅游）', author: 'Alibaba Fliggy',
+      description: '阿里飞猪官方出行 skill',
+      install_note: '八个搜索命令零配置即可用',
+      requires: { bins: ['node'], env: ['FLYAI_API_KEY'] },
+      homepage: 'https://example.com/repo',
+      featured: true, installed: false,
+    }];
+    await window._populateSkillsTab();
+    const a = document.getElementById('skillsCatalogGrid').innerHTML;
+    check('featured_stamp', a.indexOf('skill-badge-featured') !== -1 && a.indexOf('推荐') !== -1);
+    check('warn_bins', a.indexOf('skill-badge-warn') !== -1 && a.indexOf('需要 node') !== -1);
+    check('warn_env', a.indexOf('需要环境变量 FLYAI_API_KEY') !== -1);
+    check('note_rendered', a.indexOf('mcp-app-note') !== -1 && a.indexOf('八个搜索命令零配置即可用') !== -1);
+    check('install_cta_primary', a.indexOf('btn btn-primary btn-xs') !== -1
+      && a.indexOf('data-skills-action="install"') !== -1);
+    check('repo_link', a.indexOf('mcp-app-repo') !== -1 && a.indexOf('https://example.com/repo') !== -1);
+    check('no_installed_tag_when_absent', a.indexOf('skill-installed-tag') === -1);
+    check('footer_axis', a.indexOf('skill-card-footer') !== -1 && a.indexOf('skill-card-actions') !== -1);
 
-  // ── Card B: anthropic author → official badge; installed → gold language ──
-  var b = _skillsRenderCatalogCard({
-    id: 'xlsx', name: 'Excel (xlsx)', author: 'Anthropic',
-    description: 'Read and write Excel workbooks',
-    featured: false, installed: true, installed_memory_id: 'xlsx-pkg',
-  });
-  check('official_badge', b.indexOf('skill-badge-official') !== -1 && b.indexOf('官方') !== -1);
-  check('no_featured_when_false', b.indexOf('skill-badge-featured') === -1);
-  check('installed_card_class', b.indexOf('skill-card is-installed') !== -1);
-  check('installed_tag', b.indexOf('skill-installed-tag') !== -1 && b.indexOf('✓ 已安装') !== -1);
-  check('installed_actions', b.indexOf("_skillsViewFiles('xlsx-pkg'") !== -1
-    && b.indexOf("_skillsUninstall('xlsx-pkg'") !== -1);
-  check('installed_no_primary_cta', b.indexOf('btn-primary') === -1);
-} catch (e) {
-  check('harness_threw: ' + (e && e.message), false);
-}
-report();
+    // ── Card B: anthropic author → official badge; installed → gold language ──
+    window._testCatalog = [{
+      id: 'xlsx', name: 'Excel (xlsx)', author: 'Anthropic',
+      description: 'Read and write Excel workbooks',
+      featured: false, installed: true, installed_memory_id: 'xlsx-pkg',
+    }];
+    await window._populateSkillsTab();
+    const b = document.getElementById('skillsCatalogGrid').innerHTML;
+    check('official_badge', b.indexOf('skill-badge-official') !== -1 && b.indexOf('官方') !== -1);
+    check('no_featured_when_false', b.indexOf('skill-badge-featured') === -1);
+    check('installed_card_class', b.indexOf('skill-card is-installed') !== -1);
+    check('installed_tag', b.indexOf('skill-installed-tag') !== -1 && b.indexOf('✓ 已安装') !== -1);
+    check('installed_actions', b.indexOf('data-skills-action="files"') !== -1
+      && b.indexOf('data-skills-action="uninstall"') !== -1
+      && b.indexOf('data-skill-id="xlsx-pkg"') !== -1);
+    check('installed_no_primary_cta', b.indexOf('btn-primary') === -1);
+    report();
+  } catch (e) {
+    check('harness_threw: ' + (e && e.message), false);
+    report();
+  }
+})();
 '''
 
 
 def test_skills_card_render_design_pins():
-    run_harness(
-        target_js=SKILLS_JS,
-        body_js=_BODY,
-        min_pass=14,
-        label='skills-panel-design',
-    )
+    with compiled_typescript(
+        SKILLS_TS, expose_feature_registry_to_window=True,
+    ) as built:
+        run_harness(
+            target_js=built,
+            body_js=_BODY,
+            min_pass=14,
+            label='skills-panel-design',
+        )
 
 
 # ── 2. Dark-leftover ratchet on the skills CSS ───────────────────────
@@ -209,14 +228,15 @@ def test_skills_panel_header_structure():
     with open(PANEL_HTML, encoding='utf-8') as fh:
         html = fh.read()
 
-    # Header control order: title block → scope tabs → new-memory → search.
+    # Header control order: title block → scope tabs → search. The new-memory
+    # button was removed from the skills header (memory creation lives in the
+    # Memory tab); it must not return as a fake scope tab.
     i_title = html.find('mcp-store-header-title')
     i_scope = html.find('skills-scope-tabs')
-    i_newmem = html.find('openMemoryCreateForm')
     i_search = html.find('id="skillsSearch"')
-    assert -1 < i_title < i_scope < i_newmem < i_search, (
-        'skills.html header control order drifted (title | scope | action | '
-        'search — the same order as the MCP store header)'
+    assert -1 < i_title < i_scope < i_search, (
+        'skills.html header control order drifted (title | scope | search — '
+        'the same order as the MCP store header)'
     )
 
     # The count badges live inside the title block.
@@ -226,12 +246,10 @@ def test_skills_panel_header_structure():
         'the count badges left the title block'
     )
 
-    # The new-memory button is a REAL secondary button, not a fake scope tab.
-    newmem_line = next(ln for ln in html.splitlines()
-                       if 'openMemoryCreateForm' in ln)
-    assert 'btn-secondary' in newmem_line and 'skills-scope-tab' not in newmem_line, (
-        'the new-memory button must stay demoted to .btn-secondary — as a '
-        'scope-tab it masqueraded as a view switch'
+    # The removed new-memory button must not come back as a scope-tab masquerading
+    # as a view switch (it used to sit between scope tabs and search).
+    assert 'openMemoryCreateForm' not in html, (
+        'skills.html re-added the removed new-memory button'
     )
 
     # The intro paragraph carries the dedicated class (no inline styling).

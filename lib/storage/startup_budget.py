@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from runtime_guards import storage_backup_timeout_seconds
+
 
 ORDINARY_STORAGE_STARTUP_TIMEOUT_S = 30.0
 FASTPATH_SEED_STARTUP_TIMEOUT_S = 900.0
@@ -32,11 +34,14 @@ def storage_startup_timeout(environ: Mapping[str, str]) -> float:
 
 
 def lifespan_startup_timeout(environ: Mapping[str, str]) -> float:
-    """Keep Hypercorn alive through storage migration and later boot phases."""
+    """Keep Hypercorn alive through every bounded required startup phase."""
     storage_timeout = storage_startup_timeout(environ)
-    if storage_timeout <= ORDINARY_STORAGE_STARTUP_TIMEOUT_S:
-        return _ORDINARY_LIFESPAN_STARTUP_TIMEOUT_S
-    return storage_timeout + _POST_STORAGE_LIFESPAN_RESERVE_S
+    backup_timeout = float(storage_backup_timeout_seconds(environ))
+    required_phase_timeout = max(storage_timeout, backup_timeout)
+    return max(
+        _ORDINARY_LIFESPAN_STARTUP_TIMEOUT_S,
+        required_phase_timeout + _POST_STORAGE_LIFESPAN_RESERVE_S,
+    )
 
 
 __all__ = ['lifespan_startup_timeout', 'storage_startup_timeout']

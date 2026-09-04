@@ -1,9 +1,10 @@
 """Pet day-awareness (Tier 1 + Tier 2a) — the project-bar pet is connected to
 "your day" (the daily report) and reports it on tap.
 
-The backend daily report is the SINGLE SOURCE OF TRUTH: myday.js derives the
-digest {todos:{done,total}, streams:{done,blocked,total}, convCount} STRAIGHT
-from the report the backend returns and fires `tofu:day`; the pet
+The backend daily report is the SINGLE SOURCE OF TRUTH: the typed, owner-scoped
+My Day report repository derives the digest
+{todos:{done,total}, streams:{done,blocked,total}, convCount} STRAIGHT from the
+report the backend returns and the background owner fires `tofu:day`; the pet
 (tofu-pet.js) only MAPS that digest → expression/mood and renders a click
 bubble. It computes no day logic of its own.
 
@@ -30,6 +31,8 @@ from tests._runtime_sections import runtime_section
 
 REPO = Path(__file__).resolve().parent.parent
 LOCALES = REPO / "frontend" / "src" / "i18n" / "locales"
+REPORT_CACHE_OWNER = REPO / "frontend" / "src" / "features" / "myday" / "report-cache.ts"
+BACKGROUND_OWNER = REPO / "frontend" / "src" / "features" / "background.ts"
 
 pytestmark = pytest.mark.unit
 
@@ -303,43 +306,54 @@ def test_neuter_blocked_mapping_bites():
     assert r["expr"] != "sad", f"neutered build still surfaced the concerned pose ({r['expr']}) — test does not bite"
 
 
-# ── myday.js emit-seam guards (backend single source; one cache choke) ─────
+# ── typed repository emit-seam guards (backend source; one cache choke) ────
 def test_myday_derives_digest_from_report_shape():
     """The digest fields must be READ from the report the backend returns
     (streams[].status, today_todos[].done, stats.totalConversations) — not
     recomputed with day thresholds in JS."""
-    src = _myday_source()
-    assert "_mydayBuildDigest" in src, "digest builder missing"
-    m = re.search(r"function _mydayBuildDigest\(report\)\s*\{(.*?)\n\}", src, re.S)
-    assert m, "could not isolate _mydayBuildDigest"
+    src = REPORT_CACHE_OWNER.read_text(encoding="utf-8")
+    assert "myDayDigestFromReport" in src, "typed digest builder missing"
+    m = re.search(
+        r"export function myDayDigestFromReport\(report: MyDayReport\): MyDayDigest \{(.*?)\n\}",
+        src,
+        re.S,
+    )
+    assert m, "could not isolate myDayDigestFromReport"
     body = m.group(1)
     assert "report.streams" in body and "report.today_todos" in body, \
         "digest must read the backend report arrays, not a client re-derivation"
     assert "totalConversations" in body, "digest must read stats.totalConversations"
-    assert "s.status === 'done'" in body and "s.status === 'blocked'" in body, \
+    assert "stream?.status === 'done'" in body and "stream?.status === 'blocked'" in body, \
         "stream done/blocked must come from the backend status field"
 
 
 def test_myday_emit_routes_through_single_cache_choke():
-    """Both My Day open and the boot fetch must emit tofu:day via the ONE
-    cache choke (_mydaySetCache) — no second source. And the boot fetch must go
-    through Api.daily.status (no raw fetch) and be dedup-guarded."""
-    src = _myday_source()
-    # _mydaySetCache emits for today's report.
-    m = re.search(r"function _mydaySetCache\(dateStr, report\)\s*\{(.*?)\n\}", src, re.S)
-    assert m and "_mydayEmitDay" in m.group(1), \
-        "_mydaySetCache must emit the day digest (single choke)"
-    # Boot fetch: uses the shared status API + IDB cache, guarded once per session.
-    assert "_mydayBootDayDigest" in src, "boot digest fetch missing"
-    boot = re.search(r"async function _mydayBootDayDigest\(\)\s*\{(.*?)\n\}", src, re.S)
-    assert boot, "could not isolate _mydayBootDayDigest"
-    bb = boot.group(1)
-    assert "_myday._bootDigestDone" in bb, "boot fetch must be dedup-guarded (once per session)"
-    assert "Api.daily.status" in bb, "boot fetch must use Api.daily.status (no raw fetch)"
-    assert "_mydayIDB.get" in bb, "boot fetch must reuse the instant-paint IDB cache first"
-    # No raw fetch( introduced anywhere in the added seam.
-    assert "fetch('/api" not in src and 'fetch("/api' not in src, \
-        "myday.js must not issue raw fetch — go through window.Api"
+    """Panel writes and background refreshes publish through one repository;
+    the demand-loaded presenter owns neither digest policy nor boot probes."""
+    cache = REPORT_CACHE_OWNER.read_text(encoding="utf-8")
+    background = BACKGROUND_OWNER.read_text(encoding="utf-8")
+    presenter = _myday_source()
+
+    publish = re.search(
+        r"const publishReport = \(date: string, report: MyDayReport\): void => \{(.*?)\n  \};",
+        cache,
+        re.S,
+    )
+    assert publish and "publishDigest?.(myDayDigestFromReport(report))" in publish.group(1)
+    store = re.search(
+        r"const storeReport = \(date: string, report: MyDayReport\): Promise<void> => \{(.*?)\n  \};",
+        cache,
+        re.S,
+    )
+    assert store and "publishReport(date, report);" in store.group(1)
+    assert "repository.storeReport(dateStr, report)" in presenter
+    assert "myDayDigestFromReport" not in presenter and "tofu:day" not in presenter
+    assert "createMyDayReportRepository" in background
+    assert "new CustomEvent('tofu:day', { detail: digest })" in background
+    assert "if (myDayBackgroundController) return Promise.resolve();" in background
+    assert "if (myDayBackgroundStart) return myDayBackgroundStart;" in background
+    for source in (presenter, background):
+        assert "fetch('/api" not in source and 'fetch("/api' not in source
 
 
 if __name__ == "__main__":

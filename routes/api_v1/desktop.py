@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import time
+from urllib.parse import urlsplit
 
 from quart import Blueprint
 
@@ -28,12 +29,74 @@ from lib.log_policy import stream_backup_count, stream_max_bytes
 from lib.log_redaction import redact_text, sanitize_value
 from lib.log_retention import append_bytes_locked, copytruncate_if_oversize
 from lib.openapi import api_meta
+from lib.request_parser import BadRequest, async_parse_body, optional_str
 
 from .auth import require_auth
 
 logger = get_logger(__name__)
 
 api_v1_desktop_bp = Blueprint('api_v1_desktop', __name__)
+
+
+_DESKTOP_BUILD_OS_CHOICES = ('linux', 'windows')
+_DESKTOP_BUILD_KIND_CHOICES = ('full', 'agent')
+_MAX_BUILD_SERVER_URL_CHARS = 4096
+
+
+def _desktop_build_parameters(body: dict) -> tuple[str, str, str]:
+    """Validate one expensive build request before it starts background work.
+
+    Defaults are useful for an empty POST, but applying them to misspelled or
+    malformed fields is unsafe: ``windwos`` previously launched a Linux build
+    and an unknown ``kind`` launched the much larger full application.  The
+    preseed URL is persisted in artifact metadata, so credential carriers are
+    rejected here rather than relying on the installed client to discard them.
+    """
+    os_key = optional_str(
+        body, 'os', default='linux', max_len=16).lower() or 'linux'
+    if os_key not in _DESKTOP_BUILD_OS_CHOICES:
+        raise BadRequest(
+            'os must be one of: ' + ', '.join(_DESKTOP_BUILD_OS_CHOICES),
+            field='os',
+        )
+    if os_key == 'linux':
+        return os_key, 'full', ''
+
+    kind = optional_str(
+        body, 'kind', default='full', max_len=16).lower() or 'full'
+    if kind not in _DESKTOP_BUILD_KIND_CHOICES:
+        raise BadRequest(
+            'kind must be one of: ' + ', '.join(_DESKTOP_BUILD_KIND_CHOICES),
+            field='kind',
+        )
+
+    server_url = optional_str(
+        body,
+        'server_url',
+        default='',
+        max_len=_MAX_BUILD_SERVER_URL_CHARS,
+    )
+    if server_url:
+        try:
+            parsed = urlsplit(server_url)
+            has_hostname = bool(parsed.hostname)
+        except ValueError as error:
+            raise BadRequest(
+                'server_url must be an absolute HTTP(S) URL',
+                field='server_url',
+            ) from error
+        if parsed.scheme.lower() not in ('http', 'https') or not has_hostname:
+            raise BadRequest(
+                'server_url must be an absolute HTTP(S) URL',
+                field='server_url',
+            )
+        if (parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment):
+            raise BadRequest(
+                'server_url must not contain credentials, query, or fragment',
+                field='server_url',
+            )
+    return os_key, kind, server_url
 
 
 def _setup_state(connected: bool) -> str:
@@ -478,9 +541,10 @@ async def desktop_status():
         'toolchain (lib/desktop_dist/winbuilder.py — payload cached per '
         '(git_sha, deps), then the NSIS wrapper; optional '
         '``{"server_url": ...}`` pre-seeds the remote attachment into the '
-        'installer). macOS cannot be built on Linux (documented permanent '
-        'boundary — the mirror serves it). GET returns both builders\' '
-        'persisted states.'
+        'installer). Build selectors are validated rather than defaulted on '
+        'typos; preseed URLs must be credential-free absolute HTTP(S) URLs. '
+        'macOS cannot be built on Linux (documented permanent boundary — the '
+        'mirror serves it). GET returns both builders\' persisted states.'
     ),
     tags=['capabilities'],
 )
@@ -488,18 +552,10 @@ async def desktop_build():
     from quart import request
     from lib.desktop_dist import builder as _dist_builder
     if request.method == 'POST':
-        body = {}
-        try:
-            body = await request.get_json(silent=True) or {}
-        except Exception as e:
-            logger.debug('desktop_build: non-JSON body ignored: %s', e)
-        os_key = str(body.get('os') or 'linux').strip().lower()
+        body = await async_parse_body(strict=True)
+        os_key, kind, url = _desktop_build_parameters(body)
         if os_key == 'windows':
             from lib.desktop_dist import winbuilder as _win_builder
-            url = str(body.get('server_url') or '').strip()
-            kind = str(body.get('kind') or 'full').strip().lower()
-            if kind not in ('full', 'agent'):
-                kind = 'full'
             st = _win_builder.start_installer(reason='api', server_url=url,
                                               target=kind)
             audit_log('desktop_build_kicked', os='windows', kind=kind,

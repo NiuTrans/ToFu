@@ -5,6 +5,7 @@ conversation) and its formatting helpers (``_extract_text``,
 ``_format_tool_rounds``, ``_extract_result_text``, ``_truncate``).
 """
 
+from dataclasses import dataclass
 import json
 
 from lib.identity import require_user_id
@@ -24,6 +25,22 @@ MAX_CHARS = 80000
 #: read still ends on a whole message instead of mid-token.
 TRANSCRIPT_HEAD = 3
 TRANSCRIPT_TAIL = 60
+_RAW_TAIL_PROBE_WINDOW = 64
+
+
+@dataclass(frozen=True, slots=True)
+class _RawMessageWindow:
+    """Bounded raw candidates with their absolute transcript coordinates."""
+
+    head: list[tuple[int, dict]]
+    tail: list[tuple[int, dict]]
+    total: int
+    end: int
+    reaches_head: bool
+
+
+class _RawWindowNeedsFull(RuntimeError):
+    """The bounded raw probe fits entirely, so older rows may also fit."""
 
 
 def _select_message_window(messages, head, tail, before=None):
@@ -137,10 +154,358 @@ def _coerce_json(value, default, label=''):
     return safe_json(value, default=default, label=label)
 
 
-def _read_conversation_snapshot(conversation_id, *, user_id):
+def _read_conversation_snapshot(conversation_id, *, user_id, **projection):
     """Dependency seam for the owner-scoped conversation authority."""
     from lib.conversations.repository import get_conversation
-    return get_conversation(conversation_id, user_id=user_id)
+    return get_conversation(
+        conversation_id,
+        user_id=user_id,
+        **projection,
+    )
+
+
+def _read_prose_message_window(
+    conversation_id,
+    *,
+    user_id,
+    tail,
+    before,
+):
+    """Return one row plus exact indexed head/tail messages for prose."""
+    def full_fallback():
+        snapshot = _read_conversation_snapshot(
+            conversation_id, user_id=user_id)
+        if snapshot is None:
+            return None
+        messages = snapshot['messages']
+        if not isinstance(messages, list):
+            return snapshot, [], 0, 0
+        kept, omitted, total = _select_message_window(
+            messages, TRANSCRIPT_HEAD, tail, before=before)
+        return snapshot, kept, omitted, total
+
+    if tail > 500:
+        return full_fallback()
+    projection = {'message_window': tail}
+    if before is not None:
+        projection['before_sequence'] = before
+    tail_snapshot = _read_conversation_snapshot(
+        conversation_id,
+        user_id=user_id,
+        **projection,
+    )
+    if tail_snapshot is None:
+        return None
+    raw_total = tail_snapshot.get('msg_count')
+    if (
+        not isinstance(raw_total, int)
+        or isinstance(raw_total, bool)
+        or raw_total < 0
+    ):
+        return full_fallback()
+    total = raw_total
+    end = total if before is None else max(0, min(before, total))
+    tail_messages = tail_snapshot['messages']
+    expected_tail_size = min(tail, end)
+    if (
+        not isinstance(tail_messages, list)
+        or len(tail_messages) != expected_tail_size
+    ):
+        return full_fallback()
+    if end <= len(tail_messages):
+        return (
+            tail_snapshot,
+            list(enumerate(tail_messages)),
+            0,
+            total,
+        )
+
+    head_end = min(TRANSCRIPT_HEAD, end)
+    head_snapshot = _read_conversation_snapshot(
+        conversation_id,
+        user_id=user_id,
+        message_window=head_end,
+        before_sequence=head_end,
+    )
+    if head_snapshot is None:
+        return None
+    head_messages = head_snapshot['messages']
+    tail_rev = tail_snapshot.get('rev')
+    if (
+        not isinstance(tail_rev, int)
+        or isinstance(tail_rev, bool)
+        or head_snapshot.get('rev') != tail_rev
+        or head_snapshot.get('msg_count') != total
+        or not isinstance(head_messages, list)
+        or len(head_messages) != head_end
+    ):
+        return full_fallback()
+
+    tail_start = end - len(tail_messages)
+    if end <= head_end + len(tail_messages):
+        overlap = max(0, head_end - tail_start)
+        merged = [*head_messages, *tail_messages[overlap:]]
+        if len(merged) != end:
+            return full_fallback()
+        return tail_snapshot, list(enumerate(merged)), 0, total
+    kept = list(enumerate(head_messages))
+    kept.extend(
+        (tail_start + offset, message)
+        for offset, message in enumerate(tail_messages)
+    )
+    return tail_snapshot, kept, tail_start - head_end, total
+
+
+def _is_digest_anchor_worthy(message):
+    """Whether a message carries substantive prose for digest anchoring."""
+    if not isinstance(message, dict):
+        return False
+    if _extract_text(message.get('content', '')).strip():
+        return True
+    thinking = message.get('thinking')
+    return isinstance(thinking, str) and bool(thinking.strip())
+
+
+def _select_digest_message_window(messages, head, tail):
+    """Select the exact anchored digest window from a complete transcript."""
+    total = len(messages)
+    last_content_index = None
+    for index in range(total - 1, -1, -1):
+        if _is_digest_anchor_worthy(messages[index]):
+            last_content_index = index
+            break
+    tail_end = (
+        last_content_index if last_content_index is not None else total - 1
+    )
+    trailing_dropped = (total - 1) - tail_end
+    if tail_end + 1 <= head + tail:
+        kept = list(enumerate(messages[:tail_end + 1]))
+        omitted = 0
+    else:
+        tail_start = tail_end - tail + 1
+        kept = list(enumerate(messages[:head]))
+        kept.extend(
+            (index, messages[index])
+            for index in range(tail_start, tail_end + 1)
+        )
+        omitted = tail_start - head
+    return kept, total, omitted, trailing_dropped
+
+
+def _read_digest_message_window(
+    conversation_id,
+    *,
+    user_id,
+    head,
+    tail,
+):
+    """Read the anchored digest edges, with a coherent exact fallback."""
+    def full_fallback():
+        snapshot = _read_conversation_snapshot(
+            conversation_id, user_id=user_id)
+        if snapshot is None:
+            return None
+        messages = snapshot['messages']
+        if not isinstance(messages, list):
+            return None
+        return snapshot, *_select_digest_message_window(messages, head, tail)
+
+    if (
+        isinstance(head, bool)
+        or not isinstance(head, int)
+        or isinstance(tail, bool)
+        or not isinstance(tail, int)
+        or not 1 <= head <= 500
+        or not 1 <= tail <= 500
+    ):
+        return full_fallback()
+    suffix_snapshot = _read_conversation_snapshot(
+        conversation_id,
+        user_id=user_id,
+        message_window=tail,
+    )
+    if suffix_snapshot is None:
+        return None
+    raw_total = suffix_snapshot.get('msg_count')
+    suffix_messages = suffix_snapshot['messages']
+    if (
+        not isinstance(raw_total, int)
+        or isinstance(raw_total, bool)
+        or raw_total < 0
+        or not isinstance(suffix_messages, list)
+        or len(suffix_messages) != min(tail, raw_total)
+    ):
+        return full_fallback()
+    total = raw_total
+    suffix_start = total - len(suffix_messages)
+    local_anchor = None
+    for index in range(len(suffix_messages) - 1, -1, -1):
+        if _is_digest_anchor_worthy(suffix_messages[index]):
+            local_anchor = index
+            break
+    if local_anchor is None:
+        if suffix_start > 0:
+            return full_fallback()
+        tail_end = total - 1
+    else:
+        tail_end = suffix_start + local_anchor
+    trailing_dropped = (total - 1) - tail_end
+    if tail_end + 1 <= head + tail:
+        if suffix_start == 0:
+            kept = list(enumerate(suffix_messages[:tail_end + 1]))
+            return suffix_snapshot, kept, total, 0, trailing_dropped
+        prefix_size = tail_end + 1
+        if prefix_size > 500:
+            return full_fallback()
+        prefix_snapshot = _read_conversation_snapshot(
+            conversation_id,
+            user_id=user_id,
+            message_window=prefix_size,
+            before_sequence=prefix_size,
+        )
+        if not _digest_pages_share_epoch(
+            suffix_snapshot, prefix_snapshot, total
+        ) or len(prefix_snapshot['messages']) != prefix_size:
+            return full_fallback()
+        kept = list(enumerate(prefix_snapshot['messages']))
+        return prefix_snapshot, kept, total, 0, trailing_dropped
+
+    tail_start = tail_end - tail + 1
+    if tail_start == suffix_start and tail_end == total - 1:
+        selected_tail_snapshot = suffix_snapshot
+        selected_tail = suffix_messages
+    else:
+        selected_tail_snapshot = _read_conversation_snapshot(
+            conversation_id,
+            user_id=user_id,
+            message_window=tail,
+            before_sequence=tail_end + 1,
+        )
+        if not _digest_pages_share_epoch(
+            suffix_snapshot, selected_tail_snapshot, total
+        ):
+            return full_fallback()
+        selected_tail = selected_tail_snapshot['messages']
+        if not isinstance(selected_tail, list) or len(selected_tail) != tail:
+            return full_fallback()
+    head_snapshot = _read_conversation_snapshot(
+        conversation_id,
+        user_id=user_id,
+        message_window=head,
+        before_sequence=head,
+    )
+    if not _digest_pages_share_epoch(
+        suffix_snapshot, head_snapshot, total
+    ) or len(head_snapshot['messages']) != head:
+        return full_fallback()
+    kept = list(enumerate(head_snapshot['messages']))
+    kept.extend(
+        (tail_start + offset, message)
+        for offset, message in enumerate(selected_tail)
+    )
+    return (
+        suffix_snapshot,
+        kept,
+        total,
+        tail_start - head,
+        trailing_dropped,
+    )
+
+
+def _digest_pages_share_epoch(first, second, total):
+    """Whether two bounded digest pages prove one conversation revision."""
+    if first is None or second is None:
+        return False
+    revision = first.get('rev')
+    return (
+        isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and second.get('rev') == revision
+        and second.get('msg_count') == total
+        and isinstance(second['messages'], list)
+    )
+
+
+def _read_raw_message_window(
+    conversation_id,
+    *,
+    user_id,
+    limit,
+    before,
+):
+    """Read enough raw candidates to prove a budget fit or request fallback."""
+    def full_fallback():
+        snapshot = _read_conversation_snapshot(
+            conversation_id, user_id=user_id)
+        return (snapshot, None) if snapshot is not None else None
+
+    candidate_window = (
+        _RAW_TAIL_PROBE_WINDOW
+        if limit is None
+        else max(1, int(limit))
+    )
+    if candidate_window > 500:
+        return full_fallback()
+    projection = {'message_window': candidate_window}
+    if before is not None:
+        projection['before_sequence'] = before
+    tail_snapshot = _read_conversation_snapshot(
+        conversation_id,
+        user_id=user_id,
+        **projection,
+    )
+    if tail_snapshot is None:
+        return None
+    raw_total = tail_snapshot.get('msg_count')
+    messages = tail_snapshot['messages']
+    if (
+        not isinstance(raw_total, int)
+        or isinstance(raw_total, bool)
+        or raw_total < 0
+        or not isinstance(messages, list)
+    ):
+        return full_fallback()
+    total = raw_total
+    end = total if before is None else max(0, min(before, total))
+    expected_size = min(candidate_window, end)
+    if len(messages) != expected_size:
+        return full_fallback()
+    tail_start = end - len(messages)
+    head_size = min(TRANSCRIPT_HEAD, end)
+    if tail_start == 0:
+        head_pairs = list(enumerate(messages[:head_size]))
+        tail_pairs = [
+            (index, messages[index])
+            for index in range(head_size, len(messages))
+        ]
+        return tail_snapshot, _RawMessageWindow(
+            head=head_pairs,
+            tail=tail_pairs,
+            total=total,
+            end=end,
+            reaches_head=True,
+        )
+    head_snapshot = _read_conversation_snapshot(
+        conversation_id,
+        user_id=user_id,
+        message_window=head_size,
+        before_sequence=head_size,
+    )
+    if not _digest_pages_share_epoch(
+        tail_snapshot, head_snapshot, total
+    ) or len(head_snapshot['messages']) != head_size:
+        return full_fallback()
+    return tail_snapshot, _RawMessageWindow(
+        head=list(enumerate(head_snapshot['messages'])),
+        tail=[
+            (tail_start + offset, message)
+            for offset, message in enumerate(messages)
+            if tail_start + offset >= head_size
+        ],
+        total=total,
+        end=end,
+        reaches_head=tail_start <= head_size,
+    )
 
 
 def get_conversation(conversation_id, *, user_id,
@@ -175,9 +540,26 @@ def get_conversation(conversation_id, *, user_id,
         return "Error: Cannot reference the current conversation — you are already in it. Use list_conversations to find other conversations."
 
     owner_id = require_user_id(user_id, context='get conversation reference')
+    _tail = TRANSCRIPT_TAIL if limit is None else max(1, int(limit))
+    _before = None if before is None else max(0, int(before) - 1)
     try:
-        row = _read_conversation_snapshot(
-            conversation_id, user_id=int(owner_id))
+        if raw:
+            raw_projection = _read_raw_message_window(
+                conversation_id,
+                user_id=int(owner_id),
+                limit=limit,
+                before=_before,
+            )
+            row = raw_projection[0] if raw_projection is not None else None
+            prose_projection = None
+        else:
+            prose_projection = _read_prose_message_window(
+                conversation_id,
+                user_id=int(owner_id),
+                tail=_tail,
+                before=_before,
+            )
+            row = prose_projection[0] if prose_projection is not None else None
     except Exception as exc:
         logger.debug('[conv_ref] conversation read failed conv=%s: %s',
                      (conversation_id or '')[:12], exc)
@@ -186,8 +568,36 @@ def get_conversation(conversation_id, *, user_id,
         return f"Error: Conversation '{conversation_id}' not found. Use list_conversations to find valid conversation IDs."
 
     if raw:
-        return _render_raw_conversation(row, conversation_id,
-                                        limit=limit, before=before)
+        try:
+            return _render_raw_conversation(
+                row,
+                conversation_id,
+                limit=limit,
+                before=before,
+                message_window=raw_projection[1],
+            )
+        except _RawWindowNeedsFull:
+            try:
+                full_row = _read_conversation_snapshot(
+                    conversation_id, user_id=int(owner_id))
+            except Exception as exc:
+                logger.debug(
+                    '[conv_ref] raw fallback read failed conv=%s: %s',
+                    (conversation_id or '')[:12],
+                    exc,
+                )
+                full_row = None
+            if full_row is None:
+                return (
+                    f"Error: Conversation '{conversation_id}' not found. "
+                    'Use list_conversations to find valid conversation IDs.'
+                )
+            return _render_raw_conversation(
+                full_row,
+                conversation_id,
+                limit=limit,
+                before=before,
+            )
 
     # Layer 2 trigger: PAUSED. The sidebar conversation-summary feature is
     #   unstable (render location + timing issues), so we no longer REQUEST
@@ -196,17 +606,13 @@ def get_conversation(conversation_id, *, user_id,
     #   lib/tasks_pkg/manager/_sync.py is likewise disabled. Revisit later.
 
     title = row['title'] or '(untitled)'
-    _tail = TRANSCRIPT_TAIL if limit is None else max(1, int(limit))
-    _before = None if before is None else max(0, int(before) - 1)
     settings = _coerce_json(row['settings'], default={},
                             label='conv-ref-settings')
 
-    messages = row['messages']
-    if not messages:
+    _projection_row, kept, omitted, total = prose_projection
+    if total == 0:
         return (f"Conversation '{title}' [{conversation_id}] exists but "
                 'has no messages.')
-    kept, omitted, total = _select_message_window(
-        messages, TRANSCRIPT_HEAD, _tail, before=_before)
 
     # Build formatted output
     parts = []
@@ -242,6 +648,14 @@ def get_conversation(conversation_id, *, user_id,
             # Note any images/PDFs
             if msg.get('images'):
                 parts.append(f"  [Contains {len(msg['images'])} image(s)]")
+            if msg.get('attachments'):
+                for attachment in msg['attachments']:
+                    if not isinstance(attachment, dict):
+                        continue
+                    parts.append(
+                        f"  [Attachment: {attachment.get('name', 'unknown')} "
+                        f"({attachment.get('kind', 'media')}, "
+                        f"{attachment.get('status', 'unknown')})]")
             if msg.get('pdfTexts'):
                 for pdf in msg['pdfTexts']:
                     parts.append(f"  [PDF: {pdf.get('name', 'unknown')} — {pdf.get('pages', '?')} pages]")
@@ -315,9 +729,11 @@ def build_conversation_digest(conversation_id, *, user_id,
     as a clean, scannable card instead of dumping the raw ``═══`` / ``── User
     Message #`` ASCII separators as Markdown.
 
-    Never re-parses the prose result — reads the same DB row and emits a
-    typed structure (mirrors the ``boardSnapshot`` / ``peerStatus`` pattern in
-    ``lib/tasks_pkg/handlers/misc/_brain.py``).
+    Never re-parses the prose result. It reads one revision-consistent bounded
+    suffix probe, exact anchored tail, and head projection and emits a typed
+    structure (mirrors the ``boardSnapshot`` / ``peerStatus`` pattern in
+    ``lib/tasks_pkg/handlers/misc/_brain.py``). Ambiguous anchors or epochs use
+    one coherent full-read fallback.
 
     HEAD+TAIL policy: a long conversation keeps its opening ``head`` messages
     (what it is about) AND its most-recent ``tail`` messages (where it ended
@@ -354,23 +770,19 @@ def build_conversation_digest(conversation_id, *, user_id,
         return None
     owner_id = require_user_id(user_id, context='build conversation digest')
     try:
-        row = _read_conversation_snapshot(
+        projection = _read_digest_message_window(
             conversation_id,
             user_id=owner_id,
+            head=head,
+            tail=tail,
         )
     except Exception as e:
         logger.debug('[conv_ref] digest DB read failed for %s: %s',
                      conversation_id, e)
         return None
-    if not row:
+    if not projection:
         return None
-
-    messages = row['messages']
-    # Only a CORRUPT row (non-list messages) forfeits the card. An empty list
-    # is a valid digest: the selection logic below degenerates cleanly to
-    # messages: [] and the frontend renders its designed empty state.
-    if not isinstance(messages, list):
-        return None
+    row, kept, n, omitted, trailing_dropped = projection
     settings = _coerce_json(row['settings'], default={}, label='conv-digest-settings')
 
     def _preview(text, limit=DIGEST_PREVIEW):
@@ -380,44 +792,6 @@ def build_conversation_digest(conversation_id, *, user_id,
     def _full(text):
         s = str(text or '').strip()
         return (s[:DIGEST_FULL_CAP] + '…') if len(s) > DIGEST_FULL_CAP else s
-
-    n = len(messages)
-
-    # ── TAIL ANCHORING ──
-    # The tail must END on the conversation's CONCLUSION, not on a trailing
-    # run of tool-only rounds. Find the last message that carries SUBSTANTIVE
-    # prose — real ``content`` OR ``thinking`` (a round's model reasoning is
-    # substantive; a bare cleanup tool call with neither is the "empty closer"
-    # we drop) — and anchor the tail there, dropping the rounds after it.
-    # Without this a tool-heavy ending fills the tail with blank rows and the
-    # "where did it end up" half of head+tail shows nothing.
-    def _is_anchor_worthy(m):
-        if not isinstance(m, dict):
-            return False
-        if _extract_text(m.get('content', '')).strip():
-            return True
-        th = m.get('thinking')
-        return isinstance(th, str) and bool(th.strip())
-
-    last_content_idx = None
-    for idx in range(n - 1, -1, -1):
-        if _is_anchor_worthy(messages[idx]):
-            last_content_idx = idx
-            break
-    tail_end = last_content_idx if last_content_idx is not None else n - 1
-    trailing_dropped = (n - 1) - tail_end
-
-    # HEAD+TAIL selection with 1-based original indices preserved, so a message
-    # row always reports its true position in the conversation.
-    if tail_end + 1 <= head + tail:
-        # Head and tail windows meet/overlap — no middle gap.
-        kept = list(enumerate(messages[:tail_end + 1]))
-        omitted = 0
-    else:
-        tail_start = tail_end - tail + 1
-        kept = list(enumerate(messages[:head]))
-        kept += [(i, messages[i]) for i in range(tail_start, tail_end + 1)]
-        omitted = tail_start - head
 
     def _row(i, msg):
         role = msg.get('role', 'unknown')
@@ -452,6 +826,9 @@ def build_conversation_digest(conversation_id, *, user_id,
         pdfs = msg.get('pdfTexts')
         if pdfs:
             entry['pdfs'] = len(pdfs)
+        attachments = msg.get('attachments')
+        if attachments:
+            entry['attachments'] = len(attachments)
         if role == 'assistant':
             tools = []
             for r in (msg.get('toolRounds') or []):
@@ -572,7 +949,14 @@ def _clamp_message_fields(msg, budget, max_items=None):
     return {k: _clamp(v) for k, v in msg.items()}
 
 
-def _render_raw_conversation(row, conversation_id, limit=None, before=None):
+def _render_raw_conversation(
+    row,
+    conversation_id,
+    limit=None,
+    before=None,
+    *,
+    message_window: _RawMessageWindow | None = None,
+):
     """Render the DB record of a conversation as a structured JSON dump.
 
     Used for debugging: preserves every field of every RENDERED message
@@ -600,7 +984,7 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
     settings = _coerce_json(row['settings'], default={}, label='conv-ref-raw-settings')
 
     all_msgs = messages if isinstance(messages, list) else []
-    total = len(all_msgs)
+    total = len(all_msgs) if message_window is None else message_window.total
 
     if total == 0:
         # An empty record's JSON skeleton carries NO information beyond "this
@@ -615,11 +999,26 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
                 f"rev: {row['rev']}). The record is empty — nothing to "
                 f"page or dump.")
 
-    _before = None if before is None else max(0, min(int(before) - 1, total))
-    end = total if _before is None else _before
-
-    head_n = min(TRANSCRIPT_HEAD, end)
-    head_block = [(i, all_msgs[i]) for i in range(head_n)]
+    if message_window is None:
+        _before = (
+            None
+            if before is None
+            else max(0, min(int(before) - 1, total))
+        )
+        end = total if _before is None else _before
+        head_n = min(TRANSCRIPT_HEAD, end)
+        head_block = [(i, all_msgs[i]) for i in range(head_n)]
+        tail_candidates = [
+            (index, all_msgs[index])
+            for index in range(head_n, end)
+        ]
+        reaches_head = True
+    else:
+        end = message_window.end
+        head_block = message_window.head
+        head_n = len(head_block)
+        tail_candidates = message_window.tail
+        reaches_head = message_window.reaches_head
 
     base = {
         'id': row['id'],
@@ -629,7 +1028,6 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
         'updated_at': row['updated_at'],
         'msg_count': row['msg_count'],
         'rev': row['rev'],
-        'settings': settings,
         'messageCount': total,
     }
 
@@ -641,6 +1039,12 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
             'messageIndices': [i + 1 for i, _ in kept_pairs],
             'messages': [m for _, m in kept_pairs],
         })
+        # Put the requested page before potentially large settings.  Raw mode
+        # still preserves every field, but a downstream bounded envelope now
+        # exposes the page identity and message evidence before ancillary
+        # metadata.  The previous order made every page look identical after
+        # L0 truncation because the prefix ended inside ``settings``.
+        rec['settings'] = settings
         return rec, json.dumps(rec, ensure_ascii=False, indent=2, default=str)
 
     # Fit the tail greedily backwards from `end`, stopping when the next
@@ -654,19 +1058,29 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
         tail_cap = min(tail_cap, max(1, int(limit)))
     tail = []
     record, dump = None, ''
-    for i in range(end - 1, head_n - 1, -1):
+    stopped_for_budget = False
+    for i, message in reversed(tail_candidates):
         if len(tail) >= tail_cap:
             break
-        cand = [(i, all_msgs[i])] + tail
+        cand = [(i, message)] + tail
         rec, d = _serialize(head_block + cand,
                             end - head_n - len(cand))
         if len(d) > budget and tail:
+            stopped_for_budget = True
             break
         tail, record, dump = cand, rec, d
     if record is None:  # end == head_n: no tail slot at all
         record, dump = _serialize(head_block, 0)
         tail = []
     omitted = end - head_n - len(tail)
+    if (
+        message_window is not None
+        and limit is None
+        and not reaches_head
+        and not stopped_for_budget
+        and len(dump) <= budget
+    ):
+        raise _RawWindowNeedsFull
 
     header_lines = [
         f"{'═' * 60}",

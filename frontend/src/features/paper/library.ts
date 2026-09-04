@@ -1,6 +1,14 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
+
+import {
+  readBrowserStorage,
+  removeBrowserStorage,
+  writeBrowserStorage,
+} from '../../core/browser-storage';
 import type { I18nKey } from '../../i18n';
 type JsonObject = Record<string, unknown>;
+export type PaperSaveScope = 'all' | 'metadata' | 'qa' | 'babel';
 
 interface PaperFolder extends JsonObject {
   id: string;
@@ -28,6 +36,16 @@ interface PaperEntry extends JsonObject {
   folderId?: string;
   hasReport?: boolean;
   _persisted?: boolean;
+  _detailLoaded?: boolean;
+  _detailAccess?: number;
+}
+
+interface PendingPaperSave {
+  paperId: string;
+  entry: PaperEntry;
+  fields: number;
+  first: boolean;
+  promise: Promise<unknown>;
 }
 
 interface RecommendCard extends JsonObject {
@@ -39,6 +57,7 @@ interface RecommendCard extends JsonObject {
 interface PaperLibraryApi {
   libraryUpsert(id: string, body: JsonObject): Promise<JsonObject | null>;
   libraryList(): Promise<JsonObject | null>;
+  libraryGet(id: string): Promise<JsonObject | null>;
   libraryDelete(id: string): Promise<unknown>;
 }
 
@@ -52,7 +71,6 @@ interface PaperFolderApi {
 type PaperLibraryWindow = Window & {
   Api?: { paper?: PaperLibraryApi; paperFolders?: PaperFolderApi };
   t?: (key: string, params?: Record<string, unknown>) => string;
-  escapeHtml?: (value: unknown) => string;
   debugLog?: (message: string, level?: string) => void;
   paperMode?: boolean;
   _paperLibrary?: PaperEntry[];
@@ -122,6 +140,12 @@ const ACTIVE_KEY = 'paper_active_id';
 const LEGACY_LIBRARY_KEY = 'paper_library';
 const MIGRATED_KEY = 'paper_library_migrated_v1';
 const FOLDER_COLLAPSE_KEY = 'paper_folder_collapsed';
+const DETAIL_CACHE_MAX_ENTRIES = 2;
+const SAVE_METADATA = 1;
+const SAVE_QA = 2;
+const SAVE_ALL = SAVE_METADATA | SAVE_QA;
+const pendingPaperSaves = new Map<string, PendingPaperSave>();
+let openGeneration = 0;
 
 function globals(): PaperLibraryWindow {
   return featureRegistry as unknown as PaperLibraryWindow;
@@ -150,14 +174,6 @@ function folderApi(): PaperFolderApi {
   return api;
 }
 
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (typeof helper === 'function') return helper(value);
-  const span = document.createElement('span');
-  span.textContent = value == null ? '' : String(value);
-  return span.innerHTML;
-}
-
 function translate(
   key: I18nKey,
   fallback: string = key,
@@ -169,6 +185,53 @@ function translate(
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? '');
+}
+
+function releasePaperDetail(entry: PaperEntry): void {
+  delete entry.parsedText;
+  delete entry.qaHistory;
+  delete entry.images;
+  delete entry.babelCache;
+  delete entry._detailAccess;
+  entry._detailLoaded = false;
+}
+
+function trimPaperDetailCache(): void {
+  const loaded = (state()._paperLibrary ?? [])
+    .filter((entry) => entry._detailLoaded && !isRecommendedEntry(entry))
+    .sort((left, right) => (right._detailAccess || 0) - (left._detailAccess || 0));
+  loaded.slice(DETAIL_CACHE_MAX_ENTRIES).forEach(releasePaperDetail);
+}
+
+async function hydratePaperEntry(entry: PaperEntry): Promise<PaperEntry | null> {
+  if (entry._detailLoaded || isRecommendedEntry(entry)) {
+    entry._detailLoaded = true;
+    entry._detailAccess = Date.now();
+    return entry;
+  }
+  try {
+    const data = await paperApi().libraryGet(entry.id);
+    const detail = data?.paper;
+    if (
+      !data?.ok
+      || !detail
+      || typeof detail !== 'object'
+      || Array.isArray(detail)
+      || String((detail as JsonObject).id || '') !== entry.id
+    ) {
+      console.warn('[Paper:Library] Detail response rejected:', data);
+      return null;
+    }
+    Object.assign(entry, detail, {
+      _persisted: true,
+      _detailLoaded: true,
+      _detailAccess: Date.now(),
+    });
+    return entry;
+  } catch (error: unknown) {
+    console.warn('[Paper:Library] Detail load failed:', message(error));
+    return null;
+  }
 }
 
 export async function loadPaperFolders(): Promise<PaperFolder[]> {
@@ -237,7 +300,7 @@ export function getPaperFolderById(id: string): PaperFolder | null {
 
 export function readPaperFolderCollapse(): Record<string, boolean> {
   try {
-    const raw = localStorage.getItem(FOLDER_COLLAPSE_KEY);
+    const raw = readBrowserStorage(FOLDER_COLLAPSE_KEY);
     const value = raw ? JSON.parse(raw) : {};
     return value && typeof value === 'object'
       ? value as Record<string, boolean> : {};
@@ -257,7 +320,7 @@ export function togglePaperFolderCollapse(folderId: string): void {
   try {
     const local = readPaperFolderCollapse();
     local[folderId] = collapsed;
-    localStorage.setItem(FOLDER_COLLAPSE_KEY, JSON.stringify(local));
+    writeBrowserStorage(FOLDER_COLLAPSE_KEY, JSON.stringify(local));
   } catch { /* server state remains the fallback */ }
   void updatePaperFolder(folderId, { collapsed });
   renderPaperLibrary();
@@ -303,20 +366,33 @@ export function setActivePaperFolder(folderId?: string | null): void {
   renderPaperLibrary();
 }
 
-/** Persist mutable fields; server-derived heavy fields are first-save only. */
-export function persistPaperEntry(
-  entry: PaperEntry | null | undefined,
-  first = false,
-): Promise<unknown> {
-  if (!entry?.id) return Promise.resolve();
-  const body: JsonObject = {
-    title: entry.title || '',
-    qaHistory: (entry.qaHistory || []).slice(-50),
-    babelCache: entry.babelCache || {},
-    pageCount: entry.pageCount || 0,
-    createdAt: entry.createdAt || Date.now(),
-    folderId: entry.folderId || '',
-  };
+function paperSaveFields(scope: PaperSaveScope): number {
+  if (scope === 'metadata') return SAVE_METADATA;
+  if (scope === 'qa') return SAVE_QA;
+  // Whole-paper translations are durable in paper_translations. Keep the
+  // scope so Babel can capture its current in-memory view without duplicating
+  // the artifact in paper_library on every cache hit or completion.
+  if (scope === 'babel') return 0;
+  return SAVE_ALL;
+}
+
+function paperSaveBody(
+  entry: PaperEntry,
+  options: { fields: number; first: boolean },
+): JsonObject {
+  const { fields, first } = options;
+  const body: JsonObject = {};
+  if (first || (fields & SAVE_METADATA)) {
+    Object.assign(body, {
+      title: entry.title || '',
+      pageCount: entry.pageCount || 0,
+      createdAt: entry.createdAt || Date.now(),
+      folderId: entry.folderId || '',
+    });
+  }
+  if (first || (fields & SAVE_QA)) {
+    body.qaHistory = (entry.qaHistory || []).slice(-50);
+  }
   if (first) {
     Object.assign(body, {
       pdfUrl: entry.pdfUrl || '',
@@ -325,22 +401,83 @@ export function persistPaperEntry(
       paperHash: entry.paperHash || '',
       parsedText: (entry.parsedText || '').slice(0, 200000),
       images: Array.isArray(entry.images) ? entry.images.slice(0, 60) : [],
+      // Preserve one-time legacy migration compatibility. Subsequent Babel
+      // writes use the authoritative paper_translations artifact only.
+      babelCache: entry.babelCache || {},
     });
   }
-  return paperApi().libraryUpsert(entry.id, body).then((data) => {
-    if (!data?.ok) console.warn('[Paper:Library] Upsert rejected:', data?.error);
-    return data;
-  }).catch((error: unknown) => {
-    console.warn('[Paper:Library] Upsert failed:', error);
-    return undefined;
-  });
+  return body;
+}
+
+async function drainPaperSave(pending: PendingPaperSave): Promise<unknown> {
+  let lastResult: unknown;
+  try {
+    while (pending.first || pending.fields) {
+      const entry = pending.entry;
+      const first = pending.first;
+      const fields = pending.fields;
+      pending.first = false;
+      pending.fields = 0;
+      try {
+        const data = await paperApi().libraryUpsert(
+          entry.id,
+          paperSaveBody(entry, { fields, first }),
+        );
+        lastResult = data;
+        if (!data?.ok) {
+          console.warn('[Paper:Library] Upsert rejected:', data?.error);
+        } else if (first) {
+          entry._persisted = true;
+          pending.entry._persisted = true;
+          pending.first = false;
+        }
+      } catch (error: unknown) {
+        console.warn('[Paper:Library] Upsert failed:', error);
+        lastResult = undefined;
+      }
+    }
+  } finally {
+    if (pendingPaperSaves.get(pending.paperId) === pending) {
+      pendingPaperSaves.delete(pending.paperId);
+    }
+  }
+  return lastResult;
+}
+
+/** Queue one partial save; server-derived content is sent only until first ack. */
+export function persistPaperEntry(
+  entry: PaperEntry | null | undefined,
+  first = false,
+  scope: PaperSaveScope = 'metadata',
+): Promise<unknown> {
+  if (!entry?.id) return Promise.resolve();
+  const fields = paperSaveFields(scope);
+  if (!first && fields === 0) return Promise.resolve();
+  const existing = pendingPaperSaves.get(entry.id);
+  if (existing) {
+    existing.entry = entry;
+    existing.fields |= fields;
+    existing.first ||= first;
+    return existing.promise;
+  }
+  const pending: PendingPaperSave = {
+    paperId: entry.id,
+    entry,
+    fields,
+    first,
+    promise: Promise.resolve(),
+  };
+  pendingPaperSaves.set(entry.id, pending);
+  pending.promise = Promise.resolve()
+    .then(() => drainPaperSave(pending));
+  return pending.promise;
 }
 
 export async function migrateLegacyLibrary(): Promise<void> {
-  if (localStorage.getItem(MIGRATED_KEY)) return;
-  const raw = localStorage.getItem(LEGACY_LIBRARY_KEY);
+  if (readBrowserStorage(MIGRATED_KEY)) return;
+  const raw = readBrowserStorage(LEGACY_LIBRARY_KEY);
   if (!raw) {
-    localStorage.setItem(MIGRATED_KEY, '1');
+    writeBrowserStorage(MIGRATED_KEY, '1');
     return;
   }
   let legacy: unknown;
@@ -348,13 +485,13 @@ export async function migrateLegacyLibrary(): Promise<void> {
     legacy = JSON.parse(raw);
   } catch (error: unknown) {
     console.warn('[Paper:Library] Legacy bookshelf parse failed, discarding:', error);
-    localStorage.removeItem(LEGACY_LIBRARY_KEY);
-    localStorage.setItem(MIGRATED_KEY, '1');
+    removeBrowserStorage(LEGACY_LIBRARY_KEY);
+    writeBrowserStorage(MIGRATED_KEY, '1');
     return;
   }
   if (!Array.isArray(legacy) || legacy.length === 0) {
-    localStorage.removeItem(LEGACY_LIBRARY_KEY);
-    localStorage.setItem(MIGRATED_KEY, '1');
+    removeBrowserStorage(LEGACY_LIBRARY_KEY);
+    writeBrowserStorage(MIGRATED_KEY, '1');
     return;
   }
   globals().debugLog?.(
@@ -366,14 +503,14 @@ export async function migrateLegacyLibrary(): Promise<void> {
       console.warn('[Paper:Library] Migrate entry failed:', error);
     }
   }
-  localStorage.removeItem(LEGACY_LIBRARY_KEY);
-  localStorage.setItem(MIGRATED_KEY, '1');
+  removeBrowserStorage(LEGACY_LIBRARY_KEY);
+  writeBrowserStorage(MIGRATED_KEY, '1');
   globals().debugLog?.('[Paper] Migration complete.', 'success');
 }
 
 export async function loadPaperLibrary(): Promise<void> {
   const shared = state();
-  shared._activePaperId = localStorage.getItem(ACTIVE_KEY) || '';
+  shared._activePaperId = readBrowserStorage(ACTIVE_KEY) || '';
   const folders = loadPaperFolders().catch((error: unknown) => {
     console.warn('[Paper:Folders] load (parallel) failed:', message(error));
   });
@@ -384,6 +521,8 @@ export async function loadPaperLibrary(): Promise<void> {
       shared._paperLibrary = (data.papers as PaperEntry[]).map((entry) => ({
         ...entry,
         _persisted: true,
+        _detailLoaded: Object.prototype.hasOwnProperty.call(entry, 'parsedText'),
+        _detailAccess: 0,
       }));
     } else {
       shared._paperLibrary = [];
@@ -393,20 +532,25 @@ export async function loadPaperLibrary(): Promise<void> {
     console.warn('[Paper:Library] Load failed, falling back to empty:', error);
     shared._paperLibrary = [];
   }
-  if (shared._activePaperId && !(shared._paperLibrary ?? []).some(
+  const active = (shared._paperLibrary ?? []).find(
     (entry) => entry.id === shared._activePaperId,
-  )) {
+  );
+  if (shared._activePaperId && !active) {
     shared._activePaperId = '';
-    localStorage.removeItem(ACTIVE_KEY);
+    removeBrowserStorage(ACTIVE_KEY);
+  } else if (active && !await hydratePaperEntry(active)) {
+    shared._activePaperId = '';
+    removeBrowserStorage(ACTIVE_KEY);
   }
+  trimPaperDetailCache();
   await folders;
 }
 
 export function setActivePaperId(id?: string | null): void {
   const value = id || '';
   state()._activePaperId = value;
-  if (value) localStorage.setItem(ACTIVE_KEY, value);
-  else localStorage.removeItem(ACTIVE_KEY);
+  if (value) writeBrowserStorage(ACTIVE_KEY, value);
+  else removeBrowserStorage(ACTIVE_KEY);
 }
 
 export function newPaperEntryId(): string {
@@ -451,7 +595,9 @@ export function persistRecommendedCard(
     pageCount: 0,
     recommendWhy: card.why || '',
     folderId: state()._activePaperFolderId || '',
-    _persisted: true,
+    _persisted: false,
+    _detailLoaded: true,
+    _detailAccess: Date.now(),
   };
   state()._paperLibrary?.unshift(entry);
   renderPaperLibrary();
@@ -475,6 +621,8 @@ export function createPaperEntry(
       existing.parsedText = parsedText || '';
       if (arxivId) existing.arxivId = arxivId;
       existing._persisted = false;
+      existing._detailLoaded = true;
+      existing._detailAccess = Date.now();
       setActivePaperId(existing.id);
       return existing;
     }
@@ -494,6 +642,8 @@ export function createPaperEntry(
     pageCount: 0,
     folderId: shared._activePaperFolderId || '',
     _persisted: false,
+    _detailLoaded: true,
+    _detailAccess: Date.now(),
   };
   shared._paperLibrary?.unshift(entry);
   setActivePaperId(entry.id);
@@ -508,9 +658,11 @@ export function getActivePaperEntry(): PaperEntry | null {
   ) ?? null;
 }
 
-export function saveActivePaperState(): Promise<unknown> {
+export function saveActivePaperState(
+  scope: PaperSaveScope = 'all',
+): Promise<unknown> {
   const entry = getActivePaperEntry();
-  if (!entry) return Promise.resolve();
+  if (!entry?._detailLoaded) return Promise.resolve();
   const shared = state();
   entry.pdfUrl = shared._paperPdfUrl || '';
   entry.pdfFilename = shared._paperPdfFilename || entry.pdfFilename || '';
@@ -522,27 +674,27 @@ export function saveActivePaperState(): Promise<unknown> {
   entry.images = Array.isArray(shared._paperImages) ? shared._paperImages : [];
   entry.babelCache = shared._babelTranslatedPages || {};
   entry.pageCount = shared._paperTotalPages || 0;
+  entry._detailAccess = Date.now();
   const first = !entry._persisted;
-  entry._persisted = true;
-  return persistPaperEntry(entry, first);
+  return persistPaperEntry(entry, first, scope);
 }
 
 export function deletePaperEntry(id: string): void {
+  openGeneration += 1;
   const shared = state();
+  const deletingActive = shared._activePaperId === id;
   shared._paperLibrary = (shared._paperLibrary ?? []).filter(
     (entry) => entry.id !== id,
   );
-  if (shared._activePaperId === id) {
-    setActivePaperId(shared._paperLibrary[0]?.id || '');
-  }
+  if (deletingActive) setActivePaperId('');
   void paperApi().libraryDelete(id).catch((error: unknown) => {
     console.warn('[Paper:Library] Delete failed:', error);
   });
   renderPaperLibrary();
-  if (!shared.paperMode) return;
-  const next = getActivePaperEntry();
+  if (!shared.paperMode || !deletingActive) return;
+  const next = shared._paperLibrary[0];
   if (next) {
-    openPaperEntry(next);
+    void openPaperEntry(next);
     return;
   }
   shared._resetAllReportViews?.();
@@ -561,9 +713,16 @@ export function deletePaperEntry(id: string): void {
   shared._updatePaperTitles?.();
 }
 
-export function openPaperEntry(entry: PaperEntry): void {
+export async function openPaperEntry(entry: PaperEntry): Promise<void> {
+  const generation = ++openGeneration;
+  const previousActive = getActivePaperEntry();
+  const hydrated = await hydratePaperEntry(entry);
+  if (!hydrated || generation !== openGeneration || !state().paperMode) {
+    trimPaperDetailCache();
+    return;
+  }
   const shared = state();
-  void saveActivePaperState();
+  if (previousActive?.id !== entry.id) void saveActivePaperState();
   try { shared._paperQAAbort?.abort(); } catch { /* best-effort prior stream */ }
   shared._paperQAAbort = null;
   shared._resetAllReportViews?.();
@@ -595,6 +754,7 @@ export function openPaperEntry(entry: PaperEntry): void {
   if (shared._paperPdfUrl) void shared._loadPaperPdf?.(shared._paperPdfUrl);
   else shared._showPaperLanding?.();
   shared._switchPaperTab?.(shared._paperActiveTab || 'qa');
+  trimPaperDetailCache();
 }
 
 export function renderPaperLibrary(): void {
@@ -715,10 +875,11 @@ export function onPaperLibClick(id: string): void {
   const entry = state()._paperLibrary?.find((paper) => paper.id === id);
   if (!entry) return;
   if (isRecommendedEntry(entry)) {
+    openGeneration += 1;
     setActivePaperId(entry.id);
     void globals()._fetchArxivPaper?.(entry.arxivId || '', entry.id);
   } else {
-    openPaperEntry(entry);
+    void openPaperEntry(entry);
   }
 }
 

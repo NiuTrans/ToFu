@@ -175,16 +175,62 @@ class UsageRouteTest(unittest.TestCase):
 
         class Client:
             @staticmethod
+            def transport_metrics():
+                return {
+                    'pre_dispatch_command_retries': 4,
+                    'pre_dispatch_command_retry_exhaustions': 1,
+                    'response_frame_bytes_inflight': 32 * 1024 * 1024,
+                    'response_frame_bytes_capacity': 128 * 1024 * 1024,
+                    'response_frame_bytes_peak': 96 * 1024 * 1024,
+                    'response_frame_admission_waiting': 1,
+                    'response_frame_admission_waits': 3,
+                    'response_frame_admission_rejections': 2,
+                    'response_frame_bytes_admitted_total': 200 * 1024 * 1024,
+                    'response_frame_bytes_observed_total': 180 * 1024 * 1024,
+                    'response_frame_bytes_observed_max': 46 * 1024 * 1024,
+                }
+
+            @staticmethod
             def metrics():
                 return {
                     'backend': 'sqlite',
                     'sqlite_version': '3.53.4',
                     'queries': {'queries': 9, 'query_failures': 1},
                     'writer_cache_mib': 32,
+                    'process': {
+                        'rss_bytes': 900 * 1024 * 1024,
+                        'open_fds_or_handles': 42,
+                        'threads': 7,
+                    },
+                    'rpc': {
+                        'active': 2,
+                        'capacity': 8,
+                        'waiting': 1,
+                        'rejected': 3,
+                        'frame_bytes_inflight': 48 * 1024 * 1024,
+                        'frame_bytes_capacity': 128 * 1024 * 1024,
+                        'frame_bytes_peak': 96 * 1024 * 1024,
+                        'frame_admission_waiting': 1,
+                        'frame_admission_waits': 4,
+                        'frame_admission_rejections': 2,
+                        'frame_bytes_admitted_total': 256 * 1024 * 1024,
+                        'request_frame_bytes_total': 200 * 1024 * 1024,
+                        'request_frame_bytes_max': 46 * 1024 * 1024,
+                        'response_frame_bytes_total': 300 * 1024 * 1024,
+                        'response_frame_bytes_max': 48 * 1024 * 1024,
+                        'idle_trim_attempts': 5,
+                        'idle_trim_successes': 5,
+                        'idle_trim_reclaimed_bytes': 600 * 1024 * 1024,
+                        'idle_trim_last_before_bytes': 900 * 1024 * 1024,
+                        'idle_trim_last_after_bytes': 300 * 1024 * 1024,
+                        'idle_trim_duration_ns_total': 25_000_000,
+                        'idle_trim_last_duration_ns': 6_000_000,
+                    },
                     'writer': {
                         'submitted': 7,
                         'failed': 2,
                         'timed_out': 1,
+                        'write_admission_rejections': 4,
                         'stall_interrupts': 3,
                         'batches': 4,
                         'batched_jobs': 6,
@@ -201,6 +247,20 @@ class UsageRouteTest(unittest.TestCase):
                         'shipper': {
                             'ship_lag_bytes': 4096,
                             'last_ship_age_s': 2.5,
+                            'snapshots': 3,
+                            'snapshot_database_bytes_copied': 8192,
+                            'snapshot_wal_bytes_copied': 1024,
+                            'snapshot_progress_bytes': 2048,
+                            'wal_rebase_trigger_bytes': 15_360,
+                            'wal_rebase_budget_bytes': 16_384,
+                            'rebase_active': True,
+                            'write_pressure_active': True,
+                            'write_pressure_activations': 2,
+                            'write_pressure_rejections': 4,
+                            'write_pressure_observation_failures': 1,
+                            'wal_write_pressure_bytes': 16_384,
+                            'local_wal_bytes': 16_384,
+                            'wal_write_headroom_bytes': 0,
                         },
                     },
                 }
@@ -227,6 +287,91 @@ class UsageRouteTest(unittest.TestCase):
         self.assertIn(
             'tofu_storage_fastpath_last_ship_age_seconds{backend="sqlite"} '
             '2.5', body)
+        self.assertIn(
+            'tofu_storage_fastpath_snapshots_total{backend="sqlite"} 3', body)
+        self.assertIn(
+            'tofu_storage_fastpath_snapshot_database_bytes_copied_total'
+            '{backend="sqlite"} 8192', body)
+        self.assertIn(
+            'tofu_storage_fastpath_snapshot_wal_bytes_copied_total'
+            '{backend="sqlite"} 1024', body)
+        self.assertIn(
+            'tofu_storage_fastpath_snapshot_progress_bytes{backend="sqlite"} '
+            '2048', body)
+        self.assertIn(
+            'tofu_storage_fastpath_wal_rebase_trigger_bytes{backend="sqlite"} '
+            '15360', body)
+        self.assertIn(
+            'tofu_storage_fastpath_wal_rebase_budget_bytes{backend="sqlite"} '
+            '16384', body)
+        self.assertIn(
+            'tofu_storage_writer_write_admission_rejections_total'
+            '{backend="sqlite"} 4', body)
+        self.assertIn(
+            'tofu_storage_fastpath_rebase_active{backend="sqlite"} 1', body)
+        self.assertIn(
+            'tofu_storage_fastpath_write_pressure_active{backend="sqlite"} 1',
+            body)
+        self.assertIn(
+            'tofu_storage_fastpath_write_pressure_activations_total'
+            '{backend="sqlite"} 2', body)
+        self.assertIn(
+            'tofu_storage_fastpath_write_pressure_rejections_total'
+            '{backend="sqlite"} 4', body)
+        self.assertIn(
+            'tofu_storage_fastpath_write_pressure_observation_failures_total'
+            '{backend="sqlite"} 1', body)
+        self.assertIn(
+            'tofu_storage_fastpath_wal_write_pressure_bytes{backend="sqlite"} '
+            '16384', body)
+        self.assertIn(
+            'tofu_storage_fastpath_local_wal_bytes{backend="sqlite"} 16384',
+            body)
+        self.assertIn(
+            'tofu_storage_fastpath_wal_write_headroom_bytes{backend="sqlite"} '
+            '0', body)
+        self.assertIn(
+            'tofu_storage_process_rss_bytes{backend="sqlite"} 943718400',
+            body)
+        self.assertIn(
+            'tofu_storage_rpc_active{backend="sqlite"} 2', body)
+        self.assertIn(
+            'tofu_storage_rpc_capacity{backend="sqlite"} 8', body)
+        self.assertIn(
+            'tofu_storage_rpc_rejections_total{backend="sqlite"} 3', body)
+        self.assertIn(
+            'tofu_storage_client_predispatch_command_retries_total'
+            '{backend="sqlite"} 4', body)
+        self.assertIn(
+            'tofu_storage_client_predispatch_command_retry_exhaustions_total'
+            '{backend="sqlite"} 1', body)
+        self.assertIn(
+            'tofu_storage_client_response_frame_bytes_inflight'
+            '{backend="sqlite"} 33554432', body)
+        self.assertIn(
+            'tofu_storage_client_response_frame_bytes_capacity'
+            '{backend="sqlite"} 134217728', body)
+        self.assertIn(
+            'tofu_storage_client_response_frame_admission_rejections_total'
+            '{backend="sqlite"} 2', body)
+        self.assertIn(
+            'tofu_storage_rpc_frame_bytes_inflight{backend="sqlite"} '
+            '50331648', body)
+        self.assertIn(
+            'tofu_storage_rpc_frame_bytes_capacity{backend="sqlite"} '
+            '134217728', body)
+        self.assertIn(
+            'tofu_storage_rpc_frame_admission_rejections_total'
+            '{backend="sqlite"} 2', body)
+        self.assertIn(
+            'tofu_storage_idle_heap_trim_reclaimed_bytes_total'
+            '{backend="sqlite"} 629145600', body)
+        self.assertIn(
+            'tofu_storage_idle_heap_trim_duration_seconds_total'
+            '{backend="sqlite"} 0.025', body)
+        self.assertIn(
+            'tofu_storage_idle_heap_trim_last_duration_seconds'
+            '{backend="sqlite"} 0.006', body)
 
     def test_metrics_requires_admin(self):
         async def go():

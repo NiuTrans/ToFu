@@ -13,6 +13,8 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
 from lib.log import get_logger
+from lib.paper.arxiv_errors import ArxivQuerySyntaxError
+from lib.paper.contracts import PAPER_TITLE_BATCH_MAX_IDS
 
 logger = get_logger(__name__)
 
@@ -52,10 +54,6 @@ _ARXIV_SEARCH_RETRY_SLEEP = 3.0
 # takes identity/domain as PARAMETERS and owns the construction.
 _FIELDED_SYNTAX_RE = re.compile(
     r'(?:\b(?:ti|abs|au|cat|jr|rn|id|all)\s*:)|(?:\s(?:AND|OR|ANDNOT)\s)')
-
-
-class ArxivQuerySyntaxError(ValueError):
-    """Raised when built arXiv syntax is passed to the free-text entry point."""
 
 
 def _extract_arxiv_id(url_or_id):
@@ -133,6 +131,55 @@ def _fetch_title_via_api(arxiv_id):
         return ''
     title_el = entry.find('atom:title', _ATOM_NS)
     return _strip_arxiv_text(title_el.text if title_el is not None else '')
+
+
+def fetch_arxiv_titles_batch(arxiv_ids):
+    """Resolve at most 20 titles with exactly one Atom API request.
+
+    This cost-bounded verifier primitive intentionally performs no retry and
+    no per-paper HTML fallback. Callers decide how an unavailable batch affects
+    their quality gate; interactive single-paper title recovery continues to
+    use :func:`fetch_arxiv_title` and its robust fallback chain.
+    """
+    requested = []
+    seen = set()
+    for index, value in enumerate(arxiv_ids or ()):
+        if index >= PAPER_TITLE_BATCH_MAX_IDS:
+            raise ValueError(
+                'arXiv title batch accepts at most '
+                f'{PAPER_TITLE_BATCH_MAX_IDS} ids')
+        normalized = normalize_arxiv_id(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        requested.append(normalized)
+    if not requested:
+        return {}
+
+    id_list = quote(','.join(requested))
+    url = (
+        f'{_ARXIV_API_URL}?id_list={id_list}'
+        f'&start=0&max_results={len(requested)}'
+    )
+    response = http_get(
+        url, timeout=15,
+        headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    titles = {}
+    requested_set = set(requested)
+    for entry in root.findall('atom:entry', _ATOM_NS):
+        id_element = entry.find('atom:id', _ATOM_NS)
+        title_element = entry.find('atom:title', _ATOM_NS)
+        normalized = normalize_arxiv_id(
+            id_element.text if id_element is not None else '')
+        if not normalized or normalized not in requested_set:
+            continue
+        title = _strip_arxiv_text(
+            title_element.text if title_element is not None else '')
+        if title:
+            titles.setdefault(normalized, title)
+    return titles
 
 
 def _fetch_title_via_abs_page(arxiv_id):

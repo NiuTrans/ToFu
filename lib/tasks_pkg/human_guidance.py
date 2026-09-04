@@ -1,142 +1,148 @@
-"""Human Guidance system — thread-safe blocking wait for user input.
+"""Owner-bound blocking wait for a task's human guidance response.
 
-The LLM can call the ``ask_human`` tool to pose a question to the user.
-The backend thread blocks **indefinitely** until the user responds or the
-task is aborted, similar to the write-approval flow in ``approval.py``.
-
-Two response modes are supported:
-- **free_text**: user types a free-form answer
-- **choice**: user picks from a list of options provided by the LLM
+The LLM can call ``ask_human`` to pose a free-text or choice question. The
+task thread waits indefinitely, with abort heartbeats, while the shared human
+gate registry owns authorization and first-resolution-wins concurrency.
 """
 
-import threading
+from __future__ import annotations
 
+import time
+
+from lib.human_gate_contract import MAX_HUMAN_GATE_RESPONSE_LENGTH
 from lib.log import get_logger
+from lib.tasks_pkg.human_gate_registry import (
+    GATE_GUIDANCE,
+    human_gate_registry,
+)
+
 
 logger = get_logger(__name__)
-
-_human_guidance_requests = {}
-_human_guidance_lock = threading.Lock()
-
-# How often (seconds) the blocking wait wakes up to check for task abort.
 _ABORT_POLL_INTERVAL = 2.0
 
 
-def request_human_guidance(guidance_id, task=None):
-    """Block the current thread indefinitely until the user responds.
+def _request_owner(task, owner_user_id):
+    if owner_user_id is not None:
+        from lib.identity import require_user_id
+        return require_user_id(
+            owner_user_id, context='human guidance request owner')
+    from lib.tasks_pkg.manager import task_user_id
+    return task_user_id(task)
 
-    The wait has **no timeout** — it blocks until one of:
-    1. The user submits a response (via ``resolve_human_guidance``).
-    2. The parent *task* is aborted (``task['aborted']`` becomes truthy).
-    3. ``cancel_human_guidance`` is called externally.
 
-    To avoid zombie threads on task abort, the wait polls every
-    ``_ABORT_POLL_INTERVAL`` seconds and checks ``task['aborted']``.
-
-    Args:
-        guidance_id: Unique identifier for this guidance request.
-        task: Optional task dict — if provided, abort is checked
-              periodically so the thread doesn't block forever.
-
-    Returns:
-        The user's response string, or None if task was aborted.
-    """
+def request_human_guidance(
+    guidance_id: str,
+    task=None,
+    *,
+    owner_user_id: int | None = None,
+) -> str | None:
+    """Wait until this owner responds, the task aborts, or it is cancelled."""
+    owner = _request_owner(task, owner_user_id)
     logger.info('[HumanGuidance] Request %s blocking (no timeout, '
                 'abort_poll=%.1fs, task=%s)', guidance_id,
                 _ABORT_POLL_INTERVAL,
                 task.get('id', '?')[:8] if task else 'none')
-    evt = threading.Event()
-    with _human_guidance_lock:
-        _human_guidance_requests[guidance_id] = {
-            'event': evt,
-            'response': None,
-            'resolved': False,
-        }
+    entry = human_gate_registry.register(
+        GATE_GUIDANCE,
+        guidance_id,
+        owner_user_id=owner,
+    )
+    if entry is None:
+        logger.error('[HumanGuidance] duplicate or capacity-exhausted request '
+                     'guidance_id=%s; refusing registration', guidance_id)
+        return None
 
-    # Poll loop: wait _ABORT_POLL_INTERVAL at a time, checking for abort
-    resolved = False
-    while not resolved:
-        resolved = evt.wait(timeout=_ABORT_POLL_INTERVAL)
-        if resolved:
+    while True:
+        if entry.event.wait(timeout=_ABORT_POLL_INTERVAL):
             break
-        # Reaper heartbeat: a task blocked on human input is ALIVE (waiting on
-        #   the user, not wedged). This indefinite wait emits no event, so keep
-        #   the positive-liveness clock fresh so reap_stuck_running_tasks never
-        #   force-fails a legitimately human-waiting turn. (import-free: set the
-        #   plain dict field the reaper reads.)
+        # A task blocked on a human is alive, not wedged. Keep the reaper's
+        # positive-liveness clock fresh while retaining the abort poll.
         if task is not None:
-            import time as _t
-            task['_dispatch_heartbeat'] = _t.time()
-        # Check task abort
+            try:
+                task['_dispatch_heartbeat'] = time.time()
+            except (TypeError, AttributeError):
+                pass
         if task and task.get('aborted'):
-            with _human_guidance_lock:
-                entry = _human_guidance_requests.get(guidance_id)
-                # A response may have acquired the lock immediately after the
-                # timed wait. Preserve first-resolution-wins: consume it on
-                # the next loop instead of acknowledging then discarding it.
-                if entry and entry.get('resolved'):
-                    continue
-                _human_guidance_requests.pop(guidance_id, None)
+            # If a response acquired the registry lock at this boundary it
+            # wins; otherwise atomically discard the abandoned waiter.
+            if not human_gate_registry.discard_unresolved(
+                GATE_GUIDANCE, guidance_id, entry,
+            ):
+                continue
             logger.info('[HumanGuidance] Request %s — task aborted, '
                         'unblocking thread', guidance_id)
             return None
 
-    # Event was set — user responded
-    with _human_guidance_lock:
-        entry = _human_guidance_requests.pop(guidance_id, {})
-        response = entry.get('response')
-    logger.info('[HumanGuidance] Resolved %s → response_len=%d, '
-                'preview=%.100s', guidance_id,
-                len(response) if response else 0, response or '')
-    return response
+    resolution = human_gate_registry.take(
+        GATE_GUIDANCE, guidance_id, entry)
+    response = resolution.response if resolution.resolved else None
+    logger.info('[HumanGuidance] Resolved %s → response_len=%d',
+                guidance_id, len(response) if isinstance(response, str) else 0)
+    return response if isinstance(response, str) else None
 
 
-def cancel_human_guidance(guidance_id):
-    """Cancel a pending guidance request, unblocking the waiting thread.
+def cancel_human_guidance(
+    guidance_id: str,
+    *,
+    owner_user_id: int,
+) -> bool:
+    """Cancel this owner's pending guidance request."""
+    resolved = human_gate_registry.resolve(
+        GATE_GUIDANCE,
+        guidance_id,
+        owner_user_id=owner_user_id,
+        response=None,
+    )
+    if resolved:
+        logger.info('[HumanGuidance] Cancelled guidance_id=%s', guidance_id)
+    return resolved
 
-    Called when the task is externally aborted or cleaned up.
 
-    Args:
-        guidance_id: The guidance request ID to cancel.
-
-    Returns:
-        True if the request was found and cancelled, False otherwise.
-    """
-    with _human_guidance_lock:
-        entry = _human_guidance_requests.get(guidance_id)
-        if not entry or entry.get('resolved'):
-            logger.debug('[HumanGuidance] cancel called for unknown '
-                         'guidance_id=%s (already resolved?)', guidance_id)
-            return False
-        entry['resolved'] = True
-        entry['response'] = None
-        entry['event'].set()
-    logger.info('[HumanGuidance] Cancelled guidance_id=%s', guidance_id)
+def resolve_human_guidance(
+    guidance_id: str,
+    response_text: str,
+    *,
+    owner_user_id: int,
+) -> bool:
+    """Resolve this owner's pending human-guidance request."""
+    if not isinstance(response_text, str):
+        raise ValueError('human guidance response must be a string')
+    if not response_text.strip():
+        raise ValueError('human guidance response is required')
+    if len(response_text) > MAX_HUMAN_GATE_RESPONSE_LENGTH:
+        raise ValueError(
+            'human guidance response exceeds '
+            f'{MAX_HUMAN_GATE_RESPONSE_LENGTH} characters')
+    resolved = human_gate_registry.resolve(
+        GATE_GUIDANCE,
+        guidance_id,
+        owner_user_id=owner_user_id,
+        response=response_text,
+    )
+    if not resolved:
+        logger.warning('[HumanGuidance] resolve called for unknown, foreign, '
+                       'or already resolved guidance_id=%s', guidance_id)
+        return False
+    logger.info('[HumanGuidance] User resolved %s → response_len=%d',
+                guidance_id, len(response_text))
     return True
 
 
-def resolve_human_guidance(guidance_id, response_text):
-    """Called by the API endpoint when user submits their answer.
+def is_human_guidance_pending(
+    guidance_id: str,
+    *,
+    owner_user_id: int,
+) -> bool:
+    return human_gate_registry.is_pending(
+        GATE_GUIDANCE,
+        guidance_id,
+        owner_user_id=owner_user_id,
+    )
 
-    Args:
-        guidance_id: The guidance request ID to resolve.
-        response_text: The user's response string.
 
-    Returns:
-        True if the request was found and resolved, False otherwise.
-    """
-    with _human_guidance_lock:
-        entry = _human_guidance_requests.get(guidance_id)
-        if not entry or entry.get('resolved'):
-            logger.warning('[HumanGuidance] resolve called for unknown '
-                           'guidance_id=%s (expired or already resolved)',
-                           guidance_id)
-            return False
-        entry['resolved'] = True
-        entry['response'] = response_text
-        entry['event'].set()
-    logger.info('[HumanGuidance] User resolved %s → response_len=%d, '
-                'preview=%.100s', guidance_id,
-                len(response_text) if response_text else 0,
-                response_text or '')
-    return True
+__all__ = [
+    'cancel_human_guidance',
+    'is_human_guidance_pending',
+    'request_human_guidance',
+    'resolve_human_guidance',
+]

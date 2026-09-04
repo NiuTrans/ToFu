@@ -61,4 +61,4 @@ def test_legacy_paper_tables_are_owner_scoped_before_schema_is_accepted(
     version = connection.execute(
         "SELECT meta_value FROM storage_meta WHERE meta_key = 'schema_version'"
     ).fetchone()[0]
-    assert int(version) == SCHEMA_VERSION == 40
+    assert int(version) == SCHEMA_VERSION

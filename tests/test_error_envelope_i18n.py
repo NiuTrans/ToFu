@@ -11,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = ROOT / 'frontend/src/runtime/app-runtime.js'
+PRESENTATION_OWNER = ROOT / 'frontend/src/error-presentation.ts'
 LOCALES = {
     language: json.loads(
         (ROOT / f'frontend/src/i18n/locales/{language}.json').read_text(encoding='utf-8')
@@ -125,9 +125,13 @@ def test_locale_titles_and_hints_match_the_python_source_of_truth():
         assert LOCALES['en'][f'err.k.{kind}.hint'] == en_hint, kind
 
 
-def test_english_chips_match_the_runtime_fallback_labels():
-    source = RUNTIME.read_text(encoding='utf-8')
-    match = re.search(r'const ERROR_KIND_LABELS = \{(.*?)\n\};', source, re.S)
+def test_english_chips_match_typed_presentation_fallback_labels():
+    source = PRESENTATION_OWNER.read_text(encoding='utf-8')
+    match = re.search(
+        r'export const ERROR_KIND_LABELS:.*?Object\.freeze\(\{(.*?)\n\}\);',
+        source,
+        re.S,
+    )
     assert match
     labels = dict(re.findall(r"^\s*([a-z_]+):\s*'([^']*)'", match.group(1), re.M))
     from lib.error_envelope import KINDS
@@ -145,12 +149,16 @@ def test_shared_fragments_and_invalid_image_variants_are_complete():
         assert LOCALES[language]['err.k.invalid_image.hintSize'].startswith('• ')
 
 
-def test_error_renderer_reads_the_vite_translator_without_classic_globals():
-    source = RUNTIME.read_text(encoding='utf-8')
-    assert source.count('migrated source: core/error_envelope.js') == 1
-    owner = source[source.index('function _envResolveI18n'):]
-    owner = owner[:owner.index('/* ===== migrated source:', 1)]
-    assert 'const text = t(key, params);' in owner
+def test_error_presentation_uses_injected_vite_translator_without_globals():
+    owner = PRESENTATION_OWNER.read_text(encoding='utf-8')
+    prelude = (ROOT / 'frontend/src/runtime/sections/_prelude.js').read_text(
+        encoding='utf-8')
+    assert 'createErrorEnvelopePresentation(' in owner
+    assert 'const text = translateDynamic(key, params);' in owner
     assert 'return text === key ? null : text;' in owner
     assert '_i18n[' not in owner
+    assert 'runtimeScope' not in owner
+    assert "from '../error-presentation'" in prelude
+    assert 'translate: t,' in prelude
+    assert 'iconHtml,' in prelude
     assert not (ROOT / 'static/js').exists()

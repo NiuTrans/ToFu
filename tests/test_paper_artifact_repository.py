@@ -11,6 +11,7 @@ from lib.paper.artifact_repository import (
     PaperNote,
     PaperPodcast,
     PaperReport,
+    PaperReportReopen,
     PaperTranslation,
 )
 
@@ -27,6 +28,33 @@ class _Client:
         if operation == 'paper.report.get':
             return {**payload, 'report': 'body', 'model': 'm',
                     'meta': {'kind': 'report'}, 'created_at': 10}
+        if operation == 'paper.report.resolve':
+            return {
+                'paper_hash': payload['paper_hash'],
+                'lang': payload.get('fallback_lang') or payload['preferred_lang'],
+                'report': 'resolved', 'model': 'm', 'meta': {}, 'created_at': 10,
+            }
+        if operation == 'paper.report.reopen':
+            return {
+                'report': {
+                    'paper_hash': payload['paper_hash'],
+                    'lang': payload.get('fallback_lang') or payload['preferred_lang'],
+                    'report': 'reopened', 'model': 'm', 'meta': {},
+                    'created_at': 10,
+                },
+                'siblings': [{
+                    'paper_hash': payload['paper_hash'], 'lang': sibling_lang,
+                    'report': f'sibling-{sibling_lang}', 'model': '', 'meta': {},
+                    'created_at': 11,
+                } for sibling_lang in payload[
+                    'sibling_langs_by_base'
+                ].get(payload.get('fallback_lang') or payload['preferred_lang'], [])],
+            }
+        if operation == 'paper.report.excerpts':
+            return [{
+                'paper_hash': paper_hash, 'lang': payload['lang'],
+                'report': f'excerpt-{paper_hash}', 'created_at': 10,
+            } for paper_hash in payload['paper_hashes']]
         if operation == 'paper.report.latest':
             return {**payload, 'lang': 'en', 'report': 'latest', 'model': 'm',
                     'meta': {}, 'created_at': 11}
@@ -64,6 +92,22 @@ def test_repository_injects_owner_into_every_operation():
         17, client_factory=lambda *, write=False: client)
 
     assert repo.get_report('hash', 'en').report == 'body'
+    assert repo.get_report('hash', 'en', max_chars=6_000).report == 'body'
+    resolved = repo.resolve_report('hash', 'zh', 'en')
+    assert resolved.report == 'resolved' and resolved.lang == 'en'
+    reopened = repo.reopen_report(
+        'hash', 'zh', 'en',
+        sibling_langs_by_base={
+            'zh': ('insight:zh',),
+            'en': ('insight:en', 'termfill:en'),
+        })
+    assert isinstance(reopened, PaperReportReopen)
+    assert reopened.report.report == 'reopened' and reopened.report.lang == 'en'
+    assert list(reopened.siblings) == ['insight:en', 'termfill:en']
+    excerpts = repo.report_excerpts(
+        ['hash-1', 'hash-1', 'hash-2'], 'en', max_chars=6_000)
+    assert list(excerpts) == ['hash-1', 'hash-2']
+    assert excerpts['hash-1'].report == 'excerpt-hash-1'
     assert repo.latest_report('hash').report == 'latest'
     assert repo.get_translation('hash', 'zh').text == '译文'
     assert repo.list_notes('hash', 'en')[0].note == 'note'
@@ -88,6 +132,31 @@ def test_repository_injects_owner_into_every_operation():
     assert client.calls
     for call in client.calls:
         assert call[2]['user_id'] == 17
+    excerpt_call = next(
+        call for call in client.calls
+        if call[1] == 'paper.report.get'
+        and call[2].get('max_report_chars') is not None)
+    assert excerpt_call[2]['max_report_chars'] == 6_000
+    batch_call = next(
+        call for call in client.calls if call[1] == 'paper.report.excerpts')
+    assert batch_call[2]['paper_hashes'] == ['hash-1', 'hash-2']
+    assert batch_call[2]['max_report_chars'] == 6_000
+    resolve_call = next(
+        call for call in client.calls if call[1] == 'paper.report.resolve')
+    assert resolve_call[2] == {
+        'user_id': 17, 'paper_hash': 'hash',
+        'preferred_lang': 'zh', 'fallback_lang': 'en',
+    }
+    reopen_call = next(
+        call for call in client.calls if call[1] == 'paper.report.reopen')
+    assert reopen_call[2] == {
+        'user_id': 17, 'paper_hash': 'hash', 'preferred_lang': 'zh',
+        'fallback_lang': 'en',
+        'sibling_langs_by_base': {
+            'zh': ['insight:zh'],
+            'en': ['insight:en', 'termfill:en'],
+        },
+    }
 
 
 def test_repository_rejects_implicit_owner_and_command_identity():
@@ -98,6 +167,22 @@ def test_repository_rejects_implicit_owner_and_command_identity():
         1, client_factory=lambda *, write=False: _Client())
     with pytest.raises(ValueError, match='command_id'):
         repo.put_report(PaperReport('hash', 'en', 'body'), command_id='')
+    with pytest.raises(ValueError, match='1..6000'):
+        repo.get_report('hash', 'en', max_chars=6_001)
+    with pytest.raises(ValueError, match='at most 40'):
+        repo.report_excerpts(
+            [f'hash-{index}' for index in range(41)],
+            'en', max_chars=6_000)
+    with pytest.raises(ValueError, match='at most 8'):
+        repo.reopen_report(
+            'hash', 'en', sibling_langs_by_base={
+                'en': [f'sibling:{index}' for index in range(9)]})
+    with pytest.raises(ValueError, match='unknown base'):
+        repo.reopen_report(
+            'hash', 'en', sibling_langs_by_base={'zh': ['insight:zh']})
+    with pytest.raises(ValueError, match='contain sequences'):
+        repo.reopen_report(
+            'hash', 'en', sibling_langs_by_base={'en': 'insight:en'})
 
 
 def test_application_boundary_uses_only_the_injected_storage_port(monkeypatch):
@@ -179,4 +264,4 @@ def test_schema_33_repairs_version_32_ownerless_paper_tables(tmp_path):
         ).fetchone()[0] == 1
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION == 40
+    assert int(version) == SCHEMA_VERSION

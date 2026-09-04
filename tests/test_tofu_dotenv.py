@@ -139,6 +139,8 @@ def test_lifecycle_manager_reader_stays_compatible_with_canonical_syntax(
         'PORT="15599"\n'
         "BIND_HOST='127.0.0.1'\n"
         'TOFU_TLS=0\n'
+        'TOFU_AGENT_QUEUE_CAPACITY=96\n'
+        'TOFU_AGENT_STUCK_REPLACEMENTS=2\n'
         'IGNORED=value\n',
         encoding='utf-8')
     canonical = {
@@ -146,3 +148,5 @@ def test_lifecycle_manager_reader_stays_compatible_with_canonical_syntax(
         if key in SERVER_ENV_KEYS
     }
     assert project_server_env(str(tmp_path)) == canonical
+    assert canonical['TOFU_AGENT_QUEUE_CAPACITY'] == '96'
+    assert canonical['TOFU_AGENT_STUCK_REPLACEMENTS'] == '2'

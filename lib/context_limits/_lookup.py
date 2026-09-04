@@ -101,8 +101,8 @@ def resolve_learned_context_limit(provider_id: str | None, model: str,
       the compaction gate caps prompts below the pin so no observation can
       ever climb out, and expand entries never expire — the mirror image
       of the shrink-side starvation deadlock in the package docstring.
-      (Live instance: sankuai::kimi-k3 pinned at 383,727 while the real
-      window is 1M, 2026-07-26.)
+      (Live instance: one internal gateway's kimi-k3 slot pinned at
+      383,727 while the real window is 1M, 2026-07-26.)
     * no entry        → ``static_limit``.
     * legacy no-meta  → the learned value, absolute (historical semantics
       for hand-edited / pre-TTL values are unchanged).

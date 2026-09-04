@@ -78,6 +78,11 @@ class ProbeResult:
     verdict: str
     latency_ms: 'float | None' = None
     status_code: int = 0
+    # Higher means the route reached a more useful protocol boundary. Generic
+    # subscription probes leave the default unchanged; Git command probes can
+    # rank a real smart-HTTP response above an SSO-login redirect while still
+    # retaining the redirect as a reachable fallback.
+    quality: int = 1
 
     @property
     def ok(self) -> bool:
@@ -151,6 +156,7 @@ class _Health:
     circuit_until: float = 0.0
     backoff_step: int = 0
     failure_kind: str = ''
+    quality: int = 0
 
 
 def probe_route(url: str, route: Route) -> ProbeResult:
@@ -210,11 +216,18 @@ class RouteManager:
     """
 
     def __init__(self, *, probe=probe_route, clock=time.monotonic,
-                 jitter=None, max_workers: int = _MAX_PROBE_WORKERS):
+                 jitter=None, max_workers: int = _MAX_PROBE_WORKERS,
+                 target_key=None):
         self._probe = probe
         self._clock = clock
         self._jitter = jitter or (lambda seconds: seconds * random.uniform(
             0.8, 1.2))
+        # Subscription endpoints are isolated by hostname. Other consumers
+        # (notably command egress) need a finer key because one hostname can
+        # expose HTTPS on 443 while SSH on 3022 is unreachable. Keep the
+        # historical hostname default and make the stronger identity an
+        # explicit construction-time dependency.
+        self._target_key = target_key or self._default_target_key
         self._lock = threading.RLock()
         self._health: dict[tuple[str, str], _Health] = {}
         self._preferred: dict[str, str] = {}
@@ -225,8 +238,17 @@ class RouteManager:
         self._closed = False
 
     @staticmethod
-    def _host(url: str) -> str:
+    def _default_target_key(url: str) -> str:
         return (urlparse(url).hostname or '').lower()
+
+    def _host(self, url: str) -> str:
+        try:
+            return str(self._target_key(url) or '').lower()
+        except Exception as error:
+            logger.debug(
+                '[SubscriptionRoute] target-key resolver failed (%s)',
+                type(error).__name__)
+            return ''
 
     @staticmethod
     def _dedupe(routes: list[Route]) -> list[Route]:
@@ -288,6 +310,15 @@ class RouteManager:
                 state.backoff_step = 0
                 state.failure_kind = ''
                 state.last_success = now
+                observed_quality = max(0, int(result.quality or 0))
+                if source == 'probe' or state.quality <= 0:
+                    state.quality = observed_quality
+                else:
+                    # Actual request reports do not know which application
+                    # boundary the lightweight probe reached.  Preserve that
+                    # evidence instead of silently degrading it to generic
+                    # reachability after a successful command/request.
+                    state.quality = max(state.quality, observed_quality)
                 if result.latency_ms is not None and result.latency_ms > 0:
                     state.samples += 1
                     if state.ewma_ms is None:
@@ -450,7 +481,8 @@ class RouteManager:
                 state = health[route.route_id]
                 latency = (state.ewma_ms if state and state.ewma_ms is not None
                            else float('inf'))
-                return latency, route.priority, route.route_id
+                quality = state.quality if state else 0
+                return -quality, latency, route.priority, route.route_id
 
             ordered = sorted(routes, key=score)
             best = ordered[0]
@@ -459,22 +491,31 @@ class RouteManager:
             if incumbent is not None:
                 best_state = health[best.route_id]
                 incumbent_state = health[incumbent.route_id]
+                best_quality = best_state.quality if best_state else 0
+                incumbent_quality = (
+                    incumbent_state.quality if incumbent_state else 0)
                 best_ms = best_state.ewma_ms if best_state else None
                 incumbent_ms = incumbent_state.ewma_ms if incumbent_state else None
-                if (best_ms is None or incumbent_ms is None
-                        or incumbent_ms <= best_ms * _PREFERRED_HYSTERESIS):
+                if (incumbent_quality == best_quality
+                        and (best_ms is None or incumbent_ms is None
+                             or incumbent_ms
+                             <= best_ms * _PREFERRED_HYSTERESIS)):
                     best = incumbent
             self._preferred[host] = best.route_id
         return [best] + [r for r in ordered if r.route_id != best.route_id]
 
     def candidates(self, url: str, routes: list[Route], *,
                    wait_timeout: float = _COLD_RACE_TIMEOUT_S,
-                   force_probe: bool = False) -> list[Route]:
+                   force_probe: bool = False, cancelled=None,
+                   wait_for_all: bool = False,
+                   minimum_quality: 'int | None' = None) -> list[Route]:
         """Return healthy routes, fastest stable route first.
 
         Cold start waits for the first successful concurrent probe.  A known
         healthy route returns without waiting; any stale/half-open alternatives
-        continue probing in the executor.
+        continue probing in the executor.  ``wait_for_all`` lets a specialized
+        caller compare every bounded cold probe; ``minimum_quality`` ends that
+        wait early once any reachable route supplies sufficient evidence.
         """
         host = self._host(url)
         routes = self._dedupe(routes)
@@ -492,17 +533,33 @@ class RouteManager:
         pending = set(futures)
         deadline = time.monotonic() + max(0.0, wait_timeout)
         while pending:
+            if cancelled is not None and cancelled():
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
+            wait_slice = (min(0.1, remaining)
+                          if cancelled is not None else remaining)
             done, pending = concurrent.futures.wait(
-                pending, timeout=remaining,
+                pending, timeout=wait_slice,
                 return_when=concurrent.futures.FIRST_COMPLETED)
             if not done:
+                if cancelled is not None:
+                    continue
                 break
             healthy = self._healthy(host, routes, self._clock())
             if healthy:
-                return self._rank(host, healthy)
+                if not wait_for_all:
+                    return self._rank(host, healthy)
+                if minimum_quality is not None:
+                    with self._lock:
+                        reached_quality = max(
+                            (state.quality for route in healthy
+                             if (state := self._health.get(
+                                 (host, route.route_id))) is not None),
+                            default=0)
+                    if reached_quality >= minimum_quality:
+                        return self._rank(host, healthy)
         healthy = self._healthy(host, routes, self._clock())
         return self._rank(host, healthy) if healthy else []
 
@@ -549,6 +606,7 @@ class RouteManager:
                                 else round(state.ewma_ms, 1)),
                     'failures': state.consecutive_failures,
                     'failure_kind': state.failure_kind,
+                    'quality': state.quality,
                     'retry_in_s': round(max(0.0, state.circuit_until - now), 1),
                 }
             return {'preferred': dict(self._preferred), 'routes': routes}

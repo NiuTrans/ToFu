@@ -14,6 +14,8 @@ Design summary
 
       <base_path>/.tofu/file-history/
           snapshots.jsonl          — append-only round log
+          snapshot-tail.json       — disposable validated hot-tail index
+          tracked.json             — current per-path version index
           backups/
               <sha256(rel)[:2]>/
                   <sha256(rel)>@v1 — first observed contents
@@ -39,6 +41,7 @@ Public API (mirrors the surface ``git_shim`` exposed):
     make_snapshot(base_path, *, task_id, conv_id, message_id,
                   tool_names=None) -> snapshot_id | None       — round end
     list_history(base_path, *, path=None, limit=20) -> list
+    find_latest_snapshot_id(base_path, *, task_id=None, conv_id=None) -> str | None
     diff_name_status(base_path, from_id, to_id) -> list[dict]
     rewind_to(base_path, snapshot_id) -> dict                  — undo
     restore_from(base_path, snapshot_id) -> dict               — redo
@@ -56,6 +59,7 @@ from __future__ import annotations
 from lib.file_history.api import (
     detect_external_edits,
     diff_name_status,
+    find_latest_snapshot_id,
     get_last_snapshot_id,
     is_enabled,
     list_history,
@@ -73,6 +77,7 @@ __all__ = [
     'make_snapshot',
     'list_history',
     'diff_name_status',
+    'find_latest_snapshot_id',
     'rewind_to',
     'restore_from',
     'detect_external_edits',

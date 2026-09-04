@@ -13,6 +13,7 @@ keeps only the OAuth flow + re-export facades for the legacy names
 
 import base64
 import json
+import math
 import time
 import uuid
 
@@ -69,6 +70,12 @@ CODEX_OAUTH_CONFIG = {
 }
 
 _TOKEN_REFRESH_BUFFER = 300  # 5 minutes
+_TERMINAL_REFRESH_ERROR_CODES = frozenset({
+    'invalid_grant',
+    'invalid_refresh_token',
+    'refresh_token_invalidated',
+    'refresh_token_reused',
+})
 
 
 def _oauth_http_post(url: str, payload: dict, *, timeout: float = 30,
@@ -421,6 +428,45 @@ def codex_refresh_token(refresh_tok: str = None,
         lock_path=token_path('codex') + '.refresh')
 
 
+def _refresh_error_code(resp) -> str:
+    """Return a bounded OAuth error code from a token-endpoint response."""
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        # Token endpoints sometimes return HTML/plaintext on proxy failures.
+        # The caller still falls back to the HTTP status, but retain the parse
+        # failure without ever logging the response body or credentials.
+        logger.debug('[CodexOAuth] refresh error body was not JSON: %s', exc,
+                     exc_info=True)
+        return ''
+    if not isinstance(payload, dict):
+        return ''
+    error = payload.get('error')
+    if isinstance(error, dict):
+        code = error.get('code') or error.get('type')
+    else:
+        code = error
+    return str(code or payload.get('code') or '').strip().lower()[:64]
+
+
+def _invalidate_rejected_refresh_token(refresh_tok: str, reason: str) -> None:
+    """Persist terminal refresh rejection without overwriting a newer login.
+
+    The access token is retained for its remaining lifetime. Clearing only the
+    rejected refresh token makes cross-process singleflight waiters and later
+    requests stop replaying a credential the issuer has declared terminal.
+    """
+    stored = load_token('codex') or {}
+    if stored.get('refresh_token') != refresh_tok:
+        logger.info('[Codex OAuth] Rejected refresh token was already replaced')
+        return
+    stored['refresh_token'] = ''
+    stored['refresh_invalidated_at'] = time.time()
+    stored['refresh_invalidated_reason'] = reason[:64]
+    if not save_token('codex', stored):
+        logger.error('[Codex OAuth] Could not persist terminal refresh rejection')
+
+
 def _codex_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | None:
     """The actual upstream refresh (called under the singleflight lock)."""
     payload = {
@@ -436,6 +482,14 @@ def _codex_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | No
                                     user_id=user_id)
 
             if resp.status_code != 200:
+                error_code = _refresh_error_code(resp)
+                if error_code in _TERMINAL_REFRESH_ERROR_CODES:
+                    logger.warning(
+                        '[Codex OAuth] Refresh token rejected permanently '
+                        '(HTTP %d, code=%s); sign-in required',
+                        resp.status_code, error_code)
+                    _invalidate_rejected_refresh_token(refresh_tok, error_code)
+                    return None
                 logger.warning('[Codex OAuth] Refresh failed (HTTP %d, attempt %d): %.300s',
                                resp.status_code, attempt + 1, resp.text)
                 if attempt < 2:
@@ -468,6 +522,8 @@ def _codex_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | No
                 'expires_in': expires_in,
                 'last_refresh': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             })
+            stored.pop('refresh_invalidated_at', None)
+            stored.pop('refresh_invalidated_reason', None)
             if not save_token('codex', stored):
                 # Refresh tokens can be single-use. Do not retry upstream with
                 # the now-consumed old token after a local persistence failure.
@@ -507,18 +563,34 @@ def codex_get_valid_token(user_id: str = '') -> str | None:
         return None
 
     access_token = stored.get('access_token', '')
-    expire = stored.get('expire', 0)
+    try:
+        expire = float(stored.get('expire') or 0)
+    except (TypeError, ValueError, OverflowError):
+        expire = 0
+    if not math.isfinite(expire):
+        expire = 0
 
     if not access_token:
         return None
 
-    if time.time() > expire - _TOKEN_REFRESH_BUFFER:
-        logger.info('[Codex OAuth] Token expiring soon, refreshing…')
-        refreshed = codex_refresh_token(stored.get('refresh_token', ''),
-                                        user_id=user_id)
-        if refreshed:
-            return refreshed.get('access_token')
-        logger.warning('[Codex OAuth] Refresh failed, using potentially expired token')
+    now = time.time()
+    if now > expire - _TOKEN_REFRESH_BUFFER:
+        if stored.get('refresh_invalidated_at'):
+            logger.debug('[Codex OAuth] Refresh is terminally invalid; '
+                         'waiting for sign-in')
+        else:
+            logger.info('[Codex OAuth] Token expiring soon, refreshing…')
+            refreshed = codex_refresh_token(stored.get('refresh_token', ''),
+                                            user_id=user_id)
+            if refreshed:
+                return refreshed.get('access_token')
+        if now < expire:
+            logger.warning('[Codex OAuth] Refresh unavailable; using access '
+                           'token only until its recorded expiry')
+            return access_token
+        logger.warning('[Codex OAuth] Access token expired and refresh is '
+                       'unavailable; sign-in required')
+        return None
 
     return access_token
 

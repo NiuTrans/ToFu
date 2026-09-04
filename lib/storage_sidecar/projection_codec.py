@@ -9,9 +9,10 @@ copies that are byte-for-byte equal while a projection is at rest, records
 explicit versioned references, and restores the public projection before any
 semantic operation consumes it.
 
-Entry points are :func:`encode_projection_for_storage` and
-:func:`decode_projection_from_storage`.  The codec is backend-neutral and has
-no database, filesystem, or application-service dependency.
+Entry points are :func:`encode_projection_for_storage`,
+:func:`decode_projection_from_storage`, and their sequence variants for frozen
+pre-Turn conversation archives. The codec is backend-neutral and has no
+database, filesystem, or application-service dependency.
 """
 
 from __future__ import annotations
@@ -260,6 +261,48 @@ def decode_projection_from_storage(projection: Any) -> Any:
     return dict(sorted(decoded_projection.items()))
 
 
+def encode_projection_sequence_for_storage(
+    projections: Any,
+    *,
+    accept_stored: bool = False,
+) -> list[dict[str, Any]]:
+    """Encode an ordered projection list without hiding malformed members.
+
+    ``accept_stored`` is reserved for offline idempotent maintenance: each
+    existing marker is validated and hydrated before deterministic re-encoding.
+    Public writes keep the default and therefore reject the private namespace.
+    """
+    if not isinstance(projections, list):
+        raise _codec_error("projection sequence is not an array")
+    encoded: list[dict[str, Any]] = []
+    for candidate in projections:
+        if not isinstance(candidate, dict):
+            raise _codec_error("projection sequence member is not an object")
+        public = (
+            decode_projection_from_storage(candidate)
+            if accept_stored else candidate
+        )
+        encoded.append(encode_projection_for_storage(public))
+    return encoded
+
+
+def decode_projection_sequence_from_storage(
+    projections: Any,
+) -> list[dict[str, Any]]:
+    """Hydrate every member of one stored ordered projection list."""
+    if not isinstance(projections, list):
+        raise _codec_error("projection sequence is not an array")
+    decoded: list[dict[str, Any]] = []
+    for candidate in projections:
+        if not isinstance(candidate, dict):
+            raise _codec_error("projection sequence member is not an object")
+        value = decode_projection_from_storage(candidate)
+        if not isinstance(value, dict):
+            raise _codec_error("decoded projection member is not an object")
+        decoded.append(value)
+    return decoded
+
+
 def projection_hydration_byte_upper_bound(value: Any) -> int:
     """Return a backend-neutral upper bound for one hydrated projection.
 
@@ -301,6 +344,8 @@ __all__ = [
     "STORAGE_PROJECTION_MAX_HYDRATION_RATIO",
     "STORAGE_PROJECTION_CODEC_VERSION",
     "decode_projection_from_storage",
+    "decode_projection_sequence_from_storage",
     "encode_projection_for_storage",
+    "encode_projection_sequence_for_storage",
     "projection_hydration_byte_upper_bound",
 ]

@@ -98,6 +98,17 @@ def test_commit_spawn_thread_is_a_daemon(spawned):
     assert spawned[0]['daemon'] is True
 
 
+def test_commit_spawn_captures_opaque_writer_before_terminal_release(spawned):
+    """The daemon must not retain or later reread the structural projection."""
+    task = _task(toolRounds=[_round('code_exec')])
+    commit_mod._spawn_async_commit_round(task, True, '/proj')
+
+    daemon_args = spawned[0]['args']
+    assert daemon_args[3] is True
+    task['toolRounds'] = None
+    assert daemon_args[3] is True
+
+
 def test_commit_spawn_failure_is_swallowed(monkeypatch):
     """Failing to spawn must not break the round — the snapshot is best-effort.
 
@@ -202,6 +213,25 @@ def test_unattributed_edit_kept_when_round_ran_an_opaque_writer(fh_env):
     task = _task(toolRounds=[_round('code_exec')])
     _run(task, fh_env)
     assert [f['path'] for f in task['modifiedFileList']] == ['made_by_code_exec.txt']
+
+
+def test_captured_opaque_writer_survives_terminal_round_release(fh_env):
+    """Production passes the pre-release fact, not the released projection."""
+    fh_env['diff'] = [{'path': 'made_before_release.txt', 'action': 'created'}]
+    fh_env['tracked'] = {
+        'made_before_release.txt': {'last_writer_task_id': ''},
+    }
+    task = _task(toolRounds=None)
+
+    commit_mod._run_commit_round_async(
+        task,
+        '/proj',
+        round_has_opaque_writer=True,
+    )
+
+    assert [f['path'] for f in task['modifiedFileList']] == [
+        'made_before_release.txt',
+    ]
 
 
 def test_unattributed_edit_dropped_when_round_ran_only_readonly_tools(fh_env):
@@ -597,11 +627,22 @@ def test_prefs_patch_updates_turn_provenance_with_revision_cas(monkeypatch):
     monkeypatch.setattr(lifecycle, 'get_turn', lambda conv_id, turn_id, **kw: {
         'turnId': turn_id,
         'projectionRevision': 7,
-        'projection': {'content': 'answer', 'provenance': {
-            'blockId': 'provenance',
-            'memoryPrefetch': {'phase': 'done', 'selected': 1},
-        }},
+        'projection': {
+            'content': 'answer',
+            'toolRounds': [{'toolName': 'read_files', 'toolContent': 'kept'}],
+            'segments': [{'type': 'tool', 'content': 'kept'}],
+            'provenance': {
+                'blockId': 'provenance',
+                'memoryPrefetch': {'phase': 'done', 'selected': 1},
+            },
+        },
     })
+    monkeypatch.setattr(
+        lifecycle,
+        '_task_projection',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('preference patch must not refold task structure')),
+    )
     monkeypatch.setattr(
         lifecycle,
         'update_turn_projection',
@@ -620,6 +661,12 @@ def test_prefs_patch_updates_turn_provenance_with_revision_cas(monkeypatch):
     assert request['expected_projection_revision'] == 7
     assert request['user_id'] == 9
     assert request['projection']['content'] == 'answer'
+    assert request['projection']['toolRounds'] == [
+        {'toolName': 'read_files', 'toolContent': 'kept'},
+    ]
+    assert request['projection']['segments'] == [
+        {'type': 'tool', 'content': 'kept'},
+    ]
     assert request['projection']['provenance'] == {
         'blockId': 'provenance',
         'memoryPrefetch': {'phase': 'done', 'selected': 1},

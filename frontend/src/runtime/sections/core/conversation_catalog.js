@@ -2,7 +2,7 @@
 /* Conversation catalog and metadata persistence.
  *
  * Responsibilities:
- *   - load and merge sidebar metadata;
+ *   - adapt authoritative sidebar rows into metadata-only shells;
  *   - hydrate metadata-only shells from IndexedDB;
  *   - persist conversation settings;
  *   - delegate every transcript read to ConversationTurnStore.
@@ -11,18 +11,24 @@
  * rebases, repairs, or merges transcript content.
  */
 
-let _lastServerLoadOk = false;
-let _convMetaEtag = null;
-let _conversationCatalogFlight = null;
-let _serverTotalCount = null;
+const _conversationSettingsResolution = createConversationSettingsResolution({
+  resolveConfig: (inputs) => Api.conversations.resolveConfig(inputs),
+  resolveSettings: (inputs) => Api.conversations.resolveSettings(inputs),
+  patchResolvedSettings: (id, inputs) => (
+    Api.conversations.patchResolvedSettings(id, inputs)
+  ),
+  patchSettings: (id, settings) => (
+    Api.conversations.patchSettings(id, settings)
+  ),
+});
 
 async function persistConversationSettings(conv) {
   if (!conv?.id) return false;
   try {
     if (!conv._localOnly) {
-      const settings = (typeof _buildConvSettings === 'function')
-        ? await _buildConvSettings(conv) : {};
-      const response = await Api.conversations.patchSettings(conv.id, settings);
+      const response = await _conversationSettingsResolution.persist(
+        conv.id, _buildConvSettingsInputs(conv),
+      );
       if (!response?.ok) return false;
     }
     try {
@@ -37,14 +43,6 @@ async function persistConversationSettings(conv) {
                  error?.message || error);
     return false;
   }
-}
-
-function serverLoadOk() {
-  return _lastServerLoadOk;
-}
-
-function getServerTotalCount() {
-  return _serverTotalCount;
 }
 
 function _catalogRevision(row) {
@@ -180,99 +178,113 @@ async function hydrateConversationCatalogFromCache() {
   }
 }
 
-async function _fetchConversationCatalog() {
-  _lastServerLoadOk = false;
-  const headers = {};
-  if (_convMetaEtag) headers['If-None-Match'] = _convMetaEtag;
-  const makeSignal = (ms) => {
-    if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-      return AbortSignal.timeout(ms);
-    }
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(), ms);
-    return controller.signal;
-  };
-
-  let response = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    response = await Api.conversations.listMeta({
-      headers,
-      signal: makeSignal(12000),
-    });
-    if (response?.status !== 503) break;
-    const retryAfter = Number(response.headers?.get?.('Retry-After')) || attempt + 1;
-    await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
+function _catalogRequestSignal(timeoutMs) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(timeoutMs);
   }
-  if (!response) throw new Error('Conversation catalog is unreachable.');
-  if (response.status === 304) {
-    _lastServerLoadOk = true;
-    return null;
-  }
-  if (!response.ok) {
-    throw new Error(`Conversation catalog failed with HTTP ${response.status}.`);
-  }
-  const payload = await response.json();
-  if (!payload || !Array.isArray(payload.items)) {
-    throw new Error('Conversation catalog returned an invalid response.');
-  }
-  const totalHeader = response.headers?.get?.('X-Total-Count');
-  if (totalHeader !== null && totalHeader !== undefined && totalHeader !== '') {
-    const parsed = Number(totalHeader);
-    if (Number.isInteger(parsed) && parsed >= 0) _serverTotalCount = parsed;
-  }
-  _convMetaEtag = response.headers?.get?.('ETag') || null;
-  _lastServerLoadOk = true;
-  return payload.items;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
 }
 
-async function loadConversationCatalog() {
-  if (_conversationCatalogFlight) return _conversationCatalogFlight;
-  _conversationCatalogFlight = (async () => {
-    try {
-      const rows = await _fetchConversationCatalog();
-      if (rows === null) return;
-      try {
-        if (typeof ConvCache !== 'undefined') {
-          await ConvCache.putSidebarList?.(rows);
-        }
-      } catch (error) {
-        debugLog(`[conversation-catalog] cache write failed: ${error?.message || error}`, 'warn');
-      }
+function _applyAuthoritativeConversationCatalogRows(rows, totalCount) {
+  const serverRows = rows.filter((row) => row?.id);
+  const serverIds = new Set(serverRows.map((row) => row.id));
+  mergeConversationCatalogRows(serverRows);
 
-      const localById = new Map(conversations.map((conversation) =>
-        [conversation.id, conversation]));
-      const serverIds = new Set();
-      for (const row of rows) {
-        if (!row?.id) continue;
-        serverIds.add(row.id);
-        const local = localById.get(row.id);
-        if (local) _mergeCatalogRow(local, row);
-        else conversations.push(_newCatalogShell(row));
+  const complete = Number.isInteger(totalCount) && totalCount <= rows.length;
+  if (complete) {
+    for (const conversation of [...conversations]) {
+      if (conversation._localOnly || serverIds.has(conversation.id)) continue;
+      if (typeof _applyRemoteConvDeleted === 'function') {
+        _applyRemoteConvDeleted(conversation.id);
       }
-
-      const complete = Number.isInteger(_serverTotalCount)
-        && _serverTotalCount <= rows.length;
-      if (complete) {
-        for (const conversation of [...conversations]) {
-          if (conversation._localOnly || serverIds.has(conversation.id)) continue;
-          if (typeof _applyRemoteConvDeleted === 'function') {
-            _applyRemoteConvDeleted(conversation.id);
-          }
-        }
-      }
-
-      conversations.sort(_convSorter);
-      renderConversationList();
-    } catch (error) {
-      _lastServerLoadOk = false;
-      debugLog(`[conversation-catalog] ${error?.message || error}`, 'warn');
     }
-  })();
-  try {
-    await _conversationCatalogFlight;
-  } finally {
-    _conversationCatalogFlight = null;
   }
+
+  conversations.sort(_convSorter);
+  renderConversationList();
+  _wakeServerBusyConversations(serverRows);
+  /* Empty storage shells are intentionally reclaimed after boot, so only
+   * sidebar-visible rows participate in later 304 snapshot validation. */
+  return serverRows
+    .filter((row) => _catalogTurnCount(row) > 0)
+    .map((row) => row.id);
+}
+
+/* The sidebar busy projection (streaming dot / "answering" tag) derives
+ * exclusively from client-side Turn state. A hard refresh holds that state
+ * only for hydrated conversations, so every other live conversation read
+ * idle until it was opened by hand. The server stamps `busy` on catalog
+ * rows whose task registry still has live work (list_running_tasks); wake
+ * exactly those shells the client does not already know are busy, so
+ * hydration replays the running Turns and reconnects their attempt
+ * streams — the same recovery a manual open performs. */
+let _serverBusyWakeInFlight = false;
+function _wakeServerBusyConversations(rows) {
+  if (_serverBusyWakeInFlight) return;
+  const turnStore = runtimeScope.ConversationTurnStore;
+  if (!turnStore?.wakeConversation) return;
+  const targets = [];
+  for (const row of rows || []) {
+    if (!row?.busy || !row.id) continue;
+    const conv = conversations.find((item) => item?.id === row.id);
+    if (!conv) continue;
+    if (typeof convIsBusy === 'function' && convIsBusy(conv)) continue;
+    targets.push(conv);
+  }
+  if (!targets.length) return;
+  _serverBusyWakeInFlight = true;
+  runWithConcurrency(
+    targets,
+    (conv) => Promise.resolve(turnStore.wakeConversation(conv))
+      .catch((error) => debugLog(
+        `[conversation-catalog] busy wake failed for ${conv.id.slice(0, 8)}: ${error?.message || error}`,
+        'warn',
+      )),
+    DEFAULT_ASYNC_POOL_CONCURRENCY,
+  ).then(() => {
+    if (typeof renderConversationList === 'function') renderConversationList();
+  }).finally(() => {
+    _serverBusyWakeInFlight = false;
+  });
+}
+
+function _catalogContainsEveryAppliedRow(conversationIds) {
+  if (conversationIds.size === 0) return true;
+  const presentIds = new Set(conversations.map((conversation) => conversation?.id));
+  for (const conversationId of conversationIds) {
+    if (!presentIds.has(conversationId)) return false;
+  }
+  return true;
+}
+
+const _conversationCatalogLoader = createConversationCatalogLoader({
+  requestCatalog: ({ headers, timeoutMs }) => Api.conversations.listMeta({
+    headers,
+    signal: _catalogRequestSignal(timeoutMs),
+  }),
+  applyAuthoritativeRows: _applyAuthoritativeConversationCatalogRows,
+  hasEveryAppliedRow: _catalogContainsEveryAppliedRow,
+  writeCache: (rows) => (
+    typeof ConvCache !== 'undefined' && ConvCache.putSidebarList
+      ? ConvCache.putSidebarList(rows) : Promise.resolve(0)
+  ),
+  wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  warn: (message) => debugLog(`[conversation-catalog] ${message}`, 'warn'),
+});
+retainedCompositionLifecycle.add(() => _conversationCatalogLoader.destroy());
+
+function serverLoadOk() {
+  return _conversationCatalogLoader.serverLoadOk();
+}
+
+function getServerTotalCount() {
+  return _conversationCatalogLoader.serverTotalCount();
+}
+
+function loadConversationCatalog() {
+  return _conversationCatalogLoader.load();
 }
 
 async function hydrateConversationRuntime(convId) {
@@ -285,10 +297,6 @@ async function hydrateConversationRuntime(convId) {
   await turnStore.hydrateConversation(conv);
   conv._turnSnapshotRequired = false;
   conv._serverTurnCount = runtimeScope.ConversationTurnRead?.ordered?.(conv)?.length || 0;
-  if (typeof runtimeScope.Artifacts?.hydrateConversation === 'function') {
-    void runtimeScope.Artifacts.hydrateConversation(conv).catch((error) =>
-      console.debug('[artifacts] conversation hydrate failed:', error));
-  }
   if (typeof runtimeScope.loadCompactionHistory === 'function') {
     void runtimeScope.loadCompactionHistory(convId).catch((error) =>
       console.debug('[compaction] history hydrate failed:', error));

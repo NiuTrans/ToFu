@@ -14,14 +14,20 @@ returned.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 
 from lib.log import get_logger
-from lib.production.contracts import normalise_asset_briefs
+from lib.production.contracts import (
+    normalise_asset_briefs,
+    normalise_media_queries,
+)
 
 logger = get_logger(__name__)
 
-__all__ = ['prepare_scene_assets', 'PREFLIGHT_MANIFEST']
+__all__ = [
+    'collect_media_attribution', 'prepare_scene_assets', 'PREFLIGHT_MANIFEST',
+]
 
 PREFLIGHT_MANIFEST = '.tofu-assets.json'
 _REQUIRED_ROLES = ('subject', 'diagram')
@@ -52,7 +58,7 @@ def _usable(scene_dir: str, record: dict) -> bool:
 
 
 def prepare_scene_assets(scene: dict, scene_dir: str, *,
-                         max_assets: int = 2) -> dict:
+                         max_assets: int = 2, max_media: int = 1) -> dict:
     """Resolve required briefs and attach ``scene['resolved_assets']``.
 
     Returns ``{'resolved': [...], 'findings': [...]}``.  One record is
@@ -103,6 +109,53 @@ def prepare_scene_assets(scene: dict, scene_dir: str, *,
             findings.append(
                 f'required {role} asset could not be prepared before '
                 f'authoring: {exc}')
+    media_requests = normalise_media_queries(
+        scene.get('media_queries'), max_items=max(0, max_media))
+    for request in media_requests:
+        query = str(request.get('query') or '')
+        requested_kind = str(request.get('kind') or 'image')
+        semantic_target = str(request.get('semantic_target') or '')
+        hit = next((record for record in cached
+                    if record.get('requested_kind') == requested_kind
+                    and record.get('query') == query
+                    and _usable(scene_dir, record)), None)
+        if hit is not None:
+            record = dict(hit)
+            record['semantic_target'] = semantic_target
+            resolved.append(record)
+            continue
+        try:
+            from lib.production.stock_media import resolve_stock_media
+            result = resolve_stock_media(request)
+            if not result.get('ok'):
+                raise RuntimeError(result.get('reason') or
+                                   'stock provider returned no media')
+            data = result.pop('data', b'')
+            suffix = str(result.pop('suffix', '') or '')
+            from lib.motion_video._assets import scene_asset_dir
+            name = f'stock_{hashlib.sha256(data).hexdigest()[:20]}{suffix}'
+            asset_dir = scene_asset_dir(scene_dir)
+            absolute_path = os.path.join(asset_dir, name)
+            from lib.json_store import write_bytes_atomic
+            if not os.path.isfile(absolute_path):
+                write_bytes_atomic(absolute_path, data)
+            record = {
+                **result,
+                'path': f'assets/{name}',
+                'role': f'stock-{result.get("media_kind") or requested_kind}',
+                'prompt': query,
+                'semantic_target': semantic_target,
+            }
+            record.pop('ok', None)
+            if not _usable(scene_dir, record):
+                raise RuntimeError('stock provider returned an unusable path')
+            resolved.append(record)
+        except Exception as exc:
+            logger.warning('[AssetPreflight] %s stock %s failed: %s',
+                           scene.get('id'), requested_kind, exc)
+            findings.append(
+                f'required {requested_kind} media could not be prepared '
+                f'before authoring: {exc}')
     if resolved:
         # Keep only unique current records.  The manifest is the resume cache,
         # not an append-only history of abandoned prompts.
@@ -115,3 +168,47 @@ def prepare_scene_assets(scene: dict, scene_dir: str, *,
                            scene.get('id'), exc)
     scene['resolved_assets'] = resolved
     return {'resolved': resolved, 'findings': findings}
+
+
+def collect_media_attribution(workdir: str, *, max_records: int = 64) -> dict:
+    """Write the bounded public attribution ledger for stock assets in a film."""
+    scenes_dir = os.path.join(workdir, 'scenes')
+    records: list[dict] = []
+    try:
+        scene_names = sorted(os.listdir(scenes_dir))[:max(0, max_records)]
+    except OSError:
+        scene_names = []
+    for scene_name in scene_names:
+        scene_dir = os.path.join(scenes_dir, scene_name)
+        for record in _load(scene_dir):
+            if not isinstance(record, dict) or not record.get('provider'):
+                continue
+            records.append({
+                'scene_id': scene_name,
+                'provider': str(record.get('provider') or ''),
+                'provider_url': str(record.get('provider_url') or ''),
+                'creator': str(record.get('creator') or ''),
+                'creator_url': str(record.get('creator_url') or ''),
+                'media_url': str(record.get('page_url') or ''),
+                'query': str(record.get('query') or ''),
+                'license_hint': str(record.get('license_hint') or ''),
+            })
+            if len(records) >= max_records:
+                break
+        if len(records) >= max_records:
+            break
+    if not records:
+        return {'records': 0, 'json_path': '', 'text_path': ''}
+    from lib.json_store import write_json_atomic, write_text_atomic
+    json_path = os.path.join(workdir, 'media_attribution.json')
+    text_path = os.path.join(workdir, 'media_attribution.txt')
+    write_json_atomic(json_path, records)
+    lines = ['Media provided by Pexels — https://www.pexels.com']
+    for record in records:
+        creator = record['creator'] or 'Pexels contributor'
+        lines.append(
+            f'{record["scene_id"]}: {creator} — '
+            f'{record["media_url"] or record["provider_url"]}')
+    write_text_atomic(text_path, '\n'.join(lines) + '\n')
+    return {'records': len(records), 'json_path': json_path,
+            'text_path': text_path}

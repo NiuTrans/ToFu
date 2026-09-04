@@ -9,6 +9,7 @@ pure predicates that read them: :func:`insight_gate_fires`,
 import os
 
 from lib.log import get_logger
+from lib.paper.report_artifact_keys import insight_lang_key as insight_lang_key
 
 logger = get_logger(__name__)
 
@@ -32,7 +33,6 @@ _RUBRIC_MAX_TOKENS = 3000
 # Reader-context caps (kept small — this is a hint, not a corpus dump).
 _CTX_LIBRARY_MAX = 8
 _CTX_MEMORY_MAX = 6
-_INSIGHT_LANG_PREFIX = 'insight'
 
 # Headroom gate: the n=9 A/B showed the section-vs-report win is CONDITIONAL —
 # it wins where the report's own insight rubric is LOW (all wins at overall
@@ -80,13 +80,3 @@ def insight_enabled(cfg=None) -> bool:
     if env:
         return env in ('1', 'true', 'yes', 'on')
     return True
-
-
-def insight_lang_key(ui_lang: str) -> str:
-    """Composite ``paper_reports.lang`` key for a persisted insight pass.
-
-    ``insight:<ui_lang>`` — a separate row from the plain ``'en'`` / ``'zh'``
-    report, so persisting an insight NEVER overwrites the fidelity report and
-    the two can be diffed. Mirrors Review Mode's ``review:<venue>:<uilang>``.
-    """
-    return f'{_INSIGHT_LANG_PREFIX}:{ui_lang or "en"}'

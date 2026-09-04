@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 
 import pytest
@@ -116,6 +117,26 @@ def test_leading_emit_failure_keeps_text_for_close_retry():
     assert coalescer.stats['failed_emits'] == 1
     assert coalescer.close() is True
     assert emitted == [('first', '')]
+
+
+def test_close_failure_marks_closed_then_reraises_with_evidence(caplog):
+    def fail_emit(_content, _thinking):
+        raise RuntimeError('durable emit unavailable')
+
+    coalescer = BoundedTextDeltaCoalescer(fail_emit, delay_s=60)
+    with pytest.raises(RuntimeError, match='durable emit unavailable'):
+        coalescer.add(content='retained')
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger='lib.tasks_pkg.manager._delta_coalescer',
+    ):
+        with pytest.raises(RuntimeError, match='durable emit unavailable'):
+            coalescer.close()
+
+    assert 'final flush failed before close: RuntimeError' in caplog.text
+    with pytest.raises(RuntimeError, match='closed'):
+        coalescer.add(content='late')
 
 
 def test_cumulative_projection_is_updated_inside_the_emit_ordering_boundary():

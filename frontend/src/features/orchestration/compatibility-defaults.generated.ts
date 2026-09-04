@@ -52,6 +52,11 @@ const defaults: Record<string, Record<string, unknown>> = {
         "reduce": false,
         "timeline": true
       },
+      "goal_completion_evidence_missing": {
+        "durable": true,
+        "reduce": false,
+        "timeline": false
+      },
       "stuck_detected": {
         "durable": true,
         "reduce": false,

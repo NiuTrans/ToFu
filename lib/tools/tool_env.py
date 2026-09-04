@@ -35,11 +35,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from lib.log import audit_log, get_logger
+from runtime_guards import resolve_resource_budget
 
 logger = get_logger(__name__)
 
 __all__ = [
     'CUSTOM_TOOL_PREFIX',
+    'MAX_CUSTOM_TOOL_CALL_ID_CHARS',
+    'MAX_CUSTOM_TOOL_RESULT_CHARS',
     'ToolLimits',
     'ToolEnvironment',
     'CustomToolError',
@@ -57,6 +60,13 @@ __all__ = [
 # also passes the existing parse_tool_calls name guards (alphanumeric + `_`).
 CUSTOM_TOOL_PREFIX = 'custom__'
 _NAME_RE = re.compile(r'^custom__[A-Za-z0-9_]{1,56}$')
+
+# These are protocol ceilings, not merely UI hints.  A client result waits in
+# process memory until the blocked tool thread consumes it, so accepting an
+# arbitrarily large callback would let one slow task retain an arbitrary body.
+MAX_CUSTOM_TOOL_CALL_ID_CHARS = 128
+MAX_CUSTOM_TOOL_RESULT_CHARS = 200_000
+_MAX_CUSTOM_TOOL_TASK_ID_CHARS = 256
 
 _VALID_MODES = ('client', 'webhook', 'sandbox')
 
@@ -82,7 +92,7 @@ class ToolLimits:
     max_tools: int = 32
     max_total_schema_bytes: int = 256 * 1024
     per_call_timeout_s: float = 120.0
-    max_result_chars: int = 200_000
+    max_result_chars: int = MAX_CUSTOM_TOOL_RESULT_CHARS
 
 
 # ══════════════════════════════════════════════════════════
@@ -103,9 +113,45 @@ class _CustomTool:
 #  Client-handoff result registry (mirrors approval.py / human_guidance.py)
 # ══════════════════════════════════════════════════════════
 
-_client_results: dict[str, dict] = {}
+# A provider/tool call id is only unique inside its owning task.  Keying this
+# process-wide registry by the bare call id lets two concurrent tasks that both
+# use a positional id such as ``call_0`` overwrite each other's wait handle
+# before the owner check in ``resolve_client_tool_result`` can run.
+_client_results: dict[tuple[str, str], dict] = {}
 _client_results_lock = threading.Lock()
 _CLIENT_ABORT_POLL_INTERVAL = 1.0
+
+
+def _client_result_capacity() -> int:
+    """Bound waiters from the same launch-time budget as task admission.
+
+    One admitted task can have at most ``ToolLimits.max_tools`` distinct
+    client calls in a parallel tool round.  The absolute ceiling keeps an
+    aggressively raised task budget from turning 200k-character callbacks
+    into an accidental multi-gigabyte process cache.
+    """
+    active_tasks = resolve_resource_budget(
+        'TOFU_MAX_INFLIGHT_TASKS', minimum=1, maximum=256)
+    return max(32, min(512, active_tasks * ToolLimits().max_tools))
+
+
+_MAX_CLIENT_RESULTS = _client_result_capacity()
+
+
+def _require_handoff_id(value: object, *, field: str, max_chars: int) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f'{field} must be a non-empty string')
+    if len(value) > max_chars:
+        raise ValueError(f'{field} too long (max {max_chars} chars)')
+    return value
+
+
+def _bound_result_text(content: Any, max_chars: int) -> str:
+    text = content if isinstance(content, str) else json.dumps(
+        content, ensure_ascii=False) if content is not None else ''
+    if len(text) > max_chars:
+        return text[:max_chars] + '\n… [custom tool result truncated]'
+    return text
 
 
 def request_client_tool_result(call_id: str, *, task: dict | None = None,
@@ -115,19 +161,55 @@ def request_client_tool_result(call_id: str, *, task: dict | None = None,
     Returns ``(content, is_error)``. On timeout or abort, ``is_error`` is True
     and ``content`` explains why — surfaced to the LLM as the tool result.
     """
-    task_id = str((task or {}).get('id') or '')
+    task_id = _require_handoff_id(
+        str((task or {}).get('id') or ''), field='task id',
+        max_chars=_MAX_CUSTOM_TOOL_TASK_ID_CHARS)
+    call_id = _require_handoff_id(
+        call_id, field='custom tool call id',
+        max_chars=MAX_CUSTOM_TOOL_CALL_ID_CHARS)
     try:
         owner_user_id = int((task or {}).get('_userId') or 0)
     except (TypeError, ValueError):
         owner_user_id = 0
-    if not task_id or owner_user_id < 1:
+    if owner_user_id < 1:
         raise ValueError(
             'Client tool handoff requires an owned task with a stable id')
+    registry_key = (task_id, call_id)
+    tool_env = (task or {}).get('_tool_env')
+    env_handle = str(getattr(tool_env, 'handle_id', '') or '')
     evt = threading.Event()
     with _client_results_lock:
-        _client_results[call_id] = {'event': evt, 'content': None,
-                                    'is_error': False, 'task_id': task_id,
-                                    'user_id': owner_user_id}
+        if registry_key in _client_results:
+            logger.error('[CustomTool] duplicate pending client handoff '
+                         'task=%s call_id=%s', task_id[:8], call_id)
+            return (
+                f'Custom tool call {call_id} is already pending for this task.',
+                True,
+            )
+        if len(_client_results) >= _MAX_CLIENT_RESULTS:
+            logger.warning(
+                '[CustomTool] client handoff capacity exhausted (%d)',
+                _MAX_CLIENT_RESULTS)
+            return (
+                'Custom tool client-handoff capacity is temporarily full; '
+                'retry the tool call later.',
+                True,
+            )
+        _client_results[registry_key] = {
+            'event': evt,
+            'content': None,
+            'is_error': False,
+            'resolved': False,
+            'task_id': task_id,
+            'user_id': owner_user_id,
+            'env_handle': env_handle,
+            'max_result_chars': min(
+                MAX_CUSTOM_TOOL_RESULT_CHARS,
+                max(1, int(getattr(
+                    getattr(tool_env, 'limits', None),
+                    'max_result_chars', MAX_CUSTOM_TOOL_RESULT_CHARS))),
+            ),
+        }
     logger.info('[CustomTool] client handoff %s waiting (timeout=%.0fs)',
                 call_id, timeout)
     deadline = time.time() + max(1.0, timeout)
@@ -135,17 +217,26 @@ def request_client_tool_result(call_id: str, *, task: dict | None = None,
         remaining = deadline - time.time()
         if remaining <= 0:
             with _client_results_lock:
-                _client_results.pop(call_id, None)
+                entry = _client_results.pop(registry_key, {})
+            if entry.get('resolved'):
+                return (entry.get('content') or '',
+                        bool(entry.get('is_error')))
             logger.warning('[CustomTool] client handoff %s timed out', call_id)
             return (f'Custom tool call {call_id} timed out after {timeout:.0f}s '
                     'waiting for the client to return a result.', True)
         if evt.wait(timeout=min(remaining, _CLIENT_ABORT_POLL_INTERVAL)):
             with _client_results_lock:
-                entry = _client_results.pop(call_id, {})
+                entry = _client_results.pop(registry_key, {})
+            if not entry.get('resolved'):
+                return ('Custom tool handoff ended without a terminal result.',
+                        True)
             return (entry.get('content') or '', bool(entry.get('is_error')))
         if task is not None and task.get('aborted'):
             with _client_results_lock:
-                _client_results.pop(call_id, None)
+                entry = _client_results.pop(registry_key, {})
+            if entry.get('resolved'):
+                return (entry.get('content') or '',
+                        bool(entry.get('is_error')))
             logger.info('[CustomTool] client handoff %s — task aborted', call_id)
             return ('Task aborted by user before the client returned a result.',
                     True)
@@ -160,11 +251,23 @@ def resolve_client_tool_result(
     is_error: bool = False,
 ) -> bool:
     """Resolve only a handoff owned by the authenticated task principal."""
+    try:
+        task_id = _require_handoff_id(
+            task_id, field='task id',
+            max_chars=_MAX_CUSTOM_TOOL_TASK_ID_CHARS)
+        call_id = _require_handoff_id(
+            call_id, field='custom tool call id',
+            max_chars=MAX_CUSTOM_TOOL_CALL_ID_CHARS)
+    except ValueError:
+        return False
+    if not isinstance(content, str):
+        raise TypeError('custom tool result content must be a string')
+    registry_key = (task_id, call_id)
     with _client_results_lock:
-        entry = _client_results.get(call_id)
-        if not entry:
-            logger.warning('[CustomTool] resolve for unknown call_id=%s '
-                           '(expired or already resolved)', call_id)
+        entry = _client_results.get(registry_key)
+        if not entry or entry.get('resolved'):
+            logger.warning('[CustomTool] resolve for unknown task=%s call_id=%s '
+                           '(expired or already resolved)', task_id[:8], call_id)
             return False
         if (entry.get('task_id') != task_id
                 or int(entry.get('user_id') or 0) != int(user_id)):
@@ -172,11 +275,16 @@ def resolve_client_tool_result(
                 '[CustomTool] rejected foreign resolve call_id=%s task=%s',
                 call_id, task_id[:8])
             return False
-        entry['content'] = content
+        # Bound before retaining the callback in the process-wide table.  The
+        # downstream dispatch cap remains as defense in depth for webhook and
+        # sandbox backends, which do not pass through this registry.
+        entry['content'] = _bound_result_text(
+            content, int(entry['max_result_chars']))
         entry['is_error'] = is_error
+        entry['resolved'] = True
         entry['event'].set()
     logger.info('[CustomTool] client resolved %s (is_error=%s, len=%d)',
-                call_id, is_error, len(content or ''))
+                call_id, is_error, len(entry['content']))
     return True
 
 
@@ -282,11 +390,7 @@ class ToolEnvironment:
         return tc_id, content, False
 
     def _cap(self, content: Any) -> str:
-        s = content if isinstance(content, str) else json.dumps(
-            content, ensure_ascii=False) if content is not None else ''
-        if len(s) > self.limits.max_result_chars:
-            s = s[:self.limits.max_result_chars] + '\n… [custom tool result truncated]'
-        return s
+        return _bound_result_text(content, self.limits.max_result_chars)
 
     # ── client: zero-trust handoff ──
     def _run_client(self, tool, task, tc_id, fn_args, rn,
@@ -511,10 +615,21 @@ def dispose_tool_env(env: ToolEnvironment | None) -> bool:
             return False
         env.disposed = True
         _envs.pop(env.handle_id, None)
-    # Unblock any in-flight client handoffs so a stuck handler thread exits.
-    for tool in env.tools:
-        if tool.mode == 'client':
-            pass  # handoffs key by call_id, not env; cancellation is per-call
+    # Unblock only this environment's in-flight client handoffs.  The waiter
+    # owns removal so it can still consume the terminal error atomically.
+    with _client_results_lock:
+        pending = [
+            entry for entry in _client_results.values()
+            if entry.get('env_handle') == env.handle_id
+        ]
+        for entry in pending:
+            entry['content'] = (
+                'Custom tool environment was disposed before the client '
+                'returned a result.'
+            )
+            entry['is_error'] = True
+            entry['resolved'] = True
+            entry['event'].set()
     audit_log('custom_tool_env_dispose', handle=env.handle_id, owner=env.owner,
               lifetime_ms=int((time.time() - env.minted_at) * 1000))
     logger.info('[CustomTool] dispose env=%s owner=%s lifetime=%.1fs',

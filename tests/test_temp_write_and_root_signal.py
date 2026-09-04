@@ -142,8 +142,11 @@ class NonTempAutoRegisterSignalTest(_Base):
         roots_before = self._roots_paths()
         target = os.path.join(self._sibling, 'pkg', 'mod.py')
 
+        # allow_outside=True stands in for the explicit user confirmation the
+        # 2026-08-31 gate requires before a write may expand the workspace —
+        # these tests exercise the post-confirmation auto-register semantics.
         res = tool_write_file(self._proj, target, 'x = 1\n',
-                              conv_id='c1', task_id='t1')
+                              conv_id='c1', task_id='t1', allow_outside=True)
 
         self.assertTrue(res['ok'], res)
         self.assertTrue(os.path.isfile(target))
@@ -167,7 +170,8 @@ class NonTempAutoRegisterSignalTest(_Base):
 
     def test_signal_drains_once(self):
         target = os.path.join(self._sibling, 'a.py')
-        tool_write_file(self._proj, target, '1\n', conv_id='c1', task_id='t1')
+        tool_write_file(self._proj, target, '1\n', conv_id='c1', task_id='t1',
+                        allow_outside=True)
         first = drain_root_added_signals()
         self.assertEqual(len(first), 1)
         # Second drain is empty — signals are consume-once.
@@ -196,7 +200,7 @@ class ConvRegistryAutoRegisterTest(_Base):
         target = os.path.join(self._sibling, 'pkg', 'mod.py')
 
         res = tool_write_file(self._proj, target, 'x = 1\n',
-                              conv_id='cX', task_id='t1')
+                              conv_id='cX', task_id='t1', allow_outside=True)
         self.assertTrue(res['ok'], res)
 
         # The new root landed in THIS conv's scoped registry, under the same
@@ -219,7 +223,8 @@ class ConvRegistryAutoRegisterTest(_Base):
         # auto-register only extends the writing conv ('cX'), never a sibling.
         cfg.set_conv_roots('cOther', self._proj)
         target = os.path.join(self._sibling, 'a.py')
-        tool_write_file(self._proj, target, '1\n', conv_id='cX', task_id='t1')
+        tool_write_file(self._proj, target, '1\n', conv_id='cX', task_id='t1',
+                        allow_outside=True)
 
         other = cfg.get_conv_roots('cOther')
         self.assertFalse(
@@ -237,7 +242,7 @@ class ConvRegistryAutoRegisterTest(_Base):
         roots_before = self._roots_paths()
         target = os.path.join(self._sibling, 'ghost.py')
         res = tool_write_file(self._proj, target, '1\n',
-                              conv_id='cGhost', task_id='t1')
+                              conv_id='cGhost', task_id='t1', allow_outside=True)
         self.assertTrue(res['ok'], res)
         self.assertTrue(os.path.isfile(target))
         # The global registry did NOT gain the sibling root.
@@ -288,7 +293,8 @@ class RecentProjectPersistenceTest(_Base):
         # paths. (Corrects the earlier expectation that contradicted the
         # no-global-pollution guarantee its sibling tests enforce.)
         target = os.path.join(self._sibling, 'pkg', 'mod.py')
-        tool_write_file(self._proj, target, 'x = 1\n', conv_id='c1', task_id='t1')
+        tool_write_file(self._proj, target, 'x = 1\n', conv_id='c1', task_id='t1',
+                        allow_outside=True)
         self.assertEqual(
             [], [os.path.abspath(p) for p in self._saved_paths
                  if os.path.abspath(p) == os.path.abspath(self._sibling)],
@@ -312,7 +318,7 @@ class RecentProjectPersistenceTest(_Base):
         # A tool write has no authority to guess whose global navigation
         # history should change. Explicit project API calls own that mutation.
         target = os.path.join(self._sibling, 'pkg', 'mod.py')
-        res = tool_write_file(self._proj, target, 'x = 1\n')
+        res = tool_write_file(self._proj, target, 'x = 1\n', allow_outside=True)
         self.assertTrue(res.get('ok'), res)
         self.assertEqual(self._saved_paths, [])
 

@@ -12,6 +12,8 @@ import pytest
 from lib.observability import InstrumentedThreadPoolExecutor
 from lib.server_loop_runtime import (
     ServingLoopRuntime,
+    _agent_queue_capacity,
+    _agent_stuck_replacements,
     _executor_idle_seconds,
     _worker_count,
 )
@@ -45,6 +47,19 @@ def test_executor_idle_budget_is_bounded_and_zero_disables(monkeypatch):
         {'TOFU_EXECUTOR_IDLE_SECONDS': 'bad'}, logger) == 600
     assert _executor_idle_seconds(
         {'TOFU_EXECUTOR_IDLE_SECONDS': '0'}, logger) == 0
+
+
+def test_agent_queue_and_stuck_replacement_budgets_are_bounded():
+    logger = logging.getLogger('test.server-loop-runtime')
+
+    assert _agent_queue_capacity(4, {}, logger) == 32
+    assert _agent_queue_capacity(
+        4, {'TOFU_AGENT_QUEUE_CAPACITY': '999999'}, logger) == 4096
+    assert _agent_queue_capacity(
+        4, {'TOFU_AGENT_QUEUE_CAPACITY': 'bad'}, logger) == 32
+    assert _agent_stuck_replacements(4, {}, logger) == 1
+    assert _agent_stuck_replacements(
+        4, {'TOFU_AGENT_STUCK_REPLACEMENTS': '99'}, logger) == 4
 
 
 def test_cancelled_queued_job_balances_retirement_accounting():

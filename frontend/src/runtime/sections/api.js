@@ -151,6 +151,64 @@
     return response;
   }
 
+  // Config/settings resolution is a read expressed as POST because its input
+  // is a structured snapshot.  A managed-worker replacement can make the
+  // outer VS Code proxy return a synthetic 500 while the browser still holds
+  // that exact snapshot.  Recover only transport/gateway failures that carry
+  // no backend request id: an application-authored 5xx must remain visible,
+  // and mutation/task POSTs never enter this retry boundary.
+  const _RESOLVER_RECOVERY_STATUSES = new Set([500, 502, 503, 504]);
+  const _RESOLVER_RECOVERY_WINDOW_MS = 75000;
+  const _RESOLVER_RECOVERY_MAX_ATTEMPTS = 20;
+  const _RESOLVER_RECOVERY_ATTEMPT_TIMEOUT_MS = 10000;
+
+  function _resolverRecoveryFailure(error) {
+    const detail = error && typeof error === 'object' ? error : {};
+    const status = Number(detail.status || 0);
+    const code = String(detail.code || '');
+    if (status === 0) return code === 'network' || code === 'timeout';
+    return _RESOLVER_RECOVERY_STATUSES.has(status) && !detail.serverRequestId;
+  }
+
+  function _resolverRecoveryDelayMs(retryIndex) {
+    return Math.min(5000, 250 * Math.pow(2, retryIndex));
+  }
+
+  async function _resolveAcrossWorkerRecovery(operation, label) {
+    const startedAt = Date.now();
+    const deadline = startedAt + _RESOLVER_RECOVERY_WINDOW_MS;
+    let attempt = 0;
+    let lastError = null;
+    while (attempt < _RESOLVER_RECOVERY_MAX_ATTEMPTS) {
+      const remainingMs = deadline - Date.now();
+      if (attempt > 0 && remainingMs <= 0) throw lastError;
+      try {
+        const result = await operation(Math.max(
+          1, Math.min(_RESOLVER_RECOVERY_ATTEMPT_TIMEOUT_MS, remainingMs)));
+        if (attempt > 0) {
+          console.info('[Api] %s recovered after %d retry attempt(s)',
+                       label, attempt);
+        }
+        return result;
+      } catch (error) {
+        lastError = error;
+        attempt += 1;
+        if (!_resolverRecoveryFailure(error)
+            || attempt >= _RESOLVER_RECOVERY_MAX_ATTEMPTS) throw error;
+        const delayMs = Math.min(
+          _resolverRecoveryDelayMs(attempt - 1), deadline - Date.now());
+        if (delayMs <= 0) throw error;
+        if (attempt === 1) {
+          console.warn('[Api] %s interrupted outside the backend; waiting for worker recovery',
+                       label);
+        }
+        const ready = await _waitForIdempotentRetry(delayMs);
+        if (!ready) throw error;
+      }
+    }
+    throw lastError;
+  }
+
   // ── Streaming (SSE / chunked text) ───────────────────────────────
   // Returns the raw Response (parse='response'). Caller pipes
   // resp.body.getReader(). For SSE the chat stream code already does
@@ -170,16 +228,26 @@
   //  URL here — every caller stays the same.
   // ────────────────────────────────────────────────────────────────
 
+  function requiredItemsList(data, path) {
+    if (data && Array.isArray(data.items)) return data.items;
+    if (Array.isArray(data)) return data;  // legacy bare-array compatibility
+    throw new ApiError(`invalid list response from ${path}`, {
+      code: 'parse',
+      url: _resolve(path),
+      body: data,
+    });
+  }
+
   // folders ---------------------------------------------------------
   const folders = {
-    // Coordinated bare-array migration (batch 19): backend wraps {ok,
-    // items}; unwrap with fallback (list-UI || [] semantics).
+    // Empty is valid data; transport/parse failure must stay distinguishable
+    // so the folder owner can preserve its last good projection.
     list:   async ()           => {
-      const d = await get('/api/v1/folders', {
-        onError: 'null', coalesce: true, priority: 'normal'
+      const path = '/api/v1/folders';
+      const data = await get(path, {
+        onError: 'throw', coalesce: true, priority: 'normal'
       });
-      if (d && Array.isArray(d.items)) return d.items;
-      return Array.isArray(d) ? d : [];
+      return requiredItemsList(data, path);
     },
     create: (name, color)      => post('/api/v1/folders', { name, color: color || '' }, { onError: 'null' }),
     update: (id, updates)      => put(`/api/v1/folders/${encodeURIComponent(id)}`, updates, { onError: 'null' }),
@@ -201,13 +269,13 @@
 
   // paper-folders (Reading-mode library folders — same shape as `folders`) ---
   const paperFolders = {
-    // Same bare-array coordination as folders.list above.
+    // Same failure-preserving list contract as folders.list above.
     list:   async ()           => {
-      const d = await get('/api/v1/paper-folders', {
-        onError: 'null', coalesce: true, priority: 'normal'
+      const path = '/api/v1/paper-folders';
+      const data = await get(path, {
+        onError: 'throw', coalesce: true, priority: 'normal'
       });
-      if (d && Array.isArray(d.items)) return d.items;
-      return Array.isArray(d) ? d : [];
+      return requiredItemsList(data, path);
     },
     create: (name, color)      => post('/api/v1/paper-folders', { name, color: color || '' }, { onError: 'null' }),
     update: (id, updates)      => put(`/api/v1/paper-folders/${encodeURIComponent(id)}`, updates, { onError: 'null' }),
@@ -217,8 +285,8 @@
     },
   };
 
-  // Installed immediately after this file by api/orchestrations.js. Keeping
-  // the placeholder stable preserves references captured during boot.
+  // The typed startup client installs methods after this placeholder exists.
+  // Keeping it stable preserves references captured during boot.
   const orchestrations = {};
 
   // memory ----------------------------------------------------------
@@ -334,15 +402,22 @@
   // request rows + attempts; getRequestPayload: full payload for one round
   // (kind='state' serves the post-tool / final / fallback mirrors).
   const tasks = {
-    byConv: (convId) =>
+    byConv: (convId, opts) =>
       get(`/api/v1/tasks/by-conv/${encodeURIComponent(convId)}`,
-          { onError: 'null' }),
+          { query: { ...((opts && opts.limit) ? { limit: opts.limit } : {}),
+                     ...((opts && opts.before) ? { before: opts.before } : {}) },
+            onError: 'null' }),
     getRequests: (taskId) =>
       get(`/api/v1/tasks/${encodeURIComponent(taskId)}/requests`,
           { onError: 'null' }),
     getRequestPayload: (taskId, roundNum, turn, kind) =>
       get(`/api/v1/tasks/${encodeURIComponent(taskId)}/requests/${encodeURIComponent(roundNum)}`,
           { query: { ...(turn ? { turn } : {}), ...(kind ? { kind } : {}) },
+            onError: 'null' }),
+    getRawArchiveChunk: (taskId, archiveId, part, offset) =>
+      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/raw-archives/` +
+          `${encodeURIComponent(archiveId)}/${encodeURIComponent(part)}`,
+          { query: { offset: offset || 0, limit: 256 * 1024 },
             onError: 'null' }),
     // Turn Trace (docs/TURN_TRACE_CONTRACT.md): the server-folded timing
     // span tree for one task — the drawer NEVER derives timing itself.
@@ -392,6 +467,20 @@
     list: (limit) =>
       get('/api/v1/research/list',
           { query: { limit: limit || 50 }, onError: 'null' }),
+
+    workspace: (direction, lang) =>
+      get('/api/v1/research/workspace',
+          { query: { direction: direction || '', lang: lang || 'en' } }),
+    saveWorkspace: (payload) =>
+      put('/api/v1/research/workspace', payload),
+    capabilities: () =>
+      get('/api/v1/research/capabilities'),
+    scaffoldManuscript: (payload) =>
+      post('/api/v1/research/manuscript/scaffold', payload),
+    sourceArchiveUrl: (direction, lang) =>
+      '/api/v1/research/manuscript/source.zip?direction=' +
+        encodeURIComponent(direction || '') + '&lang=' +
+        encodeURIComponent(lang || 'en'),
   };
 
   // optimizer -------------------------------------------------------
@@ -485,6 +574,10 @@
       _idempotentResponseWrite(
         `/api/v1/conversations/${encodeURIComponent(convId)}/settings`,
         { method: 'PATCH', json: patch }),
+    patchResolvedSettings: (convId, inputs) =>
+      _idempotentResponseWrite(
+        `/api/v1/conversations/${encodeURIComponent(convId)}/settings/resolve`,
+        { method: 'PATCH', json: inputs }),
     // Server-side folder-scoped metadata page.
     listByFolder: (folderId, opts) =>
       get('/api/v1/conversations',
@@ -542,20 +635,24 @@
     // file-change presentation cache in one round-trip.
     extractFileChangesBatch: (items) =>
       post('/api/v1/messages/extract-file-changes/batch', { items }, { onError: 'null' }),
-    // Server-authoritative per-usage cost. Returns parsed { ...cost } / { no_charge }
-    // or null on error. See lib/cost.py + lib/pricing.py.
-    cost: (usage, model, providerId) =>
-      post('/api/v1/messages/cost',
-           { usage, model, provider_id: providerId || null }, { onError: 'null' }),
-    // Batch cost over an array of { usage, model, provider_id } items; the
-    // response `costs` array aligns by index. Returns parsed body or null.
+    // Server-authoritative cost over a bounded array of
+    // { usage, model, provider_id } items. Synchronous render misses are
+    // micro-batched by core/cost.js; the response aligns by index.
     costBatch: (items) =>
       post('/api/v1/messages/cost/batch', { items }, { onError: 'null' }),
     // Server-authoritative config/settings resolution. JS ships only the
     // inputs; the server merges (lib/conv_config.py) and returns the canonical
     // dict. Both throw ApiError on non-OK so the caller keeps its error text.
-    resolveConfig:   (payload) => post('/api/v1/conversations/config/resolve', payload),
-    resolveSettings: (payload) => post('/api/v1/conversations/settings/resolve', payload),
+    /* Bounded: the composer send pipeline awaits config/settings resolution
+     * before submitting a turn; the transport only enforces a declared
+     * timeout, so an unbounded stalled POST latched the composer send lock
+     * until the page was reloaded. */
+    resolveConfig: (payload) => _resolveAcrossWorkerRecovery(
+      (timeout) => post('/api/v1/conversations/config/resolve', payload, { timeout }),
+      'conversation config resolution'),
+    resolveSettings: (payload) => _resolveAcrossWorkerRecovery(
+      (timeout) => post('/api/v1/conversations/settings/resolve', payload, { timeout }),
+      'conversation settings resolution'),
     // Sidebar metadata list (no message bodies). Returns the raw Response so
     // the caller can inspect 304 / 503 + Retry-After and pass If-None-Match /
     // an AbortSignal. opts: { prefetch, window, headers, signal }.
@@ -628,7 +725,7 @@
   const chat = {
     // Abort + queue management — fire-and-forget, swallow errors.
     abortTask:    (taskId)      => post(`/api/v1/chat/abort/${encodeURIComponent(taskId)}`, undefined, { onError: 'null', parse: 'none', taskId }),
-    abortConv:    (convId)      => post(`/api/v1/chat/abort-conv/${encodeURIComponent(convId)}`, undefined, { onError: 'null', parse: 'none', convId }),
+    abortConv:    (convId)      => post(`/api/v1/chat/abort-conv/${encodeURIComponent(convId)}`, undefined, { onError: 'null', parse: 'none', convId, timeout: 15000 }),
     // Per-command interrupt (): kill ONLY the task's running
     // run_command subprocess — the turn CONTINUES with the partial output fed
     // back to the model. NOT fire-and-forget: the caller needs the verdict
@@ -645,18 +742,18 @@
                                        { parse: 'response', onError: 'null', convId }),
     queueClear:   (convId)      => del(`/api/v1/chat/queue/${encodeURIComponent(convId)}`,
                                        { parse: 'response', onError: 'null', convId }),
-    // Arm autopilot mid-stream — "take over from here" while a reply is
-    // streaming. Persists autopilotEnabled + flips the live task's config
-    // so the virtual user takes over at the next natural stop.
+    // Arm Goal Mode mid-stream. The backend queues one explicit, durable
+    // continuation behind the accepted turn; it never changes that turn's
+    // already-selected interpreter.
     armAutopilot: (convId)      => post('/api/v1/chat/autopilot/arm', { convId },
                                         { onError: 'null', convId }),
-    // Disarm autopilot — clears the persistent armed-marker + flips live
-    // config off. Backs the queue-bar cancel button and toggle-OFF gesture.
+    // Disarm Goal Mode — cancels live GoalRuns and any queued Goal
+    // continuation, plus legacy compatibility state.
     disarmAutopilot: (convId)   => post('/api/v1/chat/autopilot/disarm', { convId },
                                         { onError: 'null', convId }),
-    // Kick autopilot on a FINISHED conversation — "push it forward". Spawns a
-    // carrier task that runs the virtual-user hook directly (no worker turn).
-    // Returns {taskId} or throws ApiError (409 when a task is already running).
+    // Continue Goal Mode on a FINISHED conversation. Creates a turn-native
+    // command and launches the same GoalRun + Flow path as an ordinary send.
+    // Returns {taskId} or throws ApiError (409 when continuation is unavailable).
     kickAutopilot: (convId, config) => request(
       '/api/v1/chat/autopilot/kick', Object.assign(
         { method: 'POST', json: { convId, config }, parse: 'json', timeout: 0 },
@@ -715,7 +812,11 @@
     // show the informed force-confirm dialog. Swallowing it to null would make
     // the button silently no-op (the historical bug: a fixed empty {} body
     // dropped the caller's {force:true} → always force=false → always 409).
-    restart: (payload) => post('/api/v1/update/restart', payload || {}, { onError: 'throw' }),
+    restart: (payload, opts) => post(
+      '/api/v1/update/restart',
+      payload || {},
+      Object.assign({ onError: 'throw' }, opts || {}),
+    ),
     // shutdown: POST — graceful manual stop (writes the manual-shutdown
     // marker so the next boot won't mistake it for an OS kill). No re-exec.
     // Takes {approvalId} once a human approved the pending request.
@@ -796,7 +897,8 @@
       request('/api/health',
               Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
     // Parsed JSON variant — used by the Settings panel to show the version.
-    info: () => get('/api/health', { onError: 'null' }),
+    info: (opts) => get(
+      '/api/health', Object.assign({ onError: 'null' }, opts || {})),
   };
 
   // pricing ---------------------------------------------------------
@@ -847,44 +949,51 @@
               { method: 'POST', json: patch, parse: 'response' }),
   };
 
-  // providers (config-side: probes + templates + balance) -----------
+  // providers (one-shot discovery; persistence belongs to modelRouting) ----
   const providers = {
-    // Coordinated bare-array migration (batch 10): the backend now wraps
-    // as {ok, items}; unwrap with an Array.isArray fallback for skew.
-    templates:        async ()                          => {
-      const d = await get('/api/v1/providers/templates', { onError: 'null' });
-      if (d && Array.isArray(d.items)) return d.items;
-      return Array.isArray(d) ? d : [];
+    templates: async () => {
+      const data = await get('/api/v1/providers/templates', { onError: 'null' });
+      if (data && Array.isArray(data.items)) return data.items;
+      return Array.isArray(data) ? data : [];
     },
+    compileTemplate: (templateKey, selectedModelIds) =>
+      post('/api/v1/providers/templates/compile', {
+        template_key: templateKey,
+        selected_model_ids: selectedModelIds,
+      }),
     probe:            (baseUrl, apiKey, modelsPath)     =>
       post('/api/v1/providers/probe',
            { base_url: baseUrl, api_key: apiKey, models_path: modelsPath },
            { onError: 'null' }),
-    probeBulk:        (baseUrls, apiKey)                =>
-      post('/api/v1/providers/probe-bulk',
-           { base_urls: baseUrls, api_key: apiKey },
-           { onError: 'null' }),
-    probeCellsStart:  (body)                            =>
-      post('/api/v1/providers/probe-cells/start', body, { onError: 'null' }),
-    /* Which wire face does each model of THIS (possibly unsaved) provider
-     * dispatch over? Answered by the backend's resolve_face — the same
-     * resolver the dispatcher uses — so the Settings pills can never
-     * disagree with routing. Never re-implement the family rule here. */
-    resolveFaces:     (provider)                        =>
-      post('/api/v1/providers/resolve-faces', { provider },
-           { onError: 'null' }),
-    probeCellsStatus: (providerId)                      =>
-      get('/api/v1/providers/probe-cells/status?provider_id=' + encodeURIComponent(providerId),
-          { onError: 'null' }),
-    balance:          (body)                            =>
-      post('/api/v1/providers/balance', body, { onError: 'null' }),
-    discoverModels:   (baseUrl, apiKey, modelsPath)     =>
-      post('/api/v1/providers/discover-models',
-           { base_url: baseUrl, api_key: apiKey, models_path: modelsPath },
-           { onError: 'null' }),
-    updateTemplate:   (key, models)                     =>
-      request('/api/v1/providers/templates/update',
-              { method: 'PUT', json: { key, models }, parse: 'response', onError: 'null' }),
+  };
+
+  // Canonical owner-scoped model/provider access authority. Credential
+  // plaintext is written only through the dedicated secret operation.
+  const modelRouting = {
+    get: () => get('/api/v1/model-routing'),
+    replace: (modelRoutingDocument, expectedRevision) => put(
+      '/api/v1/model-routing', {
+        model_routing: modelRoutingDocument,
+        expected_revision: expectedRevision,
+      }),
+    providers: () => get('/api/v1/providers'),
+    createProvider: (bundle, expectedRevision) => post(
+      '/api/v1/providers',
+      Object.assign({}, bundle || {}, { expected_revision: expectedRevision })),
+    provider: (providerId) => get(
+      `/api/v1/providers/${encodeURIComponent(providerId)}`),
+    saveProvider: (providerId, bundle, expectedRevision) => patch(
+      `/api/v1/providers/${encodeURIComponent(providerId)}`,
+      Object.assign({}, bundle || {}, { expected_revision: expectedRevision })),
+    deleteProvider: (providerId, expectedRevision) => request(
+      `/api/v1/providers/${encodeURIComponent(providerId)}`, {
+        method: 'DELETE', json: { expected_revision: expectedRevision },
+      }),
+    putCredentialSecret: (credentialId, secret, expectedRevision) => put(
+      `/api/v1/model-routing/credentials/${encodeURIComponent(credentialId)}/secret`, {
+        secret,
+        expected_revision: expectedRevision,
+      }),
   };
 
   // dispatch (model routing — observability + per-key overrides) ----
@@ -936,15 +1045,9 @@
     catalogList:      ()                           =>
       request('/api/v1/mcp/catalog',
               { method: 'GET', parse: 'response', onError: 'null' }),
-    // Lightweight introspection: flat list of every connected MCP tool
-    // ({tools, total, servers_connected}). Used by the per-turn context
-    // capsule (info-rail.js) to surface active MCP tools without paying the
-    // heavier catalog fetch.
-    toolsList:        ()                           =>
-      request('/api/v1/mcp/tools',
-              { method: 'GET', parse: 'response', onError: 'null' }),
     // Per-server tool list (with per-tool `enabled` flags) — backs the
-    // Settings → MCP card's per-tool toggle list.
+    // demand-opened Settings → MCP toggle list. First-screen context counts
+    // piggyback on server-config and never fetch these full schema rows.
     toolsListForServer: (server)                   =>
       request('/api/v1/mcp/tools',
               { method: 'GET', query: { server }, parse: 'response', onError: 'null' }),
@@ -1088,16 +1191,53 @@
   // rescan / undo, browse the filesystem, apply code edits, approve writes.
   // Backend mostly returns {ok, ...} JSON; mutations return Response so
   // callers can read .ok and parse error envelopes.
+  const _PROJECT_PATH_SINGLEFLIGHT_CAPACITY = 16;
+  const _PROJECT_PATH_SINGLEFLIGHT_KEY_CHARS = 16 * 1024;
+  const _PROJECT_RECENT_PATH_BATCH_LIMIT = 32;
+  const _projectPathInflight = new Map();
+
+  function _cloneProjectPathResponse(response) {
+    return response && typeof response.clone === 'function'
+      ? response.clone() : response;
+  }
+
+  function _setProjectPaths(folders, readOnlyPaths, recentPaths) {
+    const body = { paths: folders, readOnlyPaths: readOnlyPaths || [] };
+    if (Array.isArray(recentPaths) && recentPaths.length) {
+      // Keep project selection authoritative even beyond the reconstructible
+      // recent-history batch cap. The primary path is always index zero.
+      body.recentPaths = recentPaths.slice(0, _PROJECT_RECENT_PATH_BATCH_LIMIT);
+    }
+    const key = JSON.stringify([
+      body.paths, body.readOnlyPaths, body.recentPaths || [],
+    ]);
+    if (key.length <= _PROJECT_PATH_SINGLEFLIGHT_KEY_CHARS) {
+      const existing = _projectPathInflight.get(key);
+      if (existing) return existing.then(_cloneProjectPathResponse);
+    }
+    const pending = request('/api/v1/project/paths', {
+      method: 'PUT', json: body, parse: 'response',
+    });
+    if (key.length <= _PROJECT_PATH_SINGLEFLIGHT_KEY_CHARS
+        && _projectPathInflight.size < _PROJECT_PATH_SINGLEFLIGHT_CAPACITY) {
+      _projectPathInflight.set(key, pending);
+      const clear = () => {
+        if (_projectPathInflight.get(key) === pending) {
+          _projectPathInflight.delete(key);
+        }
+      };
+      pending.then(clear, clear);
+    }
+    return pending.then(_cloneProjectPathResponse);
+  }
+
   const project = {
     status:        (convId)   => get('/api/v1/project/status'
                                      + (convId ? ('?conv_id=' + encodeURIComponent(convId)) : ''),
                                      { onError: 'null', coalesce: true,
                                        priority: 'foreground' }),
-    setPaths:      (folders, readOnlyPaths)  =>
-      request('/api/v1/project/paths',
-              { method: 'PUT',
-                json: { paths: folders, readOnlyPaths: readOnlyPaths || [] },
-                parse: 'response' }),
+    setPaths:      (folders, readOnlyPaths, recentPaths) =>
+      _setProjectPaths(folders, readOnlyPaths, recentPaths),
     setPath:       (path)     =>
       request('/api/v1/project/set',
               { method: 'POST', json: { path }, parse: 'response' }),
@@ -1107,12 +1247,15 @@
     recentList:    ()         => get('/api/v1/project/recent', {
       onError: 'null', coalesce: true, priority: 'foreground'
     }),
-    recentSave:    (path)     =>
-      request('/api/v1/project/recent',
-              { method: 'POST', json: { path }, parse: 'response', onError: 'null' }),
     recentClear:   ()         =>
       _idempotentResponseWrite('/api/v1/project/recent',
                                { method: 'DELETE' }),
+    // Advisory probe: nearest enclosing .git root for a staged folder.
+    gitRootHint:   (path)   =>
+      post('/api/v1/project/git-root-hint', { path }, { onError: 'null' }),
+    // Re-key a renamed/moved project (recent + charter + board) to its new path.
+    relinkRecent:  (oldPath, newPath) =>
+      post('/api/v1/project/recent/relink', { oldPath, newPath }, { onError: 'null' }),
     rescan:        ()         =>
       request('/api/v1/project/rescan',
               { method: 'POST', parse: 'response' }),
@@ -1155,98 +1298,39 @@
     feed:          (path, sinceSeq) =>
       get('/api/v1/project/feed',
           { query: { path, since: sinceSeq || 0 }, onError: 'null' }),
-    // Project-brain Charter (north star). read-only get + human-gated commit.
+    // Charter and Board are read-only projections. Charter mutations only
+    // happen through checker-backed human decision promotion below.
     charter:       (path) =>
       get('/api/v1/project/charter', { query: { path }, onError: 'null' }),
-    commitCharter: (path, body) =>
-      post('/api/v1/project/charter/commit', Object.assign({ path }, body || {})),
-    // Unresolved proposals (single source for "awaiting you") + durable reject.
-    charterPending: (path) =>
-      get('/api/v1/project/charter/pending', { query: { path }, onError: 'null' }),
-    dismissProposal: (path, proposalId, body) =>
-      post('/api/v1/project/charter/dismiss',
-           Object.assign({ path, proposalId }, body || {})),
-    // Human-gated edit / delete of a committed decision (by list index) and
-    // deletion of the whole charter. All optimistic-locked (expected_version).
-    // NOTE on updateDecision: `summary` is the ONE line the per-turn injection
-    // renders (the body is read back on demand). Pass it in `body` whenever the
-    // entry has one — OMITTING it is refused with `summary_required`, because a
-    // silent keep would leave every sibling conversation reading the OLD rule
-    // while the panel showed the edit as saved. Send `summary: ''` to drop it
-    // deliberately and let the headline fall back to the fresh text.
-    updateDecision: (path, index, text, body) =>
-      post('/api/v1/project/charter/decision/update',
-           Object.assign({ path, index, text }, body || {})),
-    deleteDecision: (path, index, body) =>
-      post('/api/v1/project/charter/decision/delete',
-           Object.assign({ path, index }, body || {})),
-    deleteCharter: (path, body) =>
-      post('/api/v1/project/charter/delete', Object.assign({ path }, body || {})),
-    // Project-brain Board (coordination kanban). read-only.
     board:         (path) =>
       get('/api/v1/project/board', { query: { path }, onError: 'null' }),
-    // Board HUMAN mutations. All key strictly on the explicit `path`; `convId`
-    // is the displayed conversation acting as the human's proxy. `post` needs
-    // it (becomes created_by_conv → dispatch target); complete/block/reopen
-    // tolerate an empty convId (lifecycle actions on an existing epic, no
-    // dispatch target — feed event + audit record a blank actor honestly).
-    /** @param {string} path
-     *  @param {{title?: string, convId?: string, dependsOn?: string[]}} [opts] */
-    boardPost:     (path, { title, convId, dependsOn } = {}) =>
-      post('/api/v1/project/board/post',
-           { path, title, convId, depends_on: dependsOn || [] }),
-    boardComplete: (path, taskId, convId) =>
-      post('/api/v1/project/board/complete', { path, taskId, convId: convId || '' }),
-    boardBlock:    (path, taskId, convId, reason) =>
-      post('/api/v1/project/board/block',
-           { path, taskId, convId: convId || '', reason: reason || '' }),
-    boardReopen:   (path, taskId, convId) =>
-      post('/api/v1/project/board/reopen', { path, taskId, convId: convId || '' }),
-    boardDelete:   (path, taskId, convId) =>
-      post('/api/v1/project/board/delete', { path, taskId, convId: convId || '' }),
-    // HUMAN answer to a pending block question — closes the structured gate
-    // (stamps human_answer, clears the cooldown, immediate re-dispatch whose
-    // kickoff carries the answer).
-    boardAnswer:   (path, taskId, convId, answer) =>
-      post('/api/v1/project/board/answer',
-           { path, taskId, convId: convId || '', answer: answer || '' }),
-    // Collaboration-bar one-shot summary (board + decisions + peer→epic join).
-    // convId (optional) is excluded from activePeers/peerEpics so the count is
-    // "OTHER conversations online" — matching the local push-mirror semantics.
-    brainSummary:  (path, convId) =>
+    brainSummary:  (path) =>
       get('/api/v1/project/brain/summary',
-          { query: { path, convId: convId || '' }, onError: 'null' }),
-    // The "needs you" SSOT — everything genuinely waiting on the human,
-    // priority-ordered server-side (blocking first). One payload backs both
-    // the Needs-you tab and the collab bar's count, so they cannot drift.
-    // convId is optional and only marks `mine`; it never filters.
-    brainAttention: (path, convId) =>
+          { query: { path }, onError: 'null' }),
+    brainAttention: (path) =>
       get('/api/v1/project/brain/attention',
-          { query: { path, convId: convId || '' }, onError: 'null' }),
-    // LIVE peer/team roster (presence ⋈ task ⋈ claimed-epic). convId optional
-    // — when present it's excluded so a conv never lists itself as a peer.
-    brainPeers:    (path, convId) =>
-      get('/api/v1/project/brain/peers',
-          { query: { path, convId: convId || '' }, onError: 'null' }),
+          { query: { path }, onError: 'null' }),
+    brainAttentionAdd: (path, text) =>
+      post('/api/v1/project/brain/attention/add', { path, text }),
     // Token-free Git integration control plane. These endpoints never ask an
     // agent to inspect or repair changes: immutable checkpoints are merged by
     // Git, and conflicts/gate failures are surfaced as quarantine records.
     integrationStatus: (path) =>
       get('/api/v1/project/integration/status',
           { query: { path }, onError: 'null' }),
-    integrationCreate: (path, taskId, title) =>
-      post('/api/v1/project/integration/create', { path, taskId, title: title || '' }),
-    integrationRegister: (path, taskId, workspacePath, title) =>
+    integrationCreate: (path, workId, title) =>
+      post('/api/v1/project/integration/create', { path, workId, title: title || '' }),
+    integrationRegister: (path, workId, workspacePath, title) =>
       post('/api/v1/project/integration/register',
-           { path, taskId, workspacePath, title: title || '' }),
-    integrationCheckpoint: (path, taskId) =>
-      post('/api/v1/project/integration/checkpoint', { path, taskId }),
-    integrationSubmit: (path, taskId) =>
-      post('/api/v1/project/integration/submit', { path, taskId }),
-    integrationRetry: (path, taskId) =>
-      post('/api/v1/project/integration/retry', { path, taskId }),
-    integrationDiscard: (path, taskId) =>
-      post('/api/v1/project/integration/discard', { path, taskId }),
+           { path, workId, workspacePath, title: title || '' }),
+    integrationCheckpoint: (path, workId) =>
+      post('/api/v1/project/integration/checkpoint', { path, workId }),
+    integrationSubmit: (path, workId) =>
+      post('/api/v1/project/integration/submit', { path, workId }),
+    integrationRetry: (path, workId) =>
+      post('/api/v1/project/integration/retry', { path, workId }),
+    integrationDiscard: (path, workId) =>
+      post('/api/v1/project/integration/discard', { path, workId }),
     integrationPromote: (path, acknowledgeHeadDivergence) =>
       post('/api/v1/project/integration/promote', {
         path, acknowledgeHeadDivergence: !!acknowledgeHeadDivergence,
@@ -1255,73 +1339,36 @@
       post('/api/v1/project/integration/reconcile-head', { path }),
     integrationPrune: (path) =>
       post('/api/v1/project/integration/prune', { path }),
-    // Pillar #7 human↔brain status lane. Latest synthesized status snapshot
-    // (fresh-on-open via the staleness gate) + the append-only history trail.
-    // opts: { force } — force=true warms a fresh snapshot in the background
-    // (refresh=1). The response returns the cached snapshot instantly + a
-    // `refreshing` flag; it never blocks on the LLM synthesis.
-    brainStatus:   (path, opts) =>
-      get('/api/v1/project/brain/status',
-          { query: { path, refresh: (opts && opts.force) ? '1' : '' },
-            onError: 'null' }),
-    brainStatusHistory: (path, limit) =>
-      get('/api/v1/project/brain/status/history',
-          { query: { path, limit: limit || '' }, onError: 'null' }),
-    // Read-only synthesis Q&A about the project status. Writes NOTHING.
-    // Throws ApiError on refusal so the composer can surface the error.
-    brainStatusAsk: (path, question) =>
-      post('/api/v1/project/brain/status/ask', { path, question }),
-    // Pillar #7 WATCH lane — the human's standing "things I care about" list.
-    // brainWatchList(refresh) re-addresses open items on read (fresh-on-open).
-    brainWatchList: (path, refresh) =>
-      get('/api/v1/project/brain/watch',
-          { query: { path, refresh: refresh ? '1' : '' }, onError: 'null' }),
-    brainWatchAdd: (path, kind, text, convId) =>
-      post('/api/v1/project/brain/watch/add', { path, kind, text, convId: convId || '' }),
-    brainWatchUpdate: (itemId, action, extra) =>
+    brainStatus:   (path) =>
+      get('/api/v1/project/brain/status', { query: { path }, onError: 'null' }),
+    brainWatchList: (path) =>
+      get('/api/v1/project/brain/watch', { query: { path }, onError: 'null' }),
+    brainWatchAdd: (path, kind, text, conversationId) =>
+      post('/api/v1/project/brain/watch/add', {
+        path, kind, text, conversationId: conversationId || '',
+      }),
+    brainWatchUpdate: (path, itemId, patch) =>
       post('/api/v1/project/brain/watch/update',
-           Object.assign({ itemId, action }, extra || {})),
-    brainWatchAddress: (itemId) =>
-      post('/api/v1/project/brain/watch/address', { itemId }),
-    // Promote a watch item into the charter — the ONLY bridge to sibling
-    // agents (human-gated charter commit). Throws ApiError on version skew.
-    brainWatchPromote: (itemId, convId, expectedVersion) =>
-      post('/api/v1/project/brain/watch/promote',
-           { itemId, convId: convId || '', expectedVersion: expectedVersion }),
-    // Follow-up Q&A anchored to ONE trail response (human↔brain lane; the
-    // answer appends to the same trail with trigger='follow_up').
-    brainWatchFollowUp: (itemId, question, seq) =>
-      post('/api/v1/project/brain/watch/follow_up',
-           { itemId, question, seq: seq || 0 }),
-    // Per-conversation brain INFLUENCE — how THIS conv is affected by the
-    // brain (charter bound by, epics owned vs avoided, decisions awaiting).
-    brainInfluence: (path, convId) =>
-      get('/api/v1/project/brain/influence',
-          { query: { path, convId }, onError: 'null' }),
-    // HUMAN nudge to a sibling conversation — the operator (acting via the
-    // displayed conv `convId`) sends advisory `text` to `toConvId`. Reuses
-    // send_peer_message server-side (same rate limit + self-send guard).
-    // Throws ApiError on refusal so the composer can surface rate_limited.
-    brainPeerMessage: (path, convId, toConvId, text) =>
-      post('/api/v1/project/brain/peer-message',
-           { path, convId: convId || '', toConvId, text }),
-    // HUMAN hard-abort of a sibling conversation's running task(s). The
-    // operator (acting via `convId`) stops `toConvId` — the authenticated
-    // operator IS the approval (confirmed client-side), passed server-side as
-    // approved_by and honored by the same audit gate. Aborts the TASK only.
-    // Throws ApiError on refusal so the caller can surface the reason.
-    brainPeerAbort: (path, convId, toConvId) =>
-      post('/api/v1/project/brain/peer-abort',
-           { path, convId: convId || '', toConvId }),
+           Object.assign({ path, itemId }, patch || {})),
+    brainWatchDelete: (path, itemId) =>
+      post('/api/v1/project/brain/watch/delete', { path, itemId }),
+    brainCheckers: (path) =>
+      get('/api/v1/project/brain/checkers', { query: { path }, onError: 'null' }),
+    brainCheckerRegister: (path, definition) =>
+      post('/api/v1/project/brain/checkers/register', { path, definition }),
+    brainCheckerRun: (path, checkerId, version, workId) =>
+      post('/api/v1/project/brain/checkers/run', {
+        path, checkerId, version, workId: workId || '',
+      }),
+    promoteDecision: (path, decision) =>
+      post('/api/v1/project/charter/decision/promote',
+           Object.assign({ path }, decision || {})),
   };
 
-  // paper-reader (library + report + translate + QA) ---------------
-  // Library is row-keyed by paper id; upsert sends a partial body. The
-  // report and translate flows use task-based polling — we hand back
-  // raw responses for the streaming paths and parsed JSON for the
-  // simpler ones.
+  // paper-reader: light shelf summaries, on-demand detail, task streams.
   const paper = {
-    libraryList:    ()                    => get('/api/v1/paper/library', { onError: 'null' }),
+    libraryList:    ()                    => get('/api/v1/paper/library/summaries', { onError: 'null' }),
+    libraryGet:     (id)                  => get(`/api/v1/paper/library/${encodeURIComponent(id)}`, { onError: 'null' }),
     libraryUpsert:  (id, body)            => put(`/api/v1/paper/library/${encodeURIComponent(id)}`, body, { onError: 'null' }),
     libraryDelete:  (id)                  => del(`/api/v1/paper/library/${encodeURIComponent(id)}`, { parse: 'response', onError: 'null' }),
     // Upload + fetch-arxiv-stream stay on /api/paper/* (multipart / SSE
@@ -1375,6 +1422,11 @@
               { method: 'GET', query: { task_id: taskId, cursor }, parse: 'response', onError: 'null' }),
     reportLookup:   (paperHash, lang, opts) =>
       post('/api/v1/paper/report/lookup', { paper_hash: paperHash, lang }, Object.assign({ onError: 'null' }, opts || {})),
+    reportResolve:  (paperHash, lang, paperText, opts) =>
+      post('/api/v1/paper/report/lookup', Object.assign(
+        { lang, include_cache: true },
+        paperHash ? { paper_hash: paperHash } : { paper_text: paperText || '' }
+      ), Object.assign({ onError: 'null' }, opts || {})),
     reportCache:    (cacheBody)           => post('/api/v1/paper/report/cache', cacheBody, { onError: 'null' }),
     reportAbort:    (taskId)              => post(`/api/v1/paper/report/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
     // Deepen (on-demand section depth, reading-xp P3). Start has no client
@@ -1547,17 +1599,34 @@
   // parse:    sync extract → returns full JSON body (contract has data.success/error)
   // vlmStart: kick off async VLM parse, returns {taskId}
   // vlmPoll:  poll a single VLM task — full body (status / progress / result)
+  // vlmCancel: cooperatively stop one owned queued/running task
   // vlmTasks: lookup VLM tasks by filename
   const pdf = {
     parse:     (formData)            => request('/api/pdf/parse', { method: 'POST', body: formData, timeout: 0 }),
     vlmStart:  (formData)            => request('/api/pdf/vlm-parse', { method: 'POST', body: formData, timeout: 0 }),
     vlmPoll:   (taskId)              => get(`/api/v1/pdf/vlm-parse/${encodeURIComponent(taskId)}`, { onError: 'null' }),
+    vlmCancel: (taskId)              => request(`/api/v1/pdf/vlm-parse/${encodeURIComponent(taskId)}`, { method: 'DELETE' }),
     vlmTasks:  (filename)            => get('/api/v1/pdf/vlm-tasks', { query: { filename }, onError: 'null' }),
   };
 
   // docs (Office / plain text) -------------------------------------
   const doc = {
     parse: (formData) => request('/api/doc/parse', { method: 'POST', body: formData, timeout: 0 }),
+  };
+
+  // unified durable chat attachments --------------------------------
+  const media = {
+    upload: (formData) => request('/api/v1/media/attachments', {
+      method: 'POST', body: formData, timeout: 0,
+    }),
+    get: (attachmentId) => get(
+      `/api/v1/media/attachments/${encodeURIComponent(attachmentId)}`,
+      { onError: 'null' },
+    ),
+    remove: (attachmentId) => del(
+      `/api/v1/media/attachments/${encodeURIComponent(attachmentId)}`,
+      { query: { draft: 1 }, onError: 'null' },
+    ),
   };
 
   // audio (speech-to-text / voice input) ---------------------------
@@ -1627,14 +1696,19 @@
     pageRequestId,    // the correlation prefix every request of this page shares
     // domains
     folders, paperFolders, orchestrations, memory, skills, profile, userContext, timer, scheduler, optimizer, compactions,
-    conversations, text, translate, chat, images, pdf, doc, audio, videos, artifacts,
+    conversations, text, translate, chat, images, pdf, doc, media, audio, videos, artifacts,
     health, pricing, clientError, serverConfig, costExperiments, network, browser, project, daily, paper,
     desktop,
-    features, providers, dispatch, oauth, mcp, update, trading, authSources,
+    features, providers, modelRouting, dispatch, oauth, mcp, update, trading, authSources,
     privateHosts, credentials,
     swarm, logs, motion, tasks, users, research, tools, knowledge,
   };
 
   global.Api = Api;
   Api.ApiError = _transportOwner.ApiError;
-})(typeof window !== 'undefined' ? window : this);
+})(runtimeScope);
+
+/* Retained sections still call the endpoint facade by its historic `Api`
+ * name. Bind that name once inside this ESM composition root instead of
+ * relying on a browser-global property or duplicating transport ownership. */
+const Api = runtimeScope.Api;

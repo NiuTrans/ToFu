@@ -175,11 +175,22 @@ def create_task(
         '_attemptId': (config or {}).get('_attemptId') or '',
         '_turnActor': (config or {}).get('_turnActor') or 'assistant',
         '_turnKind': (config or {}).get('_turnKind') or 'reply',
-        # Override TaskRuntime defaults with chat-specific shape:
-        'status': 'running',          # chat tasks start running, not pending
+        # Keep TaskRuntime's lifecycle truth: registration/binding is pending;
+        # the physical agent worker owns the transition to running.
+        'status': 'pending',
         'content': '', 'thinking': '', 'error': None,
         'aborted': False, 'toolRounds': [],
         'content_lock': threading.Lock(),
+
+        # MCP image originals are persisted immediately; only bounded refs are
+        # retained here and projected with the authoritative assistant Turn.
+        '_mcpImages': list((config or {}).get('checkpointImages') or []),
+        '_mcpImageBytes': sum(
+            max(0, int(float(item.get('sizeKB') or 0) * 1024))
+            for item in ((config or {}).get('checkpointImages') or [])
+            if isinstance(item, dict)
+        ),
+        '_mcpMediaLock': threading.Lock(),
         '_contentEpoch': 0,
         'finishReason': None, 'usage': None, 'toolSummary': None,
         'phase': None,                # current phase for polling fallback
@@ -193,6 +204,104 @@ def create_task(
         # '_force_rotate_pair' is set transiently by analyse_stream_result
         # and consumed (cleared) by stream_llm_response on the next call.
     })
+    # Turn-native browser commands carry the same structured model reference
+    # as the native API. Bind one owner-scoped v2 candidate group before any
+    # durable-at-birth write or worker launch; ordinary chat cannot pin a
+    # Connection/Deployment directly.
+    _model_ref = config.get('modelRef')
+    if isinstance(_model_ref, dict):
+        _route_group = None
+        _route_bound = False
+        try:
+            from lib.model_routing import (
+                ModelRoutingRepository,
+                OwnerBoundary,
+                RoutePolicy,
+                mint_routed_slot_group,
+                parse_native_model_selection,
+            )
+            _routing = config.get('routing')
+            _routing = dict(_routing) if isinstance(_routing, dict) else {}
+            _preferred = config.get('preferredProviderId')
+            if _preferred and not _routing.get('preferred_provider_id'):
+                _routing['preferred_provider_id'] = str(_preferred)
+            _selection = parse_native_model_selection({
+                'model': _model_ref,
+                'routing': _routing,
+            })
+            _required_caps = {'text'}
+            if config.get('thinkingDepth') not in (None, '', 'off'):
+                _required_caps.add('thinking')
+            for _message in messages or []:
+                _blocks = (_message.get('content')
+                           if isinstance(_message, dict) else None)
+                if isinstance(_blocks, list) and any(
+                        isinstance(_block, dict)
+                        and _block.get('type') in {'image', 'image_url'}
+                        for _block in _blocks):
+                    _required_caps.add('vision')
+                    break
+            _required_context = _routing.get('required_context') or 1
+            if (isinstance(_required_context, bool)
+                    or not isinstance(_required_context, int)
+                    or _required_context < 1):
+                raise ValueError('routing.required_context must be a positive integer')
+            _price_budget = _routing.get('price_budget') or {}
+            if not isinstance(_price_budget, dict):
+                raise ValueError('routing.price_budget must be an object')
+
+            def _route_price_budget(name):
+                _value = _price_budget.get(name)
+                if _value is None:
+                    return None
+                if (isinstance(_value, bool)
+                        or not isinstance(_value, (int, float))
+                        or _value < 0):
+                    raise ValueError(
+                        'routing.price_budget.%s must be non-negative' % name)
+                return float(_value)
+
+            _route_group = mint_routed_slot_group(
+                ModelRoutingRepository(),
+                OwnerBoundary.create(owner_user_id, principal.tenant_id),
+                _selection,
+                policy=RoutePolicy(
+                    required_capabilities=frozenset(_required_caps),
+                    required_context=_required_context,
+                    max_input_price=_route_price_budget('max_input'),
+                    max_output_price=_route_price_budget('max_output'),
+                    price_currency=str(_price_budget.get('currency') or 'USD'),
+                    cache_affinity_connection_id=str(
+                        _routing.get('cache_affinity_connection_id') or ''),
+                ),
+                owner_tag=f'task:{task_id}',
+            )
+            task['_pinned_provider_id'] = _route_group.pin_id
+            task['_model_routing_group'] = _route_group
+            task['_requestedModelRef'] = dict(_model_ref)
+            task['model'] = (
+                _selection.model.model_id if _selection.model is not None
+                else _selection.provider_offering.offering_id)
+            from lib.agent_core.execution_session import (
+                bind_model_route,
+                execution_session_for_task,
+            )
+
+            def _dispose_model_routing_group() -> None:
+                from lib.model_routing import dispose_routed_slot_group
+                dispose_routed_slot_group(_route_group)
+
+            bind_model_route(
+                execution_session_for_task(task),
+                _dispose_model_routing_group,
+            )
+            _route_bound = True
+        except Exception:
+            if _route_group is not None and not _route_bound:
+                from lib.model_routing import dispose_routed_slot_group
+                dispose_routed_slot_group(_route_group)
+            chat_task_runtime.discard(task_id)
+            raise
     if transient:
         # Headless/embed runtimes intentionally have no durable storage
         # authority. Stamp this before the first phase event is emitted so
@@ -249,7 +358,7 @@ def create_task(
     task['_reconnectable'] = _direct_affinity
 
     # Durable-at-birth: write the task_results row AT CREATION
-    #   (status='running', empty content/thinking). The running-checkpoint
+    #   (status='pending', empty content/thinking). The running-checkpoint
     #   writers only fire on content/thinking deltas and per-round boundaries,
     #   so a task killed by a server restart BEFORE its first delta left NO row
     #   at all — and the cold-replay / poll-DB / startup-recovery stale-scan
@@ -281,7 +390,7 @@ def create_task(
             if task.get('_requestId'):
                 _birth_meta['requestId'] = task['_requestId']
             _upsert_task_row(
-                task, conv_id or '', content='', thinking='', status='running',
+                task, conv_id or '', content='', thinking='', status='pending',
                 error_json=None, tr_json=None,
                 meta_json=(json.dumps(_birth_meta, ensure_ascii=False)
                            if _birth_meta else None))
@@ -289,28 +398,6 @@ def create_task(
             logger.warning(
                 '[Task %s] durable-at-birth row write failed (non-fatal): %s',
                 task_id[:8], e)
-
-    # Project-brain Activity Feed: a 'started' pulse, EXCEPT for autopilot
-    #   follow-up turns (config.autopilotRunId set) — a deep autopilot run is
-    #   dozens of tasks and would flood the feed; those collapse to a single
-    #   'run_concluded' event at run close-out (autopilot._emit_run_concluded).
-    #   Best-effort: emit_project_event never raises, but guard the lookup too
-    #   so feed wiring can NEVER break task creation.
-    if not transient:
-        try:
-            _cfg = config or {}
-            _proj = (_cfg.get('projectPath') or '').strip()
-            if (_proj and conv_id
-                    and not (_cfg.get('autopilotRunId') or '').strip()):
-                from lib.conversations.project_feed import emit_project_event
-                emit_project_event(
-                    _proj, conv_id, 'started',
-                    (last_user_query or '').strip() or 'New turn started',
-                    user_id=int(task_user_id(task)),
-                    task_id=task_id)
-        except Exception as e:
-            logger.debug('[Task %s] project-feed started emit skipped: %s',
-                         task_id[:8], e)
 
     # Register as the LATEST task for this conversation — freshness guard
     if conv_id and not transient:
@@ -344,7 +431,7 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
     otherwise linger forever as a phantom ``status='running'`` row that
     ``/api/chat/active`` reports and the frontend orphan-recovery turns into a
     permanently-stuck "Waiting…" placeholder. (TTL cleanup only evicts
-    done/error/aborted tasks, so a never-finalized carrier is immortal.)
+    terminal tasks, so a never-finalized pending carrier is immortal.)
 
     This unregisters the task and clears any ``_conv_latest_task``
     entry it claimed, so the carrier is invisible to every reconnect path. Safe
@@ -368,6 +455,16 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
         # e.g. the autopilot VU carrier's designed retirement — must never
         # be resurrected as a phantom 'running' row by a trailing event.
         _popped['_discarded_at'] = time.time()
+        _route_group = _popped.pop('_model_routing_group', None)
+        if _route_group is not None:
+            try:
+                from lib.model_routing import dispose_routed_slot_group
+                dispose_routed_slot_group(_route_group)
+            except Exception as exc:
+                logger.warning(
+                    '[Manager] discarded model-routing group cleanup failed: %s',
+                    exc,
+                )
     logger.info('[Manager] discard_task: task=%s conv=%s popped=%s caller=%s',
                 (task_id or '?')[:8], (conv_id or '')[:8],
                 bool(_popped), _caller)
@@ -431,7 +528,7 @@ def plant_abort_tombstone(
 ) -> bool:
     """Record an abort request for a task the registry has lost.
 
-    Returns True only when a LIVE (status='running') task_results row exists
+    Returns True only when a LIVE (pending/running) task_results row exists
     — the endpoint uses that to distinguish “signal planted” from a genuine
     404 (no such task / already terminal).
     """
@@ -505,7 +602,7 @@ def has_abort_tombstone(task_id: str) -> bool:
         return task_id in _abort_tombstones
 
 
-def make_task_abort_check(task: dict):
+def make_task_abort_check(task: dict, *, nonblocking_storage: bool = False):
     """Build the abort_check closure for dispatch/stream retry loops.
 
     ANDs three channels ( ③-3):
@@ -516,14 +613,58 @@ def make_task_abort_check(task: dict):
          task_results metadata tombstone — the cross-process leg.
     The dispatch loop polls this every 429/retry cycle, so a tombstoned ghost
     dies at its next cycle with the normal AbortedError unwind.
+
+    ``nonblocking_storage=True`` is the provider-ingress mode.  It performs the
+    same throttled DB probe on at most one task-local daemon thread and returns
+    the last observed answer immediately.  In-memory Stop remains synchronous;
+    only the cross-process observer may arrive one poll later.  This prevents a
+    slow storage socket from pausing an otherwise healthy upstream model stream.
     """
     task_id = (task or {}).get('id', '')
     owner_user_id = task_user_id(task)
-    _st = {'hit': False, 'last_db': 0.0}
+    _st = {
+        'hit': False,
+        'last_db': 0.0,
+        'probe_in_flight': False,
+    }
+    _st_lock = threading.Lock()
+
+    def _probe_storage() -> None:
+        try:
+            requested = _db_abort_tombstoned(
+                task_id, user_id=owner_user_id)
+            if requested:
+                with _st_lock:
+                    _st['hit'] = True
+                logger.info('[Task %s] abort tombstone consumed (async db '
+                            'channel) — aborting', task_id[:8])
+        finally:
+            with _st_lock:
+                _st['probe_in_flight'] = False
+
+    def _schedule_storage_probe(now: float) -> None:
+        with _st_lock:
+            if _st['probe_in_flight']:
+                return
+            _st['probe_in_flight'] = True
+            _st['last_db'] = now
+        try:
+            worker = threading.Thread(
+                target=_probe_storage,
+                name=f'tofu-abort-probe-{task_id[:8] or "unknown"}',
+                daemon=True,
+            )
+            worker.start()
+        except Exception as e:
+            with _st_lock:
+                _st['probe_in_flight'] = False
+            logger.debug('[Manager] abort-signal async probe start failed '
+                         'task=%s: %s', task_id[:8], e)
 
     def _check() -> bool:
-        if _st['hit']:
-            return True
+        with _st_lock:
+            if _st['hit']:
+                return True
         if task.get('aborted'):
             return True
         with _abort_tombstones_lock:
@@ -533,16 +674,31 @@ def make_task_abort_check(task: dict):
                             'channel) — aborting', task_id[:8])
                 return True
         now = time.monotonic()
-        if now - _st['last_db'] >= _DB_TOMBSTONE_POLL_S:
-            _st['last_db'] = now
-            if _db_abort_tombstoned(task_id, user_id=owner_user_id):
-                _st['hit'] = True
-                logger.info('[Task %s] abort tombstone consumed (db channel) '
-                            '— aborting', task_id[:8])
+        with _st_lock:
+            db_due = now - _st['last_db'] >= _DB_TOMBSTONE_POLL_S
+        if db_due:
+            if nonblocking_storage:
+                _schedule_storage_probe(now)
+            else:
+                with _st_lock:
+                    _st['last_db'] = now
+                if _db_abort_tombstoned(task_id, user_id=owner_user_id):
+                    with _st_lock:
+                        _st['hit'] = True
+                    logger.info('[Task %s] abort tombstone consumed (db channel) '
+                                '— aborting', task_id[:8])
+                    return True
+        with _st_lock:
+            if _st['hit']:
                 return True
         return False
 
     return _check
+
+
+def make_provider_abort_check(task: dict):
+    """Provider-stream abort check with a non-blocking storage observer."""
+    return make_task_abort_check(task, nonblocking_storage=True)
 
 
 def write_carrier_terminal_row(task, status: str) -> None:
@@ -590,7 +746,11 @@ def write_carrier_terminal_row(task, status: str) -> None:
                        (task.get('id') or '?')[:8], e, exc_info=True)
 
 
-def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
+def list_running_tasks(
+    exclude_conv_id: str | None = None,
+    *,
+    user_id: int | None = None,
+) -> list[dict]:
     """Return one entry per CONVERSATION with genuinely-live running work.
 
     Used by the self-update restart guard to refuse a process re-exec that
@@ -608,7 +768,8 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
         invisible to the frontend by design (the reconnect endpoint hides it,
         the sidebar never lights a dot for it). Counting it made the restart
         dialog report "N conversations running" that the user could see nowhere.
-      * **Activity filter (same judge as the reaper).** A task whose BOTH
+      * **Running activity filter (same judge as the reaper).** A running task
+        whose BOTH
         liveness clocks (``_t_last_event`` and ``_dispatch_heartbeat``) have
         been silent past ``_stuck_task_max_silent_secs()`` is WEDGED — the exact
         signal ``reap_stuck_running_tasks`` uses to force-fail it. Such a task
@@ -627,9 +788,12 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
         entry keyed on its task id.
 
     Args:
-        exclude_conv_id: When set, running tasks belonging to this conversation
+        exclude_conv_id: When set, live tasks belonging to this conversation
             are omitted (the caller triggering the restart doesn't count its
             own conversation against itself).
+        user_id: When set, only tasks owned by this user are counted. The
+            sidebar busy projection is owner-scoped, so it must never light a
+            dot for another user's conversation.
 
     Returns:
         A list of ``{'taskId', 'convId', 'elapsed'}`` dicts, one per distinct
@@ -650,15 +814,17 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
     by_key: dict[str, tuple[float, dict]] = {}
     for t in chat_task_runtime.snapshot():
         tid = str(t.get('id') or '')
-        if t.get('status') != 'running' or t.get('aborted'):
+        if t.get('status') not in ('pending', 'running') or t.get('aborted'):
             continue
             # Skip non-streaming CARRIER/HOLDER tasks (VU sub-task / inline
             #   reporter) — same predicate GET /api/chat/active uses to hide
             #   them from reconnect. Without this a background autopilot VU
             #   carrier (convId='', never surfaced in the sidebar) counted as
-            #   a "running conversation" and made the restart dialog claim work
+            #   a "live conversation" and made the restart dialog claim work
             #   was in flight that the user could not see anywhere.
         if is_carrier_task(t):
+            continue
+        if user_id is not None and task_user_id(t) != user_id:
             continue
         conv = t.get('convId') or ''
         if exclude_conv_id and conv == exclude_conv_id:
@@ -667,7 +833,10 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
             # Activity filter — exclude WEDGED tasks (both clocks stale), the
             # same predicate reap_stuck_running_tasks uses. Either clock fresh
             # = alive. Disabled (max_silent<=0) → never treat as wedged.
-        if max_silent > 0:
+        # Pending work owns a real queue position and has not entered the
+        # reaper's running-only liveness domain yet. Its queue wait can exceed
+        # the worker-silence threshold without becoming a zombie.
+        if max_silent > 0 and t.get('status') == 'running':
             last_event = t.get('_t_last_event', created)
             heartbeat = t.get('_dispatch_heartbeat', created)
             if (now - last_event) >= max_silent and (now - heartbeat) >= max_silent:
@@ -706,7 +875,7 @@ def abort_running_tasks_for_conv(
     exclude_task_id: str | None = None,
     reason: str = 'superseded_by_new_task',
 ) -> int:
-    """Abort all running tasks for a conversation, except the excluded one.
+    """Abort all pending/running tasks for a conversation except one.
 
     Called when starting a new task (send/regenerate/edit) to ensure the old
     task stops writing to the conversation DB. Returns the count of aborted tasks.
@@ -721,7 +890,7 @@ def abort_running_tasks_for_conv(
         return (
             task.get('convId') == conv_id
             and task_user_id(task) == int(user_id)
-            and task.get('status') == 'running'
+            and task.get('status') in ('pending', 'running')
             and task.get('id') != exclude_task_id
             and not task.get('aborted')
         )
@@ -739,6 +908,7 @@ def abort_running_tasks_for_conv(
         updater=_mark_aborted,
     )
     aborted = len(_aborted_tasks)
+    queued_finalized_ids: set[str] = set()
     for t in _aborted_tasks:
         tid = str(t.get('id') or '')
         logger.info(
@@ -763,6 +933,22 @@ def abort_running_tasks_for_conv(
             )
         except Exception as _aerr:
             logger.debug('[Manager] audit_log task_abort failed: %s', _aerr)
+        if str(t.get('status') or '') == 'pending':
+            try:
+                from lib.tasks_pkg.spawn import cancel_queued_task
+
+                if cancel_queued_task(tid):
+                    from lib.tasks_pkg.manager._terminal import (
+                        finalize_chat_task_aborted,
+                    )
+
+                    if finalize_chat_task_aborted(t) is not None:
+                        queued_finalized_ids.add(tid)
+            except Exception as error:
+                logger.warning(
+                    '[Task %s] queued supersede cancellation failed: %s',
+                    tid[:8], error, exc_info=True,
+                )
     # Zombie-task terminal floor (outside tasks_lock — this does DB I/O).
     #   An aborted task normally reaches a terminal task_results row only when
     #   ITS OWN thread runs finalize/persist. A thread that is wedged (e.g. a
@@ -774,7 +960,8 @@ def abort_running_tasks_for_conv(
     #   finalize, persist_task_result overwrites this floor with the real
     #   final content/status (last-writer-wins, keyed on task_id).
     for _t in _aborted_tasks:
-        _write_aborted_terminal_floor(_t)
+        if str(_t.get('id') or '') not in queued_finalized_ids:
+            _write_aborted_terminal_floor(_t)
     if aborted:
         logger.info('[Manager] conv=%s Auto-aborted %d stale task(s) before starting new task %s',
                     conv_id[:8], aborted, (exclude_task_id or '?')[:8])
@@ -798,7 +985,7 @@ def abort_running_tasks_for_conv(
                 conv_id[:8], _ne)
     return aborted
 def quiesce_running_tasks(reason: str = 'server_shutdown') -> int:
-    """Signal EVERY running task to abort — called at server shutdown.
+    """Signal every pending/running task to abort at server shutdown.
 
     The abort flag is cooperative: the orchestrator's abort seam checks
     ``task['aborted']`` between rounds / after each stream chunk / between
@@ -825,7 +1012,8 @@ def quiesce_running_tasks(reason: str = 'server_shutdown') -> int:
 
         aborted = len(chat_task_runtime.update_matching(
             predicate=lambda task: (
-                task.get('status') == 'running' and not task.get('aborted')
+                task.get('status') in ('pending', 'running')
+                and not task.get('aborted')
             ),
             updater=_mark_quiesced,
         ))

@@ -8,6 +8,7 @@ ids remain an internal bridge to the model/tool executor.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import uuid
@@ -16,12 +17,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from lib.error_envelope import make_envelope, normalize_envelope
+from lib.conversation_sync.dispatch_contract import (
+    CONVERSATION_EXECUTOR_DISPATCH_MODE,
+    normalize_attempt_dispatch_mode,
+)
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import get_logger
 from lib.storage.errors import StorageError
 from lib.storage_projection import (
+    compact_tool_rounds_for_frame_budget,
     sanitize_api_rounds_for_persist,
     trim_tool_round_for_persist,
+)
+from lib.tool_round_identity import tool_rounds_with_execution_identity
+from lib.tool_round_replay import (
+    checkpoint_retention_positions,
+    scan_replayable_tool_round_prefix,
 )
 from lib.turn_verdict import (
     derive_turn_verdict,
@@ -32,23 +43,10 @@ from lib.turn_projection_segments import (
     public_turn_with_stable_segments,
     public_value_with_stable_segments,
 )
-
-
-
-
-
-
-
-
-
-
-
-
+from lib.turn_projection_patch import build_projection_patch
 
 
 logger = get_logger(__name__)
-
-
 
 
 def _turn_client(*, write: bool = False):
@@ -56,9 +54,9 @@ def _turn_client(*, write: bool = False):
     return get_storage_client(write=write)
 
 
-
 ACTORS = frozenset({'human', 'assistant', 'planner', 'critic', 'virtual_user'})
-OPERATIONS = frozenset({'generate', 'continue', 'checkpoint_resume', 'regenerate'})
+OPERATIONS = frozenset({'generate', 'continue', 'checkpoint_resume', 'regenerate',
+                        'answer_guidance'})
 TERMINAL_STATUSES = frozenset({'completed', 'interrupted', 'truncated', 'failed'})
 LIVE_ATTEMPT_STATUSES = frozenset({'pending', 'running'})
 _PROJECTION_INJECTION_LANES = (
@@ -70,6 +68,8 @@ _PROJECTION_INJECTION_LANES = (
 _PROJECTION_PROVENANCE_FIELDS = (
     ('_memoryPrefetch', 'memoryPrefetch'),
     ('_mcpLoginHint', 'mcpLoginHint'),
+    ('_mcpToolsDelta', 'mcpToolsDelta'),
+    ('_projectPathChange', 'projectPathChange'),
     ('_preferencesApplied', 'preferencesApplied'),
     ('_preferencesLearned', 'preferencesLearned'),
     ('_relatedConversations', 'relatedConversations'),
@@ -78,6 +78,18 @@ _PROJECTION_PROVENANCE_FIELDS = (
 _turn_search_backfill_lock = threading.Lock()
 _turn_search_backfill_started = False
 _TURN_SEARCH_BACKFILL_INITIAL_DELAY_SECONDS = 60.0
+
+# One process-stable dispatch owner makes ``turn.attempt.claim`` safely
+# replayable after an ambiguous sidecar acknowledgement. A fresh process gets
+# a fresh identity; boot recovery settles claims left by its predecessor
+# instead of silently repeating billable work.
+_ATTEMPT_DISPATCH_OWNER_ID = uuid.uuid4().hex
+_ATTEMPT_CLAIM_MAX_ATTEMPTS = 4
+_ATTEMPT_CLAIM_RPC_DEADLINE_SECONDS = 2.0
+# Every in-process dispatch entry point shares these stripes from claim through
+# bind/spawn. This makes same-owner claim replay safe without retaining an
+# unbounded lock/token map for arbitrary attempt IDs.
+_ATTEMPT_DISPATCH_LOCKS = tuple(threading.Lock() for _ in range(256))
 
 
 # ── Text-delta write coalescing ──────────────────────────────────────────
@@ -104,7 +116,6 @@ def _delta_record_min_interval_s() -> float:
             'TOFU_TURN_DELTA_RECORD_MS', '300')) / 1000.0)
     except (TypeError, ValueError):
         return 0.3
-
 
 
 _delta_throttle_lock = threading.Lock()
@@ -224,30 +235,6 @@ def _now_ms() -> int:
 _DELTA_MAX_SKEW_MS = 300_000
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def create_turn_pair(conversation_id: str, *, command_id: str,
                      input_projection: Any, config: dict[str, Any] | None,
                      lane_id: str = 'main', parent_turn_id: str | None = None,
@@ -255,7 +242,13 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
                      run_id: str = '', user_id: Any,
                      input_actor: str = 'human', input_kind: str = 'input',
                      require_parent_is_lane_tail: bool = False,
+                     require_lane_idle: bool = False,
+                     reject_if_human_queued: bool = False,
                      conversation_defaults: dict[str, Any] | None = None,
+                     dispatch_mode: str = '',
+                     input_presentation_id: str = '',
+                     output_presentation_id: str = '',
+                     queue_binding: dict[str, Any] | None = None,
                      ) -> dict[str, Any]:
     """Atomically create the input turn, output turn and first attempt."""
     user_id = require_user_id(user_id, context='create turn pair')
@@ -265,6 +258,7 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
         raise ValueError('invalid output actor')
     if input_actor not in {'human', 'virtual_user', 'critic'}:
         raise ValueError('invalid input actor')
+    dispatch_mode = normalize_attempt_dispatch_mode(dispatch_mode)
     lane_id = lane_id or 'main'
     from lib.storage import StorageError
     normalized_input_projection = projection_with_stable_segments(
@@ -280,7 +274,15 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
         'output_actor': output_actor, 'run_id': run_id,
         'input_actor': input_actor, 'input_kind': input_kind or 'input',
         'require_parent_is_lane_tail': bool(require_parent_is_lane_tail),
+        'require_lane_idle': bool(require_lane_idle),
+        'reject_if_human_queued': bool(reject_if_human_queued),
         'conversation_defaults': conversation_defaults or {},
+        'dispatch_mode': dispatch_mode,
+        'input_presentation_id': (
+            input_presentation_id or f'{command_id}:input'),
+        'output_presentation_id': (
+            output_presentation_id or f'{command_id}:output'),
+        'queue_binding': queue_binding or {},
     }
     try:
         return public_value_with_stable_segments(_turn_client(write=True).command(
@@ -310,8 +312,88 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
                 'invalid_parent_turn', str(exc)) from exc
         if exc.code == 'turn_lane_advanced':
             raise LifecycleConflict('lane_advanced', str(exc)) from exc
+        if exc.code == 'turn_superseded_by_human':
+            raise LifecycleConflict('superseded_by_human', str(exc)) from exc
         if exc.code == 'database_conflict':
             raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
+
+
+def activate_queued_turn_pair(
+    conversation_id: str, queue_id: str, *, user_id: Any,
+) -> dict[str, Any]:
+    """Atomically move one already-created queued pair into the main lane."""
+    user_id = require_user_id(user_id, context='activate queued turn pair')
+    try:
+        return public_value_with_stable_segments(_turn_client(write=True).command(
+            'turn.queue.activate',
+            {
+                'conversation_id': conversation_id,
+                'queue_id': queue_id,
+                'user_id': user_id,
+            },
+            command_id=f'turn-queue-activate:{conversation_id}:{queue_id}',
+        ))
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'turn_in_progress':
+            raise LifecycleConflict('lane_busy', str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
+
+
+def cancel_queued_turn_pair(
+    conversation_id: str, queue_id: str, *, user_id: Any,
+) -> dict[str, Any]:
+    """Idempotently delete one pending queue row and its unexecuted pair."""
+    user_id = require_user_id(user_id, context='cancel queued turn pair')
+    try:
+        return public_value_with_stable_segments(_turn_client(write=True).command(
+            'turn.queue.cancel',
+            {
+                'conversation_id': conversation_id,
+                'queue_id': queue_id,
+                'user_id': user_id,
+            },
+            command_id=f'turn-queue-cancel:{conversation_id}:{queue_id}',
+        ))
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
+
+
+def commit_user_steer(
+    conversation_id: str,
+    attempt_id: str,
+    *,
+    command_id: str,
+    text: str,
+    user_id: Any,
+) -> dict[str, Any]:
+    """Durably append a pending injection block before waking the live worker."""
+    user_id = require_user_id(user_id, context='commit user steer')
+    try:
+        return public_value_with_stable_segments(_turn_client(write=True).command(
+            'turn.steer.commit',
+            {
+                'conversation_id': conversation_id,
+                'attempt_id': attempt_id,
+                'command_id': command_id,
+                'text': text,
+                'user_id': user_id,
+            },
+            command_id=f'turn-steer-commit:{conversation_id}:{command_id}',
+        ))
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code in {'database_conflict', 'turn_in_progress'}:
+            raise LifecycleConflict('steer_window_closed', str(exc)) from exc
         raise
 
 
@@ -385,22 +467,35 @@ def announce_related_turns(
     return bool(result.get('changed')) if isinstance(result, dict) else bool(result)
 
 
-
-
-
-
 def create_attempt(conversation_id: str, turn_id: str, *, command_id: str,
                    operation: str, expected_projection_revision: int,
                    config: dict[str, Any] | None = None,
                    resume_anchor: dict[str, Any] | None = None,
                    input_update: dict[str, Any] | None = None,
                    expected_input_projection_revision: int | None = None,
+                   dispatch_mode: str = CONVERSATION_EXECUTOR_DISPATCH_MODE,
                    user_id: Any) -> dict[str, Any]:
     user_id = require_user_id(user_id, context='create turn attempt')
     if not command_id:
         raise ValueError('commandId is required')
     if operation not in OPERATIONS - {'generate'}:
-        raise ValueError('operation must be continue, checkpoint_resume, or regenerate')
+        raise ValueError('operation must be continue, checkpoint_resume, regenerate, or answer_guidance')
+    dispatch_mode = normalize_attempt_dispatch_mode(dispatch_mode)
+
+    executable_config = dict(config or {})
+    target_actor = None
+    target_kind = None
+    if operation == 'regenerate':
+        from lib.tasks_pkg.plan_mode import (
+            interaction_mode_generated_turn_identity,
+            normalize_interaction_mode_runtime_config,
+        )
+        executable_config = normalize_interaction_mode_runtime_config(
+            executable_config
+        )
+        target_actor, target_kind = interaction_mode_generated_turn_identity(
+            executable_config
+        )
     from lib.storage import StorageError
     try:
         return _turn_client(write=True).command(
@@ -409,9 +504,13 @@ def create_attempt(conversation_id: str, turn_id: str, *, command_id: str,
                 'turn_id': turn_id, 'command_id': command_id,
                 'operation': operation,
                 'expected_projection_revision': expected_projection_revision,
-                'config': config or {}, 'resume_anchor': resume_anchor,
+                'config': executable_config, 'resume_anchor': resume_anchor,
                 'input_update': input_update,
                 'expected_input_projection_revision': expected_input_projection_revision,
+
+                'target_actor': target_actor,
+                'target_kind': target_kind,
+                'dispatch_mode': dispatch_mode,
             }, command_id)
     except StorageError as exc:
         if exc.code == 'database_not_found':
@@ -433,13 +532,29 @@ def create_attempt(conversation_id: str, turn_id: str, *, command_id: str,
 def bind_task(
     attempt_id: str, task_id: str, *, user_id: Any,
 ) -> dict[str, Any] | None:
-    """Bind the internal executor task and expose the attempt as running."""
+    """Bind scheduler identity while the attempt remains durably pending."""
     user_id = require_user_id(user_id, context='bind turn task')
     return _turn_client(write=True).command(
         'turn.attempt.bind', {'attempt_id': attempt_id,
                               'task_id': task_id,
-                              'user_id': user_id},
+                              'user_id': user_id,
+                              'dispatch_owner_id': _ATTEMPT_DISPATCH_OWNER_ID},
         f'turn-bind:{attempt_id}:{task_id}')
+
+
+def mark_task_started(
+    attempt_id: str, task_id: str, *, user_id: Any,
+) -> dict[str, Any] | None:
+    """Publish the pending→running transition at physical worker entry."""
+    user_id = require_user_id(user_id, context='start bound turn task')
+    return _turn_client(write=True).command(
+        'turn.attempt.start', {
+            'attempt_id': attempt_id,
+            'task_id': task_id,
+            'user_id': user_id,
+        },
+        f'turn-start:{attempt_id}:{task_id}',
+    )
 
 
 def dispatch_attempt_to_worker(
@@ -475,20 +590,70 @@ def dispatch_attempt_to_worker(
     )
 
 
+def attempt_dispatch_lock(attempt_id: str) -> threading.Lock:
+    """Return the bounded process-wide serialization stripe for one attempt."""
+    normalized_attempt_id = str(attempt_id or '')
+    if not normalized_attempt_id:
+        raise ValueError('attempt_id is required for dispatch serialization')
+    return _ATTEMPT_DISPATCH_LOCKS[
+        hash(normalized_attempt_id) % len(_ATTEMPT_DISPATCH_LOCKS)
+    ]
+
+
 def claim_attempt_start(attempt_id: str, *, user_id: Any) -> bool:
     """Acquire the one-shot executor-dispatch lease for an accepted attempt.
 
-    This closes the commit-to-task-bind window: a concurrent lost-ACK retry
-    sees the durable claim and attaches to the same attempt rather than
-    launching a second billable request.  A process crash after the claim is
-    intentionally recovered as ``interrupted`` on boot, never auto-retried.
+    This closes the commit-to-task-bind window. The claim carries one
+    process-stable owner, so an ambiguous acknowledgement can be retried by
+    this process while a different process still loses the CAS. A process
+    crash after the claim is intentionally recovered as ``interrupted`` on
+    boot, never auto-retried.
     """
     user_id = require_user_id(user_id, context='claim turn attempt')
-    return bool(_turn_client(write=True).command(
-        'turn.attempt.claim', {
-            'attempt_id': attempt_id, 'user_id': user_id,
-        },
-        f'turn-claim:{attempt_id}'))
+    last_error: StorageError | None = None
+    for attempt_no in range(_ATTEMPT_CLAIM_MAX_ATTEMPTS):
+        try:
+            claimed = _turn_client(write=True).command(
+                'turn.attempt.claim', {
+                    'attempt_id': attempt_id,
+                    'user_id': user_id,
+                    'dispatch_owner_id': _ATTEMPT_DISPATCH_OWNER_ID,
+                },
+                f'turn-claim:{attempt_id}',
+                deadline=_ATTEMPT_CLAIM_RPC_DEADLINE_SECONDS,
+            )
+            if last_error is not None:
+                logger.info(
+                    '[TurnLifecycle] attempt dispatch claim recovered after '
+                    '%d transient failure(s) attempt=%s',
+                    attempt_no,
+                    attempt_id[:12],
+                )
+            return bool(claimed)
+        except StorageError as exc:
+            if not exc.retryable:
+                raise
+            last_error = exc
+            if attempt_no + 1 >= _ATTEMPT_CLAIM_MAX_ATTEMPTS:
+                raise
+            delay = min(
+                0.5,
+                max(
+                    float(exc.retry_after_ms or 0) / 1000.0,
+                    0.05 * (2 ** attempt_no),
+                ),
+            )
+            logger.warning(
+                '[TurnLifecycle] transient attempt dispatch claim failure; '
+                'retrying in %.2fs attempt=%s code=%s try=%d/%d',
+                delay,
+                attempt_id[:12],
+                exc.code,
+                attempt_no + 1,
+                _ATTEMPT_CLAIM_MAX_ATTEMPTS,
+            )
+            time.sleep(delay)
+    raise last_error or RuntimeError('Attempt claim retry loop exited')
 
 
 def fail_start(attempt_id: str, error: Any, *, user_id: Any) -> None:
@@ -617,23 +782,47 @@ def _task_projection(
                (task.get('content') or cfg.get('contentPrefix') or ''))
     checkpoint_rounds = (task.get('_checkpointToolRounds')
                          or cfg.get('checkpointToolRounds') or [])
-    merged_rounds = list(checkpoint_rounds) + list(task.get('toolRounds') or [])
+    attempt_id = task.get('_attemptId') or task.get('attemptId') or ''
+    task_id = task.get('id') or task.get('taskId') or ''
+    # A Turn can outlive several executors. Preserve checkpoint ownership and
+    # stamp this attempt's fresh rounds before they cross the durable projection
+    # boundary; llmRound/roundNum restart for every resumed executor.
+    merged_rounds = tool_rounds_with_execution_identity(
+        checkpoint_rounds, attempt_id='', task_id='',
+    ) + tool_rounds_with_execution_identity(
+        task.get('toolRounds') or [],
+        attempt_id=attempt_id,
+        task_id=task_id if attempt_id else '',
+        overwrite=bool(attempt_id),
+    )
     projected_rounds = [
         trim_tool_round_for_persist(dict(item))
         if isinstance(item, dict) else item
         for item in merged_rounds
     ]
+    # Keep the durable document below one storage frame: without this cap a
+    # long tool-heavy turn grows past the wire limit and every authoritative
+    # write starts failing closed (task mtdx825fjmhmx5: 379 rejected frames).
+    projected_rounds = compact_tool_rounds_for_frame_budget(projected_rounds)
     projection.update({
         'content': content,
         'thinking': (task.get('thinking') if task.get('thinking') is not None
                      else projection.get('thinking', '')),
         'toolRounds': projected_rounds,
     })
+
+    # New executors always own this field. Its presence intentionally clears
+    # stale images on regenerate, while checkpoint/continue initialization
+    # preserves prior refs before appending new MCP result images.
+    if task.get('_mcpImages') is not None:
+        projection['images'] = list(task.get('_mcpImages') or [])
     for source, target in (
         ('segments', 'segments'), ('usage', 'usage'), ('model', 'model'),
+        ('provider_id', 'providerId'),
         ('preset', 'preset'), ('thinkingDepth', 'thinkingDepth'),
         ('modifiedFiles', 'modifiedFiles'),
         ('modifiedFileList', 'modifiedFileList'), ('todoState', 'todoState'),
+        ('waitingOn', 'waitingOn'),
         # Fallback metadata must survive into the turn-native projection so the
         # finish tag can show "requested → actual" instead of silently
         # displaying only the fallback model.  Without these fields the
@@ -655,6 +844,9 @@ def _task_projection(
         # windows for free (slim frames patch only content/thinking on the
         # turn row; tail hydration re-serves this row).
         ('_lastRoundUsage', 'lastRoundUsage'),
+        # Structured, credential-redacted route evidence. This is the sole
+        # source for provider/model failover timelines after reload.
+        ('_route_snapshot', 'routeSnapshot'),
     ):
         if task.get(source) is not None:
             projection[target] = task[source]
@@ -686,6 +878,36 @@ def _task_projection(
     if task.get('apiRounds'):
         projection['apiRounds'] = sanitize_api_rounds_for_persist(
             task['apiRounds'])
+    # Authoritative settled-cost snapshot: ONE top-level total the finish
+    # footer / cost popover read; apiRounds stays the per-round ledger.
+    # Mirrors the done-event stamp in orchestrator/_finalize so live and
+    # reload paths sum each API round under its own model/provider/tier.
+    # Without this fold a reloaded projection carried usage but no cost, and
+    # the footer fell back to a client-side batch lookup whose async landing
+    # was diffed away by the surface footer compare (2026-08-29,
+    # mtd9ci53zq3xfm: no hover cost breakdown after reload).
+    if projection.get('usage'):
+        try:
+            from lib.cost import compute_api_rounds_cost, compute_cost
+            _fallback_model = str(
+                projection.get('model') or task.get('model') or '')
+            _fallback_provider = task.get('provider_id') or None
+            _settled_cost = compute_api_rounds_cost(
+                projection.get('apiRounds'),
+                fallback_model_id=_fallback_model,
+                fallback_provider_id=_fallback_provider,
+            )
+            if _settled_cost is None:
+                _settled_cost = compute_cost(
+                    projection['usage'],
+                    model_id=_fallback_model,
+                    provider_id=_fallback_provider,
+                )
+            if _settled_cost:
+                projection['cost'] = _settled_cost
+        except Exception as _cost_exc:
+            logger.debug('[TurnLifecycle] settled-cost fold failed: %s',
+                         _cost_exc)
     if raw_event is not None:
         # Runtime events remain the canonical facts.  The public Turn owns one
         # bounded, replay-safe presentation projection so a refresh preserves
@@ -697,22 +919,18 @@ def _task_projection(
         )
         if activity_timeline is not None:
             projection['activityTimeline'] = activity_timeline
+    # The live status remains transient for rendering, but its bounded history
+    # is durable diagnostic evidence. Provider-ingress isolation may keep an
+    # individual phase frame memory-local; this cumulative projection crosses
+    # the next authoritative boundary and prevents that user-visible prompt
+    # from disappearing from postmortem analysis.
+    from lib.tasks_pkg.turn_trace import project_running_trace_status
+    projection = project_running_trace_status(projection, task)
     return projection_with_stable_segments(
         projection,
         actor=str(task.get('_turnActor') or 'assistant'),
         status=str(task.get('_turnStatus') or task.get('status') or 'running'),
     )
-
-
-def _has_checkpoint(projection: dict[str, Any]) -> tuple[bool, int]:
-    rounds = projection.get('toolRounds') or []
-    kept = 0
-    for item in rounds:
-        if isinstance(item, dict) and item.get('status') in ('done', 'completed'):
-            kept += 1
-        else:
-            break
-    return kept > 0, kept
 
 
 def _supports_lossless_prefill(task: dict[str, Any], projection: dict[str, Any]) -> bool:
@@ -776,24 +994,86 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
                 raw=detail,
             )
     options: list[dict[str, Any]] = []
-    if status in {'interrupted', 'truncated', 'failed'} and _supports_lossless_prefill(task, projection):
+    checkpoint_prefix = scan_replayable_tool_round_prefix(
+        projection.get('toolRounds') or [])
+    resumable = status in {'interrupted', 'truncated', 'failed'}
+    if resumable and _supports_lossless_prefill(task, projection):
         options.append({
             'operation': 'continue',
             'anchor': {'type': 'lossless_prefill',
                        'contentChars': len(projection.get('content') or '')},
         })
-    has_checkpoint, kept = _has_checkpoint(projection)
-    if status in {'interrupted', 'truncated', 'failed'} and has_checkpoint:
-        rounds = projection.get('toolRounds') or []
-        last = rounds[kept - 1] if kept else {}
+    elif (resumable and not projection.get('content')
+            and (checkpoint_prefix.rounds or projection.get('thinking'))):
+        # No prose tail to prefill, so continuing needs no prefill
+        # capability at all: the replayed checkpoint prefix is the wire
+        # continuity and the write boundary preserves the interrupted
+        # thinking tail as a rolled-back block. Offering only
+        # checkpoint_resume here would force a needless projection rewrite.
+        options.append({
+            'operation': 'continue',
+            'anchor': {'type': 'replay_only', 'contentChars': 0},
+        })
+    if (resumable and checkpoint_prefix.rounds):
+        # Retention is wider than replay: the durable projection keeps every
+        # pre-gap row (display carriers included) so a resume never erases
+        # rendered history; only discarded provider-attempt artifacts are
+        # filtered.  Replay still uses ``checkpoint_prefix`` alone.
+        kept_boundary, retained_positions = checkpoint_retention_positions(
+            projection.get('toolRounds') or [], checkpoint_prefix)
         options.append({
             'operation': 'checkpoint_resume',
             'anchor': {
-                'type': 'tool_checkpoint', 'keptToolRounds': kept,
-                'content': last.get('assistantContent') or '',
-                'thinking': last.get('thinking') or '', 'segments': [],
+                'type': 'tool_checkpoint',
+                # ``keptToolRounds`` is the raw retention boundary (all rows
+                # before the first causal gap).  Positions are the semantic
+                # authority: they omit only discarded provider-attempt
+                # artifacts.
+                'keptToolRounds': kept_boundary,
+                'replayableToolRounds': len(checkpoint_prefix.rounds),
+                'retainedToolRoundPositions': retained_positions,
+                # Terminal lanes restart empty: the attempt-creation
+                # boundary moves the interrupted content/thinking tail into
+                # ``projection.rolledBack`` instead of seeding it back. A
+                # checkpoint resume regenerates the tail on the wire, so a
+                # seed would display text the model never produced and then
+                # wipe it.
+                'content': '', 'thinking': '', 'segments': [],
             },
         })
+    if (status in {'interrupted', 'truncated', 'failed'}
+            and checkpoint_prefix.blocked_position is not None
+            and checkpoint_prefix.blocked_reason == 'missing_tool_result'):
+        raw_rounds = projection.get('toolRounds') or []
+        gap_round = (
+            raw_rounds[checkpoint_prefix.blocked_position]
+            if checkpoint_prefix.blocked_position < len(raw_rounds) else None
+        )
+        # A turn that died while blocked on ask_human persists the question
+        # round with no result. Offer the late-answer resume: the user can
+        # still complete THAT tool call and continue the loop from it,
+        # instead of letting a plain continue amputate the question and
+        # making the model re-ask.
+        if (isinstance(gap_round, Mapping)
+                and gap_round.get('toolName') == 'ask_human'
+                and gap_round.get('status') == 'awaiting_human'
+                and isinstance(gap_round.get('guidanceId'), str)
+                and gap_round['guidanceId']):
+            kept_boundary, retained_positions = checkpoint_retention_positions(
+                raw_rounds, checkpoint_prefix)
+            options.append({
+                'operation': 'answer_guidance',
+                'anchor': {
+                    'type': 'human_guidance',
+                    'guidanceId': gap_round['guidanceId'],
+                    'toolCallId': str(gap_round.get('toolCallId') or ''),
+                    'question': str(gap_round.get('guidanceQuestion') or ''),
+                    'responseType': str(gap_round.get('guidanceType') or 'free_text'),
+                    'roundPosition': checkpoint_prefix.blocked_position,
+                    'keptToolRounds': kept_boundary,
+                    'retainedToolRoundPositions': retained_positions,
+                },
+            })
     options.append({'operation': 'regenerate', 'anchor': {'type': 'turn_start'}})
     settlement = {
         'outcome': outcome,
@@ -856,6 +1136,77 @@ def _signal_stale_attempt_abort(task: dict[str, Any], attempt_id: str,
                      '(non-fatal)', exc_info=True)
 
 
+def _is_frame_overflow_error(exc: 'StorageError') -> bool:
+    """Both deterministic fences that make one authoritative frame unwritable.
+
+    ``storage_payload_too_large`` is the sidecar payload cap; the 64 MiB wire
+    frame cap (lib/storage/protocol.py::MAX_FRAME_BYTES) is enforced by the
+    client encoder before the command leaves the process, surfacing as a
+    ``database_protocol_error`` whose message names the frame limit. Retrying
+    either shape with the same projection can never succeed.
+    """
+    if exc.code == 'storage_payload_too_large':
+        return True
+    return (exc.code == 'database_protocol_error'
+            and 'frame exceeds the size limit' in str(exc).lower())
+
+
+def _signal_frame_overflow_abort(task: dict[str, Any], attempt_id: str,
+                                 event_kind: str) -> None:
+    """Plant the cooperative abort triple when even a text-only frame is
+    unwritable, so the worker stops emitting events nothing can persist.
+
+    Same stamp contract as the stale-attempt fence (``aborted`` +
+    ``_abort_timestamp`` + ``_abort_reason``); a prior user abort must never
+    be clobbered. The turn itself settles via the normal reaper lane — no
+    write path can record a terminal frame bigger than the wire cap.
+    """
+    if task.get('aborted'):
+        return
+    logger.error('[TurnLifecycle] unwritable frame for task=%s attempt=%s '
+                 'event=%s; signaling abort (storage_frame_overflow)',
+                 str(task.get('id') or '?')[:8], str(attempt_id or '?')[:8],
+                 event_kind)
+    try:
+        task['aborted'] = True
+        task['_abort_timestamp'] = time.time()
+        task['_abort_reason'] = 'storage_frame_overflow'
+        abort_event = task.get('abort_event')
+        if abort_event is not None:
+            abort_event.set()
+    except Exception:
+        logger.debug('[TurnLifecycle] frame-overflow abort signal failed '
+                     '(non-fatal)', exc_info=True)
+
+
+def _signal_authority_integrity_abort(task: dict[str, Any], attempt_id: str,
+                                      event_kind: str) -> None:
+    """Stop work after a deterministic corruption fence rejects authority.
+
+    Retrying ``database_integrity`` on every stream/tool event cannot recover
+    the Turn and previously let an invisible worker spend model rounds while
+    thousands of durable-before-visible frames were withheld. The normal
+    recovery/reaper boundary owns settlement; this signal only stops further
+    expensive execution.
+    """
+    if task.get('aborted'):
+        return
+    logger.error(
+        '[TurnLifecycle] conversation authority integrity failure for task=%s '
+        'attempt=%s event=%s; signaling cooperative abort',
+        str(task.get('id') or '?')[:8], str(attempt_id or '?')[:8], event_kind,
+    )
+    try:
+        task['aborted'] = True
+        task['_abort_timestamp'] = time.time()
+        task['_abort_reason'] = 'storage_authority_integrity'
+        abort_event = task.get('abort_event')
+        if abort_event is not None:
+            abort_event.set()
+    except Exception:
+        logger.debug('[TurnLifecycle] authority-integrity abort signal failed '
+                     '(non-fatal)', exc_info=True)
+
 def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
                                   status: str) -> None:
     """Drain the conversation's durable message queue once a turn-native attempt
@@ -909,6 +1260,61 @@ def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
         logger.debug('[Queue] turn-native settlement drain hook failed', exc_info=True)
 
 
+_TURN_PROJECTION_STATE_KEY = '_turnProjectionState'
+_TURN_PROJECTION_LOCK_KEY = '_turnProjectionStateLock'
+
+
+def _task_projection_state_lock(task: dict[str, Any]) -> threading.RLock:
+    """Return one task-local lock for projection revision/cache ownership."""
+    existing = task.get(_TURN_PROJECTION_LOCK_KEY)
+    if hasattr(existing, 'acquire') and hasattr(existing, 'release'):
+        return existing
+    candidate = threading.RLock()
+    return task.setdefault(_TURN_PROJECTION_LOCK_KEY, candidate)
+
+
+def _task_projection_state(
+    task: dict[str, Any], attempt_id: str, user_id: int,
+) -> dict[str, Any] | None:
+    """Return the validated last-applied Turn state for this executor."""
+    state = task.get(_TURN_PROJECTION_STATE_KEY)
+    if not isinstance(state, dict):
+        return None
+    revision = state.get('projectionRevision')
+    projection = state.get('projection')
+    if (state.get('attemptId') != attempt_id
+            or state.get('userId') != user_id
+            or not isinstance(revision, int) or isinstance(revision, bool)
+            or revision < 0 or not isinstance(projection, dict)):
+        return None
+    task_turn_id = str(task.get('_turnId') or '')
+    if task_turn_id and state.get('turnId') != task_turn_id:
+        return None
+    return state
+
+
+def _remember_task_projection_state(
+    task: dict[str, Any],
+    *,
+    attempt_id: str,
+    user_id: int,
+    turn: Mapping[str, Any],
+    projection: dict[str, Any],
+    projection_revision: int,
+) -> None:
+    """Retain one bounded live baseline; terminal cleanup releases it."""
+    task[_TURN_PROJECTION_STATE_KEY] = {
+        'attemptId': attempt_id,
+        'userId': user_id,
+        'conversationId': str(
+            turn.get('conversationId') or task.get('convId') or ''),
+        'turnId': str(turn.get('turnId') or task.get('_turnId') or ''),
+        'actor': str(turn.get('actor') or task.get('_turnActor') or 'assistant'),
+        'projectionRevision': projection_revision,
+        'projection': projection,
+    }
+
+
 def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
                       task_event: dict[str, Any] | None = None):
     """Persist one task projection/event before it becomes client-visible.
@@ -930,22 +1336,52 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
     fix).  Every other outcome leaves the event row to the caller's
     standalone append.
     """
+    with _task_projection_state_lock(task):
+        return _record_task_event_locked(task, raw_event, task_event)
+
+
+def _record_task_event_locked(
+    task: dict[str, Any],
+    raw_event: dict[str, Any],
+    task_event: dict[str, Any] | None,
+    *,
+    allow_rebase: bool = True,
+):
+    """Record one event while this task owns its projection state lock."""
     attempt_id = task.get('_attemptId') or task.get('attemptId')
     if not attempt_id:
         return False
     from lib.tasks_pkg.manager._registry import task_user_id
     user_id = task_user_id(task)
     now = _now_ms()
-    attempt = get_attempt(attempt_id, user_id=user_id)
-    if attempt['status'] not in LIVE_ATTEMPT_STATUSES:
-        _signal_stale_attempt_abort(task, attempt_id, 'attempt-not-live')
-        return False
     event_kind = str(raw_event.get('type') or 'projection')
     if (event_kind in _COALESCIBLE_EVENT_KINDS
             and not _delta_throttle_allows(attempt_id)):
+        # Coalesced frames do not enter the write transaction that normally
+        # proves the attempt fence, so retain the small authoritative status
+        # read on this lane. A superseded worker must never leak a late delta
+        # merely because its projection baseline was cached.
+        attempt = get_attempt(attempt_id, user_id=user_id)
+        if attempt['status'] not in LIVE_ATTEMPT_STATUSES:
+            _signal_stale_attempt_abort(task, attempt_id, 'attempt-not-live')
+            return False
         return 'coalesced'
-    turn = get_turn(
-        attempt['conversationId'], attempt['turnId'], user_id=user_id)
+    state = _task_projection_state(task, attempt_id, user_id)
+    if state is not None:
+        turn = {
+            'conversationId': state['conversationId'],
+            'turnId': state['turnId'],
+            'actor': state['actor'],
+            'projectionRevision': state['projectionRevision'],
+            'projection': state['projection'],
+        }
+    else:
+        attempt = get_attempt(attempt_id, user_id=user_id)
+        if attempt['status'] not in LIVE_ATTEMPT_STATUSES:
+            _signal_stale_attempt_abort(task, attempt_id, 'attempt-not-live')
+            return False
+        turn = get_turn(
+            attempt['conversationId'], attempt['turnId'], user_id=user_id)
     previous = turn.get('projection') or {}
     terminal = event_kind in _TERMINAL_EVENTS
     try:
@@ -974,6 +1410,17 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
     status = 'running'
     error = {}
     if terminal:
+        from lib.tasks_pkg.turn_trace import finalize_trace_projection
+        projection = finalize_trace_projection(
+            projection,
+            task,
+            raw_event,
+            now_ms=now,
+            pending_sequence=(
+                task_event.get('sequence')
+                if isinstance(task_event, Mapping) else None
+            ),
+        )
         status, settlement = _settlement(task, raw_event, projection)
         error = settlement.get('error') or {}
         # Only a successfully completed Plan-mode executor may mint executable
@@ -1005,17 +1452,21 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
     #   CURRENT phase (phase events their own, delta/terminal frames
     #   None).  None is sent explicitly so replay clears the HUD.
     _live_phase = None if terminal else task.get('phase')
-    event_payload = {'projection': projection, 'phase': _live_phase}
+    # The projection is already represented once by ``projection_patch`` in
+    # the command.  It must not ride inside this event envelope too: the
+    # Sidecar replaces this private command shape with its own canonical
+    # revision patch before durable replay / sync capture.
+    event_payload = {'phase': _live_phase}
     if terminal:
         event_payload = {'status': status, 'settlement': settlement,
-                         'projection': projection, 'phase': None}
+                         'phase': None}
     elif event_type == 'interaction_request':
         event_payload['request'] = raw_event
     else:
         event_payload['updateKind'] = event_kind
     command_payload = {
         'attempt_id': attempt_id, 'user_id': user_id,
-        'projection': projection,
+        'task_id': str(task.get('id') or ''),
         'terminal': terminal, 'status': status, 'settlement': settlement,
         'error': error, 'event_type': event_type,
         'event_payload': event_payload, 'now': now,
@@ -1024,10 +1475,26 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
         command_payload['slim'] = True
         command_payload['content'] = content
         command_payload['thinking'] = thinking
+    else:
+        base_revision = int(turn.get('projectionRevision') or 0)
+        command_payload['projection_patch'] = build_projection_patch(
+            previous,
+            projection,
+            base_revision=base_revision,
+            target_revision=base_revision + 1,
+        )
+        # ``_task_projection`` and the terminal boundary above both return a
+        # canonical stable-segment document.  This private evidence lets the
+        # Sidecar reuse that exact revision without re-normalizing it on the
+        # next structural event; older producers omit it and safely fall back.
+        command_payload['projection_segments_stable'] = True
     if task_event is not None:
         command_payload['task_event'] = task_event
     client = _turn_client(write=True)
-    command_id = f'turn-event:{attempt_id}:{now}:{event_kind}'
+    command_id = (
+        f'turn-event:{attempt_id}:{now}:{event_kind}'
+        f'{":rebase" if not allow_rebase else ""}'
+    )
     try:
         result = client.command(
             'turn.event.record', command_payload, command_id,
@@ -1037,6 +1504,22 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
             # Send / Regenerate behind multi-MiB projection writes.
             priority='event')
     except StorageError as exc:
+        if (exc.code == 'turn_projection_stale'
+                and allow_rebase and not slim):
+            # A legitimate external projection CAS advanced the row after our
+            # last event. Refresh exactly once and rebuild this same raw event
+            # against that base; repeated contention still fails closed.
+            task.pop(_TURN_PROJECTION_STATE_KEY, None)
+            return _record_task_event_locked(
+                task,
+                raw_event,
+                task_event,
+                allow_rebase=False,
+            )
+        if exc.code == 'database_integrity':
+            _signal_authority_integrity_abort(
+                task, attempt_id, event_kind)
+            raise
         # A payload-cap rejection is deterministic. Retrying the same full
         # projection on every subsequent progress frame once turned one
         # 10.3M-character command log into hundreds of multi-MiB serializations
@@ -1046,8 +1529,12 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
         # durable; a later full probe or terminal settlement converges the turn
         # document. Calls without a carrier still fail closed because slimming
         # those would discard their only structural fact.
-        if (exc.code != 'storage_payload_too_large'
-                or terminal or task_event is None or slim):
+        # Terminal events are not exempt: a turn whose text alone no longer
+        # fits one frame still has to settle, and the slim path is the only
+        # writable shape left (task mtdx825fjmhmx5 burned 2.5h emitting
+        # rejected full-projection terminal frames).
+        if (not _is_frame_overflow_error(exc)
+                or task_event is None or slim):
             raise
         retry_count = int(task.get('_turnProjectionOversizeCount') or 0) + 1
         task['_turnProjectionOversizeCount'] = retry_count
@@ -1062,19 +1549,78 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
         )
         content, thinking = _delta_text_fields(task, previous)
         projection = {'content': content, 'thinking': thinking}
-        event_payload['projection'] = projection
         command_payload.update({
-            'projection': projection,
             'event_payload': event_payload,
             'slim': True,
             'content': content,
             'thinking': thinking,
         })
+        command_payload.pop('projection_patch', None)
+        command_payload.pop('projection_segments_stable', None)
         slim = True
-        result = client.command(
-            'turn.event.record', command_payload, command_id,
-            priority='event')
+        try:
+            result = client.command(
+                'turn.event.record', command_payload, command_id,
+                priority='event')
+        except StorageError as retry_exc:
+            # Even the text-only frame was rejected: the cumulative content
+            # alone exceeds one frame, every later write can only grow, and
+            # the worker is now burning tokens on events nothing can persist.
+            # Plant the cooperative abort triple so the round loop stops at
+            # its next gate instead of repeating this failure for hours.
+            if _is_frame_overflow_error(retry_exc):
+                _signal_frame_overflow_abort(task, attempt_id, event_kind)
+            elif retry_exc.code == 'database_integrity':
+                _signal_authority_integrity_abort(
+                    task, attempt_id, event_kind)
+            raise
     applied = bool(result.get('applied'))
+    if applied and not terminal:
+        applied_revision = result.get('projection_revision')
+        if (isinstance(applied_revision, int)
+                and not isinstance(applied_revision, bool)
+                and applied_revision >= 0):
+            applied_projection = projection
+            if slim:
+                applied_projection = dict(previous)
+                applied_projection['content'] = content
+                applied_projection['thinking'] = thinking
+                # Sidecar patch writes normalize their locked base through
+                # the public stable-segment projection before applying the
+                # next delta. Keep this local baseline on the same shape: a
+                # slim text write intentionally leaves the at-rest segment
+                # mirror stale until the next structural write, while every
+                # public ``turn.get`` already presents the repaired mirror.
+                applied_projection = projection_with_stable_segments(
+                    applied_projection,
+                    actor=str(turn.get('actor') or 'assistant'),
+                    status=status,
+                )
+            _remember_task_projection_state(
+                task,
+                attempt_id=attempt_id,
+                user_id=user_id,
+                turn=turn,
+                projection=applied_projection,
+                projection_revision=applied_revision,
+            )
+        else:
+            task.pop(_TURN_PROJECTION_STATE_KEY, None)
+    elif applied:
+        # No later task frame may trust a terminal attempt as live. The
+        # terminal projection is already durable and the ordinary heavy-state
+        # release will drop the same baseline shortly afterward.
+        task.pop(_TURN_PROJECTION_STATE_KEY, None)
+    else:
+        task.pop(_TURN_PROJECTION_STATE_KEY, None)
+        try:
+            latest_attempt = get_attempt(attempt_id, user_id=user_id)
+        except LifecycleNotFound:
+            latest_attempt = None
+        if (latest_attempt is None
+                or latest_attempt.get('status') not in LIVE_ATTEMPT_STATUSES):
+            _signal_stale_attempt_abort(
+                task, attempt_id, 'event-record-rejected')
     if applied and event_kind in _COALESCIBLE_EVENT_KINDS:
         _delta_throttle_stamp(attempt_id)
     if applied and not slim and not terminal:
@@ -1087,12 +1633,10 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
         _structural_fold_clear(attempt_id)
     if applied and terminal:
         _drain_queue_after_settlement(
-            task, str(attempt.get('conversationId') or ''), status)
+            task, str(turn.get('conversationId') or ''), status)
     if applied and task_event is not None and result.get('task_event') is not None:
         return 'carried'
     return applied
-
-
 
 
 def sync_visible_run_turns(task: dict[str, Any], messages: list[dict[str, Any]],
@@ -1184,7 +1728,8 @@ def list_turns(conversation_id: str, *, user_id: Any,
                                       'user_id': user_id})
                 if client.query('conversation.get', {
                         'conv_id': conversation_id,
-                        'user_id': user_id}) is None:
+                        'user_id': user_id,
+                        'derive_messages': False}) is None:
                     raise LifecycleNotFound('Conversation not found')
                 return {
                     'conversationId': conversation_id,
@@ -1221,7 +1766,9 @@ def list_turns(conversation_id: str, *, user_id: Any,
     revision = client.query(
         'turn.revision', {'conversation_id': conversation_id, 'user_id': user_id})
     if client.query('conversation.get', {
-            'conv_id': conversation_id, 'user_id': user_id}) is None:
+            'conv_id': conversation_id,
+            'user_id': user_id,
+            'derive_messages': False}) is None:
         raise LifecycleNotFound('Conversation not found')
     return {
         'conversationId': conversation_id,
@@ -1253,6 +1800,36 @@ def get_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
     return row
 
 
+def list_dispatchable_attempts(
+    *, created_before_ms: int, limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Read one bounded system batch of accepted, never-dispatched attempts.
+
+    The semantic operation applies the dispatch-mode and empty-task proof
+    before its limit. Each returned item includes the durable owner identity;
+    callers must pass that owner back through the normal command service.
+    """
+    cutoff = int(created_before_ms)
+    bounded_limit = int(limit)
+    if cutoff < 0:
+        raise ValueError('created_before_ms must be non-negative')
+    if not 1 <= bounded_limit <= 32:
+        raise ValueError('dispatchable attempt limit must be between 1 and 32')
+    rows = _turn_client().query(
+        'turn.attempt.dispatchable.list', {
+            'created_before_ms': cutoff,
+            'limit': bounded_limit,
+        },
+        deadline=2.0,
+    )
+    if not isinstance(rows, list):
+        raise StorageError(
+            'database_protocol_error',
+            'Dispatchable attempt query returned an invalid result',
+        )
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
 def get_conversation_revision(conversation_id: str, *, user_id: Any) -> int:
     user_id = require_user_id(user_id, context='get conversation revision')
     revision = _turn_client().query(
@@ -1263,7 +1840,8 @@ def get_conversation_revision(conversation_id: str, *, user_id: Any) -> int:
         # the conversation domain to distinguish missing from empty.
         if _turn_client().query(
                 'conversation.get', {'conv_id': conversation_id,
-                                     'user_id': user_id}) is None:
+                                     'user_id': user_id,
+                                     'derive_messages': False}) is None:
             raise LifecycleNotFound('Conversation not found')
     return int(revision)
 
@@ -1298,6 +1876,39 @@ def update_turn_projection(conversation_id: str, turn_id: str, *,
         if exc.code == 'turn_in_progress':
             raise LifecycleConflict('turn_in_progress', str(exc)) from exc
         if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
+
+
+def record_turn_perception(
+    conversation_id: str,
+    turn_id: str,
+    *,
+    attempt_id: str,
+    observation: Mapping[str, Any],
+    user_id: Any,
+) -> dict[str, Any]:
+    """Append one owner-scoped, content-free browser perception receipt."""
+    user_id = require_user_id(user_id, context='record turn perception')
+    observation_id = str(observation.get('observationId') or '')
+    if not observation_id:
+        raise ValueError('observationId is required')
+    receipt_identity = hashlib.sha256(
+        f'{user_id}\0{attempt_id}\0{observation_id}'.encode('utf-8')
+    ).hexdigest()
+    try:
+        return _turn_client(write=True).command(
+            'turn.perception.record', {
+                'conversation_id': conversation_id,
+                'user_id': user_id,
+                'turn_id': turn_id,
+                'attempt_id': attempt_id,
+                'observation': dict(observation),
+            }, f'turn-perception:{user_id}:{receipt_identity}')
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code in {'database_conflict', 'turn_projection_stale'}:
             raise LifecycleConflict(exc.code, str(exc)) from exc
         raise
 
@@ -1500,6 +2111,7 @@ def abort_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
         from lib.tasks_pkg.manager.runtime import chat_task_runtime
         task = chat_task_runtime.get_owned(task_id, user_id=int(user_id))
     if task is not None:
+        was_pending = str(task.get('status') or '') == 'pending'
         chat_task_runtime.abort_owned(task_id, user_id=int(user_id))
         chat_task_runtime.update_fields(
             task_id,
@@ -1509,6 +2121,13 @@ def abort_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
                 '_abort_reason': 'turn_attempt_abort',
             },
         )
+        if was_pending:
+            from lib.tasks_pkg.spawn import cancel_queued_task
+
+            if cancel_queued_task(task_id):
+                from lib.tasks_pkg.manager import finalize_chat_task_aborted
+
+                finalize_chat_task_aborted(task)
     else:
         # Registry miss (or no task bound yet): plant the durable abort
         # tombstone so a live-but-evicted worker's abort_check consumes it
@@ -1597,7 +2216,9 @@ def build_api_messages(
         projection['_turnId'] = row['turnId']
         raw.append(projection)
     from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
-    return _transform_messages(raw, config, exclude_last=bool(config.get('excludeLast')))
+    return _transform_messages(
+        raw, config, exclude_last=bool(config.get('excludeLast')),
+        user_id=owner_user_id)
 
 
 def backfill_turn_search_index(*, max_rounds: int = 100_000) -> dict[str, Any]:
@@ -1777,14 +2398,15 @@ def cleanup_superseded_attempts(*, retention_ms: int = 6 * 60 * 60 * 1000,
         f'turn-cleanup:{cutoff}:{limit}'))
 
 
-
 __all__ = [
     'LifecycleConflict', 'LifecycleNotFound', 'TERMINAL_STATUSES',
     'create_turn_pair', 'append_settled_turn', 'announce_related_turns',
-    'create_attempt', 'claim_attempt_start', 'dispatch_attempt_to_worker',
-    'bind_task', 'fail_start',
+    'create_attempt', 'attempt_dispatch_lock', 'claim_attempt_start',
+    'dispatch_attempt_to_worker',
+    'bind_task', 'mark_task_started', 'fail_start',
     'record_task_event', 'sync_visible_run_turns',
-    'list_turns', 'get_turn', 'get_attempt', 'update_turn_projection',
+    'list_turns', 'get_turn', 'get_attempt', 'list_dispatchable_attempts',
+    'update_turn_projection',
     'create_branch_lane', 'delete_branch_lane',
     'delete_turns',
     'get_conversation_revision', 'read_events',

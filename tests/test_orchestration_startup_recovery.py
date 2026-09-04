@@ -60,6 +60,9 @@ def test_cross_owner_handler_has_no_synthetic_personal_owner():
         statement = ''
         params = ()
 
+        def fetch_all(self, _statement, _params):
+            return []
+
         def execute(self, statement, params):
             self.statement = statement
             self.params = params

@@ -28,6 +28,7 @@ symbol resolves byte-identically to the pre-split module:
 from __future__ import annotations
 
 from lib.log import get_logger
+from lib.scheduler.contract import TimerCapacityError, timer_live_capacity
 
 logger = get_logger(__name__)
 
@@ -89,6 +90,7 @@ __all__ = [
     'get_timer_poll_log',
     'poll_timer', 'start_timer_loop', 'resume_active_timers',
     'get_active_timer_count',
+    'TimerCapacityError', 'timer_live_capacity',
     # Used by scheduler/executor.py for inline blocking poll:
     '_record_poll', '_increment_poll_count', '_mark_exhausted',
 ]

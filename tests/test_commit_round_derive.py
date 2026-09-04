@@ -43,6 +43,11 @@ WHAT IS ASSERTED (behaviour, never implementation — charter discipline)
   5. Deduplication is keyed on ``(root, path)`` — the same relative path in two
      different roots is two files, not one.
 
+  6. Live stamping — a journaled record folds into the RUNNING task's
+     ``modifiedFileList`` immediately (the mid-run fileChanges card);
+     terminal or aborted tasks are refused, the fold is copy-on-write, and
+     settlement remains the authority that rebuilds the list at commit.
+
 Run::
 
     PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
@@ -58,7 +63,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg.commit_round._derive import derive_round_modified_files  # noqa: E402
+from lib.tasks_pkg.commit_round._derive import (  # noqa: E402
+    derive_round_modified_files,
+    note_live_file_change,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -312,6 +320,149 @@ def test_unrooted_mod_omits_the_root_key_entirely(journal):
     journal['/proj'] = [_mod('f.py', root='')]
     files, _, _ = derive_round_modified_files(_task(), '/proj', ['/proj'])
     assert files == [{'path': 'f.py', 'action': 'written'}]
+
+
+# ── 6. live stamping into the running task ────────────────────────────
+
+class _StubRuntime:
+    """Minimal stand-in for the task registry's ``update_matching`` contract."""
+
+    def __init__(self, tasks):
+        self._tasks = tasks
+
+    def update_matching(self, *, predicate, updater):
+        hits = []
+        for task in self._tasks:
+            if predicate(task):
+                updater(task)
+                hits.append(task)
+        return hits
+
+
+def _live_task(**over):
+    t = {'id': TASK_ID, 'status': 'running'}
+    t.update(over)
+    return t
+
+
+@pytest.fixture
+def stub_runtime(monkeypatch):
+    import lib.tasks_pkg.manager.runtime as manager_runtime
+
+    def _install(tasks):
+        monkeypatch.setattr(
+            manager_runtime, 'chat_task_runtime', _StubRuntime(tasks))
+        return tasks
+    return _install
+
+
+def test_live_change_stamps_running_task(stub_runtime):
+    task = _live_task()
+    stub_runtime([task])
+    assert note_live_file_change(
+        TASK_ID, {'path': 'src/a.ts', 'action': 'modified'}) is True
+    assert task['modifiedFileList'] == [{'path': 'src/a.ts', 'action': 'modified'}]
+    assert task['modifiedFiles'] == 1
+
+
+def test_live_change_last_write_wins_keeping_first_position(stub_runtime):
+    task = _live_task(modifiedFileList=[{'path': 'b.py', 'action': 'written'}],
+                      modifiedFiles=1)
+    stub_runtime([task])
+    note_live_file_change(TASK_ID, {'path': 'a.py', 'action': 'created'})
+    note_live_file_change(TASK_ID, {'path': 'b.py', 'action': 'patched'})
+    assert task['modifiedFileList'] == [
+        {'path': 'b.py', 'action': 'patched'},   # re-edit keeps first position
+        {'path': 'a.py', 'action': 'created'},
+    ]
+    assert task['modifiedFiles'] == 2
+
+
+def test_live_change_seeds_from_checkpoint_list(stub_runtime):
+    """A continued turn must show the full round live, not only new edits."""
+    task = _live_task(
+        _checkpointModifiedFileList=[{'path': 'old.py', 'action': 'written'}])
+    stub_runtime([task])
+    note_live_file_change(TASK_ID, {'path': 'new.py', 'action': 'created'})
+    assert [f['path'] for f in task['modifiedFileList']] == ['old.py', 'new.py']
+    assert task['modifiedFiles'] == 2
+
+
+def test_live_change_refuses_terminal_or_aborted_task(stub_runtime):
+    """A late tool callback must not rewrite a settled/aborted list."""
+    settled = _live_task(status='completed')
+    aborted = _live_task(aborted=True)
+    stub_runtime([settled, aborted])
+    assert note_live_file_change(
+        TASK_ID, {'path': 'x.py', 'action': 'written'}) is False
+    assert 'modifiedFileList' not in settled
+    assert 'modifiedFileList' not in aborted
+
+
+def test_live_change_is_copy_on_write(stub_runtime):
+    """A projection fold holding the previous list never sees it mutate."""
+    original = [{'path': 'a.py', 'action': 'written'}]
+    task = _live_task(modifiedFileList=original)
+    stub_runtime([task])
+    note_live_file_change(TASK_ID, {'path': 'a.py', 'action': 'patched'})
+    assert original == [{'path': 'a.py', 'action': 'written'}]
+    assert task['modifiedFileList'] is not original
+
+
+def test_live_change_never_raises_when_registry_fails(monkeypatch):
+    import lib.tasks_pkg.manager.runtime as manager_runtime
+
+    class _Exploding:
+        def update_matching(self, **kwargs):
+            raise RuntimeError('registry gone')
+
+    monkeypatch.setattr(manager_runtime, 'chat_task_runtime', _Exploding())
+    assert note_live_file_change(
+        TASK_ID, {'path': 'a.py', 'action': 'written'}) is False
+
+
+def test_register_listener_is_idempotent(monkeypatch):
+    from lib.project_mod import modifications
+    monkeypatch.setattr(modifications, '_live_change_listeners', [])
+    modifications.register_live_change_listener(note_live_file_change)
+    modifications.register_live_change_listener(note_live_file_change)
+    assert modifications._live_change_listeners == [note_live_file_change]
+
+
+def test_journaled_record_reaches_the_running_task(
+        monkeypatch, stub_runtime, tmp_path):
+    """The incident shape: a mid-run write must surface on the live task.
+
+    2026-08-30 (conv mtf0knqujiwmu5): ``modifiedFileList`` was written only
+    by settlement, so a running turn's projection never carried
+    ``fileChanges`` and the UI showed no file-change card until commit.
+    """
+    from lib.project_mod import modifications
+
+    monkeypatch.setattr(
+        modifications, '_get_session_dir', lambda _bp: str(tmp_path))
+    monkeypatch.setattr(
+        modifications, '_locked_rmw', lambda _sd, fn: fn([]))
+    monkeypatch.setattr(modifications, '_roots', {})
+    monkeypatch.setattr(
+        modifications, '_live_change_listeners', [note_live_file_change])
+
+    task = _live_task()
+    stub_runtime([task])
+
+    assert modifications._record_modification(
+        str(tmp_path), 'write_file', 'src/new.ts', task_id=TASK_ID) is True
+    assert task['modifiedFileList'] == [
+        {'path': 'src/new.ts', 'action': 'created'}]
+
+    # run_command passes its exact change-type hint through (deleted vs
+    # modified is indistinguishable from ``existed`` alone).
+    assert modifications._record_modification(
+        str(tmp_path), 'run_command', 'src/gone.ts',
+        task_id=TASK_ID, action='deleted') is True
+    assert task['modifiedFileList'][-1] == {
+        'path': 'src/gone.ts', 'action': 'deleted'}
+    assert task['modifiedFiles'] == 2
 
 
 if __name__ == '__main__':

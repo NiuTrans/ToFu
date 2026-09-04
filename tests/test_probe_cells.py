@@ -1,13 +1,18 @@
-"""tests/test_probe_cells.py — Access-matrix cell-probe classification.
+"""tests/test_probe_cells.py — Provider reachability classification.
 
-Covers ``routes.config._probe_one_cell`` — the per-(key, model) reachability
-test behind the matrix's "Probe & Recommend" button. We patch the HTTP layer
-so no network is touched and assert each HTTP status maps to the right verdict.
+Covers ``lib.provider_probe.probe_one_cell`` — the provider-owned reachability
+boundary. We patch the HTTP layer so no network is touched and assert each
+HTTP status maps to the right verdict.
 """
 
 import json as jsonlib
 import unittest
 from unittest import mock
+
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class _FakeResp:
@@ -19,11 +24,11 @@ class _FakeResp:
 class ProbeCellClassificationTest(unittest.TestCase):
 
     def _probe(self, status_code, text=''):
-        import routes.config as cfg
+        import lib.provider_probe as probe
         with mock.patch('lib.http_client.http_post',
                         return_value=_FakeResp(status_code, text)):
-            return cfg._probe_one_cell('https://gw.example.com/v1', 'sk-x',
-                                       'modelX', {}, 5)
+            return probe.probe_one_cell(
+                'https://gw.example.com/v1', 'sk-x', 'modelX', {}, 5)
 
     def test_200_is_ok(self):
         body = jsonlib.dumps({'choices': [{'message': {'content': 'OK'}}]})
@@ -103,10 +108,10 @@ class ProbeCellClassificationTest(unittest.TestCase):
         self.assertEqual(self._probe(503, 'service unavailable')[0], 'unavailable')
 
     def test_network_error_is_unavailable(self):
-        import routes.config as cfg
+        import lib.provider_probe as probe
         with mock.patch('lib.http_client.http_post', side_effect=OSError('boom')):
-            status, _ = cfg._probe_one_cell('https://gw.example.com/v1', 'sk-x',
-                                            'modelX', {}, 5)
+            status, _ = probe.probe_one_cell(
+                'https://gw.example.com/v1', 'sk-x', 'modelX', {}, 5)
         self.assertEqual(status, 'unavailable')
 
     def test_unknown_code_is_error(self):
@@ -217,7 +222,7 @@ class ProbeProtocolTest(unittest.TestCase):
     """``protocol='anthropic'`` probes the Messages API with anthropic auth."""
 
     def _capture(self, protocol):
-        import routes.config as cfg
+        import lib.provider_probe as probe
         seen = {}
 
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -230,7 +235,7 @@ class ProbeProtocolTest(unittest.TestCase):
             return _FakeResp(200, jsonlib.dumps(payload))
 
         with mock.patch('lib.http_client.http_post', side_effect=fake_post):
-            status, _ = cfg._probe_one_cell(
+            status, _ = probe.probe_one_cell(
                 'https://api.openai.com/v1/anthropic', 'app-id-123',
                 'yuju-claude-opus-4.7-evaDaily', {'M-X': '1'}, 5, protocol)
         return status, seen

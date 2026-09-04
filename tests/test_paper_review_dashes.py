@@ -31,9 +31,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+import pytest  # noqa: E402
 
 TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
+pytestmark = pytest.mark.unit
 
 EMDASH, ENDASH, HBAR = '\u2014', '\u2013', '\u2015'
 FW_COMMA = '\uff0c'
@@ -136,7 +138,12 @@ def _run(lang_key, ui_lang, phash):
     re_mod2, orig, orig_insight = _patch_dispatch(REVIEW_BODY)
     try:
         task = _new_report_task('t_' + phash[:6], phash, lang_key, None,
-                                client_title='P', ui_lang=ui_lang, user_id=TEST_OWNER_USER_ID)
+                                client_title='P', ui_lang=ui_lang,
+                                config={
+                                    'responses': {'promptProfile': 'full'},
+                                    'paperInsightEnabled': False,
+                                    'paperCheckpointsEnabled': False,
+                                }, user_id=TEST_OWNER_USER_ID)
         re_mod2.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},

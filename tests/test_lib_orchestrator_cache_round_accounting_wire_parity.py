@@ -307,6 +307,82 @@ def test_helper_stamps_toolCalls_names_from_assistant_msg():
     assert api_rounds[-1].get('toolCalls') == ['search_web', 'read_file']
 
 
+def test_helper_stamps_matching_content_free_prompt_admission(monkeypatch):
+    from lib.tasks_pkg.orchestrator import _cache_round_accounting as accounting
+
+    monkeypatch.setattr(accounting, 'detect_cache_break', lambda *a, **k: None)
+    monkeypatch.setattr(accounting, 'get_prev_turn_cache_read',
+                        lambda *a, **k: 0)
+    monkeypatch.setattr(accounting, '_compute_write_breakdown',
+                        lambda *a, **k: {})
+    monkeypatch.setattr(accounting, 'log_round_cache_stats',
+                        lambda *a, **k: None)
+    evidence = {
+        'round': 1,
+        'stage': 'after_summary',
+        'action': 'compact_then_admit',
+        'messageTokens': 80_000,
+        'toolSchemaTokens': 8_000,
+        'totalTokens': 88_000,
+        'targetTokens': 120_000,
+        'hardCeilingTokens': 128_000,
+        'method': 'provider',
+        'messageCount': 23,
+    }
+    task = {
+        'id': 'a' * 32,
+        'convId': 'conv-x',
+        '_userId': 1,
+        '_lastPromptAdmission': evidence,
+    }
+    api_rounds = [{'round': 1}]
+
+    accounting.stamp_round_cache_accounting(
+        task, round_num=0, tid='abcd1234', model='kimi-k3', tools=[],
+        usage={'input_tokens': 88_000, 'output_tokens': 20},
+        assistant_msg={}, api_rounds=api_rounds, messages=[])
+
+    assert api_rounds[0]['promptAdmission'] == evidence
+    assert api_rounds[0]['promptAdmission'] is not evidence
+
+
+def test_helper_stages_bounded_cache_facts_for_the_next_checkpoint(
+        monkeypatch):
+    from lib.task_result_checkpoint_contract import (
+        TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
+        TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
+    )
+    from lib.tasks_pkg.orchestrator import _cache_round_accounting as accounting
+
+    def detect_with_facts(*_args, **kwargs):
+        hwm_sink = kwargs['cache_prefix_hwm_sink']
+        last_read_sink = kwargs['last_turn_cache_read_sink']
+        assert callable(hwm_sink)
+        assert callable(last_read_sink)
+        hwm_sink(17)
+        hwm_sink(13)
+        last_read_sink(3_200)
+        last_read_sink(3_400)
+        return None
+
+    monkeypatch.setattr(accounting, 'detect_cache_break', detect_with_facts)
+    monkeypatch.setattr(accounting, 'get_prev_turn_cache_read',
+                        lambda *a, **k: 0)
+    monkeypatch.setattr(accounting, '_compute_write_breakdown',
+                        lambda *a, **k: {})
+    monkeypatch.setattr(accounting, 'log_round_cache_stats',
+                        lambda *a, **k: None)
+    task = {'id': 'a' * 32, 'convId': 'conv-x', '_userId': 1}
+
+    accounting.stamp_round_cache_accounting(
+        task, round_num=0, tid='abcd1234', model='kimi-k3', tools=[],
+        usage={'input_tokens': 4_000, 'output_tokens': 20},
+        assistant_msg={}, api_rounds=[{'round': 1}], messages=[])
+
+    assert task[TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD] == 17
+    assert task[TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD] == 3_400
+
+
 def test_helper_skips_stamp_when_round_number_mismatch():
     """If api_rounds[-1] belongs to a different round (e.g. this round
     produced no usage so no entry was appended), the helper must NOT

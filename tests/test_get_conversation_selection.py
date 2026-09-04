@@ -61,15 +61,182 @@ def _install_fake_row(monkeypatch, messages, title='T'):
         'messages': messages, 'created_at': 1, 'updated_at': 2,
         'settings': {}, 'msg_count': len(messages), 'rev': 3,
     })
-    monkeypatch.setattr(
-        _detail,
-        '_read_conversation_snapshot',
-        lambda conversation_id, *, user_id: row,
-    )
+    def read(_conversation_id, *, user_id, **projection):
+        del user_id
+        window = projection.get('message_window')
+        if window is None:
+            return row
+        end = min(
+            projection.get('before_sequence', len(messages)),
+            len(messages),
+        )
+        projected = _FakeRow(row)
+        projected['messages'] = messages[max(0, end - window):end]
+        return projected
+
+    monkeypatch.setattr(_detail, '_read_conversation_snapshot', read)
     return row
 
 
 class TestSelectionKeepsTheEnding:
+    def test_bounded_repository_pages_match_full_selection(self, monkeypatch):
+        from lib.conv_ref import _detail
+
+        for total in (0, 1, 3, 4, 17, 63, 100):
+            messages = _mk_messages(total, body='p')
+            row = _FakeRow({
+                'id': 'c1', 'user_id': 1, 'title': 'T',
+                'messages': messages, 'created_at': 1, 'updated_at': 2,
+                'settings': {}, 'msg_count': total, 'rev': 9,
+            })
+            calls = []
+
+            def read(_conversation_id, *, user_id, **projection):
+                del user_id
+                calls.append(dict(projection))
+                if 'message_window' not in projection:
+                    return row
+                end = min(
+                    projection.get('before_sequence', total), total)
+                projected = _FakeRow(row)
+                window = projection['message_window']
+                projected['messages'] = messages[
+                    max(0, end - window):end]
+                return projected
+
+            monkeypatch.setattr(
+                _detail, '_read_conversation_snapshot', read)
+            for tail in (1, 2, 8, 60):
+                for before in (None, 0, 1, 3, total // 2, total, total + 5):
+                    calls.clear()
+                    result = _detail._read_prose_message_window(
+                        'c1', user_id=1, tail=tail, before=before)
+                    assert result is not None
+                    _row, kept, omitted, observed_total = result
+                    expected = _detail._select_message_window(
+                        messages,
+                        _detail.TRANSCRIPT_HEAD,
+                        tail,
+                        before=before,
+                    )
+                    assert (kept, omitted, observed_total) == expected
+                    assert calls
+                    assert all('message_window' in call for call in calls)
+
+    def test_bounded_page_epoch_change_uses_full_snapshot(self, monkeypatch):
+        from lib.conv_ref import _detail
+
+        messages = _mk_messages(100, body='e')
+
+        def row(selected, rev):
+            return _FakeRow({
+                'id': 'c1', 'user_id': 1, 'title': 'T',
+                'messages': list(selected), 'created_at': 1, 'updated_at': 2,
+                'settings': {}, 'msg_count': len(messages), 'rev': rev,
+            })
+
+        queued = [
+            row(messages[-60:], 4),
+            row(messages[:3], 5),
+            row(messages, 5),
+        ]
+        calls = []
+
+        def read(_conversation_id, *, user_id, **projection):
+            del user_id
+            calls.append(dict(projection))
+            return queued.pop(0)
+
+        monkeypatch.setattr(
+            _detail, '_read_conversation_snapshot', read)
+
+        result = _detail._read_prose_message_window(
+            'c1', user_id=1, tail=60, before=None)
+
+        assert result is not None
+        _row, kept, omitted, total = result
+        assert (kept, omitted, total) == _detail._select_message_window(
+            messages, _detail.TRANSCRIPT_HEAD, 60)
+        assert calls[-1] == {}
+
+    def test_bounded_digest_pages_match_full_anchor_selection(
+        self, monkeypatch
+    ):
+        from lib.conv_ref import _detail
+
+        for total, trailing in ((0, 0), (4, 0), (17, 2), (130, 3)):
+            messages = _mk_messages(total, body='d')
+            for index in range(max(0, total - trailing), total):
+                messages[index] = {
+                    'role': 'assistant',
+                    'content': '',
+                    'toolRounds': [{'toolName': 'cleanup'}],
+                }
+            row = _FakeRow({
+                'id': 'c1', 'user_id': 1, 'title': 'T',
+                'messages': messages, 'created_at': 1, 'updated_at': 2,
+                'settings': {}, 'msg_count': total, 'rev': 11,
+            })
+
+            def read(_conversation_id, *, user_id, **projection):
+                del user_id
+                if 'message_window' not in projection:
+                    return row
+                end = min(
+                    projection.get('before_sequence', total), total)
+                projected = _FakeRow(row)
+                window = projection['message_window']
+                projected['messages'] = messages[
+                    max(0, end - window):end]
+                return projected
+
+            monkeypatch.setattr(
+                _detail, '_read_conversation_snapshot', read)
+            for head, tail in ((1, 2), (3, 5), (3, 100)):
+                result = _detail._read_digest_message_window(
+                    'c1', user_id=1, head=head, tail=tail)
+                assert result is not None
+                _row, kept, observed_total, omitted, dropped = result
+                assert (kept, observed_total, omitted, dropped) == (
+                    _detail._select_digest_message_window(
+                        messages, head, tail)
+                )
+
+    def test_digest_anchor_outside_probe_uses_full_snapshot(
+        self, monkeypatch
+    ):
+        from lib.conv_ref import _detail
+
+        messages = _mk_messages(30, body='a')
+        for index in range(20, 30):
+            messages[index] = {'role': 'assistant', 'content': ''}
+        row = _FakeRow({
+            'id': 'c1', 'user_id': 1, 'title': 'T',
+            'messages': messages, 'created_at': 1, 'updated_at': 2,
+            'settings': {}, 'msg_count': len(messages), 'rev': 12,
+        })
+        calls = []
+
+        def read(_conversation_id, *, user_id, **projection):
+            del user_id
+            calls.append(dict(projection))
+            if 'message_window' not in projection:
+                return row
+            projected = _FakeRow(row)
+            projected['messages'] = messages[-5:]
+            return projected
+
+        monkeypatch.setattr(
+            _detail, '_read_conversation_snapshot', read)
+
+        result = _detail._read_digest_message_window(
+            'c1', user_id=1, head=3, tail=5)
+
+        assert result is not None
+        assert result[1:] == _detail._select_digest_message_window(
+            messages, 3, 5)
+        assert calls == [{'message_window': 5}, {}]
+
     def test_long_conversation_keeps_the_last_message(self, monkeypatch):
         """The single most important property: the CONCLUSION must survive."""
         from lib.conv_ref._detail import get_conversation
@@ -153,6 +320,90 @@ class TestNoFalseRecoveryPath:
 
 
 class TestRawStaysParseable:
+    def test_bounded_raw_probe_is_byte_identical_without_full_read(
+        self, monkeypatch
+    ):
+        from lib.conv_ref import _detail
+
+        messages = _mk_messages(400, body='zz')
+        row = _FakeRow({
+            'id': 'c1', 'user_id': 1, 'title': 'Raw',
+            'messages': messages, 'created_at': 1, 'updated_at': 2,
+            'settings': {'preset': 'test'}, 'msg_count': len(messages),
+            'rev': 14,
+        })
+        monkeypatch.setattr(
+            _detail,
+            '_read_conversation_snapshot',
+            lambda _conversation_id, *, user_id, **projection: row,
+        )
+        baseline = _detail.get_conversation('c1', raw=True, user_id=1)
+        calls = []
+
+        def bounded(_conversation_id, *, user_id, **projection):
+            del user_id
+            calls.append(dict(projection))
+            if 'message_window' not in projection:
+                return row
+            end = min(
+                projection.get('before_sequence', len(messages)),
+                len(messages),
+            )
+            projected = _FakeRow(row)
+            window = projection['message_window']
+            projected['messages'] = messages[max(0, end - window):end]
+            return projected
+
+        monkeypatch.setattr(
+            _detail, '_read_conversation_snapshot', bounded)
+
+        result = _detail.get_conversation('c1', raw=True, user_id=1)
+
+        assert result == baseline
+        assert calls == [
+            {'message_window': 64},
+            {'message_window': 3, 'before_sequence': 3},
+        ]
+
+    def test_small_raw_candidates_take_exact_full_fallback(
+        self, monkeypatch
+    ):
+        from lib.conv_ref import _detail
+
+        messages = [
+            {'role': 'user', 'content': f'short-{index}'}
+            for index in range(400)
+        ]
+        row = _FakeRow({
+            'id': 'c1', 'user_id': 1, 'title': 'Tiny rows',
+            'messages': messages, 'created_at': 1, 'updated_at': 2,
+            'settings': {}, 'msg_count': len(messages), 'rev': 15,
+        })
+        calls = []
+
+        def read(_conversation_id, *, user_id, **projection):
+            del user_id
+            calls.append(dict(projection))
+            if 'message_window' not in projection:
+                return row
+            end = min(
+                projection.get('before_sequence', len(messages)),
+                len(messages),
+            )
+            projected = _FakeRow(row)
+            window = projection['message_window']
+            projected['messages'] = messages[max(0, end - window):end]
+            return projected
+
+        monkeypatch.setattr(
+            _detail, '_read_conversation_snapshot', read)
+
+        result = _detail.get_conversation('c1', raw=True, user_id=1)
+
+        assert calls[-1] == {}
+        body = result.split('```json', 1)[1].rsplit('```', 1)[0]
+        json.loads(body)
+
     def test_raw_is_valid_json(self, monkeypatch):
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(400))

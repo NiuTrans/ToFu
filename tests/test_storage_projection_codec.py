@@ -8,8 +8,11 @@ import pytest
 from lib.storage.errors import StorageError
 from lib.storage_sidecar.operations_pkg._common import _dump, _load
 from lib.storage_sidecar.projection_codec import (
+    ProjectionCodecError,
     STORAGE_PROJECTION_CODEC_KEY,
     STORAGE_PROJECTION_MAX_HYDRATION_RATIO,
+    decode_projection_sequence_from_storage,
+    encode_projection_sequence_for_storage,
     projection_hydration_byte_upper_bound,
 )
 
@@ -132,3 +135,38 @@ def test_hydration_budget_counts_postgres_jsonb_bytes_not_mapping_keys():
         canonical
     )
     assert projection_hydration_byte_upper_bound(canonical) == len(canonical)
+
+
+def test_projection_sequence_compacts_archives_and_hydrates_shared_values():
+    projections = [_projection(payload="archive payload " * 20_000)]
+    canonical = orjson.dumps(projections, option=orjson.OPT_SORT_KEYS)
+
+    stored = encode_projection_sequence_for_storage(projections)
+    stored_bytes = orjson.dumps(stored, option=orjson.OPT_SORT_KEYS)
+    hydrated = decode_projection_sequence_from_storage(stored)
+
+    assert len(stored_bytes) < len(canonical) * 0.6
+    assert orjson.dumps(hydrated, option=orjson.OPT_SORT_KEYS) == canonical
+    assert (
+        hydrated[0]["segments"][1]["result"]["content"]
+        is hydrated[0]["toolRounds"][0]["toolContent"]
+    )
+    assert encode_projection_sequence_for_storage(
+        stored, accept_stored=True
+    ) == stored
+    with pytest.raises(ProjectionCodecError):
+        encode_projection_sequence_for_storage(stored)
+
+
+def test_archived_conversation_codec_corruption_is_storage_integrity():
+    from lib.storage_sidecar.operations_pkg._conversations import (
+        _archived_conversation_messages,
+    )
+
+    stored = encode_projection_sequence_for_storage([_projection()])
+    stored[0][STORAGE_PROJECTION_CODEC_KEY]["version"] = 99
+
+    with pytest.raises(StorageError) as raised:
+        _archived_conversation_messages(orjson.dumps(stored))
+
+    assert raised.value.code == "database_integrity"

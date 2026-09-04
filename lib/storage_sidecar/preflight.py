@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import os
@@ -169,6 +170,55 @@ class ProjectLease:
                 'Offline mutation target is outside the leased data directory',
             )
         return resolved
+
+    def publish_storage_locator(self, locator: Mapping[str, object]) -> None:
+        """Attach a credential-free diagnostic locator to the live stamp.
+
+        The lease file is project-local and intentionally contains no Sidecar
+        token or DSN. An allowlist keeps future backend metadata from
+        accidentally turning it into a credential channel.
+        """
+        if self._handle is None or self._stamp is None:
+            raise StorageError(
+                'database_unavailable',
+                'Storage locator requires an acquired project lease',
+            )
+        if int(self._stamp.get('pid') or 0) != os.getpid():
+            raise StorageError(
+                'database_unavailable', 'Project lease belongs to another process')
+        value = dict(locator)
+        allowed = {
+            'format', 'backend', 'authority_path', 'configured_path',
+            'shadow_dir', 'fastpath_active',
+        }
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(
+                'storage locator contains unsupported fields: '
+                + ', '.join(sorted(unknown)))
+        if value.get('format') != 'tofu.storage-locator/v1':
+            raise ValueError('invalid storage locator format')
+        backend = str(value.get('backend') or '').strip().lower()
+        if (not backend or len(backend) > 32
+                or any(ch not in 'abcdefghijklmnopqrstuvwxyz0123456789_'
+                       for ch in backend)):
+            raise ValueError('invalid storage locator backend')
+        value['backend'] = backend
+        for key in ('authority_path', 'configured_path', 'shadow_dir'):
+            if key not in value:
+                continue
+            raw_path = str(value[key] or '').strip()
+            if (not raw_path or len(raw_path) > 4096
+                    or '\x00' in raw_path or not Path(raw_path).is_absolute()):
+                raise ValueError(f'invalid storage locator {key}')
+            value[key] = raw_path
+        if ('fastpath_active' in value
+                and not isinstance(value['fastpath_active'], bool)):
+            raise ValueError('invalid storage locator fastpath_active')
+        value['published_unix_ms'] = int(time.time() * 1000)
+        updated = {**self._stamp, 'storage_locator': value}
+        self._write_stamp(updated)
+        self._stamp = updated
 
     def release(self) -> None:
         handle, self._handle = self._handle, None

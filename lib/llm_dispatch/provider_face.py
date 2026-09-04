@@ -214,7 +214,7 @@ def resolve_face(provider: dict, model_entry: dict,
     """Resolve which wire face *model_entry* dispatches over.
 
     Args:
-        provider: a ``config['providers'][i]`` dict.
+        provider: a provider-shaped probe or legacy-migration projection.
         model_entry: one of its ``models`` entries.
         dual_face_hosts: override the derived host set (tests / callers that
             already computed it). ``None`` = derive from shipped templates.

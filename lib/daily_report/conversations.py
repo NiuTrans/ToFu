@@ -30,6 +30,9 @@ from .todos import (
 
 logger = get_logger(__name__)
 
+_TRANSCRIPT_CHARACTER_BUDGET = 800
+_TRANSCRIPT_PREFIX_TURN_LIMIT = 128
+
 def _safe_int_ts(value, fallback=0):
     """Safely convert a timestamp value to int, handling str/float/None."""
     if value is None:
@@ -41,99 +44,183 @@ def _safe_int_ts(value, fallback=0):
         return fallback
 
 
-def _build_transcript_from_messages(msgs, day_start_ms, day_end_ms):
-    """Build a compact transcript from raw message dicts for a date range.
+def _message_text(message: dict) -> str:
+    content = message.get('content', '')
+    if isinstance(content, list):
+        content = ' '.join(
+            (part if isinstance(part, str) else part.get('text', ''))
+            for part in content
+        )
+    return content if isinstance(content, str) else ''
 
-    Mimics the frontend's _buildConvTranscript() logic.
-    """
-    turns = []
-    for msg in msgs:
-        if not isinstance(msg, dict):
+
+def _message_tool_names(message: dict) -> list[str]:
+    tool_names = []
+    for tool_round in (message.get('toolRounds', []) or []):
+        if not isinstance(tool_round, dict):
             continue
-        ts = _safe_int_ts(msg.get('timestamp', 0))
-        # If no timestamp, include the message (old data)
-        if ts and (ts < day_start_ms or ts >= day_end_ms):
-            continue
-        role = msg.get('role', '')
-        content = msg.get('content', '')
-        if isinstance(content, list):
-            # Multi-modal messages — extract text parts
-            content = ' '.join(
-                (p if isinstance(p, str) else p.get('text', ''))
-                for p in content
-            )
-        if not isinstance(content, str):
-            content = ''
+        for call in (
+            tool_round.get('calls', [])
+            or tool_round.get('toolCalls', [])
+            or []
+        ):
+            tool_name = ''
+            if isinstance(call, dict):
+                function = call.get('function', {})
+                tool_name = (
+                    function.get('name', '')
+                    if isinstance(function, dict)
+                    else ''
+                )
+                if not tool_name:
+                    tool_name = call.get('name', '')
+            if tool_name:
+                tool_names.append(tool_name)
+    return tool_names
 
-        if role == 'user' and content.strip():
-            turns.append({'role': 'USER', 'text': content})
-        elif role == 'assistant':
-            tool_names = []
-            for r in (msg.get('toolRounds', []) or []):
-                if not isinstance(r, dict):
-                    continue
-                for call in (r.get('calls', []) or r.get('toolCalls', []) or []):
-                    tn = ''
-                    if isinstance(call, dict):
-                        fn = call.get('function', {})
-                        tn = fn.get('name', '') if isinstance(fn, dict) else ''
-                        if not tn:
-                            tn = call.get('name', '')
-                    if tn:
-                        tool_names.append(tn)
-            turns.append({'role': 'ASSISTANT', 'text': content, 'tools': tool_names})
 
+def _transcript_turn(
+    message: dict,
+    *,
+    tool_names: list[str] | None = None,
+) -> dict | None:
+    role = message.get('role', '')
+    content = _message_text(message)
+    if role == 'user' and content.strip():
+        return {'role': 'USER', 'text': content}
+    if role == 'assistant':
+        return {
+            'role': 'ASSISTANT',
+            'text': content,
+            'tools': (
+                _message_tool_names(message)
+                if tool_names is None
+                else tool_names
+            )[:6],
+        }
+    return None
+
+
+def _render_transcript_turns(
+    turns: list[dict],
+    *,
+    total_turn_count: int | None = None,
+) -> str:
     if not turns:
         return ''
 
-    BUDGET = 800
+    total = len(turns) if total_turn_count is None else total_turn_count
     result = ''
-    for i, t in enumerate(turns):
-        is_first = (i == 0)
-        is_last_two = (i >= len(turns) - 3)
-        limit = 250 if (is_first or is_last_two) else 60
+    for index, turn in enumerate(turns):
+        is_first = index == 0
+        is_recent_edge = index >= total - 3
+        limit = 250 if (is_first or is_recent_edge) else 60
 
-        snippet = re.sub(r'\n+', ' ', t['text'])[:limit]
-        ellipsis = '…' if len(t['text']) > limit else ''
-        result += f'{t["role"]}: {snippet}{ellipsis}\n'
+        snippet = re.sub(r'\n+', ' ', turn['text'])[:limit]
+        ellipsis = '…' if len(turn['text']) > limit else ''
+        result += f'{turn["role"]}: {snippet}{ellipsis}\n'
 
-        if t.get('tools'):
-            result += f'[tools: {", ".join(t["tools"][:6])}]\n'
+        if turn.get('tools'):
+            result += f'[tools: {", ".join(turn["tools"][:6])}]\n'
 
-        if len(result) > BUDGET:
+        if len(result) > _TRANSCRIPT_CHARACTER_BUDGET:
             break
 
     return result.strip()
 
 
-def _message_activity_dates(msgs, created_at, updated_at,
-                            ms_start, ms_end) -> set[str]:
-    """Return every activity date represented by one exact message list.
-
-    A conversation may span several days. The old calendar helper stopped at
-    the first in-month message, so every later active day silently disappeared.
-    Use a set to count a conversation at most once on each day while retaining
-    all distinct days.
-    """
-    dates = set()
-    fallback = _safe_int_ts(updated_at or created_at or 0)
-    if not isinstance(msgs, list):
-        return dates
-    for msg in msgs:
-        if not isinstance(msg, dict):
+def _build_transcript_from_messages(msgs, day_start_ms, day_end_ms):
+    """Build the frontend-compatible compact transcript for a date range."""
+    turns = []
+    total_turn_count = 0
+    for message in msgs:
+        if not isinstance(message, dict):
             continue
-        ts = _safe_int_ts(msg.get('timestamp', 0)) or fallback
-        if ms_start <= ts < ms_end:
-            dates.add(_dt.datetime.fromtimestamp(ts / 1000).date().isoformat())
-    return dates
+        timestamp_ms = _safe_int_ts(message.get('timestamp', 0))
+        # Historical messages without a timestamp stay visible in the digest.
+        if timestamp_ms and not day_start_ms <= timestamp_ms < day_end_ms:
+            continue
+        turn = _transcript_turn(message)
+        if turn is not None:
+            total_turn_count += 1
+            if len(turns) < _TRANSCRIPT_PREFIX_TURN_LIMIT:
+                turns.append(turn)
+    return _render_transcript_turns(
+        turns,
+        total_turn_count=total_turn_count,
+    )
 
 
+def _summarize_messages_for_day(
+    messages,
+    day_start_ms: int,
+    day_end_ms: int,
+    fallback_timestamp_ms: int,
+) -> tuple[bool, int, set[str], str]:
+    """Derive report statistics and transcript in one message traversal."""
+    has_activity = False
+    rounds = 0
+    tools_used: set[str] = set()
+    transcript_turns = []
+    transcript_turn_count = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        raw_timestamp_ms = _safe_int_ts(message.get('timestamp', 0))
+        activity_timestamp_ms = raw_timestamp_ms or fallback_timestamp_ms
+        is_activity = day_start_ms <= activity_timestamp_ms < day_end_ms
+        is_transcript = (
+            not raw_timestamp_ms
+            or day_start_ms <= raw_timestamp_ms < day_end_ms
+        )
+        role = message.get('role', '')
+        tool_names = (
+            _message_tool_names(message)
+            if role == 'assistant' and (is_activity or is_transcript)
+            else []
+        )
+        if is_activity:
+            has_activity = True
+            if role == 'user':
+                rounds += 1
+            elif role == 'assistant':
+                tools_used.update(tool_names)
+        if is_transcript:
+            turn = _transcript_turn(message, tool_names=tool_names)
+            if turn is not None:
+                transcript_turn_count += 1
+                if len(transcript_turns) < _TRANSCRIPT_PREFIX_TURN_LIMIT:
+                    transcript_turns.append(turn)
+    transcript = (
+        _render_transcript_turns(
+            transcript_turns,
+            total_turn_count=transcript_turn_count,
+        )
+        if has_activity
+        else ''
+    )
+    return has_activity, rounds, tools_used, transcript
 
 
-
-
-
-
+def _local_day_intervals(ms_start: int, ms_end: int) -> tuple[list[int], list[int]]:
+    """Return explicit local-midnight boundaries and matching day numbers."""
+    if ms_end <= ms_start:
+        return [], []
+    start_date = _dt.datetime.fromtimestamp(ms_start / 1000).date()
+    boundaries = [ms_start]
+    day_numbers = [start_date.day]
+    cursor = start_date + _dt.timedelta(days=1)
+    while True:
+        boundary = int(
+            _dt.datetime.combine(cursor, _dt.time.min).timestamp() * 1000
+        )
+        if boundary >= ms_end:
+            break
+        boundaries.append(boundary)
+        day_numbers.append(cursor.day)
+        cursor += _dt.timedelta(days=1)
+    boundaries.append(ms_end)
+    return boundaries, day_numbers
 
 
 def _activity_counts_for_range(ms_start, ms_end, *, owner_user_id,
@@ -146,36 +233,29 @@ def _activity_counts_for_range(ms_start, ms_end, *, owner_user_id,
     """
     owner_id = require_user_id(
         owner_user_id, context='daily report activity scan')
+    boundaries, day_numbers = _local_day_intervals(ms_start, ms_end)
+    if not boundaries:
+        return {}
     try:
-        from lib.conversations.repository import scan_conversations_bounded
-        _candidate_count, rows = scan_conversations_bounded(
+        from lib.conversations.repository import (
+            count_conversation_activity_intervals,
+        )
+        _candidate_count, interval_counts = count_conversation_activity_intervals(
             user_id=owner_id,
             updated_at_gte=ms_start,
+            day_boundaries_ms=boundaries,
             created_at_lt=ms_end if bound_created_end else None,
             limit=10_000,
-            settings_keys=[],
         )
-        activity = {}
-        for row in rows:
-            cid = str(row['id'] or '')
-            activity[cid] = _message_activity_dates(
-                row.messages, row.get('created_at'), row.get('updated_at'),
-                ms_start, ms_end)
     except Exception as e:
         logger.error('[DailyReport] activity authority read failed range=[%d,%d): %s',
                      ms_start, ms_end, e, exc_info=True)
         return {}
 
     counts = {}
-    for dates in activity.values():
-        for date_str in dates:
-            try:
-                day_num = int(date_str.rsplit('-', 1)[1])
-            except (ValueError, IndexError) as e:
-                logger.debug('[DailyReport] malformed activity date %r: %s',
-                             date_str, e)
-                continue
-            counts[day_num] = counts.get(day_num, 0) + 1
+    for day_num, count in zip(day_numbers, interval_counts):
+        if count:
+            counts[day_num] = counts.get(day_num, 0) + count
     return counts
 
 
@@ -207,9 +287,11 @@ def _extract_convs_for_date(date_str, progress_cb=None, *, owner_user_id):
         candidate_count, rows = scan_conversations_bounded(
             user_id=owner_id,
             updated_at_gte=day_start_ms,
+            created_at_lt=day_end_ms,
             limit=10_000,
             settings_keys=[],
         )
+        rows = iter(rows)
     except Exception as exc:
         logger.error('[DailyReport] transcript authority read failed: %s',
                      exc, exc_info=True)
@@ -219,7 +301,23 @@ def _extract_convs_for_date(date_str, progress_cb=None, *, owner_user_id):
 
     digests = []
     scanned_count = 0
-    for row_idx, r in enumerate(rows):
+    row_idx = -1
+    while True:
+        try:
+            r = next(rows)
+        except StopIteration:
+            break
+        except Exception as exc:
+            # Hydration is lazy and can fail after earlier batches succeeded.
+            # A report is an all-or-nothing best-effort snapshot; never feed
+            # the LLM a silently partial day.
+            logger.error(
+                '[DailyReport] transcript authority iteration failed: %s',
+                exc,
+                exc_info=True,
+            )
+            return []
+        row_idx += 1
         scanned_count += 1
         if progress_cb and row_idx % 50 == 0:
             progress_cb(row_idx, candidate_count)
@@ -228,41 +326,20 @@ def _extract_convs_for_date(date_str, progress_cb=None, *, owner_user_id):
         if not isinstance(msgs, list) or not msgs:
             continue
 
-        # Check if conversation has activity on this day
-        has_activity = False
-        rounds = 0
-        tools_used = set()
-
-        for msg in msgs:
-            if not isinstance(msg, dict):
-                continue
-            ts = _safe_int_ts(msg.get('timestamp', 0))
-            # For old data without timestamps, use conv timestamps
-            if not ts:
-                raw_ts = r.get('updated_at') or r.get('created_at') or 0
-                ts = _safe_int_ts(raw_ts)
-            if ts < day_start_ms or ts >= day_end_ms:
-                continue
-            has_activity = True
-            if msg.get('role') == 'user':
-                rounds += 1
-            elif msg.get('role') == 'assistant':
-                for sr in (msg.get('toolRounds', []) or []):
-                    if not isinstance(sr, dict):
-                        continue
-                    for call in (sr.get('calls', []) or sr.get('toolCalls', []) or []):
-                        if isinstance(call, dict):
-                            fn = call.get('function', {})
-                            tn = fn.get('name', '') if isinstance(fn, dict) else ''
-                            if not tn:
-                                tn = call.get('name', '')
-                            if tn:
-                                tools_used.add(tn)
+        fallback_timestamp_ms = _safe_int_ts(
+            r.get('updated_at') or r.get('created_at') or 0
+        )
+        has_activity, rounds, tools_used, transcript = (
+            _summarize_messages_for_day(
+                msgs,
+                day_start_ms,
+                day_end_ms,
+                fallback_timestamp_ms,
+            )
+        )
 
         if not has_activity:
             continue
-
-        transcript = _build_transcript_from_messages(msgs, day_start_ms, day_end_ms)
         if not transcript and rounds == 0:
             continue
 

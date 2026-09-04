@@ -10,9 +10,10 @@ Routes (mounted under ``/api/v1``):
                                  dirty tree); a non-git deployment (exported
                                  copy / zip) downloads the release tarball
                                  and overlays tracked source instead.
-  POST /api/v1/update/restart  — admin: re-exec the server process so pulled
-                                 ``.py`` changes take effect. Explicit only —
-                                 ``apply`` never auto-restarts.
+  POST /api/v1/update/restart  — admin: replace the managed worker (or re-exec
+                                 an unmanaged process) so pulled ``.py``
+                                 changes take effect. Explicit only — ``apply``
+                                 never auto-restarts.
 
 The heavy lifting lives in :mod:`lib.self_update`; this layer is a thin,
 fully-logged HTTP wrapper.
@@ -57,6 +58,51 @@ UPDATE_CHANNEL = 'update'
 # ``apply_in_progress`` (a live download, re-attachable via its task_id).
 _APPLY_STATE_NAME = 'update_apply_state.json'
 _ACTIVE_APPLIES: dict = {}  # task_id → Thread; in-process liveness truth
+
+
+def _prepare_server_reexec_frontend() -> str:
+    """Repair and validate the frontend graph while this worker is still live.
+
+    The lifecycle CLI already owns the cross-process build lock and the
+    source-checkout/release distinction.  Reuse that exact preparation path,
+    then require validation to pass *before* the serving loop is fenced.  A
+    release without Node can still serve its published graph, but it may not
+    stop a healthy old worker in order to discover that the new graph is bad.
+    """
+    from lib.process_roles import CAPABILITY_FRONTEND, process_role_has
+
+    role = (os.environ.get('TOFU_PROCESS_ROLE') or 'all').strip().lower()
+    try:
+        owns_frontend = process_role_has(role, CAPABILITY_FRONTEND)
+    except ValueError as exc:
+        return f'invalid process role for restart preflight: {exc}'
+    if not owns_frontend:
+        return ''
+
+    try:
+        from serverctl import prepare_source_frontend_artifact
+        repair_error = prepare_source_frontend_artifact('in-app restart')
+    except Exception as exc:
+        logger.warning(
+            '[Update] frontend artifact preparation failed: %s',
+            type(exc).__name__,
+        )
+        return f'frontend artifact preparation failed: {exc}'
+    if repair_error:
+        return repair_error
+    try:
+        from lib.vite_assets import validate_vite_artifact
+        validate_vite_artifact()
+    except Exception as exc:
+        logger.warning(
+            '[Update] frontend artifact validation failed: %s',
+            type(exc).__name__,
+        )
+        return (
+            'frontend artifact is not restart-safe: '
+            f'{exc}; run `npm run build:frontend` while the current server '
+            'remains online')
+    return ''
 
 
 def _apply_state_path() -> str:
@@ -255,16 +301,66 @@ def update_apply():
 
 
 def _perform_server_reexec(reason: str) -> bool:
-    """Request a graceful in-place process replacement.
+    """Request a graceful process replacement through its lifecycle owner.
 
     The caller must have verified there is no in-flight work — see
     update_restart's list_running_tasks guard and lib/auto_restart.py's
-    precondition bundle.  The serving loop stops accepting connections and
-    runs Quart's bounded production shutdown stack before ``server.py`` calls
-    ``execv`` from the main thread.  Returns ``False`` only when that shutdown
-    bridge is unavailable; an accepted request returns immediately while the
-    lifecycle drains.
+    precondition bundle. A Supervisor-managed worker is replaced by a freshly
+    reloaded manager so launch-time resource policy cannot remain pinned in a
+    stale parent or inherited environment. An unmanaged worker retains the
+    bounded in-place ``execv`` path. Returns ``False`` only when the relevant
+    lifecycle bridge refuses the request.
     """
+    preflight_error = _prepare_server_reexec_frontend()
+    if preflight_error:
+        logger.error(
+            '[Update] Restart preflight refused before shutdown: %s',
+            preflight_error,
+        )
+        audit_log(
+            'self_update_restart_preflight_failed',
+            pid=os.getpid(),
+            reason=reason,
+            detail=preflight_error[:500],
+        )
+        return False
+
+    if os.environ.get('TOFU_MANAGED_BY') == 'supervisor':
+        project = os.path.realpath(
+            os.environ.get('TOFU_PROJECT_PATH')
+            or os.path.join(os.path.dirname(__file__), '..', '..'))
+        try:
+            from supervisor_protocol import request_deferred_worker_restart
+            result = request_deferred_worker_restart(
+                project,
+                source=f'application-{reason}',
+                environment=os.environ,
+            )
+        except Exception as exc:
+            logger.error(
+                '[Update] Managed worker replacement refused: %s',
+                exc,
+                exc_info=True,
+            )
+            audit_log(
+                'self_update_managed_restart_failed',
+                pid=os.getpid(),
+                reason=reason,
+                detail=str(exc)[:500],
+            )
+            return False
+        audit_log(
+            'self_update_managed_restart_requested',
+            pid=os.getpid(),
+            reason=reason,
+            manager_pid=(result.get('supervisorRefresh') or {}).get(
+                'managerPid'),
+        )
+        logger.warning(
+            '[Update] Current Supervisor accepted a fresh worker generation '
+            '(%s)', reason)
+        return True
+
     from lib.server_reexec import (
         begin_server_reexec,
         finish_server_reexec_preparation,
@@ -301,10 +397,11 @@ def _perform_server_reexec(reason: str) -> bool:
 
 
 def _deferred_reexec(delay: float = 0.6):
-    """Request process replacement after the HTTP response can flush.
+    """Request lifecycle-owned replacement after the HTTP response can flush.
 
-    The main serving thread owns the actual exec after the production shutdown
-    stack has released child authorities and transport sockets.
+    Managed workers hand the replacement to the independent Supervisor;
+    unmanaged workers let the main serving thread own the actual exec after
+    the production shutdown stack releases child authorities and sockets.
     """
     time.sleep(delay)
     _perform_server_reexec('update')
@@ -366,7 +463,8 @@ def _consume_or_forbid(approval_id, action):
 @api_meta(
     summary='Restart the server',
     description=(
-        'Re-execs the server process so freshly-pulled code takes effect. '
+        'Replaces the managed worker (or re-execs an unmanaged process) so '
+        'freshly-pulled code takes effect. '
         'HUMAN-APPROVAL GATED: without a valid approvalId this only '
         'registers a pending approval (202) and executes nothing — a human '
         'approves it in the UI, then the caller retries with '
@@ -441,6 +539,29 @@ def update_restart():
             'a restart would interrupt. Retry when idle, or pass force=true.'
             % len(running),
             runningTasks=running, needsForce=True)
+
+    # Preparation is intentionally before one-time approval consumption and
+    # before the cooldown is stamped.  A stale bundle is recoverable while the
+    # old worker is still serving; it must not burn the operator's approval or
+    # turn a repairable artifact error into an outage.
+    preflight_error = _prepare_server_reexec_frontend()
+    if preflight_error:
+        logger.error(
+            '[Update] Restart REFUSED — frontend preflight failed: %s',
+            preflight_error,
+        )
+        audit_log(
+            'self_update_restart_preflight_failed',
+            pid=os.getpid(),
+            approval_id=approval_id,
+            detail=preflight_error[:500],
+        )
+        return api_conflict(
+            'Restart refused before shutdown because the frontend artifact '
+            'could not be prepared. The current server is still running.',
+            restartPreflightFailed=True,
+            detail=preflight_error,
+        )
 
     # Acceptance: atomically consume the one-time token AND start the global
     # cooldown. A refusal above deliberately left the token usable for the

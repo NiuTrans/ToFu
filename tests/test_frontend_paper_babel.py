@@ -22,6 +22,7 @@ import subprocess
 import pytest
 
 from tests._jsdom import run_harness
+from tests._paper_vite import compiled_typescript
 
 pytestmark = pytest.mark.unit
 
@@ -154,7 +155,7 @@ const { window: win, check, report } = setup({
     },
   },
 });
-win._saveActivePaperState = () => { calls.saves++; };
+win._saveActivePaperState = (scope) => { calls.saves++; calls.saveScope = scope; };
 
 (async () => {
   check('globals installed',
@@ -195,7 +196,8 @@ win._saveActivePaperState = () => { calls.saves++; };
   check('selected result rendered',
     document.getElementById('babelPdfBody').innerHTML.includes('<md>EN DONE</md>'));
   check('single flight released', win._babelTranslating === false);
-  check('push and poll are exactly once', calls.saves === 1);
+  check('push and poll are exactly once',
+    calls.saves === 1 && calls.saveScope === 'babel');
   report();
 })();
 """
@@ -203,15 +205,13 @@ win._saveActivePaperState = () => { calls.saves++; };
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
                     reason='node + vite test bundler dev-deps not installed')
-def test_vite_paper_babel_contract(tmp_path):
-    built = tmp_path / 'paper-babel.js'
-    compiled = subprocess.run(
-        [ESBUILD, BABEL_TS, '--bundle', '--format=iife',
-         '--platform=browser', f'--outfile={built}'],
-        capture_output=True, text=True, timeout=60)
-    assert compiled.returncode == 0, compiled.stderr
-    run_harness(
-        target_js=str(built),
-        body_js=_VITE_BODY,
-        expect_pass=14,
-    )
+def test_vite_paper_babel_contract():
+    with compiled_typescript(
+        BABEL_TS,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        run_harness(
+            target_js=built,
+            body_js=_VITE_BODY,
+            expect_pass=14,
+        )

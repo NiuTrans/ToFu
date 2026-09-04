@@ -113,7 +113,6 @@ var activeConvId = null;
 var chatMode = 'chat';
 var projectState = __inactiveProject();
 var _projectBarFolders = [];
-var _scanPollTimer = null;
 var pendingImages = [], pendingPdfTexts = [], pendingVideos = [];
 var searchMode = 'multi', fetchEnabled = true, codeExecEnabled = true;
 var browserEnabled = false, desktopEnabled = false, memoryEnabled = true;
@@ -123,7 +122,7 @@ var imageGenMode = false, humanGuidanceEnabled = false, autoTranslate = false;
 var planMode = false;
 
 var autoApplyWrites = true;
-var _igSelectedModel = null, _igSelectedCount = 1;
+var _igSelectedModel = null, _igSelectedProviderId = '', _igSelectedCount = 1;
 var _igSelectedAspect = '1:1', _igSelectedResolution = '1K';
 var config = { model: null, thinkingDepth: null, _modelIsProvisional: true,
                defaultThinkingDepth: null };
@@ -198,7 +197,9 @@ function t(key) { return key; }
 function _conversationDisplayTitle(title, fallback) {
   return String(title || fallback || '');
 }
-function saveConversations() { __saves.push(Array.from(arguments)); }
+function reconcileConversationCatalogMetadata() {
+  __saves.push(Array.from(arguments));
+}
 function persistConversationSettings() {}
 function scheduleConversationSettingsPersist() {}
 function getActiveConv() {
@@ -249,8 +250,10 @@ var Api = {
       if (__statusMode === 'reject') throw new Error('boot network down');
       return __statusResult;
     },
-    setPaths: async function (paths, ro) {
-      __setPathsCalls.push([paths.slice(), ro.slice()]);
+    setPaths: async function (paths, ro, recent) {
+      __setPathsCalls.push([
+        paths.slice(), ro.slice(), Array.isArray(recent) ? recent.slice() : [],
+      ]);
       if (__setPathsMode === 'deferred:result'
           || __setPathsMode === 'deferred:reject') await __deferred;
       if (__setPathsMode === 'reject' || __setPathsMode === 'deferred:reject') {
@@ -451,7 +454,7 @@ def _run(scenario: str, *, poison: str = '',
 
     src = _retained_runtime_source()
     fns = {name: _extract_fn(src, name) for name in (
-        '_getConvProjectPath', '_isRemotePath', '_stopScanPoll',
+        '_getConvProjectPath', '_isRemotePath',
         '_updateProjectUI', '_clearProjectStateLocal', '_applyProjectData',
         '_restoreConvProject', 'onProjectCleared', '_applyChatModeUI',
         '_deriveChatModeFromFlags', 'restoreConversationSettingsToComposer',
@@ -544,7 +547,9 @@ def test_switch_to_studio_conv_with_draft_paints_studio_and_bar():
     assert r['dialImmediate'] == 'studio'
     assert r['dialSettled'] == 'studio'
     assert r['bar'] == 'flex'
-    assert r['setPaths'] == [[['/repo/other'], []]]
+    assert r['setPaths'] == [[
+        ['/repo/other'], [], ['/repo/other'],
+    ]]
 
 
 def test_nc_draft_gate_mirror_keeps_chat_dial():

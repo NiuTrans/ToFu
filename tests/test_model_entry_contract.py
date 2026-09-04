@@ -12,9 +12,8 @@ What is pinned here
    This is the assertion that catches the dangerous half-migration: reading
    ``aliases`` as *the* pool silently drops one wire deployment, and every
    remaining id still works, so nothing raises.
-2. A logical-only ``model_id`` (never sent on the wire) is still routable —
-   ``prefer_model=<logical>`` must find the pool's slots.
-3. Shipped templates carry no provider-tainted spelling as a ``model_id``.
+2. Shipped legacy-import templates carry no provider-tainted spelling as a
+   ``model_id``. Runtime routing is covered by model-routing v2 tests.
 
 Run:
     PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_model_entry_contract.py -v
@@ -112,130 +111,7 @@ def test_routing_group_includes_logical_and_every_wire_id():
 
 
 # ═══════════════════════════════════════════════════════════
-#  2. Dispatcher integration — logical id routes to wire slots
-# ═══════════════════════════════════════════════════════════
-
-def _dispatcher(models):
-    from lib.llm_dispatch.dispatcher import LLMDispatcher
-    d = LLMDispatcher()
-    d.slots = []
-    d._build_slots_from_providers([{
-        'id': 'mt', 'base_url': 'https://gw.example.com/v1',
-        'api_keys': ['sk-a'], 'enabled': True, 'models': models,
-    }])
-    d._initialized = True
-    return d
-
-
-def test_logical_id_never_becomes_a_slot_but_still_routes():
-    """The whole point of the inversion: the picker/preset name is stable while
-    only real gateway ids are dispatched."""
-    d = _dispatcher([{'model_id': 'claude-opus-5', 'capabilities': ['text'],
-                      'request_ids': ['yuju-claude-opus-5-evaDaily',
-                                      'aws.claude-opus-5']}])
-    served = {s.model for s in d.slots}
-    assert served == {'yuju-claude-opus-5-evaDaily', 'aws.claude-opus-5'}, served
-    assert 'claude-opus-5' not in served, (
-        'the logical id must never be sent as the wire model')
-    chosen = d.pick_slot(prefer_model='claude-opus-5', strict_model=True)
-    assert chosen is not None and chosen.model in served
-
-
-def test_pool_rotates_across_every_wire_id():
-    """Each wire id × key becomes its own slot, so a cooled-down deployment
-    rotates to the next one in the pool."""
-    import time
-    d = _dispatcher([{'model_id': 'logical', 'capabilities': ['text'],
-                      'request_ids': ['wire-a', 'wire-b']}])
-    for s in d.slots:
-        if s.model == 'wire-a':
-            s.cooldown_until = time.time() + 1000
-    chosen = d.pick_slot(prefer_model='logical', strict_model=True)
-    assert chosen is not None and chosen.model == 'wire-b'
-
-
-def test_strict_model_fails_over_across_provider_offerings_only():
-    """Strict means exact logical model, not exact provider.
-
-    Two providers may implement the same logical model with different wire
-    spellings. Cooling every slot on the first provider must select the second
-    provider while the logical identity remains unchanged; an unrelated model
-    must never enter the candidate set.
-    """
-    import time
-    from lib.llm_dispatch.dispatcher import LLMDispatcher
-
-    dispatcher = LLMDispatcher()
-    dispatcher.slots = []
-    dispatcher._build_slots_from_providers([
-        {
-            'id': 'provider-a', 'base_url': 'https://a.example/v1',
-            'api_keys': ['key-a'], 'enabled': True,
-            'models': [{
-                'model_id': 'shared-logical',
-                'request_ids': ['wire-a'],
-                'capabilities': ['text'],
-            }, {
-                'model_id': 'unrelated',
-                'request_ids': ['wire-other'],
-                'capabilities': ['text'],
-            }],
-        },
-        {
-            'id': 'provider-b', 'base_url': 'https://b.example/v1',
-            'api_keys': ['key-b'], 'enabled': True,
-            'models': [{
-                'model_id': 'shared-logical',
-                'request_ids': ['wire-b'],
-                'capabilities': ['text'],
-            }],
-        },
-    ])
-    dispatcher._initialized = True
-
-    first = dispatcher.pick_slot(
-        prefer_model='shared-logical', strict_model=True)
-    assert first is not None
-    for slot in dispatcher.slots:
-        if slot.provider_id == first.provider_id:
-            slot.cooldown_until = time.time() + 1000
-
-    second = dispatcher.pick_slot(
-        prefer_model='shared-logical', strict_model=True)
-    assert second is not None
-    assert second.provider_id != first.provider_id
-    assert second.logical_model == first.logical_model == 'shared-logical'
-    assert second.model in {'wire-a', 'wire-b'}
-    assert second.model != 'wire-other'
-
-
-def test_legacy_provider_entry_still_serves_root_and_aliases():
-    """Regression: pre-contract configs on disk keep every deployment."""
-    d = _dispatcher([{'model_id': 'aws.claude-opus-4.6', 'capabilities': ['text'],
-                      'aliases': ['vertex.claude-opus-4.6']}])
-    assert {s.model for s in d.slots} == {
-        'aws.claude-opus-4.6', 'vertex.claude-opus-4.6'}
-
-
-def test_model_entry_stream_only_reaches_every_wire_slot():
-    """Provider-declared protocol capability must survive slot expansion.
-
-    Managed Codex persists ``stream_only`` on each model entry. Losing it in
-    the dispatcher made non-streaming summary calls probe every Codex model,
-    receive HTTP 400, and relearn the same immutable capability each process.
-    """
-    d = _dispatcher([{
-        'model_id': 'logical-stream-model',
-        'capabilities': ['text'],
-        'request_ids': ['wire-stream-a', 'wire-stream-b'],
-        'stream_only': True,
-    }])
-    assert len(d.slots) == 2
-    assert all(slot.stream_only is True for slot in d.slots)
-
-
-# ═══════════════════════════════════════════════════════════
-#  3. Shipped templates use logical model_ids
+#  2. Shipped templates use logical model_ids
 # ═══════════════════════════════════════════════════════════
 
 def test_shipped_templates_have_no_provider_tainted_model_id():

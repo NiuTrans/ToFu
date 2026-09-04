@@ -25,30 +25,63 @@ def _clean(monkeypatch):
     monkeypatch.setenv('TOFU_CACHE_SETTLE_CODEX_SEND_INTERVAL_MS', '4200')
     monkeypatch.setenv('TOFU_CACHE_SETTLE_CODEX_MAX_MS', '6000')
     monkeypatch.setenv('TOFU_CACHE_SETTLE_CODEX_THRESHOLD_TOKENS', '1024')
+    monkeypatch.setenv(
+        'TOFU_CACHE_SETTLE_CODEX_WARM_WRITE_TOKENS', '8192')
     cache._reset_settle_for_tests()
     yield
     cache._reset_settle_for_tests()
 
 
-def test_unmetered_codex_write_is_inferred_from_usage():
+def test_unmetered_codex_write_hold_is_bounded_by_uncached_tail():
     assert cache.codex_cache_write_pending({
         'prompt_tokens': 5066,
         'prompt_tokens_details': {'cached_tokens': 0},
     }) is True
+    # A warm 1,494-token suffix can reuse the older prefix without paying a
+    # five-second visibility hold. Continued suffix growth remains bounded.
     assert cache.codex_cache_write_pending({
         'prompt_tokens': 6998,
         'prompt_tokens_details': {'cached_tokens': 5504},
-    }) is True
-    # A sub-chunk uncached suffix doesn't imply that a new 1,024-token
-    # breakpoint was written.
-    assert cache.codex_cache_write_pending({
-        'prompt_tokens': 5111,
-        'prompt_tokens_details': {'cached_tokens': 4480},
     }) is False
+    assert cache.codex_cache_write_pending({
+        'prompt_tokens': 13695,
+        'prompt_tokens_details': {'cached_tokens': 5504},
+    }) is False
+    assert cache.codex_cache_write_pending({
+        'prompt_tokens': 13696,
+        'prompt_tokens_details': {'cached_tokens': 5504},
+    }) is True
     assert cache.codex_cache_write_pending({
         'prompt_tokens': 900,
         'prompt_tokens_details': {'cached_tokens': 0},
     }) is False
+
+
+def test_warm_write_threshold_is_operator_tunable(monkeypatch):
+    monkeypatch.setenv(
+        'TOFU_CACHE_SETTLE_CODEX_WARM_WRITE_TOKENS', '2048')
+    assert cache.codex_cache_write_pending({
+        'prompt_tokens': 7551,
+        'prompt_tokens_details': {'cached_tokens': 5504},
+    }) is False
+    assert cache.codex_cache_write_pending({
+        'prompt_tokens': 7552,
+        'prompt_tokens_details': {'cached_tokens': 5504},
+    }) is True
+
+
+@pytest.mark.parametrize('value', ['invalid', '0', '1023'])
+def test_invalid_warm_write_threshold_falls_back_safely(monkeypatch, value):
+    monkeypatch.setenv(
+        'TOFU_CACHE_SETTLE_CODEX_WARM_WRITE_TOKENS', value)
+    assert cache.codex_cache_write_pending({
+        'prompt_tokens': 13695,
+        'prompt_tokens_details': {'cached_tokens': 5504},
+    }) is False
+    assert cache.codex_cache_write_pending({
+        'prompt_tokens': 13696,
+        'prompt_tokens_details': {'cached_tokens': 5504},
+    }) is True
 
 
 def test_second_codex_round_waits_for_unmetered_write(monkeypatch):
@@ -83,9 +116,13 @@ def test_warm_codex_round_obeys_per_key_send_interval(monkeypatch):
     )
     cache.settle_before_send(
         'conv-rate', 5000, now=1000.0, cache_profile='codex')
+    usage = {
+        'prompt_tokens': 6998,
+        'prompt_tokens_details': {'cached_tokens': 5504},
+    }
     cache.record_stream_end(
         'conv-rate', now=1002.0, cache_profile='codex',
-        pending_write=False)
+        pending_write=cache.codex_cache_write_pending(usage))
 
     waited = cache.settle_before_send(
         'conv-rate', 5100, now=1002.5, cache_profile='codex')
@@ -105,7 +142,10 @@ def test_async_codex_wait_uses_same_timing(monkeypatch):
         'conv-async', 5000, now=1000.0, cache_profile='codex'))
     cache.record_stream_end(
         'conv-async', now=1001.5, cache_profile='codex',
-        pending_write=True)
+        pending_write=cache.codex_cache_write_pending({
+            'prompt_tokens': 13696,
+            'prompt_tokens_details': {'cached_tokens': 5504},
+        }))
     waited = asyncio.run(cache.async_settle_before_send(
         'conv-async', 5100, now=1001.6, cache_profile='codex'))
 
@@ -147,6 +187,44 @@ def test_wire_change_is_not_laundered_into_upstream_fallback():
 
     assert result['wire_append_only'] is False
     assert result['status'] != 'implicit_breakpoint_fallback'
+
+
+def test_health_state_retains_constant_size_wire_summary():
+    """Codex diagnostics must not retain one rich row per prompt message."""
+    wire = [
+        {'key': f'user:{index}', 'h': f'{index:016x}'}
+        for index in range(2_000)
+    ]
+    cache.observe_codex_cache('conv-bounded-health', _usage(6528, wire))
+
+    retained = cache._codex_health['conv-bounded-health']
+    assert retained['wire_count'] == len(wire)
+    assert type(retained['wire_digest']) is int
+    assert 'wire_bytes' not in retained
+    assert all(not isinstance(value, (list, tuple))
+               for value in retained.values())
+
+
+def test_legacy_rich_wire_state_migrates_without_losing_append_proof():
+    """One pre-reload rich entry remains comparable, then stores compactly."""
+    cache._codex_health['conv-legacy-health'] = {
+        'call': 1,
+        'cache_read': 6528,
+        'max_read': 6528,
+        'wire_bytes': [{'h': 'a'}, {'h': 'b'}],
+        'wire_region': {'system': 'same', 'tools': 'same'},
+        'wire_routing': {'key': 'same', 'beta': '', 'endpoint': 'same'},
+        'updated': 1.0,
+    }
+    usage = _usage(
+        5504, [{'h': 'a'}, {'h': 'b'}, {'h': 'new-tail'}])
+
+    result = cache.observe_codex_cache('conv-legacy-health', usage)
+
+    assert result['wire_append_only'] is True
+    retained = cache._codex_health['conv-legacy-health']
+    assert retained['wire_count'] == 3
+    assert 'wire_bytes' not in retained
 
 
 def test_codex_fallback_is_stamped_on_api_round(monkeypatch):

@@ -49,8 +49,6 @@ CSS = os.path.join(ROOT, 'static', 'styles.css')
 # `_taskId` are present because the entry is (correctly) provenance-gated.
 _SEED_JS = r"""
 (() => {
-  window._featureFlags = window._featureFlags || {};
-  window._featureFlags.debug_mode = true;
   const rounds = [
     { roundNum: 1, llmRound: 0, toolName: 'run_command', status: 'done',
       toolContent: 'hello from the tool', _taskId: 'task-geom-1',
@@ -109,6 +107,17 @@ _MEASURE_JS = r"""
 
 @pytest.fixture()
 def _rows(page, live_server):
+    # Feature flags are module-owned after the ESM cutover. Exercise their
+    # real boot authority instead of mutating the removed window snapshot.
+    def _force_debug_flags(route):
+        response = route.fetch()
+        body = response.json()
+        body['feature_flags'] = {
+            'debug_mode': True, 'optimizer_enabled': True}
+        route.fulfill(response=response, json=body)
+
+    page.route('**/api/v1/server-config**', _force_debug_flags)
+    page.reload(wait_until='domcontentloaded')
     page.goto(live_server, wait_until='domcontentloaded')
     page.wait_for_function('typeof renderToolRoundsHTML === "function"',
                            timeout=30000)

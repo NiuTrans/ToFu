@@ -59,16 +59,52 @@ def list_conversations(
         if keyword_text
         else []
     )
-    snapshots = read_conversations(
-        user_id=owner_id,
-        project_path=(
+    # A non-search listing is already ordered and project-filtered by the
+    # authority. Title matches and body-hit IDs are independently bounded,
+    # then merged by the same authority order.
+    candidate_limit = min(10_000, limit + (1 if current_conv_id else 0))
+    common_read = {
+        "user_id": owner_id,
+        "project_path": (
             project_path if effective_scope == "project" else None
         ),
-        order_by="updated_at_desc",
-        limit=10_000,
-        include_messages=False,
-        settings_keys=["projectPath"],
-    )
+        "order_by": "updated_at_desc",
+        "include_messages": False,
+        "settings_keys": ["projectPath"],
+    }
+    if keyword_text:
+        title_snapshots = read_conversations(
+            **common_read,
+            title_contains=keyword_text,
+            limit=candidate_limit,
+        )
+        body_snapshots = (
+            read_conversations(
+                **common_read,
+                ids=sorted(body_hit_ids),
+                limit=min(200, len(body_hit_ids)),
+            )
+            if body_hit_ids
+            else []
+        )
+        snapshots_by_id = {
+            str(snapshot.get("id") or ""): snapshot
+            for snapshot in [*title_snapshots, *body_snapshots]
+            if snapshot.get("id")
+        }
+        snapshots = sorted(
+            snapshots_by_id.values(),
+            key=lambda snapshot: (
+                int(snapshot.get("updated_at") or 0),
+                str(snapshot.get("id") or ""),
+            ),
+            reverse=True,
+        )
+    else:
+        snapshots = read_conversations(
+            **common_read,
+            limit=candidate_limit,
+        )
 
     keyword_lower = keyword_text.lower()
     selected = []

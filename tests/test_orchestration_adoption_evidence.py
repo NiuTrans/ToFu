@@ -196,6 +196,31 @@ def test_program_projection_and_native_agent_item_are_actual_trajectories():
     }]
 
 
+def test_equal_native_agent_items_remain_distinct_response_occurrences():
+    task = {
+        "_toolOrchestrationDecisions": [
+            _raw_decision("independent_read_only_agents")],
+    }
+    repeated_item = {
+        "type": "multi_agent_call", "id": "recycled-agent-call",
+        "status": "completed",
+    }
+
+    reconcile_response_orchestration(task, {
+        "_responses_items": [dict(repeated_item), dict(repeated_item)],
+    }, round_index=0)
+
+    native = [
+        row for row in public_orchestration_decisions(task)[0][
+            "adoptionEvidence"]
+        if row["kind"] == "native_multi_agent_call"
+    ]
+    assert [row["outputPosition"] for row in native] == [0, 1]
+    assert [row["callId"] for row in native] == [
+        "recycled-agent-call", "recycled-agent-call",
+    ]
+
+
 def test_successful_local_read_only_wave_records_actual_agent_adoption(
         monkeypatch, tmp_path):
     import json

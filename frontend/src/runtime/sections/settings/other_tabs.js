@@ -1133,8 +1133,8 @@ function _clearConvCacheFromSettings() {
     _refreshCacheStatsUI();
     if (btn) { btn.disabled = false; btn.innerHTML = Icon('trash', 12) + ' ' + t('settings.cacheClearBtn'); }
     // Force all in-memory conversations to _turnSnapshotRequired so next click refetches
-    conversations.forEach(function(c) {
-      if (c.id !== activeConvId) c._turnSnapshotRequired = true;
+    runtimeScope.conversations.forEach(function(c) {
+      if (c.id !== runtimeScope.activeConvId) c._turnSnapshotRequired = true;
     });
     if (typeof showToast === 'function') showToast(t('settings.cacheCleared'));
   });

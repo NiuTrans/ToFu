@@ -24,8 +24,9 @@ from lib.api_response import (
 )
 from lib.log import get_logger
 from lib.openapi import api_meta
+from lib.request_parser import optional_str, parse_body
 
-from .auth import require_auth, require_scope
+from .auth import request_principal, require_auth, require_scope
 
 logger = get_logger(__name__)
 
@@ -107,23 +108,25 @@ def _with_quota_state(status: dict, provider: str,
     tags=['capabilities'],
 )
 def oauth_status():
+    owner_user_id = request_principal().require_owner(
+        context='OAuth status')
+    owner_scope = str(owner_user_id)
     try:
         from lib.oauth.outbound import reconcile_oauth_providers
-        reconcile_oauth_providers()
+        reconcile_oauth_providers(owner_user_id=owner_user_id)
         from lib.oauth.manager import get_all_oauth_status, get_oauth_status
-        from .auth import current_auth
-        _auth = current_auth()
-        _uid = str(_auth.owner_user_id or '') if _auth else ''
-
         provider = request.args.get('provider', '')
         if provider:
             if provider not in ('claude', 'codex'):
                 return api_bad_request('Invalid provider', field='provider')
             return api_ok(_with_quota_state(_with_egress_state(
-                get_oauth_status(provider), provider, _uid), provider, _uid))
-        all_status = get_all_oauth_status()
+                get_oauth_status(provider, owner_user_id=owner_user_id),
+                provider, owner_scope),
+                provider, owner_scope))
+        all_status = get_all_oauth_status(owner_user_id=owner_user_id)
         return api_ok({p: _with_quota_state(
-                           _with_egress_state(s, p, _uid), p, _uid)
+                           _with_egress_state(s, p, owner_scope),
+                           p, owner_scope)
                        for p, s in all_status.items()})
     except Exception as e:
         logger.error('[OAuth.v1] status check failed: %s', e, exc_info=True)
@@ -201,27 +204,25 @@ def oauth_test():
     tags=['capabilities'],
 )
 def oauth_device_login():
+    if request.method == 'GET':
+        provider = request.args.get('provider', '')
+    else:
+        from lib.request_parser import optional_str, parse_body
+        body = parse_body(force=True, strict=True)
+        provider = optional_str(body, 'provider', default='', max_len=16)
+    if provider != 'codex':
+        return api_bad_request(
+            'Device login is only available for provider=codex',
+            field='provider')
+
+    owner_user_id = request_principal().require_owner(
+        context='OAuth device flow')
     try:
         from lib.oauth.manager import start_device_flow
-        from .auth import current_auth
-        _auth = current_auth()
-        _uid = str(_auth.owner_user_id or '') if _auth else ''
-
-        if request.method == 'GET':
-            provider = request.args.get('provider', '')
-        else:
-            from lib.request_parser import parse_body
-            body = parse_body(force=True)
-            provider = body.get('provider', '')
-
-        if provider != 'codex':
-            return api_bad_request(
-                'Device login is only available for provider=codex',
-                field='provider')
-
         logger.info('[OAuth.v1] %s /api/v1/oauth/device-login from %s',
                     request.method, request.remote_addr)
-        result = start_device_flow(provider, user_id=_uid)
+        result = start_device_flow(
+            provider, owner_user_id=owner_user_id)
         if 'error' in result:
             # A transport outage is not a malformed login request. Preserve
             # the upstream status_code=0 detail and use 503 so clients can
@@ -236,11 +237,6 @@ def oauth_device_login():
 # ── Egress agent pin selector (multi-agent deployments) ─────────────
 
 
-def _pins_path() -> str:
-    from lib.config_dir import config_path
-    return config_path('oauth_egress_agents.json')
-
-
 @api_v1_oauth_bp.route('/api/v1/oauth/egress-agent', methods=['GET'])
 @require_auth
 @api_meta(
@@ -253,24 +249,19 @@ def _pins_path() -> str:
     tags=['capabilities'],
 )
 def oauth_egress_agent_get():
-    try:
-        from lib.desktop import list_agents
-        from lib.desktop.egress import _pinned_agent
-        from .auth import current_auth
-        auth = current_auth()
-        uid = str(auth.owner_user_id or '') if auth else ''
-        pinned = _pinned_agent(uid)
-        agents = [
-            {'agent_id': a.get('agent_id'), 'name': a.get('name'),
-             'platform': a.get('platform'),
-             'capabilities': a.get('capabilities') or {},
-             'online': a.get('online', False)}
-            for a in list_agents(user_id=uid or None)
-        ]
-        return api_ok({'pinned': pinned, 'agents': agents})
-    except Exception as e:
-        logger.error('[OAuth.v1] egress-agent GET failed: %s', e, exc_info=True)
-        return api_internal_error(e, source='api_v1.oauth.egress_agent')
+    from lib.desktop.egress import egress_agent_selection
+
+    owner_user_id = request_principal().require_owner(
+        context='desktop egress selection')
+    pinned, eligible_agents = egress_agent_selection(owner_user_id)
+    agents = [
+        {'agent_id': agent.get('agent_id'), 'name': agent.get('name'),
+         'platform': agent.get('platform'),
+         'capabilities': agent.get('capabilities') or {},
+         'online': True}
+        for agent in eligible_agents
+    ]
+    return api_ok({'pinned': pinned, 'agents': agents})
 
 
 @api_v1_oauth_bp.route('/api/v1/oauth/egress-agent', methods=['POST'])
@@ -279,42 +270,33 @@ def oauth_egress_agent_get():
     summary='Pin the desktop egress agent for this user',
     description=(
         'Body ``{agent_id}`` — pins the caller\'s subscription egress to one '
-        'online agent. Empty agent_id clears the pin. Persisted to '
-        '``data/config/oauth_egress_agents.json`` keyed by user.'
+        'online egress-capable agent owned by the caller. Empty agent_id '
+        'clears the pin. The owner-scoped preference is persisted by the '
+        'Storage Sidecar.'
     ),
     tags=['capabilities'],
 )
 def oauth_egress_agent_set():
+    # Parse before domain work. BadRequest is a client 400 at the shared HTTP
+    # boundary and must never reach storage or clear an existing selection.
+    body = parse_body(strict=True)
+    agent_id = optional_str(
+        body, 'agent_id', default='', max_len=128)
+    from lib.desktop.egress import UnknownEgressAgent, pin_egress_agent
+    from lib.log import audit_log
+
+    owner_user_id = request_principal().require_owner(
+        context='desktop egress selection')
     try:
-        from quart import request as _req
-        from lib.json_store import update_json_atomic
-        from .auth import current_auth
-        auth = current_auth()
-        uid = str(auth.owner_user_id or '') if auth else ''
-        body = _req.get_json(silent=True) or {}
-        agent_id = str(body.get('agent_id') or '').strip()
-        if agent_id:
-            from lib.desktop import list_agents
-            known = {a.get('agent_id') for a in list_agents(user_id=uid or None)}
-            if agent_id not in known:
-                return api_bad_request('unknown agent_id')
-
-        def _mutate(data):
-            data = dict(data or {})
-            if agent_id:
-                data[uid] = agent_id
-            else:
-                data.pop(uid, None)
-            return data
-
-        update_json_atomic(_pins_path(), _mutate, default={})
-        from lib.log import audit_log
-        audit_log('oauth_egress_agent_pinned', user_id=uid,
-                  agent_id=agent_id or '(cleared)')
-        return api_ok({'pinned': agent_id})
-    except Exception as e:
-        logger.error('[OAuth.v1] egress-agent POST failed: %s', e, exc_info=True)
-        return api_internal_error(e, source='api_v1.oauth.egress_agent')
+        pinned = pin_egress_agent(owner_user_id, agent_id)
+    except UnknownEgressAgent as exc:
+        return api_bad_request(str(exc), field='agent_id')
+    audit_log(
+        'oauth_egress_agent_pinned',
+        owner_user_id=owner_user_id,
+        agent_id=pinned or '(cleared)',
+    )
+    return api_ok({'pinned': pinned})
 
 
 __all__ = ['api_v1_oauth_bp']

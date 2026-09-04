@@ -43,6 +43,7 @@ from lib.agent_loop import AbortSignal
 from lib.llm_errors import AbortedError
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
+from lib.paper.report_artifact_keys import checkpoints_lang_key
 
 from .insight_engine._anchors import resolve_anchor, extract_report_headings
 
@@ -54,16 +55,10 @@ __all__ = [
     'run_report_checkpoints',
 ]
 
-_LANG_PREFIX = 'checkpoints'
 _TEMPERATURE = 0.45          # mirrors insight: some divergence, JSON still reliable
 _REPAIR_MAX_TOKENS = 4000
 _MAX_TOKENS = 4000
 _MAX_CARDS = 8               # never bury the reader in pop-quiz cards
-
-
-def checkpoints_lang_key(ui_lang: str) -> str:
-    """Composite ``paper_reports.lang`` key for a persisted checkpoint set."""
-    return f'{_LANG_PREFIX}:{ui_lang or "en"}'
 
 
 def checkpoints_enabled(cfg=None) -> bool:

@@ -7,9 +7,24 @@ import os
 from cryptography.fernet import Fernet
 import pytest
 
+from tests.support.sidecar_fixtures import module_declares_plugin
+
+
+_PLUGIN_NAME = 'tests._credential_sidecar'
+
 
 @pytest.fixture(scope='module', autouse=True)
-def credential_storage(tmp_path_factory):
+def credential_storage(request, tmp_path_factory):
+    """Install a credential Sidecar only for modules that declared it.
+
+    pytest registers ``pytest_plugins`` process-wide, so an autouse fixture
+    would otherwise run for every subsequently collected module and stop the
+    previous module's global runtime (fencing unrelated tests).
+    """
+    if not module_declares_plugin(request, _PLUGIN_NAME):
+        yield None
+        return
+
     from lib.storage import StorageRuntime, StorageSupervisor
     from lib.storage.service import install_runtime_for_test
 

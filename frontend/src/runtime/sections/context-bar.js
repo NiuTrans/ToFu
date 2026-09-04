@@ -229,18 +229,31 @@
       // 1b. turn-native turn lane: the same per-round reading, folded into the
       //     durable turn projection by lib/turn_lifecycle.py::_task_projection
       //     (stashed as task._lastRoundUsage by llm_fallback._emit_round_usage
-      //     on every round, so it is fresh BETWEEN tool rounds — apiRounds
-      //     only lands at finalize).  Riding the projection means it survives
+      //     on every response-authoring round, so it is fresh BETWEEN tool
+      //     rounds — apiRounds only lands at finalize). Riding the projection means it survives
       //     projection rebuilds, reconnect tail-hydration and slim-delta
-      //     windows, none of which session-only SSE state could.  For a
-      //     settled turn it agrees with apiRounds[-1] by construction.
+      //     windows, none of which session-only SSE state could. Compaction
+      //     and discarded billing calls remain accounting-only apiRounds.
       if (m.lastRoundUsage && m.lastRoundUsage.tokensIn > 0) {
         return m.lastRoundUsage.tokensIn;
       }
       // 2. Final apiRounds breakdown (post-done event).
       if (Array.isArray(m.apiRounds) && m.apiRounds.length) {
+        const authoritativeUsage = typeof latestAgentApiRoundUsage === 'function'
+          ? latestAgentApiRoundUsage(m.apiRounds) : null;
+        if (authoritativeUsage) {
+          const tokens = _promptTokensFromUsage(authoritativeUsage);
+          if (tokens > 0) return tokens;
+        }
+        // Compatibility for isolated retained-section harnesses. Production
+        // composes the typed selector above; this path still excludes both
+        // historical auxiliary row shapes.
         for (let j = m.apiRounds.length - 1; j >= 0; j--) {
-          const t = _promptTokensFromUsage(m.apiRounds[j] && m.apiRounds[j].usage);
+          const round = m.apiRounds[j] || {};
+          if (round.kind === 'compaction'
+              || /(?:^|[-_])(?:discarded|compaction)(?:$|[-_])/i
+                .test(round.tag || '')) continue;
+          const t = _promptTokensFromUsage(round.usage);
           if (t > 0) return t;
         }
       }
@@ -256,8 +269,9 @@
       //    For those, no reading beats a fabricated one.
       if (m.usage) {
         const t = _promptTokensFromUsage(m.usage);
-        const n = (Array.isArray(m.apiRounds) && m.apiRounds.length)
-                  || 0;
+        const n = typeof agentApiRoundCount === 'function'
+          ? agentApiRoundCount(m.apiRounds)
+          : (Array.isArray(m.apiRounds) && m.apiRounds.length) || 0;
         if (t > 0 && n > 0) return n > 1 ? Math.round(t / n) : t;
       }
     }
@@ -274,6 +288,13 @@
   function _collectCompactions(conv) {
     if (!conv) return [];
     return [...(runtimeScope.getCompactionHistory?.(conv.id) || [])];
+  }
+
+  function _countCompactions(conv) {
+    if (!conv) return 0;
+    const count = runtimeScope.CompactionHistoryState?.count?.(conv.id);
+    return Number.isFinite(count)
+      ? Math.max(0, count) : _collectCompactions(conv).length;
   }
 
   function _formatTokens(n) {
@@ -824,14 +845,15 @@
 
     /* ── Compactions → counter + clickability ───────────────────── */
     const comps = _collectCompactions(conv);
+    const compactionCount = _countCompactions(conv);
     s.compactions = comps;
-    const counterText = comps.length > 0 ? String(comps.length) : '';
+    const counterText = compactionCount > 0 ? String(compactionCount) : '';
     if (s.lastCounterText !== counterText) {
       s.counterNode.textContent = counterText;
-      s.counterNode.classList.toggle('has-count', comps.length > 0);
+      s.counterNode.classList.toggle('has-count', compactionCount > 0);
       s.lastCounterText = counterText;
     }
-    const clickable = comps.length > 0;
+    const clickable = compactionCount > 0;
     if (s.lastClickable !== clickable) {
       s.el.classList.toggle('is-clickable', clickable);
       s.lastClickable = clickable;
@@ -840,20 +862,20 @@
     const modelLabel = model || 'unknown';
     const tip = limit == null
       ? modelLabel + '\nContext window: unknown' +
-        (comps.length ? '\n' + comps.length + ' compaction' +
-                         (comps.length === 1 ? '' : 's') +
+        (compactionCount ? '\n' + compactionCount + ' compaction' +
+                         (compactionCount === 1 ? '' : 's') +
                          ' in this conversation · click to inspect' : '')
       : used > 0
       ? modelLabel + '\n' + _formatTokens(used) + ' / ' + capText +
         ' tokens (' + pctRounded + '%) — last round prompt' +
         (zone === 'hot'  ? '\nApproaching auto-compact threshold' : '') +
         (zone === 'crit' ? '\nCritical — compaction imminent'      : '') +
-        (comps.length    ? '\n' + comps.length + ' compaction' +
-                           (comps.length === 1 ? '' : 's') +
+        (compactionCount ? '\n' + compactionCount + ' compaction' +
+                           (compactionCount === 1 ? '' : 's') +
                            ' in this conversation · click to inspect' : '')
       : modelLabel + '\nContext window: ' + capText + ' tokens' +
-        (comps.length    ? '\n' + comps.length + ' compaction' +
-                           (comps.length === 1 ? '' : 's') +
+        (compactionCount ? '\n' + compactionCount + ' compaction' +
+                           (compactionCount === 1 ? '' : 's') +
                            ' in this conversation · click to inspect' : '');
     if (s.lastTitle !== tip) {
       s.el.title = tip;
@@ -903,7 +925,7 @@
       exact: profile.exact === true,
       known,
       hasUsage: used > 0,
-      compactions: _collectCompactions(conv).length,
+      compactions: _countCompactions(conv),
     };
   }
 

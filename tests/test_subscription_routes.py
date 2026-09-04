@@ -54,6 +54,88 @@ def test_cold_race_returns_first_success_without_waiting_for_slow_failure():
         manager.close()
 
 
+def test_cold_race_can_wait_for_better_quality_without_waiting_for_all():
+    slow_done = threading.Event()
+
+    def probe(_url, route):
+        if route.route_id == 'sso':
+            time.sleep(0.01)
+            return ProbeResult('ok', 10.0, 302, quality=1)
+        if route.route_id == 'git':
+            time.sleep(0.04)
+            return ProbeResult('ok', 40.0, 200, quality=2)
+        time.sleep(0.2)
+        slow_done.set()
+        return ProbeResult('network_fail')
+
+    manager = RouteManager(probe=probe, jitter=lambda value: value)
+    try:
+        started = time.monotonic()
+        out = manager.candidates(
+            'https://git.example.test/repo.git/info/refs',
+            [_route('sso'), _route('git'), _route('slow')],
+            wait_timeout=1, wait_for_all=True, minimum_quality=2)
+        elapsed = time.monotonic() - started
+        assert [route.route_id for route in out] == ['git', 'sso']
+        assert 0.03 <= elapsed < 0.15
+        assert not slow_done.is_set()
+        assert slow_done.wait(1)
+    finally:
+        manager.close()
+
+
+def test_higher_quality_route_overrides_lower_quality_incumbent():
+    manager = RouteManager(
+        probe=lambda _url, route: ProbeResult(
+            'ok', 10.0 if route.route_id == 'direct' else 40.0, 200,
+            quality=1 if route.route_id == 'direct' else 2),
+        jitter=lambda value: value)
+    url = 'https://git.example.test/repo.git/info/refs'
+    direct, proxy = _route('direct'), _route('proxy')
+    try:
+        assert manager.candidates(url, [direct], wait_timeout=1) == [direct]
+        # The known incumbent returns immediately while the new route probes
+        # in the background.
+        assert manager.candidates(url, [direct, proxy], wait_timeout=1) == [direct]
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            route_status = manager.status()['routes'].get('git.example.test', {})
+            if route_status.get('proxy', {}).get('healthy'):
+                break
+            time.sleep(0.005)
+        assert manager.cached_candidates(url, [direct, proxy])[0] == proxy
+    finally:
+        manager.close()
+
+
+def test_cold_race_wait_is_promptly_cancellable_without_killing_probe_worker():
+    entered = threading.Event()
+    release = threading.Event()
+    cancelled = threading.Event()
+
+    def probe(_url, _route):
+        entered.set()
+        release.wait(1)
+        return ProbeResult('network_fail')
+
+    manager = RouteManager(probe=probe, jitter=lambda value: value)
+    timer = threading.Timer(0.05, cancelled.set)
+    try:
+        timer.start()
+        started = time.monotonic()
+        out = manager.candidates(
+            'https://chatgpt.com/backend-api/codex/responses',
+            [_route('direct')], wait_timeout=1,
+            cancelled=cancelled.is_set)
+        assert entered.is_set()
+        assert out == []
+        assert time.monotonic() - started < 0.3
+    finally:
+        release.set()
+        timer.cancel()
+        manager.close()
+
+
 def test_probe_singleflight_is_per_host_and_route():
     entered = threading.Event()
     release = threading.Event()

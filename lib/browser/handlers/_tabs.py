@@ -42,17 +42,22 @@ def _handle_list_tabs(fn_args, runtime):
         lines = [f'Open tabs ({len(result)} total):\n']
         for t in result:
             active_mark = ' * (active)' if t.get('active') else ''
+            client_mark = (' [Tofu client — never navigated]'
+                           if t.get('isClient') else '')
             url = t.get('url', '')
             title = t.get('title', '(no title)')
-            lines.append(f'  Tab {t["id"]}: {title}{active_mark}')
+            lines.append(f'  Tab {t["id"]}: {title}{active_mark}{client_mark}')
             lines.append(f'    URL: {url}')
         # Seed only from the already-filtered result. Re-querying through the
         # resolver would both waste a bridge round and could remember a tab
         # whose domain was removed by the owner-scoped read policy above.
+        # isClient rows (the Tofu app itself) are never seeded — navigating
+        # or clicking the chat out from under the user is never the intent.
         from lib.browser._resolve import remember_work_tab
-        selected = next((t for t in result if t.get('active')), None)
-        if selected is None and result:
-            selected = result[0]
+        selected = next((t for t in result
+                         if t.get('active') and not t.get('isClient')), None)
+        if selected is None:
+            selected = next((t for t in result if not t.get('isClient')), None)
         if selected is not None and selected.get('id') is not None:
             remember_work_tab(runtime.route_key, selected['id'])
         return '\n'.join(lines)
@@ -185,5 +190,13 @@ def _handle_navigate(fn_args, runtime):
     if error:
         return f'Error navigating tab {tab_id}: {error}'
     if isinstance(result, dict):
+        # The extension refuses to navigate the Tofu client tab and opens a
+        # new tab instead — follow it so the next tab_id-less call lands on
+        # the new page, not back on the chat.
+        remember_work_tab(runtime.route_key, result.get('id', tab_id))
+        if result.get('redirectedToNewTab'):
+            return (f'Tab #{tab_id} is the Tofu client tab and is never '
+                    f'navigated; opened new tab #{result.get("id")} -> '
+                    f'{result.get("url", url)} instead (now the working tab)')
         return f'Navigated tab #{result.get("id", tab_id)} -> {result.get("url", url)} (status: {result.get("status", "?")})'
     return json.dumps(result, ensure_ascii=False, indent=2)

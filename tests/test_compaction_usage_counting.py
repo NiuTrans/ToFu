@@ -80,10 +80,15 @@ def test_advanced_summarizer_usage_is_captured(monkeypatch):
     import lib.llm_dispatch as ld
 
     cu.reset_compaction_usage('cv3')
-    monkeypatch.setattr(ld, 'dispatch_chat',
-                        lambda msgs, **kw: ('SUMMARY', {'prompt_tokens': 4200,
-                                                        'completion_tokens': 310,
-                                                        'total_tokens': 4510}))
+    dispatch_kwargs = {}
+
+    def _dispatch_chat(_messages, **kwargs):
+        dispatch_kwargs.update(kwargs)
+        return ('SUMMARY', {'prompt_tokens': 4200,
+                            'completion_tokens': 310,
+                            'total_tokens': 4510})
+
+    monkeypatch.setattr(ld, 'dispatch_chat', _dispatch_chat)
     monkeypatch.setattr(openclaw, '_raw_context_limit', lambda ctx: 200_000)
     monkeypatch.setattr(openclaw, '_tok', lambda m, t: 999_999)
     monkeypatch.setattr(openclaw, '_cooldown_ok', lambda c: True)
@@ -99,9 +104,83 @@ def test_advanced_summarizer_usage_is_captured(monkeypatch):
     msgs += [{'role': 'user', 'content': 'tail'}]
 
     adv.advanced_compact(msgs, conv_id='cv3',
-                         task={'convId': 'cv3', 'config': {'model': 'deepseek-v4-flash'}},
+                         task={'convId': 'cv3', '_userId': 41,
+                               'config': {'model': 'deepseek-v4-flash'}},
                          advanced_steps=['summarize_openclaw'])
     g = cu.get_compaction_usage('cv3')
     assert g.get('prompt_tokens') == 4200, f'summarizer usage not captured: {g}'
     assert g.get('completion_tokens') == 310
+    assert dispatch_kwargs['prefer_model'] == 'deepseek-v4-flash'
+    assert dispatch_kwargs['owner_user_id'] == 41
+    assert 'model' not in dispatch_kwargs
     cu.reset_compaction_usage('cv3')
+
+
+
+@pytest.mark.unit
+def test_accumulator_canonicalizes_vendor_aliases_and_keeps_call_rows():
+    from lib.tasks_pkg.compaction._compaction_usage import (
+        pop_compaction_usage, record_compaction_usage, reset_compaction_usage)
+
+    reset_compaction_usage('cv-alias')
+    record_compaction_usage('cv-alias', {
+        'input_tokens': 12,
+        'output_tokens': 3,
+        'cached_tokens': 90,
+        '_dispatch': {'model': 'kimi-k3', 'provider_id': 'gateway'},
+    }, 'L2')
+    got = pop_compaction_usage('cv-alias')
+
+    assert got['cache_read_tokens'] == 90
+    assert got['n_calls'] == 1
+    assert got['calls'][0]['kind'] == 'L2'
+    assert got['calls'][0]['model'] == 'kimi-k3'
+    assert got['calls'][0]['provider_id'] == 'gateway'
+    assert got['calls'][0]['usage']['cache_read_tokens'] == 90
+
+
+@pytest.mark.unit
+def test_accumulator_does_not_double_sum_canonicalized_cache_aliases():
+    from lib.tasks_pkg.compaction._compaction_usage import (
+        pop_compaction_usage, record_compaction_usage, reset_compaction_usage)
+
+    reset_compaction_usage('cv-cache')
+    record_compaction_usage('cv-cache', {
+        'prompt_tokens': 100,
+        'cached_tokens': 80,
+        'cache_read_tokens': 80,
+    })
+    got = pop_compaction_usage('cv-cache')
+
+    assert got['cache_read_tokens'] == 80
+    assert got['cached_tokens'] == 80
+
+
+
+@pytest.mark.unit
+def test_settled_merge_keeps_main_and_internal_calls_without_mutation():
+    from lib.tasks_pkg.compaction._compaction_usage import (
+        merge_compaction_usage_into_total)
+
+    main = {'prompt_tokens': 478_100, 'completion_tokens': 266,
+            'cache_read_tokens': 14_300}
+    compact = {
+        'n_calls': 1,
+        'calls': [{'kind': 'L2', 'usage': {'input_tokens': 10_000}}],
+        'timing': {'modelWallMs': 50},
+        'input_tokens': 10_000,
+        'output_tokens': 500,
+        'cache_read_input_tokens': 8_000,
+    }
+
+    merged = merge_compaction_usage_into_total(main, compact)
+
+    assert merged['prompt_tokens'] == 478_100
+    assert merged['input_tokens'] == 10_000
+    assert merged['completion_tokens'] == 266
+    assert merged['output_tokens'] == 500
+    assert merged['cache_read_tokens'] == 14_300
+    assert merged['cache_read_input_tokens'] == 8_000
+    assert 'n_calls' not in merged and 'calls' not in merged
+    assert main['prompt_tokens'] == 478_100
+    assert compact['n_calls'] == 1

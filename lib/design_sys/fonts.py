@@ -30,7 +30,8 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['FontFace', 'FONT_REGISTRY', 'LICENSES', 'get_font', 'list_fonts',
+__all__ = ['FontFace', 'FONT_REGISTRY', 'LICENSES', 'get_font',
+           'resolve_font', 'canonical_font_family', 'list_fonts',
            'get_pairing', 'ensure_font', 'font_face_block',
            'stage_font_into_scene', 'registry_summary']
 
@@ -229,6 +230,21 @@ FONT_REGISTRY: tuple = (
 )
 
 _BY_ID = {f.id: f for f in FONT_REGISTRY}
+_BY_FAMILY = {f.family.casefold(): f for f in FONT_REGISTRY}
+
+# Names produced by common browser/system font stacks for the same registered
+# face.  PPTX embedding is keyed by the exact run typeface, so leaving an alias
+# unresolved creates a package that appears to contain fonts while Office still
+# substitutes every aliased run.  Keep this table small and explicit: an alias
+# is accepted only when its glyph source and redistribution license are the
+# audited registry entry on the right.
+_FAMILY_ALIASES = {
+    'noto sans cjk sc': 'noto-sans-sc',
+    'source han sans sc': 'noto-sans-sc',
+    'source han sans cn': 'noto-sans-sc',
+    'noto serif cjk sc': 'noto-serif-sc',
+    'source han serif sc': 'noto-serif-sc',
+}
 
 #: Role-pairing shortcuts: scenario → (display_id, body_id, latin_id).
 #: themes.py consumes this; it is data, not logic.
@@ -249,6 +265,21 @@ _MIN_FONT_BYTES = 8192
 
 def get_font(font_id: str) -> FontFace | None:
     return _BY_ID.get(font_id)
+
+
+def resolve_font(value: str) -> FontFace | None:
+    """Resolve a registry id, canonical family, or audited family alias."""
+    key = str(value or '').strip()
+    if not key:
+        return None
+    return (_BY_ID.get(key) or _BY_FAMILY.get(key.casefold())
+            or _BY_ID.get(_FAMILY_ALIASES.get(key.casefold(), '')))
+
+
+def canonical_font_family(value: str, *, fallback: str = '') -> str:
+    """Return the OOXML/CSS family that matches the embedded font's names."""
+    face = resolve_font(value)
+    return face.family if face is not None else str(value or fallback)
 
 
 def list_fonts(*, scenario: str = '', role: str = '') -> list:

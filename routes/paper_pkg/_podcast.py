@@ -18,6 +18,7 @@ from lib.paper.deepen_runtime import _deepen_runtime
 from lib.paper.qa_runtime import _qa_runtime
 from lib.paper.report_runtime import _report_runtime
 from lib.paper.translate_runtime import _translate_runtime
+from lib.translate.execution import abort_translation_task
 from lib.paper_identity import (
     _paper_hash,
     _safe_hash_dir,
@@ -90,11 +91,13 @@ async def podcast_status():
     """Feature status: is a TTS slot configured, which models, mode bands."""
     from lib import tts as _tts
 
-    available = _tts.tts_available()
+    owner_user_id = int(request_user_id())
+    available = _tts.tts_available(owner_user_id=owner_user_id)
     return api_ok(
         {
             "tts_available": available,
-            "models": _tts.list_tts_models() if available else [],
+            "models": (_tts.list_tts_models(owner_user_id=owner_user_id)
+                       if available else []),
             "default_voice": _tts.default_voice() if available else "",
             "modes": {
                 m: {"target": band[0], "min": band[1], "max": band[2]}
@@ -633,7 +636,8 @@ async def lookup_podcast():
     return api_ok(
         {
             "found": False,
-            "tts_available": _tts.tts_available(),
+            "tts_available": _tts.tts_available(
+                owner_user_id=owner_user_id),
             "report_available": has_report(phash, user_id=owner_user_id),
         }
     )
@@ -758,11 +762,22 @@ register_task_routes(
 )
 
 
+def _abort_paper_translation(task_id: str, owner_user_id: int):
+    task = _translate_runtime.get_owned(task_id, user_id=owner_user_id)
+    if task is None:
+        return api_not_found()
+    if not abort_translation_task(
+            _translate_runtime, task_id, user_id=owner_user_id):
+        return api_ok(status=task['status'], note='already finished')
+    return api_ok(status='aborting')
+
+
 register_task_routes(
     api_v1_paper_bp,
     _translate_runtime,
     url_prefix="/api/v1/paper/translate",
     enable_poll=False,
+    abort_handler=_abort_paper_translation,
 )
 
 

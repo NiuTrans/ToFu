@@ -1,4 +1,5 @@
 import pytest
+import json
 
 from evaluations.tool_search.dataset import CASES, CATALOG, SEARCH_TEXT_BY_NAME
 from evaluations.tool_search.evaluation import (
@@ -73,3 +74,87 @@ def test_qwen_reference_arm_is_deterministic():
         CATALOG, 'cancel recurring reminder', limit=5,
         search_text_by_name=SEARCH_TEXT_BY_NAME)
     assert result['items'][0]['name'] == 'scheduler_cancel'
+
+
+def test_browser_namespace_finds_server_download_from_original_chinese_intent():
+    namespace_by_name = {
+        tool['function']['name']: (
+            'browser' if tool['function']['name'].startswith('browser_')
+            else 'general')
+        for tool in CATALOG
+    }
+    result = search_executable_catalog(
+        CATALOG,
+        '把浏览器页面里的最新版压缩包下载到服务器本地',
+        namespace='browser',
+        limit=5,
+        namespace_by_name=namespace_by_name,
+        search_text_by_name=SEARCH_TEXT_BY_NAME,
+    )
+    assert result['items'][0]['name'] == 'browser_download_url_to_server'
+    assert result['items'][0]['detail_level'] == 'compact'
+
+
+def test_legacy_download_name_resolves_to_one_canonical_browser_tool():
+    result = search_executable_catalog(
+        CATALOG, 'download_url_to_server', limit=3,
+        search_text_by_name=SEARCH_TEXT_BY_NAME)
+    assert result['resolved_name'] == 'browser_download_url_to_server'
+    assert result['items'][0]['name'] == 'browser_download_url_to_server'
+    assert len(result['items']) == 1
+    assert 'canonical' in result['notice']
+
+
+def test_tool_search_result_is_compact_and_hard_bounded():
+    from lib.tools.gateway import LOCAL_TOOL_SEARCH_MAX_RESULT_CHARS
+
+    contracts = {
+        tool['function']['name']: {
+            'contractVersion': 2,
+            'arguments_schema': tool['function']['parameters'],
+            'help': 'full help ' * 5000,
+            'permission': 'read',
+            'idempotency': 'read_only',
+            'ptcEligible': False,
+            'errors': [{
+                'code': f'error_{index}',
+                'message': 'very long diagnostic ' * 100,
+            } for index in range(30)],
+        }
+        for tool in CATALOG
+    }
+    broad = search_executable_catalog(
+        CATALOG, 'search create browser file tool', limit=20,
+        search_text_by_name=SEARCH_TEXT_BY_NAME,
+        contract_documents_by_name=contracts)
+    payload = json.dumps(broad, ensure_ascii=False, separators=(',', ':'))
+    assert len(payload) <= LOCAL_TOOL_SEARCH_MAX_RESULT_CHARS
+    assert all('help' not in item and 'errors' not in item
+               for item in broad['items'])
+    assert all(len(item['description']) <= 240 for item in broad['items'])
+
+    exact = search_executable_catalog(
+        CATALOG, 'browser_download_url_to_server', limit=3,
+        search_text_by_name=SEARCH_TEXT_BY_NAME,
+        contract_documents_by_name=contracts)
+    assert exact['items'][0]['detail_level'] == 'exact'
+    assert len(exact['items'][0]['help']) <= 1200
+    assert len(exact['items'][0]['errors']) <= 8
+
+
+def test_evaluation_reports_original_intent_and_retrieval_latency():
+    episodes = flatten_episodes(merge_simulated_users(
+        [next(case for case in CASES
+              if case['id'] == 'browser_server_download')], {}))
+    decided = apply_model_queries(episodes, {'decisions': [{
+        'episode_id': episodes[0]['episode_id'],
+        'action': 'search',
+        'query': 'download save archive server browser',
+    }]})
+    report = evaluate_retrieval(
+        CATALOG, decided, search=search_executable_catalog,
+        search_text_by_name=SEARCH_TEXT_BY_NAME)
+    assert report['original_intent_recall_at_5'] == 1
+    assert report['retrieval_calls'] == len(decided) + 1
+    assert report['search_latency_ms_p95'] >= 0
+    assert report['rows'][0]['original_query'] == episodes[0]['utterance']

@@ -13,6 +13,7 @@ import time
 from lib.config_dir import config_path as _config_path
 from lib.json_store import locked_path, read_json, write_json_atomic
 from lib.log import get_logger
+from lib.weak_lock_pool import WeakLockPool
 
 logger = get_logger(__name__)
 
@@ -30,8 +31,10 @@ __all__ = ['load_token', 'save_token', 'delete_token', 'token_path',
 # RTT vs ~300ms direct) widens that race window 4-6×, so concurrent
 # refreshes of the SAME refresh token are merged here: the winner calls
 # upstream, the waiters reuse its result.
-_sf_locks: dict = {}
-_sf_guard = threading.Lock()
+# Refresh tokens rotate, so retaining one lock for every historical token is a
+# process-lifetime leak. Active holders/waiters keep their lock strongly alive;
+# the shared weak pool reclaims it as soon as that refresh generation is idle.
+_sf_locks = WeakLockPool(threading.Lock)
 _store_locks: dict[str, threading.RLock] = {}
 _store_guard = threading.Lock()
 _PROVIDER_RE = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')
@@ -40,8 +43,7 @@ _SUPPORTED_PROVIDERS = frozenset({'claude', 'codex'})
 
 def _sf_lock(provider: str, refresh_tok: str) -> threading.Lock:
     fp = hashlib.sha256(f'{provider}:{refresh_tok}'.encode()).hexdigest()[:16]
-    with _sf_guard:
-        return _sf_locks.setdefault(fp, threading.Lock())
+    return _sf_locks.lock_for(fp)
 
 
 def _store_lock(provider: str) -> threading.RLock:

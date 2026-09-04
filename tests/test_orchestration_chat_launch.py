@@ -118,6 +118,8 @@ def test_launch_resolves_projection_phase_and_detached_execution_options(
     assert first['executor_options']['max_iterations'] == 7
     assert first['executor_options']['all_tools'] is not tools
     assert first['executor_options']['model'] == 'model-x'
+    assert first['executor_options']['model_routing_policy'] == (
+        'selected' if projection == 'autopilot' else 'role_tier')
     assert first['executor_options']['project_path'] == '/repo'
     assert first['executor_options']['system_prompt_base'] == 'policy'
     assert first['executor_options']['thinking_enabled'] is False
@@ -160,7 +162,7 @@ def test_flow_runner_only_assembles_the_launch_spec():
     assert 'launch.apply_task_projection(task, label=label)' in runtime
     assert '**launch.execution_kwargs(' in runtime
     assert 'initial_phase_for_flow' not in runner + runtime
-    assert 'chat_projection_for_flow' not in runner + runtime
+    assert 'chat_projection_for_flow' not in runtime
     assert "executor_options={" not in runner + runtime
 
 

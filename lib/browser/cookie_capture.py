@@ -17,9 +17,9 @@ docs/modules/browser_automation.md):
 Capture is AUTOMATIC on a wall (owner decision 2026-08-13: the per-domain
 allow/deny consent banner, its grant/denial store and the REST resolve
 endpoints were removed — this is a single-tenant self-hosted server, so
-asking the owner for their own browser session was pure friction). A
-per-domain in-memory cooldown keeps an ignored/failed login tab from
-re-opening on every fetch round.
+asking the owner for their own browser session was pure friction). A bounded
+owner/process admission gate covers both the synchronous probe and background
+poll. A bounded per-domain cooldown prevents repeated login tabs.
 
 Security posture (non-negotiable):
   * never read the WHOLE jar — ``get_cookies`` is always domain-scoped;
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from urllib.parse import urlparse
 
 from lib.browser.log_safety import text_for_log, url_for_log
@@ -54,8 +55,48 @@ _SSO_PATH_PREFIXES = ('/sso', '/login', '/signin', '/passport', '/auth')
 _LOGIN_TITLE_MARKERS = ('登录', '登陆', 'log in', 'login', 'sign in')
 
 _capture_lock = threading.RLock()
-_capture_threads: dict[tuple[str, str, str], threading.Thread] = {}
-_last_attempt: dict[tuple[str, str, str], float] = {}
+# ``None`` reserves the route during its synchronous probe; a Thread means the
+# same bounded slot has been handed to background polling.
+_capture_threads: dict[
+    tuple[str, str, str], threading.Thread | None
+] = {}
+_last_attempt: OrderedDict[tuple[str, str, str], float] = OrderedDict()
+
+
+def _capture_limits() -> tuple[int, int]:
+    from lib.browser.queue._limits import login_capture_limits
+    return login_capture_limits()
+
+
+def _cooldown_capacity() -> int:
+    process_limit, _owner_limit = _capture_limits()
+    return max(16, min(512, process_limit * 8))
+
+
+def _cooldown_active_locked(
+    capture_key: tuple[str, str, str],
+    *,
+    now: float,
+) -> bool:
+    last_attempt = _last_attempt.get(capture_key)
+    if last_attempt is None:
+        return False
+    if now - last_attempt >= _ATTEMPT_COOLDOWN_S:
+        _last_attempt.pop(capture_key, None)
+        return False
+    _last_attempt.move_to_end(capture_key)
+    return True
+
+
+def _record_attempt_locked(
+    capture_key: tuple[str, str, str],
+    *,
+    now: float,
+) -> None:
+    _last_attempt.pop(capture_key, None)
+    _last_attempt[capture_key] = now
+    while len(_last_attempt) > _cooldown_capacity():
+        _last_attempt.popitem(last=False)
 
 
 # ══════════════════════════════════════════════════════════
@@ -288,40 +329,77 @@ def handle_login_wall(
 
     with _capture_lock:
         if capture_key in _capture_threads:
-            logger.debug('[CookieCapture] capture already running for %s', dom)
+            logger.debug(
+                '[CookieCapture] capture/probe already running for %s', dom)
             return False
-        if time.time() - _last_attempt.get(capture_key, 0.0) < _ATTEMPT_COOLDOWN_S:
+        if _cooldown_active_locked(capture_key, now=time.time()):
             logger.debug('[CookieCapture] login-tab cooldown active for %s — skip', dom)
             return False
+        process_limit, owner_limit = _capture_limits()
+        owner_active = sum(
+            key[0] == capture_key[0] for key in _capture_threads)
+        if (len(_capture_threads) >= process_limit
+                or owner_active >= owner_limit):
+            logger.warning(
+                '[CookieCapture] capture capacity full domain=%s '
+                'active=%d/%d owner_active=%d/%d',
+                dom, len(_capture_threads), process_limit,
+                owner_active, owner_limit,
+            )
+            return False
+        # Reserve before the potentially 25-second probe. Concurrent fetches
+        # for this route now return without duplicating bridge/API work.
+        _capture_threads[capture_key] = None
 
-    # VERIFY before storing anything. ``get_cookies(domain)`` also returns
-    # anonymous tracking cookies, so "non-empty" is NOT proof of a session —
-    # storing those would poison auth_sources for an hour (the fresh-source
-    # check above would then suppress real capture). The only honest session
-    # signal is a re-fetch that no longer walls.
-    if _probe_no_longer_walled(
-            url, client_id=client_id, owner_user_id=user_id):
-        cookies = _fetch_cookies(
-            dom, client_id=client_id, owner_user_id=user_id)
-        if cookies:
-            _store_cookies(
-                dom, cookies, source='extension', user_id=user_id)
-            return True
+    keep_background_slot = False
+    attempt_at: float | None = None
+    thread: threading.Thread | None = None
+    missing_slot = object()
+    try:
+        # VERIFY before storing anything. ``get_cookies(domain)`` also returns
+        # anonymous tracking cookies, so "non-empty" is NOT proof of a session.
+        # The only honest session signal is a re-fetch that no longer walls.
+        if _probe_no_longer_walled(
+                url, client_id=client_id, owner_user_id=user_id):
+            cookies = _fetch_cookies(
+                dom, client_id=client_id, owner_user_id=user_id)
+            if cookies:
+                _store_cookies(
+                    dom, cookies, source='extension', user_id=user_id)
+                return True
 
-    # No live session: open the login page for the user and poll in the
-    # background. This fetch round fails; the next one succeeds.
-    thread = threading.Thread(
-                              target=_background_capture,
-                              args=(dom, url),
-                              kwargs={
-                                  'client_id': client_id,
-                                  'user_id': user_id,
-                                  'capture_key': capture_key,
-                              },
-                              name=f'cookie-capture-{dom}', daemon=True)
-    with _capture_lock:
-        _capture_threads[capture_key] = thread
-        _last_attempt[capture_key] = time.time()
-    thread.start()
-    logger.info('[CookieCapture] async capture started for %s', dom)
-    return False
+        # No live session: hand the existing slot to a background poll. This
+        # fetch round fails; the next one succeeds.
+        thread = threading.Thread(
+            target=_background_capture,
+            args=(dom, url),
+            kwargs={
+                'client_id': client_id,
+                'user_id': user_id,
+                'capture_key': capture_key,
+            },
+            name=f'cookie-capture-{dom}',
+            daemon=True,
+        )
+        with _capture_lock:
+            # Defensive: only replace our own probe reservation.
+            if _capture_threads.get(capture_key, missing_slot) is not None:
+                logger.debug(
+                    '[CookieCapture] capture won probe race for %s', dom)
+                return False
+            attempt_at = time.time()
+            _record_attempt_locked(capture_key, now=attempt_at)
+            _capture_threads[capture_key] = thread
+        thread.start()
+        keep_background_slot = True
+        logger.info('[CookieCapture] async capture started for %s', dom)
+        return False
+    finally:
+        if not keep_background_slot:
+            with _capture_lock:
+                current = _capture_threads.get(capture_key, missing_slot)
+                if current is None or current is thread:
+                    _capture_threads.pop(capture_key, None)
+                if (attempt_at is not None
+                        and _last_attempt.get(capture_key) == attempt_at):
+                    _last_attempt.pop(capture_key, None)

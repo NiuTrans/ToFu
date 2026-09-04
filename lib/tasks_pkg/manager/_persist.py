@@ -9,15 +9,59 @@ import json
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
+from lib.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 from lib.tasks_pkg.manager._events import snapshot_task_text
+from lib.tool_round_identity import tool_rounds_with_execution_identity
 from lib.storage_projection import (
     _USAGE_TRANSIENT_KEYS,  # noqa: F401 — manager facade re-export
     _sanitize_api_rounds_for_persist,
     _sanitize_usage_for_persist,
     _trim_round_for_persist,
 )
+from lib.task_result_checkpoint_contract import (
+    TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
+    TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
+    TASK_RESULT_CACHE_FACT_MAXIMUM,
+    TASK_RESULT_CACHE_PREFIX_HWM_FIELD,
+    TASK_RESULT_CACHE_SETTINGS_CONTRACT,
+    TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+    TASK_RESULT_LAST_TURN_CACHE_READ_FIELD,
+)
 
 logger = get_logger(__name__)
+
+
+_RUNNING_CHECKPOINT_DEADLINE_SECONDS = 0.5
+_RUNNING_CHECKPOINT_PRIORITY = "maintenance"
+_TERMINAL_CHECKPOINT_ATTEMPTS = 5
+
+
+def _nudge_int(value):
+    try:
+        return max(0, min(1_000_000, int(value or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _public_tool_nudge_evidence(value):
+    """Project at most one bounded, content-free efficiency witness."""
+    if not isinstance(value, list):
+        return []
+    for nudge in reversed(value[-8:]):
+        if not isinstance(nudge, dict):
+            continue
+        tools = nudge.get('tools')
+        if not isinstance(tools, (list, tuple)):
+            tools = []
+        return [{
+            'afterRound': _nudge_int(nudge.get('afterRound')),
+            'targetRound': _nudge_int(nudge.get('targetRound')),
+            'reason': str(nudge.get('reason') or '')[:64],
+            'chainLength': _nudge_int(nudge.get('chainLength')),
+            'tools': [str(name)[:128] for name in tools[:6]],
+            'max': _nudge_int(nudge.get('max')),
+        }]
+    return []
 
 
 def _tool_rounds_have_dedicated_home(task):
@@ -31,6 +75,31 @@ def _tool_rounds_have_dedicated_home(task):
     their sole durable home and must retain the blob.
     """
     return is_conversation_attempt(task)
+
+
+def _segments_have_dedicated_home(task):
+    """True when the authoritative Turn already owns the segment timeline.
+
+    A conversation attempt commits its stable ``segments`` projection in the
+    same transaction as every structural/terminal event.  Rewriting the same
+    growing tool-result content into ``task_results.segments`` every five
+    seconds is therefore reconstructible duplication, not recovery state.
+
+    Inline and headless tasks have no Turn projection and keep the existing
+    task-result segment payload as their sole durable structural timeline.
+    """
+    return is_conversation_attempt(task)
+
+
+def _task_result_segments_json(task):
+    """Serialize the segment timeline only for tasks that own it here."""
+    if _segments_have_dedicated_home(task):
+        return None
+    segments = task.get('segments')
+    if not segments:
+        return None
+    from lib.tasks_pkg.segments import segments_to_json
+    return json.dumps(segments_to_json(segments), ensure_ascii=False)
 
 
 def terminal_state_log_summary(task, *, persisted: bool):
@@ -115,6 +184,8 @@ def build_result_meta(task):
     if task.get('id'): meta['taskId'] = task['id']
     if task.get('model'): meta['model'] = task['model']
     if task.get('provider_id'): meta['provider_id'] = task['provider_id']
+    if isinstance(task.get('_route_snapshot'), dict):
+        meta['routeSnapshot'] = task['_route_snapshot']
     if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
     if task.get('_affinityKey'): meta['affinityKey'] = task['_affinityKey']
     if task.get('_reconnectable'): meta['reconnectable'] = True
@@ -142,6 +213,16 @@ def build_result_meta(task):
             public_orchestration_decisions)
         meta['toolOrchestrationDecisions'] = (
             public_orchestration_decisions(task))
+    # One content-free witness per task is enough to correlate a dynamic hint
+    # with later behavior. Persist explicit bounded projections rather than
+    # either mutable private carrier or its model-visible prompt.
+    for _private_key, _public_key in (
+        ('_programmaticAdoptionNudges', 'programmaticAdoptionNudges'),
+        ('_toolRoundTripNudges', 'toolRoundTripNudges'),
+    ):
+        _public_nudges = _public_tool_nudge_evidence(task.get(_private_key))
+        if _public_nudges:
+            meta[_public_key] = _public_nudges
     if task.get('_todoState'):
         # Versioned checklist stack. Raw todo_write rounds remain the audit log;
         # this compact sidecar is the recovery/current-state authority.
@@ -149,7 +230,14 @@ def build_result_meta(task):
         meta['todoState'] = public_todo_state(task['_todoState'])
     if task.get('_todo_blocked'):
         meta['todoBlocked'] = task['_todo_blocked']
+    if task.get('_waiting_on'):
+        meta['waitingOn'] = task['_waiting_on']
     if task.get('apiRounds'): meta['apiRounds'] = _sanitize_api_rounds_for_persist(task['apiRounds'])
+
+    if task.get('compactionUsage'):
+        meta['compactionUsage'] = task['compactionUsage']
+    if task.get('_promptAdmissionHistory'):
+        meta['promptAdmission'] = list(task['_promptAdmissionHistory'][-8:])
     if task.get('modifiedFiles'): meta['modifiedFiles'] = task['modifiedFiles']
     if task.get('modifiedFileList'): meta['modifiedFileList'] = task['modifiedFileList']
     # Orchestration flow per-node run trace (resolved brief + bounded I/O per
@@ -179,8 +267,10 @@ def build_result_meta(task):
 # diagnostics that no render path reads. Left in place they inflate a single
 # conversation to 100+ MB, so the browser exhausts memory the moment it loads
 # and renders it (proven: mr80gsd8rywph9 = 121 MB, dominated by usage._wire_fp).
-# We strip them at the DB persist boundary (and mirror the strip on the
-# frontend PUT + IndexedDB cache) so the authoritative store never carries them.
+# New live round records exclude consumed wire evidence before entering
+# ``apiRounds`` or SSE retention. This DB boundary remains defense-in-depth for
+# legacy/imported/raw task shapes (mirrored by frontend PUT + IndexedDB), so the
+# authoritative store never carries them even when an older producer does.
 #
 #   1. usage._wire_fp / _wire_static — the post-translation wire fingerprint
 #      (a ~226 KB canonicalized-message LIST per round). Captured in
@@ -222,7 +312,23 @@ def _merge_tool_rounds(task):
     """
     cp = task.get('_checkpointToolRounds') or []
     cur = task.get('toolRounds') or []
-    merged = (list(cp) + cur) if cp else cur
+    attempt_id = task.get('_attemptId') or task.get('attemptId') or ''
+    task_id = task.get('id') or task.get('taskId') or ''
+    # Checkpoint rows already belong to earlier attempts and preserve their
+    # stamps. Current rows always belong to this executor. Without this split,
+    # a restart/resume merges several attempt-local llmRound=0/1/... sequences
+    # into one Turn with no durable way for segment/render code to distinguish
+    # them.
+    scoped_checkpoint = tool_rounds_with_execution_identity(
+        cp, attempt_id='', task_id='',
+    )
+    scoped_current = tool_rounds_with_execution_identity(
+        cur,
+        attempt_id=attempt_id,
+        task_id=task_id if attempt_id else '',
+        overwrite=bool(attempt_id),
+    )
+    merged = scoped_checkpoint + scoped_current
     # The shallow-copy is thread-safety (see docstring); layer the persist
     # trim on top so a DONE round's transient _partialOutput buffer never
     # reaches the DB. _trim_round_for_persist returns dict(r) when it strips,
@@ -249,102 +355,343 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
     owner_user_id = require_user_id(
         task.get('_userId'), context='task result checkpoint')
     client = get_storage_client(write=True)
-    if (conv_id and not task.get('_inline_messages')
-            and not client.query('conversation.get', {
-                'conv_id': conv_id, 'user_id': owner_user_id})):
-        logger.info('[Task %s] conv=%s skipping task result: parent absent',
-                    task['id'][:8], conv_id[:8])
-        return False
+    parent_required = bool(conv_id and not task.get('_inline_messages'))
 
-    written_at = int(time.time() * 1000)
-    transient_error = None
-    for attempt in range(5):
-        current = client.query(
+    def cache_candidate(field):
+        candidate = task.get(field) if parent_required else None
+        if (isinstance(candidate, int)
+                and not isinstance(candidate, bool)
+                and 0 < candidate <= TASK_RESULT_CACHE_FACT_MAXIMUM):
+            return candidate
+        return None
+
+    cache_prefix_hwm_candidate = cache_candidate(
+        TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD)
+    last_turn_cache_read_candidate = cache_candidate(
+        TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD)
+    cache_settings_requested = bool(
+        cache_prefix_hwm_candidate is not None
+        or last_turn_cache_read_candidate is not None
+    )
+
+    def witnessed_version_and_value():
+        current_record = client.query(
             'record.get', {'namespace': 'task_results', 'key': task['id']})
-        current_value = (current or {}).get('value') or {}
+        current_value = (current_record or {}).get('value') or {}
         if current_value.get('status') == 'interrupted':
             logger.warning('[Task %s] task result fenced after recovery',
                            task['id'][:8])
-            return False
-        if status == 'running' and current_value.get('status') not in (None, 'running'):
-            logger.warning('[Task %s] running checkpoint cannot regress %s',
+            return None
+        if status in ('pending', 'running') and current_value.get(
+                'status') not in (None, 'pending', 'running'):
+            logger.warning('[Task %s] nonterminal checkpoint cannot regress %s',
                            task['id'][:8], current_value.get('status'))
+            return None
+        return int((current_record or {}).get('version') or 0), current_value
+
+    known_version = task.get('_taskResultVersion')
+    guarded = (
+        task.get('_taskResultCheckpointGuard')
+        == TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
+        and isinstance(known_version, int)
+        and not isinstance(known_version, bool)
+        and known_version >= 0
+    )
+    if not guarded:
+        if (parent_required
+                and not client.query('conversation.get', {
+                    'conv_id': conv_id,
+                    'user_id': owner_user_id,
+                    'derive_messages': False,
+                })):
+            logger.info('[Task %s] conv=%s skipping task result: parent absent',
+                        task['id'][:8], conv_id[:8])
             return False
-        value = {
-            'task_id': task['id'],
-            'conv_id': conv_id,
-            'user_id': owner_user_id,
-            'content': content,
-            'thinking': thinking,
-            'error': error_json,
-            'status': status,
-            'tool_rounds': tr_json,
-            'metadata': meta_json,
-            'segments': segments_json,
-            'created_at': int(task.get('created_at', time.time()) * 1000),
-            'completed_at': written_at,
+        witness = witnessed_version_and_value()
+        if witness is None:
+            return False
+        expected_version, current_value = witness
+    else:
+        expected_version = known_version
+        current_value = {}
+
+    written_at = int(time.time() * 1000)
+    value = {
+        'task_id': task['id'],
+        'conv_id': conv_id,
+        'user_id': owner_user_id,
+        'content': content,
+        'thinking': thinking,
+        'error': error_json,
+        'status': status,
+        'tool_rounds': tr_json,
+        'metadata': meta_json,
+        'segments': segments_json,
+        'created_at': int(task.get('created_at', time.time()) * 1000),
+        'completed_at': written_at,
+    }
+    if cache_prefix_hwm_candidate is not None:
+        value[TASK_RESULT_CACHE_PREFIX_HWM_FIELD] = (
+            cache_prefix_hwm_candidate)
+    if last_turn_cache_read_candidate is not None:
+        value[TASK_RESULT_LAST_TURN_CACHE_READ_FIELD] = (
+            last_turn_cache_read_candidate)
+    for tombstone_key in ('abort_requested_at', 'abort_source'):
+        if tombstone_key in current_value:
+            value[tombstone_key] = current_value[tombstone_key]
+
+    running_checkpoint = status == 'running'
+    # One conflict refresh is allowed even for a running checkpoint so an
+    # atomic abort tombstone can be preserved. Transient writer pressure,
+    # however, consumes its sole running-checkpoint admission immediately.
+    maximum_attempts = (
+        2 if running_checkpoint else _TERMINAL_CHECKPOINT_ATTEMPTS
+    )
+    command_options = (
+        {
+            'priority': _RUNNING_CHECKPOINT_PRIORITY,
+            'deadline': _RUNNING_CHECKPOINT_DEADLINE_SECONDS,
         }
-        for tombstone_key in ('abort_requested_at', 'abort_source'):
-            if tombstone_key in current_value:
-                value[tombstone_key] = current_value[tombstone_key]
+        if running_checkpoint else {}
+    )
+    transient_error = None
+    conflict_error = None
+
+    def clear_cache_candidate(field, sent_value):
+        current = task.get(field)
+        if (isinstance(current, int)
+                and not isinstance(current, bool)
+                and current == sent_value):
+            task.pop(field, None)
+
+    def persist_cache_settings_with_legacy_peer():
+        """Retain cache durability while the Sidecar rolls independently."""
+        from lib.tasks_pkg.cache_tracking._persist import (
+            advance_persisted_boundary,
+            write_last_turn_cache_read,
+        )
+
+        if cache_prefix_hwm_candidate is not None:
+            try:
+                hwm_durable = advance_persisted_boundary(
+                    conv_id, cache_prefix_hwm_candidate,
+                    user_id=owner_user_id)
+            except Exception as cache_error:
+                hwm_durable = False
+                logger.warning(
+                    '[Task %s] legacy cache HWM fallback failed: %s',
+                    task['id'][:8], cache_error,
+                )
+            if hwm_durable:
+                clear_cache_candidate(
+                    TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
+                    cache_prefix_hwm_candidate,
+                )
+        if last_turn_cache_read_candidate is not None:
+            try:
+                last_read_durable = write_last_turn_cache_read(
+                    conv_id, last_turn_cache_read_candidate,
+                    user_id=owner_user_id)
+            except Exception as cache_error:
+                last_read_durable = False
+                logger.warning(
+                    '[Task %s] legacy cache last-read fallback failed: %s',
+                    task['id'][:8], cache_error,
+                )
+            if last_read_durable:
+                clear_cache_candidate(
+                    TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
+                    last_turn_cache_read_candidate,
+                )
+
+    for attempt in range(maximum_attempts):
         try:
-            client.command(
-                'task_results.checkpoint', {
-                    'key': task['id'],
-                    'value': value,
-                    'expected_version': int((current or {}).get('version') or 0),
-                },
+            checkpoint_payload = {
+                'key': task['id'],
+                'value': value,
+                'expected_version': expected_version,
+                'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+                'require_parent': parent_required,
+            }
+            if cache_settings_requested:
+                checkpoint_payload['cache_settings_contract'] = (
+                    TASK_RESULT_CACHE_SETTINGS_CONTRACT)
+            result = client.command(
+                'task_results.checkpoint', checkpoint_payload,
                 None,
+                **command_options,
             )
+            cache_settings_committed = False
+            if isinstance(result, dict):
+                result_version = result.get('version')
+                valid_result_version = (
+                    isinstance(result_version, int)
+                    and not isinstance(result_version, bool)
+                    and result_version >= 0
+                )
+                guard_confirmed = (
+                    result.get('guard_contract')
+                    == TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
+                    and isinstance(result.get('owned'), bool)
+                    and valid_result_version
+                )
+                if guard_confirmed:
+                    task['_taskResultCheckpointGuard'] = (
+                        TASK_RESULT_CHECKPOINT_GUARD_CONTRACT)
+                    task['_taskResultVersion'] = result_version
+                    if result.get('owned') is False:
+                        return False
+                    cache_settings_committed = (
+                        cache_settings_requested
+                        and result.get('cache_settings_contract')
+                        == TASK_RESULT_CACHE_SETTINGS_CONTRACT
+                        and result.get('cache_settings_committed') is True
+                    )
+                elif valid_result_version:
+                    # An old peer can still return a useful witness, but it
+                    # cannot authorize removal of compatibility reads.
+                    task['_taskResultVersion'] = result_version
+            if cache_settings_requested:
+                if cache_settings_committed:
+                    # The contract echo proves both facts were handled in the
+                    # guarded transaction. Returned values are authoritative
+                    # (an ambiguous replay may report a newer task's LWW
+                    # baseline), but malformed/missing optional values must
+                    # not trigger a stale legacy overwrite.
+                    authoritative_hwm = (
+                        result.get(TASK_RESULT_CACHE_PREFIX_HWM_FIELD)
+                        if isinstance(result, dict) else None
+                    )
+                    authoritative_last_read = (
+                        result.get(TASK_RESULT_LAST_TURN_CACHE_READ_FIELD)
+                        if isinstance(result, dict) else None
+                    )
+                    if not (
+                        isinstance(authoritative_hwm, int)
+                        and not isinstance(authoritative_hwm, bool)
+                        and 0 < authoritative_hwm
+                        <= TASK_RESULT_CACHE_FACT_MAXIMUM
+                    ):
+                        authoritative_hwm = None
+                    if not (
+                        isinstance(authoritative_last_read, int)
+                        and not isinstance(authoritative_last_read, bool)
+                        and 0 < authoritative_last_read
+                        <= TASK_RESULT_CACHE_FACT_MAXIMUM
+                    ):
+                        authoritative_last_read = None
+                    from lib.tasks_pkg.cache_tracking._persist import (
+                        remember_persisted_cache_facts,
+                    )
+                    remember_persisted_cache_facts(
+                        conv_id,
+                        user_id=owner_user_id,
+                        cache_prefix_hwm=authoritative_hwm,
+                        last_turn_cache_read=authoritative_last_read,
+                    )
+                    if cache_prefix_hwm_candidate is not None:
+                        clear_cache_candidate(
+                            TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
+                            cache_prefix_hwm_candidate,
+                        )
+                    if last_turn_cache_read_candidate is not None:
+                        clear_cache_candidate(
+                            TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
+                            last_turn_cache_read_candidate,
+                        )
+                else:
+                    persist_cache_settings_with_legacy_peer()
             return True
         except StorageError as exc:
             if exc.code == 'database_conflict':
+                conflict_error = exc
+                witness = witnessed_version_and_value()
+                if witness is None:
+                    return False
+                expected_version, current_value = witness
+                for tombstone_key in ('abort_requested_at', 'abort_source'):
+                    if tombstone_key in current_value:
+                        value[tombstone_key] = current_value[tombstone_key]
                 continue
             if exc.code not in {
                 'database_busy', 'database_timeout', 'database_unavailable',
             }:
                 raise
             transient_error = exc
-            logger.warning('[Task %s] task result write attempt %d/5 failed: %s',
-                           task['id'][:8], attempt + 1, exc)
-            if attempt < 4:
+            transient_attempt = 1 if running_checkpoint else attempt + 1
+            transient_limit = (
+                1 if running_checkpoint else _TERMINAL_CHECKPOINT_ATTEMPTS
+            )
+            logger.warning(
+                '[Task %s] task result write attempt %d/%d failed: %s',
+                task['id'][:8], transient_attempt, transient_limit, exc,
+            )
+            if running_checkpoint:
+                break
+            if attempt + 1 < maximum_attempts:
                 time.sleep(0.05 * (attempt + 1))
     if transient_error is not None:
         raise transient_error
-    logger.warning('[Task %s] task result CAS contention', task['id'][:8])
-    return False
+    if conflict_error is not None:
+        logger.warning('[Task %s] task result CAS contention', task['id'][:8])
+        # False is reserved for a proven parent/owner/status fence because
+        # terminal callers use it to suppress later durable side effects.
+        # Contention is pressure, not evidence that this executor is stale.
+        raise conflict_error
+    raise RuntimeError('Task result checkpoint exhausted without a verdict')
 
 
-# Heavy INPUT fields pinned on the task dict that have NO reader after the
+# Heavy fields pinned on the task dict that have NO authority role after the
 # turn reaches a terminal state. They are the dominant grow-with-conversation
 # retainers (measured 2026-07-11: essentially all of the ~3.3 GB private-dirty
-# heap is per-task state, not import baseline). ``messages`` is the full API
-# input context (whole conversation), ``_flow_turns`` the per-turn Flow
-# snapshots. Both are consumed DURING the turn; every POST-terminal reader
-# (chat_poll DB path, killed-recovery, reconcile) rebuilds from the DB
-# (``task_results`` / ``conversations``), never from these in-memory copies.
+# heap is per-task state, not import baseline). The common fields below are
+# live input, Flow, result-cache, and settlement/correlation state consumed
+# only DURING the turn. Conversation attempts additionally release their
+# structural projection: the settled Turn owns toolRounds/segments/checkpoint
+# rounds and task-result metadata owns programRuns. Inline/headless tasks keep
+# those fields because they have no Turn and synchronous response builders read
+# their sole copy after execution.
 # Released at the terminal persist chokepoint so a finished task no longer pins
-# a whole conversation's worth of bytes for the ttl=3600s retention window
+# a whole conversation's worth of bytes for the remaining hot-retention window
 # (and forever, for the never-evicted carriers). ``events`` is deliberately
 # KEPT — a reconnecting SSE client replays from the absolute cursor within the
 # retained TTL window. The async profile-consolidation daemon captures ``messages``
 # by its own reference arg (spawned by the orchestrator BEFORE this runs), so
 # nulling the dict key here frees the bytes exactly when that daemon finishes,
 # not at task-TTL — strictly better.
-_HEAVY_TERMINAL_FIELDS = ('messages', '_flow_turns')
+_HEAVY_TERMINAL_FIELDS = (
+    'messages', '_flow_turns', '_tool_result_cache',
+    '_unchanged_tool_result_receipts', '_settled_tool_results',
+    '_tool_call_id_receipts',
+)
+_CONVERSATION_TERMINAL_PROJECTION_FIELDS = (
+    'toolRounds', 'segments', 'programRuns', '_checkpointToolRounds',
+    # Live event persistence keeps one last-applied projection baseline so
+    # structural events can send revision patches without re-reading the
+    # growing Turn. The settled Turn is authoritative after terminal.
+    '_turnProjectionState',
+)
 
 
 def _release_heavy_task_state(task) -> int:
-    """Null the heavy input fields on a TERMINAL task. Returns count released.
+    """Null reconstructible heavy fields on a terminal task.
 
     No-op unless the task is terminal (defensive: never strip a task that
-    could still stream). Best-effort — never raises into the persist path.
+    could still stream). Returns the field count; best-effort and never raises
+    into the persist path.
     """
     try:
-        if task.get('status') not in ('done', 'error', 'aborted'):
+        if task.get('status') not in TASK_REPLAY_TERMINAL_STATUSES:
             return 0
+        release_fields = _HEAVY_TERMINAL_FIELDS
+        if is_conversation_attempt(task):
+            # The terminal Turn is the structural authority for conversation
+            # attempts, while result metadata owns programRuns. Inline/headless
+            # tasks have no Turn (and synchronous response builders still read
+            # these fields), so they deliberately retain their sole copy.
+            release_fields += _CONVERSATION_TERMINAL_PROJECTION_FIELDS
         released = 0
-        for f in _HEAVY_TERMINAL_FIELDS:
+        for f in release_fields:
             if task.get(f):
                 task[f] = None
                 released += 1
@@ -490,16 +837,15 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         # projection; duplicating them in task_results creates two authorities.
         tr_json = None if _tool_rounds_have_dedicated_home(task) else json.dumps(_merged_tr, ensure_ascii=False)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
-        # segments (, step 2): persist the THIN form
-        #   (segments_to_json strips the _round mirror — it duplicates the
-        #   tool_rounds column). Rehydrated on read via rehydrate_segments +
-        #   the co-persisted toolRounds. Best-effort: never break persistence.
+        # Persist segments only when task_results is their durable home.
+        # Conversation attempts already commit the same stable timeline in
+        # their authoritative Turn projection; copying every tool result here
+        # would rewrite a growing reconstructible blob at each checkpoint and
+        # again at terminal settlement. Inline/headless tasks retain the thin
+        # task-result form and its existing rehydration contract.
         segments_json = None
         try:
-            _segs = task.get('segments')
-            if _segs:
-                from lib.tasks_pkg.segments import segments_to_json
-                segments_json = json.dumps(segments_to_json(_segs), ensure_ascii=False)
+            segments_json = _task_result_segments_json(task)
         except Exception as _sj_e:
             logger.warning('[Task %s] segments serialize failed (non-fatal): %s',
                            task_id_short, _sj_e, exc_info=True)

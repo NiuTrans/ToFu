@@ -109,6 +109,11 @@ cp "$BUNDLE/_internal/static/icons/logo.png" \
 # ── DEBIAN metadata ──
 SIZE_KB="$(du -sk "$ROOTFS" | cut -f1)"
 mkdir -p "$ROOTFS/DEBIAN"
+
+# dpkg-deb requires the control directory to be world-readable/executable
+# (>=0755). A restrictive umask (077) would otherwise create it 0700 and abort
+# the build on the next invocation.
+chmod 755 "$ROOTFS/DEBIAN"
 cat > "$ROOTFS/DEBIAN/control" <<EOF
 Package: tofu
 Version: $VERSION
@@ -125,6 +130,8 @@ Description: Self-hosted AI assistant (desktop)
  User data (config, databases, logs) lives per-user in
  ~/.local/share/Tofu — the application never writes into /opt.
 EOF
+
+chmod 644 "$ROOTFS/DEBIAN/control"
 
 cat > "$ROOTFS/DEBIAN/postinst" <<'EOF'
 #!/bin/sh

@@ -10,7 +10,14 @@ import requests
 from lib.desktop_agent._browser_relay import BrowserRelay, RelayResponse, \
     origin_of
 
-pytestmark = pytest.mark.unit
+# The relay is bound on FIXED loopback port ranges (15280-15289, 15380-15389,
+# 15480-15489) and each test makes real requests to 127.0.0.1. Those ranges
+# collide with a dev browser-relay or a second pytest worker on the same host,
+# so the whole file runs in the dedicated no-xdist serial lane. BrowserRelay
+# does not yet resolve the actual bound port for a port-0/ephemeral request
+# (start() sets ``self.port = port`` to the REQUESTED port), so ephemeral
+# allocation is impossible without a source change; remove this mark once it is.
+pytestmark = [pytest.mark.unit, pytest.mark.serial]
 
 
 def test_origin_of_keeps_origin_and_drops_proxy_path():

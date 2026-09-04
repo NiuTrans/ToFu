@@ -93,10 +93,14 @@ _buildReportTOC = () => '';
 _buildReadingTimeBar = () => null;
 _wireReportScrollSpy = () => {};
 _wireReadingTimeTracking = () => {};
-_captureReadingAnchor = () => null;
-_loadReadingPosition = () => null;
-_restoreReadingAnchor = () => {};
-_persistReadingPosition = () => {};
+// Reading-position capture/restore now lives on the typed report owner
+// (report-runtime.ts) and the retained renderer consumes it via runtimeScope
+// (=== win in this harness). Re-point the no-op stubs there so the re-render
+// capture/restore path runs without a real scroll layout.
+win._captureReadingAnchor = () => null;
+win._loadReadingPosition = () => null;
+win._restoreReadingAnchor = () => {};
+win._persistReadingPosition = () => {};
 _syncReportToolbar = () => {};
 _renderReportFinishTag = () => '';
 if (typeof _reportView === 'function') {

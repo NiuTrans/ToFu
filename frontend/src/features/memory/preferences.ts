@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtmlText as escape } from '../../html-safety';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
 import type { I18nKey } from '../../i18n';
 
@@ -36,7 +37,6 @@ type PreferencesWindow = Window & {
   Api?: { userContext?: UserContextApi; memory?: MemoryClearApi };
   t?: (key: string, values?: Record<string, unknown>) => string;
   Icon?: (name: string, size?: number) => string;
-  escapeHtml?: (value: unknown) => string;
   debugLog?: (message: string, kind?: string) => void;
   showConfirm?: (message: string, options?: { danger?: boolean }) => Promise<boolean>;
   refreshMemoryList?: (scope?: string, targetId?: string) => Promise<void>;
@@ -85,13 +85,6 @@ function translate(
 ): string {
   const translated = globals().t?.(key, values || {});
   return translated && translated !== key ? translated : fallback;
-}
-
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (helper) return helper(String(value ?? ''));
-  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 function errorMessage(error: unknown): string {

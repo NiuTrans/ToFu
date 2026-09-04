@@ -67,13 +67,17 @@ _SETTINGS_HINT_EN = (
 )
 
 _PERMISSION_HINT_CN = (
-    '• 打开 「设置 → Keys」 检查该 Provider 的 Key 是否填写正确、是否被停用。\n'
-    '• 若该 Key 对当前模型没有访问权限，请更换为其它模型或申请开通。'
+    '• 展开错误详情确认具体 HTTP 状态和上游原因；403 也可能只表示当前模型未授权，'
+    '并不等于 Key 永久失效。\n'
+    '• 若其它请求也持续失败，再到「设置 → Keys」检查凭证；若仅该模型失败，'
+    '请切换模型或申请模型权限。'
 )
 
 _PERMISSION_HINT_EN = (
-    '• Open "Settings → Keys" and verify the key for this provider is correct and enabled.\n'
-    '• If the key does not have access to this model, switch models or request access.'
+    '• Expand the error details for the exact HTTP status and upstream reason. '
+    'A 403 can be model-specific and does not by itself prove the key is permanently invalid.\n'
+    '• If other requests also keep failing, check Settings → Keys. If only this '
+    'model fails, switch models or request model access.'
 )
 
 _TIMEOUT_HINT_CN = '• 稍后重试。若持续超时，可在 「设置 → 模型默认」 切换到响应更快的模型。'
@@ -124,8 +128,8 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
     'ratelimit':          ('⚠️ API 请求已达限频（429）',
                             'API rate-limited (HTTP 429)',
                             _SETTINGS_HINT_CN, _SETTINGS_HINT_EN),
-    'permission':         ('⚠️ API Key 被拒绝（401/403，无权限或已失效）',
-                            'API key rejected (401/403, invalid or lacking permission)',
+    'permission':         ('⚠️ 请求被拒绝（HTTP 401/403，凭证或模型权限不足）',
+                            'Request rejected (HTTP 401/403: credential or model permission)',
                             _PERMISSION_HINT_CN, _PERMISSION_HINT_EN),
     'no_slot':            ('⚠️ 当前没有可用的 API Key',
                             'No available API key slot',
@@ -180,11 +184,11 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
     # recovered immediately.
     'tool_loop':          ('⚠️ 模型陷入重复工具调用循环，已主动停止',
                             'Model stuck in a repeated tool-call loop',
-                            '• 模型连续多轮发出**完全相同**的工具调用且结果毫无变化；系统先发送了一次纠偏指令，模型仍然重复后才主动停止，避免继续烧费。\n'
+                            '• 模型连续多轮重复完全相同或语义等价的工具调用，未获得新证据；系统先发送一次带恢复路径的纠偏指令，模型仍未推进后才主动停止，避免继续烧费。\n'
                             '• 优先点击 Continue 从最近检查点继续；若没有 Continue 再 Retry。反复触发时请换个说法/拆小任务，或在 「设置 → 模型默认」 换一个模型。',
-                            '• The model emitted the **exact same** tool call several rounds in a row with '
-                            'identical results. The system first sent one corrective instruction and stopped '
-                            'only after the model still repeated it, preventing further wasted spend.\n'
+                            '• The model repeatedly issued identical or semantically equivalent tool calls '
+                            'without obtaining new evidence. The system first sent one recovery instruction '
+                            'and stopped only after there was still no progress, preventing further wasted spend.\n'
                             '• Prefer Continue to resume from the latest checkpoint; use Retry if Continue is unavailable. If the same task keeps tripping this, rephrase / '
                             'split the task, or switch models in "Settings → Model defaults".'),
     'premature_close':    ('⚠️ 网关/代理过早关闭流',

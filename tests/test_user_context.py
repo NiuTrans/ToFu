@@ -197,6 +197,74 @@ def test_short_one_off_request_does_not_call_learner(context_data_dir,
     assert calls == []
 
 
+def test_old_long_request_does_not_retrigger_learner_for_short_latest_turn(
+        context_data_dir, monkeypatch):
+    """Only the just-finished user turn may justify another paid review.
+
+    Historical user text remains useful model context after a current durable
+    signal, but an old long coding request must not make every later "thanks"
+    turn pay for the same review again.
+    """
+    import lib.memory.profile_consolidate as pc
+
+    calls = []
+    monkeypatch.setattr(
+        'lib.llm_dispatch.dispatch_chat',
+        lambda *args, **kwargs: calls.append((args, kwargs)) or ('{}', {}),
+    )
+
+    assert pc.run_profile_consolidation([
+        {'role': 'user', 'content': 'Implement this one-off change. ' + 'x' * 500},
+        {'role': 'assistant', 'content': 'Done.'},
+        {'role': 'user', 'content': '谢谢。'},
+    ]) == []
+    assert calls == []
+
+
+def test_profile_review_uses_strict_zero_wait_admission(context_data_dir,
+                                                        monkeypatch):
+    """The advisory learner never challenges known billing/contention stops."""
+    from lib import key_stats
+    import lib.memory.profile_consolidate as pc
+
+    captured = {}
+
+    def fake_dispatch(*args, **kwargs):
+        assert key_stats.is_strict_billing_stop_admission() is True
+        captured.update(kwargs)
+        return '{}', {}
+
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', fake_dispatch)
+
+    assert pc.run_profile_consolidation([
+        {'role': 'user', 'content': '我偏好简洁的中文回答。'},
+    ]) == []
+    assert captured['max_429_attempts'] == 1
+    assert captured['defer_on_shared_contention'] is True
+    assert key_stats.is_strict_billing_stop_admission() is False
+
+
+def test_profile_review_shared_contention_deferral_is_fail_soft(
+        context_data_dir, monkeypatch, caplog):
+    """A known shared outage skips this reconstructible pass without warning."""
+    import logging
+
+    import lib.memory.profile_consolidate as pc
+    from lib.llm_dispatch import DispatchSharedContentionDeferred
+
+    def defer_dispatch(*_args, **_kwargs):
+        raise DispatchSharedContentionDeferred(retry_after_s=12.5)
+
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', defer_dispatch)
+    caplog.set_level(logging.INFO, logger='lib.memory.profile_consolidate')
+
+    assert pc.run_profile_consolidation([
+        {'role': 'user', 'content': '我偏好简洁的中文回答。'},
+    ]) == []
+    assert 'deferred by shared contention for 12.5s' in caplog.text
+    assert 'cheap-LLM call failed' not in caplog.text
+
+
 def test_consolidation_rejects_ungrounded_or_fluffy_output(context_data_dir,
                                                            monkeypatch):
     """A model cannot invent evidence or save conversational framing."""

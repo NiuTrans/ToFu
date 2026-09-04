@@ -443,6 +443,14 @@
   box-shadow:1px 1px 0 var(--m-ink);
   background:var(--m-cream);
 }
+.memory-page-controls{
+  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;
+  gap:10px;padding:6px 2px;position:sticky;top:0;z-index:3;
+  background:var(--m-white,#faf8f3);border-bottom:1px solid var(--m-skin,#e4d6bf)
+}
+.memory-page-controls .memory-retry-btn{margin:0;min-width:86px}
+.memory-page-controls .memory-retry-btn:disabled{opacity:.38;cursor:default;transform:none}
+.memory-page-status{text-align:center;color:var(--m-ink-faint);font-size:11px;font-weight:650}
 
 /* ═══════════════════════════════════════════
    Memory Card — tofu block card style

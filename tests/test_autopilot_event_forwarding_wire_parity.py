@@ -18,14 +18,12 @@ subclass.  This suite pins the NEW contract:
      ``tests/test_autopilot_warmup_setup_phase.py`` uses.
   3. The old list-subclass machinery is gone from BOTH files — no
      zombie ``_VUEventForwarder`` declarations (source-scan guard).
-  4. Functional smoke: the transform wraps a forwardable event onto the
-     carrier's own stream AND forwards it to the parent (dual-emit),
-     passes lifecycle frames verbatim WITHOUT a parent copy (the
-     explicit dual-emit helper owns those), and drops non-contract
-     frames.
+  4. Functional smoke: the transform wraps a forwardable event only on the
+     carrier's own stream, passes lifecycle frames verbatim, and drops
+     non-contract frames. A settled parent is never an event destination.
 
-Guarded against NEUTER: delete the leaf / reinject the class inline /
-drop the dual-emit from the transform.
+Guarded against NEUTER: delete the leaf / reinject the class inline / restore
+the stale parent tunnel.
 """
 from __future__ import annotations
 
@@ -111,8 +109,10 @@ def test_no_zombie_vu_event_forwarder_declarations():
             f'transform replaced the list subclass (2026-07-26).')
 
 
-def test_transform_wraps_and_dual_emits(monkeypatch, reload_modules):
-    """Functional smoke: a forwardable event lands wrapped on BOTH streams."""
+def test_transform_wraps_on_carrier_without_parent_write(
+    monkeypatch, reload_modules,
+):
+    """A forwardable event lands only on the carrier authority."""
     ap = importlib.import_module('lib.tasks_pkg.autopilot')
     forwarded = []
 
@@ -131,14 +131,7 @@ def test_transform_wraps_and_dual_emits(monkeypatch, reload_modules):
     assert own.get('vuMsgId') == 'vu-msg-abc'
     assert own.get('inner', {}).get('type') == 'delta'
 
-    # …and the parent stream gets the SAME wrapped forward (pre-hop window).
-    assert len(forwarded) == 1, (
-        f'expected exactly 1 forwarded frame to parent, got {len(forwarded)}')
-    parent_task, wrapped = forwarded[0]
-    assert parent_task is parent
-    assert wrapped.get('type') == 'autopilot_vu_event'
-    assert wrapped.get('vuMsgId') == 'vu-msg-abc'
-    assert wrapped.get('inner', {}).get('type') == 'delta'
+    assert forwarded == []
 
 
 def test_transform_lifecycle_verbatim_and_drops(monkeypatch, reload_modules):

@@ -1,15 +1,18 @@
 """Incrementally translate narration while an authoritative turn runs.
 
 One accumulator belongs to one executor task. During generation it translates
-closed narration rounds and emits live previews; after the terminal turn event
-has committed, ``finalize_incremental`` queues exactly one projection merge.
-No conversation transcript or positional message identity participates.
+a bounded number of closed narration/reasoning rounds and emits live previews.
+Task-local admission state preserves that budget across idle thread retirement.
+After the terminal turn event has committed, ``finalize_incremental``
+prioritizes exactly one projection merge. No conversation transcript or
+positional message identity participates.
 """
 
 from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
 from typing import Any
 
@@ -27,6 +30,27 @@ _MAX_ACTIVE_ACCUMULATORS = resolve_resource_budget(
     'TOFU_INCREMENTAL_TRANSLATE_ACTIVE', maximum=256)
 _OPERATION_QUEUE_CAPACITY = resolve_resource_budget(
     'TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY', minimum=2, maximum=256)
+_MAX_PREVIEW_SEGMENTS = resolve_resource_budget(
+    'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS', minimum=1, maximum=1024)
+_PREVIEW_DEADLINE_SECONDS = resolve_resource_budget(
+    'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS',
+    minimum=5,
+    maximum=300,
+)
+_PREVIEW_MIN_NARRATION_CHARS = resolve_resource_budget(
+    'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS',
+    minimum=1,
+    maximum=4096,
+)
+_PREVIEW_MAX_429_ATTEMPTS = resolve_resource_budget(
+    'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS',
+    minimum=1,
+    maximum=8,
+)
+_TASK_PREVIEW_STATE = '_incremental_translate_preview_state'
+_PREVIEW_STATE_DISABLED = 'disabled'
+_PREVIEW_STATE_STARTED = 'started'
+_PREVIEW_STATE_LIMIT_REPORTED = 'limitReported'
 
 _accumulators: dict[str, "_Accumulator"] = {}
 _accumulators_lock = threading.Lock()
@@ -53,11 +77,57 @@ def _owner_id(task: dict[str, Any]):
     return task_user_id(task)
 
 
-def _mixed_key_order(key: int | str) -> tuple[int, Any]:
-    """Deterministic order for the mixed int-round / thinking-blockId map:
-    narration rounds numerically first, ``thinking:`` blockIds after."""
+def _task_preview_state(
+    task: dict[str, Any], *, create: bool = False,
+) -> dict[str, Any]:
+    state = task.get(_TASK_PREVIEW_STATE)
+    if isinstance(state, dict):
+        return state
+    if not create:
+        return {}
+    state = {}
+    task[_TASK_PREVIEW_STATE] = state
+    return state
+
+
+def _task_preview_started(task: dict[str, Any]) -> int:
+    try:
+        return max(0, int(
+            _task_preview_state(task).get(_PREVIEW_STATE_STARTED) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _clear_task_preview_state(task: dict[str, Any] | None) -> None:
+    if not isinstance(task, dict):
+        return
+    task.pop(_TASK_PREVIEW_STATE, None)
+
+
+def _mixed_key_order(key: int | str) -> tuple[Any, ...]:
+    """Deterministic order for legacy rounds and scoped segment block ids."""
     text = str(key)
-    return (0, int(text)) if text.isdigit() else (1, text)
+    if text.isdigit():
+        return (0, int(text), text)
+    round_match = re.search(r':llm-(\d+)(?::|$)', text)
+    if round_match:
+        lane = 0 if text.startswith('text:') else 1
+        return (lane, int(round_match.group(1)), text)
+    return (2, text)
+
+
+def _model_batch_segment_key(
+    task: dict[str, Any], segment_type: str, round_num: int,
+) -> str:
+    """Match the exact block id final segment assembly will persist."""
+    from lib.tool_round_identity import model_batch_segment_block_id
+
+    return model_batch_segment_block_id(
+        segment_type,
+        round_num,
+        attempt_id=task.get('_attemptId') or task.get('attemptId') or '',
+        task_id=task.get('id') or task.get('taskId') or '',
+    )
 
 
 def _frame_payloads(translations: dict[int | str, str]) -> tuple[str, dict[str, str]]:
@@ -84,6 +154,7 @@ class _Accumulator:
     def __init__(self, task: dict[str, Any]) -> None:
         from lib.conv_config import resolve_translate_target, target_lang_code
 
+        self._preview_state = _task_preview_state(task, create=True)
         self.task_id = str(task["id"])
         self.conversation_id = str(task["convId"])
         self.turn_id = str(task["_turnId"])
@@ -91,12 +162,17 @@ class _Accumulator:
         self.user_id = _owner_id(task)
         self.target = resolve_translate_target(task.get("config") or {})
         self.target_code = target_lang_code(self.target)
-        # Keys: int llmRound for narration prose; the segment blockId
-        # (``thinking:llm-N`` / ``thinking:terminal``) for reasoning, which
-        # shares its round number with the round's narration.
+        # Keys are stable segment blockIds. They carry attempt identity, so a
+        # Continue task's local R0 cannot overwrite an earlier attempt's R0.
         self.translations: dict[int | str, str] = {}
         self.originals: dict[int | str, str] = {}
         self.model = "unknown"
+        self._preview_segments_started = _task_preview_started(task)
+        self._preview_disabled = bool(
+            self._preview_state.get(_PREVIEW_STATE_DISABLED))
+        self._preview_limit_reported = bool(
+            self._preview_state.get(_PREVIEW_STATE_LIMIT_REPORTED))
+        self._cancel_event = threading.Event()
         self._lock = threading.Lock()
         self._queue = IncrementalOperationBuffer(_OPERATION_QUEUE_CAPACITY)
         self._last_drop_reported = 0
@@ -118,18 +194,30 @@ class _Accumulator:
         return dropped >= 0
 
     def finalize(self, content: str) -> bool:
-        dropped = self._queue.put_terminal(("finalize", content or ""))
-        self._report_preview_pressure(dropped)
+        # Pending previews are reconstructible enrichment. Once authority has
+        # settled, the user-visible terminal translation owns the worker next.
+        dropped = self._queue.put_terminal(
+            ("finalize", content or ""),
+            replace=True,
+            preserve_segment_keys=frozenset({'thinking:terminal'}),
+        )
+        if dropped > 0:
+            logger.debug(
+                '[IncTranslate] task=%s terminal prioritized over %d '
+                'pending preview segment(s)', self.task_id[:8], dropped)
         return dropped >= 0
 
     def stamp_only(self) -> bool:
-        dropped = self._queue.put_terminal(("stamp",))
-        self._report_preview_pressure(dropped)
+        dropped = self._queue.put_terminal(
+            ("stamp",),
+            replace=True,
+            preserve_segment_keys=frozenset({'thinking:terminal'}),
+        )
         return dropped >= 0
 
     def cancel(self) -> bool:
+        self._cancel_event.set()
         dropped = self._queue.put_terminal(_STOP, replace=True)
-        self._report_preview_pressure(dropped)
         return dropped >= 0
 
     def _report_preview_pressure(self, dropped: int) -> None:
@@ -162,7 +250,7 @@ class _Accumulator:
                     return
                 operation = item[0]
                 if operation == "segment":
-                    self._translate_segment(item[1], item[2])
+                    self._process_preview_segment(item[1], item[2])
                     continue
                 if operation == "finalize":
                     self._commit_deliverable(item[1])
@@ -184,7 +272,70 @@ class _Accumulator:
                 if _accumulators.get(self.task_id) is self:
                     _accumulators.pop(self.task_id, None)
 
-    def _translate_segment(self, key: int | str, original: str) -> None:
+    def _process_preview_segment(self, key: int | str, original: str) -> None:
+        """Translate one optional preview without risking terminal delivery."""
+        terminal_reasoning = key == 'thinking:terminal'
+        if self._preview_disabled and not terminal_reasoning:
+            return
+        narration = isinstance(key, int) or str(key).startswith('text:')
+        if (not terminal_reasoning and narration
+                and len(str(original or '').strip())
+                < _PREVIEW_MIN_NARRATION_CHARS):
+            logger.debug(
+                '[IncTranslate] task=%s skipped short narration preview '
+                'chars=%d floor=%d; terminal translation remains enabled',
+                self.task_id[:8], len(str(original or '').strip()),
+                _PREVIEW_MIN_NARRATION_CHARS,
+            )
+            return
+        if not terminal_reasoning:
+            if self._preview_segments_started >= _MAX_PREVIEW_SEGMENTS:
+                if not self._preview_limit_reported:
+                    self._preview_limit_reported = True
+                    self._preview_state[
+                        _PREVIEW_STATE_LIMIT_REPORTED] = True
+                    logger.info(
+                        '[IncTranslate] task=%s preview budget reached '
+                        'segments=%d; terminal translation remains enabled',
+                        self.task_id[:8], _MAX_PREVIEW_SEGMENTS,
+                    )
+                return
+            self._preview_segments_started += 1
+            self._preview_state[_PREVIEW_STATE_STARTED] = (
+                self._preview_segments_started)
+        try:
+            self._translate_segment(
+                key,
+                original,
+                max_429_attempts=(
+                    None if terminal_reasoning
+                    else _PREVIEW_MAX_429_ATTEMPTS),
+                defer_on_shared_contention=not terminal_reasoning,
+            )
+        except Exception as exc:
+            # A preview is reconstructible enrichment. Do not tear down the
+            # accumulator and lose its final translation because a saturated
+            # provider or malformed intermediate segment failed once.
+            if not terminal_reasoning:
+                self._preview_disabled = True
+                self._preview_state[_PREVIEW_STATE_DISABLED] = True
+            logger.warning(
+                '[IncTranslate] task=%s %s segment %s failed; terminal '
+                'translation remains enabled: %s',
+                self.task_id[:8],
+                ('terminal reasoning' if terminal_reasoning
+                 else 'preview disabled after'),
+                key, str(exc)[:300],
+            )
+
+    def _translate_segment(
+        self,
+        key: int | str,
+        original: str,
+        *,
+        max_429_attempts: int | None,
+        defer_on_shared_contention: bool,
+    ) -> None:
         original = str(original or "")
         if not original.strip():
             return
@@ -196,6 +347,9 @@ class _Accumulator:
             progress_cb=lambda partial: self._push_segment_progress(
                 key, partial,
             ),
+            overall_deadline=_PREVIEW_DEADLINE_SECONDS,
+            max_429_attempts=max_429_attempts,
+            defer_on_shared_contention=defer_on_shared_contention,
         )
         with self._lock:
             self.originals[key] = original
@@ -208,23 +362,35 @@ class _Accumulator:
         self,
         original: str,
         progress_cb=None,
+        overall_deadline: float | None = None,
+        max_429_attempts: int | None = None,
+        defer_on_shared_contention: bool = False,
     ) -> tuple[str, str]:
-        from lib.text_lang import detect_language
-
-        if detect_language(original, force_fasttext=True).code == self.target_code:
-            return original, "skipped"
-
-        from lib.translate.engine import _translate_freetext
         from lib.translate.notranslate import (
             _extract_notranslate_blocks,
+            _has_translatable_text,
             _reattach_notranslate_blocks,
             _reattach_notranslate_blocks_partial,
         )
-        from lib.translate.prompt import _build_translate_prompt
 
         body, protected = _extract_notranslate_blocks(original)
-        if not body.strip():
+        if protected and not _has_translatable_text(body):
+            # A protected-only preview needs neither fastText nor a provider
+            # call. Restore the visible payload locally so markup never leaks
+            # into the live preview or terminal segment stamp.
+            return _reattach_notranslate_blocks(body, protected).strip(), "skipped"
+
+        from lib.translate.skip_policy import (
+            should_skip_automatic_translation,
+        )
+
+        if should_skip_automatic_translation(
+                original, self.target, self.target_code):
             return original, "skipped"
+
+        from lib.translate.engine import _translate_freetext
+        from lib.translate.prompt import _build_translate_prompt
+
         def visible_progress(partial):
             if progress_cb is not None:
                 progress_cb(_reattach_notranslate_blocks_partial(
@@ -237,6 +403,10 @@ class _Accumulator:
             source=_SOURCE,
             target=self.target,
             progress_cb=visible_progress if progress_cb is not None else None,
+            overall_deadline=overall_deadline,
+            abort_check=self._cancel_event.is_set,
+            max_429_attempts=max_429_attempts,
+            defer_on_shared_contention=defer_on_shared_contention,
         )
         translated = (translated or "").strip()
         if protected:
@@ -376,6 +546,13 @@ def _submit_keyed(task, key: int | str, text) -> bool:
     try:
         if not text or not str(text).strip() or not _enabled_for(task):
             return False
+        terminal_reasoning = key == 'thinking:terminal'
+        preview_state = _task_preview_state(task)
+        if not terminal_reasoning and (
+            preview_state.get(_PREVIEW_STATE_DISABLED)
+            or _task_preview_started(task) >= _MAX_PREVIEW_SEGMENTS
+        ):
+            return False
         task_id = str(task["id"])
         with _accumulators_lock:
             accumulator = _accumulators.get(task_id)
@@ -405,9 +582,10 @@ def _submit_keyed(task, key: int | str, text) -> bool:
 def submit_round_segment(task, round_num, text) -> bool:
     """Queue one closed narration round; return whether translation owns it."""
     try:
-        key = int(round_num)
+        normalized_round = int(round_num)
     except (TypeError, ValueError):
         return False
+    key = _model_batch_segment_key(task, 'text', normalized_round)
     return _submit_keyed(task, key, text)
 
 
@@ -415,8 +593,7 @@ def submit_thinking_segment(task, block_id, text) -> bool:
     """Queue one closed reasoning block, keyed by its segment blockId.
 
     Reasoning shares its llmRound with the round's narration prose, so it is
-    keyed by the collision-free segment blockId (``thinking:llm-N`` /
-    ``thinking:terminal``) — the same key
+    keyed by the collision-free segment blockId — the same key
     ``commit._stamp_segment_translations`` resolves when pinning. Oversize
     reasoning defers to the retro/on-open path: stamping is enrich-only, so
     pinning a truncated translation would freeze it permanently.
@@ -424,6 +601,15 @@ def submit_thinking_segment(task, block_id, text) -> bool:
     key = str(block_id or '').strip()
     if not key:
         return False
+    # Compatibility call sites historically passed ``thinking:llm-N``. Scope
+    # that key at admission so it matches modern final segment assembly.
+    if key.startswith('thinking:llm-'):
+        try:
+            round_number = int(key.removeprefix('thinking:llm-'))
+        except ValueError:
+            pass
+        else:
+            key = _model_batch_segment_key(task, 'thinking', round_number)
     if len(str(text or '')) > _SEGMENT_MAX_CHARS:
         logger.debug(
             "[IncTranslate] thinking %s exceeds %d chars; left to retro path",
@@ -439,8 +625,12 @@ def finalize_incremental(task, content, **_ignored) -> bool:
     with _accumulators_lock:
         accumulator = _accumulators.get(task_id)
     if accumulator is None:
+        _clear_task_preview_state(task)
         return False
-    return accumulator.finalize(str(content or ""))
+    accepted = accumulator.finalize(str(content or ""))
+    if accepted:
+        _clear_task_preview_state(task)
+    return accepted
 
 
 def finalize_incremental_stamp_only(task, **_ignored) -> bool:
@@ -449,8 +639,12 @@ def finalize_incremental_stamp_only(task, **_ignored) -> bool:
     with _accumulators_lock:
         accumulator = _accumulators.get(task_id)
     if accumulator is None:
+        _clear_task_preview_state(task)
         return False
-    return accumulator.stamp_only()
+    accepted = accumulator.stamp_only()
+    if accepted:
+        _clear_task_preview_state(task)
+    return accepted
 
 
 def cancel_incremental(task) -> bool:
@@ -459,8 +653,12 @@ def cancel_incremental(task) -> bool:
     with _accumulators_lock:
         accumulator = _accumulators.get(task_id)
     if accumulator is None:
+        _clear_task_preview_state(task)
         return False
-    return accumulator.cancel()
+    accepted = accumulator.cancel()
+    if accepted:
+        _clear_task_preview_state(task)
+    return accepted
 
 
 __all__ = [

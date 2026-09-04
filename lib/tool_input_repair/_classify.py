@@ -96,6 +96,9 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     'open_url': 'fetch_url',
     'websearch': 'web_search',
     'google': 'web_search',
+    # Pre-2026-08 browser namespace migration. The argument contract is
+    # compatible and the target must exist in the current task catalog.
+    'download_url_to_server': 'browser_download_url_to_server',
     # ── large tool-result continuation ──
     # ``read_artifact`` is also a real swarm artifact tool. Exact live names
     # always win above; this alias applies only in a catalog where that tool is

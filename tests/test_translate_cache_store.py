@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -50,6 +51,71 @@ def test_translate_cache_valid_json_with_invalid_shape_is_a_miss(
     path.write_text(json.dumps(payload), encoding='utf-8')
 
     assert cache.get('text', 'en', 'zh') is None
+
+
+def _same_translate_cache_shard(cache, count):
+    buckets = {}
+    for index in range(20_000):
+        text = f'cache-budget-{index}'
+        prefix = cache._key(text, 'en', 'zh')[:2]
+        bucket = buckets.setdefault(prefix, [])
+        bucket.append(text)
+        if len(bucket) >= count:
+            return bucket
+    raise AssertionError('could not find colliding cache shard keys')
+
+
+def test_translate_cache_evicts_oldest_entry_to_hard_shard_budget(
+        monkeypatch, tmp_path):
+    from lib import translate_cache as cache
+
+    monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
+    monkeypatch.setattr(cache, '_initialized', False)
+    monkeypatch.setattr(cache, '_ENABLED', True)
+    first, second = _same_translate_cache_shard(cache, 2)
+
+    cache.put(first, 'en', 'zh', 'first-result', model='m1')
+    first_path = Path(cache._path_for(cache._key(first, 'en', 'zh')))
+    one_entry_budget = first_path.stat().st_size + 8
+    monkeypatch.setattr(
+        cache, '_shard_budget_bytes', lambda _prefix: one_entry_budget,
+    )
+    # Make the eviction order deterministic even on coarse-mtime filesystems.
+    os.utime(first_path, (1, 1))
+    cache.put(second, 'en', 'zh', 'second-result', model='m2')
+    second_path = Path(cache._path_for(cache._key(second, 'en', 'zh')))
+
+    retained = list(second_path.parent.glob('*.json'))
+    assert retained == [second_path]
+    assert sum(path.stat().st_size for path in retained) <= one_entry_budget
+
+
+def test_translate_cache_skips_entry_larger_than_its_shard_share(
+        monkeypatch, tmp_path):
+    from lib import translate_cache as cache
+
+    monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
+    monkeypatch.setattr(cache, '_initialized', False)
+    monkeypatch.setattr(cache, '_ENABLED', True)
+    monkeypatch.setattr(cache, '_shard_budget_bytes', lambda _prefix: 32)
+
+    cache.put('large-input', 'en', 'zh', 'x' * 100, model='model')
+
+    assert not list(tmp_path.rglob('*.json'))
+
+
+def test_translate_cache_removes_invalid_reconstructible_entry(
+        monkeypatch, tmp_path):
+    from lib import translate_cache as cache
+
+    monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
+    monkeypatch.setattr(cache, '_initialized', False)
+    monkeypatch.setattr(cache, '_ENABLED', True)
+    cache.put('batched-input', 'en', 'zh', 'damaged-boundaries', model='m1')
+
+    assert cache.remove('batched-input', 'en', 'zh') is True
+    assert cache.remove('batched-input', 'en', 'zh') is False
+    assert cache.get('batched-input', 'en', 'zh') is None
 
 
 def test_refusal_failed_replace_keeps_old_entry_and_no_temp(

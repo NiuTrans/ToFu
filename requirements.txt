@@ -107,7 +107,9 @@ psutil>=5.9
 # proxy fix is operationally critical on no-egress hosts — do not lower.
 tofu-search>=0.10.3
 trafilatura>=1.6
-# playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
+# playwright is mandatory for slide preview/layout rendering and also powers
+# the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches
+# Chromium before any research/LLM spend so an interpreter mismatch fails fast.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).
 #   With root:    sudo python -m playwright install-deps chromium
 #   Without root: install.sh falls back to `conda install -c conda-forge`
@@ -122,6 +124,10 @@ python-pptx>=0.6.21
 # silent feature loss on a clean env (public CI, 2026-08-06). Pure-Python,
 # no native build step.
 fontTools>=4.40
+# Brotli is required when fontTools opens WOFF2 faces for portable PPTX font
+# embedding.  Without an explicit declaration export fails only after all
+# research, authoring and rendering work has already completed.
+brotli>=1.1
 # lxml — floor aligned with bootstrap.py's _CONDA_PYTHON_DEPS so the pip path
 # and the conda-repair path build the SAME environment (they drifted: 4.9 here
 # vs >=5.3 there). >=5.3 is not a guess, it is the floor our own declared deps

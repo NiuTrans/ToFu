@@ -67,7 +67,9 @@ from lib.tasks_pkg.compaction._constants import (
 )
 from lib.tasks_pkg.compaction._layer2 import (
     _extract_current_query,
+    _extract_objective_anchor_text,
     _extract_recently_accessed_files,
+    _extract_summary_objective,
     _generate_query_aware_summary,
     _objective_anchor_index,
     _split_cold_rounds,
@@ -629,6 +631,7 @@ def compact_conversation_now(
                            'toolRounds': list(fold['cold_rounds'])})
     old_api = _project(fold_input, config)
     current_query = _extract_current_query(_project(plan['reserve_raw'], config))
+    anchor_text = _extract_objective_anchor_text(full_api)
     _folded_rounds = sum(len(f['cold_rounds'])
                          for f in plan.get('intra_folds', []))
     _preserved_turns = sum(
@@ -663,6 +666,8 @@ def compact_conversation_now(
             preserved_turns=_preserved_turns,
             folded_tool_rounds=_folded_rounds,
             objective_anchored=plan.get('anchor_msg') is not None,
+            durable_objective_applied=bool(
+                _extract_summary_objective(summary_text)),
             retained_user_messages=0,
             recent_files=recent_files,
             turn_diff_included=_turn_diff_included,
@@ -694,7 +699,8 @@ def compact_conversation_now(
     _summarize_t0 = time.monotonic()
     summary_text = _generate_query_aware_summary(
         old_api, current_query, '[ManualCompact]', conv_id=conv_id, task=task,
-        on_delta=_on_summary_delta, usage_out=_summary_usage)
+        on_delta=_on_summary_delta, usage_out=_summary_usage,
+        anchor_text=anchor_text)
     _summarize_ms = (time.monotonic() - _summarize_t0) * 1000
     logger.info('[ManualCompact] conv=%s summary LLM call: %.0f ms  '
                 '(fold_msgs=%d, fold_tokens≈%d) — dominant cost of /compact',
@@ -721,6 +727,12 @@ def compact_conversation_now(
         )
         return {'ok': False, 'error': 'summary_failed', 'archiveId': archive_id,
                 'receipt': failure_receipt}
+
+    # Same re-pin as the automatic L2 path: an accepted receipt carries the
+    # current effective goal, so keep the autopilot objective pin in step.
+    from lib.tasks_pkg.autopilot_state import _update_objective_from_receipt
+    _update_objective_from_receipt(
+        conv_id, _extract_summary_objective(summary_text), user_id=user_id)
 
     if recent_files:
         file_list = '\n'.join(f'  - {f}' for f in recent_files)

@@ -7,8 +7,8 @@ Routes:
 Patterned on ``routes/upload.py::parse_pdf`` (the binary-upload template): a
 ``multipart/form-data`` POST with a ``file`` field, guarded by a byte cap, a
 MIME allow-list, and a best-effort duration check, then routed through
-``lib.transcription`` to whatever transcription-capable slot is configured
-(provider-agnostic — no vendor branches, per CLAUDE.md §3.5).
+``lib.transcription`` to an owner-authorized v2 Offering. The execution group
+is request-scoped and provider-agnostic.
 
 Scope: ``chat``. Transcription is a stateless blob→text utility (it injects no
 operator-personal state into any prompt), so it is intentionally NOT registered
@@ -22,11 +22,11 @@ from quart import Blueprint, request
 
 from lib.quart_sync import request_files, request_form
 
-from lib.api_response import api_bad_request, api_error, api_ok
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 
-from .auth import require_scope
+from .auth import current_auth, request_user_id, require_scope
 
 logger = get_logger(__name__)
 
@@ -48,12 +48,19 @@ api_v1_audio_bp = Blueprint('api_v1_audio', __name__)
 )
 def audio_capabilities_v1():
     from lib.transcription import (
-        audio_byte_cap, list_transcription_models, max_audio_duration_s,
-        transcription_available,
+        audio_byte_cap,
+        list_transcription_models,
+        max_audio_duration_s,
+    )
+
+    auth = current_auth()
+    models = list_transcription_models(
+        owner_user_id=int(request_user_id()),
+        tenant_id=auth.tenant_id if auth else None,
     )
     return api_ok(
-        available=transcription_available(),
-        models=list_transcription_models(),
+        available=bool(models),
+        models=models,
         maxBytes=audio_byte_cap(),
         maxDurationS=max_audio_duration_s(),
     )
@@ -68,7 +75,7 @@ def audio_capabilities_v1():
         'audio (webm/ogg/wav/mp3/m4a/flac) plus optional ``language`` (ISO-639-1 '
         'hint) and ``prompt`` (domain-term biasing) form fields. Returns '
         '``{ok, text, model, provider_id, durationS?}``. Routes through the '
-        'configured transcription slot pool (provider-agnostic). 503 when no '
+        'owner-authorized model-routing v2 group. 503 when no '
         'transcription model is configured; 400 for an empty / oversize / '
         'unsupported / too-long upload; 502 on an upstream provider failure.'
     ),
@@ -108,9 +115,12 @@ def transcribe_audio_v1():
     prompt = (form.get('prompt') or '').strip() or None
 
     try:
+        auth = current_auth()
         result = transcribe(audio_bytes, filename,
                             content_type=f.content_type,
-                            language=language, prompt=prompt)
+                            language=language, prompt=prompt,
+                            owner_user_id=int(request_user_id()),
+                            tenant_id=auth.tenant_id if auth else None)
     except TranscriptionError as e:
         logger.warning('[Audio.v1] transcription failed (%d): %s',
                        e.status, e.detail)
@@ -118,7 +128,12 @@ def transcribe_audio_v1():
     except Exception as e:
         logger.error('[Audio.v1] transcription crashed for %s (%d bytes): %s',
                      filename, len(audio_bytes), e, exc_info=True)
-        return api_error(f'Transcription failed: {e}', status=500)
+        return api_internal_error(
+            e,
+            context='audio:transcribe',
+            source='routes.api_v1.audio',
+            log_traceback=False,
+        )
 
     return api_ok({
         'text': result.text,

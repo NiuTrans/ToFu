@@ -65,27 +65,26 @@ def run_longform_task(task: dict) -> None:
         artifact_id = ''
         conv_id = task.get('conv_id') or ''
         if conv_id:
-            try:
-                from lib.artifacts.core import create_artifact
-                with open(result['path'], encoding='utf-8') as f:
-                    row = create_artifact(
-                        conv_id=conv_id, content=f.read(), format='markdown',
-                        source='longform-report', task_id=task_id,
-                        title=result.get('title') or task['topic'],
-                        source_ref={'topic': task['topic']},
-                        meta={'sections': result.get('sections'),
-                              'sources': result.get('sources')})
-                artifact_id = row.get('id') or ''
-            except Exception as e:
-                logger.warning('[Longform] artifact publish failed: %s', e)
+            from lib.artifacts.core import create_artifact
+            with open(result['path'], encoding='utf-8') as f:
+                row = create_artifact(
+                    conv_id=conv_id, content=f.read(), format='markdown',
+                    source='longform-report', task_id=task_id,
+                    title=result.get('title') or task['topic'],
+                    source_ref={'topic': task['topic']},
+                    meta={'sections': result.get('sections'),
+                          'sources': result.get('sources')})
+            artifact_id = row.get('id') if isinstance(row, dict) else ''
+            if not artifact_id:
+                raise RuntimeError(
+                    'longform artifact repository did not confirm publication')
 
         result['artifact_id'] = artifact_id
         task['result'] = result
         # Quality axis: the report is readable, so status is legitimately
-        # 'done'. But a section whose stage never produced an artifact is
-        # silently skipped by _run_assemble, and an outline thinner than the
-        # requested depth passes _gate_outline (which only demands >= 2) —
-        # both ship a structurally-valid report that is missing content.
+        # 'done'. Retain a quality verdict for legacy/stale checkpoints whose
+        # section artifact is absent or whose outline predates the exact-depth
+        # gate; new recipes reject those shapes before publication.
         _written = result.get('sections_written', result.get('sections', 0))
         _requested = result.get('sections_requested', 0)
         _missing = max(0, result.get('sections', 0) - _written)
@@ -142,21 +141,25 @@ def start_report_job(topic: str, *, lang: str = 'zh', depth: str = 'standard',
                      conv_id: str = '', user_id: int) -> dict:
     """Create + spawn a report job; returns {task_id, deduped}."""
     from lib.longform.runtime import (
-        _cleanup_stale_longform_tasks, _longform_index_get,
-        _longform_index_register, _longform_runtime, _longform_task_id,
-        _new_longform_task)
+        _claim_longform_task, _cleanup_stale_longform_tasks,
+        _longform_runtime, _longform_task_id)
 
     _cleanup_stale_longform_tasks()
-    key = (user_id, topic.strip(), lang, depth)
-    existing = _longform_index_get(key)
-    if existing:
-        return {'task_id': existing, 'deduped': True}
+    normalized_topic = topic.strip()
+    key = (user_id, normalized_topic, lang, depth)
     tid = _longform_task_id()
     wd = os.path.join(longform_root(), 'jobs', tid)
-    os.makedirs(wd, exist_ok=True)
-    task = _new_longform_task(tid, topic=topic.strip(), workdir=wd, lang=lang,
-                              depth=depth, conv_id=conv_id, user_id=user_id)
-    _longform_index_register(key, tid)
+    task, existing = _claim_longform_task(
+        key, tid, topic=normalized_topic, workdir=wd, lang=lang, depth=depth,
+        conv_id=conv_id, user_id=user_id)
+    if existing:
+        return {'task_id': existing, 'deduped': True}
+    try:
+        os.makedirs(wd, exist_ok=True)
+    except Exception as exc:
+        _longform_runtime.finish(
+            tid, error=exc, error_context='longform:start')
+        raise
     _longform_runtime.spawn(tid, run_longform_task, task)
     logger.info('[Longform] started %s topic=%r lang=%s depth=%s',
                 tid, topic[:60], lang, depth)

@@ -99,6 +99,18 @@ def test_mark_clean_manual_button():
         print('OK mark_clean(manual)')
 
 
+def test_generic_signal_cannot_overwrite_stronger_exit_intent():
+    with tempfile.TemporaryDirectory() as d:
+        sm = _fresh_marker_module(d)
+        for reason in ('manual', 'restart', 'memory_recycle'):
+            sm.arm()
+            sm.mark_clean(reason)
+            sm.mark_clean('signal')
+            cls = sm.classify_previous_shutdown()
+            assert cls['verdict'] == sm.VERDICT_CLEAN
+            assert cls['reason'] == reason
+
+
 def test_restart_reexec_is_clean():
     with tempfile.TemporaryDirectory() as d:
         sm = _fresh_marker_module(d)

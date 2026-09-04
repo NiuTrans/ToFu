@@ -35,6 +35,7 @@ from __future__ import annotations
 pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
+import logging
 import os
 import tempfile
 import unittest
@@ -56,6 +57,26 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+@pytest.mark.unit
+def test_restart_frontend_preparation_failure_is_visible(monkeypatch, caplog):
+    import serverctl
+    import routes.api_v1.update as update_route
+
+    def fail_prepare(_reason):
+        raise RuntimeError('synthetic frontend preparation failure')
+
+    monkeypatch.setenv('TOFU_PROCESS_ROLE', 'all')
+    monkeypatch.setattr(
+        serverctl, 'prepare_source_frontend_artifact', fail_prepare)
+    with caplog.at_level(logging.WARNING, logger='routes.api_v1.update'):
+        failure = update_route._prepare_server_reexec_frontend()
+
+    assert failure == (
+        'frontend artifact preparation failed: '
+        'synthetic frontend preparation failure')
+    assert 'frontend artifact preparation failed: RuntimeError' in caplog.text
 
 
 class UpdateRestartGuardTest(unittest.TestCase):
@@ -101,6 +122,12 @@ class UpdateRestartGuardTest(unittest.TestCase):
         for path in (la._APPROVALS_FILE, la._STATE_FILE):
             if os.path.exists(path):
                 os.unlink(path)
+        self._restart_preflight = patch(
+            'routes.api_v1.update._prepare_server_reexec_frontend',
+            return_value='',
+        )
+        self._restart_preflight.start()
+        self.addCleanup(self._restart_preflight.stop)
 
     def _clear_cooldown_only(self):
         def _mut(document):
@@ -262,6 +289,23 @@ class UpdateRestartGuardTest(unittest.TestCase):
         reexec.assert_called_once()
         # …and the cooldown was stamped for the accepted restart.
         self.assertGreater(la.restart_cooldown_remaining(), 0)
+
+    def test_frontend_preflight_failure_keeps_server_and_approval_live(self):
+        token = self._approved_token()
+        with patch('lib.tasks_pkg.manager.list_running_tasks', return_value=[]), \
+             patch('routes.api_v1.update._deferred_reexec') as reexec, \
+             patch(
+                 'routes.api_v1.update._prepare_server_reexec_frontend',
+                 return_value='stale locale artifact'):
+            r = self._post({'approvalId': token})
+
+        self.assertEqual(r.status_code, 409)
+        body = _run(r.get_json())
+        self.assertTrue(body.get('restartPreflightFailed'))
+        self.assertIn('still running', str(body.get('error') or ''))
+        reexec.assert_not_called()
+        self.assertEqual(la.validate(token, 'restart'), (True, ''))
+        self.assertEqual(la.restart_cooldown_remaining(), 0)
 
     # ── NEUTER: strip the gate and the attack succeeds ───────────────
 

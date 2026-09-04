@@ -5,6 +5,7 @@ OpenAI-compatible API for transcription to high-quality Markdown.
 """
 
 import base64
+from collections.abc import Callable
 import re
 import threading
 
@@ -15,12 +16,19 @@ from lib.pdf_parser.vlm._config import (
     _env_int,
     _get_vlm_models,
 )
+from lib.pdf_parser.vlm._policy import (
+    vlm_call_workers,
+    vlm_max_429_attempts,
+    vlm_max_pages,
+)
 
 logger = get_logger(__name__)
 
 
 def _vlm_call_pages(page_images: list[bytes], page_range: str,
-                     model: str, max_tokens: int = 16384) -> str:
+                     model: str, max_tokens: int = 16384, *,
+                     abort_check: Callable[[], bool] | None = None,
+                     max_429_attempts: int | None = None) -> str:
     """Send page image(s) to VLM and get Markdown back.
 
     ``max_tokens`` should scale with batch size — caller is expected to
@@ -51,6 +59,10 @@ def _vlm_call_pages(page_images: list[bytes], page_range: str,
         max_tokens=max_tokens, temperature=0.1,
         capability='vision', model=model,
         timeout=timeout,
+        abort_check=abort_check,
+        max_429_attempts=(max_429_attempts
+                          if max_429_attempts is not None
+                          else vlm_max_429_attempts()),
         log_prefix=f'[PDF-VLM/{model.split("/")[-1][:20]}]',
         max_retries=5,  # retry harder — 429s are routine on shared keys
     )
@@ -62,14 +74,16 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
                   dpi: int = 150,
                   batch_pages: int | None = None,
                   max_workers: int | None = None,
-                  progress_cb=None) -> str:
+                  max_pages: int | None = None,
+                  progress_cb=None,
+                  abort_check: Callable[[], bool] | None = None) -> str:
     """Parse a PDF via VLM for high-quality Markdown output.
 
     Renders every page to an image, groups pages into batches of
     ``batch_pages`` (default from env ``PDF_VLM_BATCH_PAGES``, fallback 4),
-    and sends each batch as a single VLM call. Batches run concurrently
-    via a thread pool capped by ``max_workers`` (default = #batches,
-    i.e. fully parallel; env override ``PDF_VLM_MAX_WORKERS``).
+    and sends each batch as a single VLM call. Batches run concurrently inside
+    the launch-probed VLM call ceiling. ``PDF_VLM_MAX_WORKERS`` may lower that
+    ceiling but cannot raise it.
 
     Why batch?  A 64-page paper used to fan out 64 single-page calls,
     causing 429-storms on shared keys and ~60-page-worth of HTTP
@@ -81,9 +95,11 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
         model: Force a specific model (skips dispatcher capability lookup).
         dpi: Image render DPI per page.
         batch_pages: Pages per VLM call. ``None`` → env / 4.
-        max_workers: Cap on concurrent VLM calls. ``None`` → unlimited
-            (one thread per batch).
+        max_workers: Optional lower cap on concurrent VLM calls.
+        max_pages: Optional lower page ceiling; the launch-time hard ceiling
+            always applies and is checked before rendering.
         progress_cb: ``Callable[[done_pages, total_pages], None]``.
+        abort_check: Cooperative cancellation/deadline callback.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -95,8 +111,18 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
     if batch_pages is None:
         batch_pages = _env_int('PDF_VLM_BATCH_PAGES', 4, lo=1, hi=16)
 
+    policy_max_pages = vlm_max_pages()
+    effective_max_pages = min(
+        policy_max_pages,
+        max(1, int(max_pages)) if max_pages is not None else policy_max_pages,
+    )
     logger.info('VLM parse: rendering %d-dpi page images...', dpi)
-    page_images = render_pdf_pages(pdf_bytes, dpi=dpi)
+    page_images = render_pdf_pages(
+        pdf_bytes,
+        dpi=dpi,
+        max_pages=effective_max_pages,
+        abort_check=abort_check,
+    )
     total = len(page_images)
 
     # ── Group pages into batches ──
@@ -111,10 +137,16 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
         batches.append((idx, i, end, imgs, label, batch_model))
 
     n_batches = len(batches)
+    call_worker_ceiling = vlm_call_workers()
     if max_workers is None:
-        max_workers = _env_int('PDF_VLM_MAX_WORKERS', n_batches,
-                               lo=1, hi=max(n_batches, 1))
-    max_workers = max(1, min(max_workers, n_batches))
+        max_workers = _env_int(
+            'PDF_VLM_MAX_WORKERS',
+            call_worker_ceiling,
+            lo=1,
+            hi=call_worker_ceiling,
+        )
+    max_workers = max(
+        1, min(int(max_workers), call_worker_ceiling, max(n_batches, 1)))
 
     # Output-token cap scales with batch size — 4096 tokens/page is the
     # rough budget for dense academic content.
@@ -132,7 +164,17 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
     _done_lock = threading.Lock()
 
     def _process_batch(idx, imgs, label, use_model):
-        md = _vlm_call_pages(imgs, label, use_model, max_tokens=max_tokens)
+        if abort_check is not None and abort_check():
+            from lib.llm_errors import AbortedError
+            raise AbortedError('VLM PDF transcription aborted')
+        md = _vlm_call_pages(
+            imgs,
+            label,
+            use_model,
+            max_tokens=max_tokens,
+            abort_check=abort_check,
+            max_429_attempts=vlm_max_429_attempts(),
+        )
         md = re.sub(r'^```(?:markdown)?\s*\n', '', md)
         md = re.sub(r'\n```\s*$', '', md)
         return idx, md.strip()
@@ -153,6 +195,11 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
                 results[batch_idx] = md
                 logger.debug('VLM parse: %s done ✓', label)
             except Exception as exc:
+                from lib.llm_errors import AbortedError
+                if isinstance(exc, AbortedError):
+                    for pending in future_map:
+                        pending.cancel()
+                    raise
                 logger.error('VLM parse: %s failed: %s', label, exc,
                              exc_info=True)
                 results[idx] = f'\n\n<!-- VLM error on {label}: {exc} -->\n\n'

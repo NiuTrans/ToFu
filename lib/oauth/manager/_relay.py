@@ -14,10 +14,9 @@ from urllib.parse import urlparse, parse_qs
 from lib.log import get_logger
 
 from lib.oauth.manager._state import (
-    _active_flows,
-    _flows_lock,
     _active_servers,
     _servers_lock,
+    _update_active_flow,
 )
 
 logger = get_logger(__name__)
@@ -231,7 +230,7 @@ def _bind_relay(provider: str, port: int, state: str):
 
 
 def _run_relay_server(provider: str, port: int, state: str, timeout: int = 300,
-                      server=None):
+                      server=None, flow_id: str = ''):
     """Run relay HTTP server on the registered callback port.
 
     This server has ONE job: serve the relay HTML page when the OAuth
@@ -245,6 +244,8 @@ def _run_relay_server(provider: str, port: int, state: str, timeout: int = 300,
         timeout: Max seconds to wait.
         server: An already-bound server from :func:`_bind_relay`. When None
             this binds here, preserving the original single-step behaviour.
+        flow_id: Opaque active-flow generation. Delayed relay completion may
+            update only that generation, never a later login for the provider.
     """
     served = threading.Event()
 
@@ -271,9 +272,8 @@ def _run_relay_server(provider: str, port: int, state: str, timeout: int = 300,
         logger.info('[OAuth Relay] Listening on :%d for %s callback (timeout=%ds)',
                      port, provider, timeout)
 
-        with _flows_lock:
-            if provider in _active_flows:
-                _active_flows[provider]['status'] = 'waiting_callback'
+        _update_active_flow(
+            provider, flow_id, status='waiting_callback')
 
         deadline = time.time() + timeout
         while time.time() < deadline and not served.is_set():
@@ -281,20 +281,26 @@ def _run_relay_server(provider: str, port: int, state: str, timeout: int = 300,
 
         server.server_close()
         with _servers_lock:
-            _active_servers.pop(provider, None)
+            if _active_servers.get(provider) is server:
+                _active_servers.pop(provider, None)
 
         if not served.is_set():
             logger.warning('[OAuth Relay] Timeout waiting for %s callback', provider)
-            with _flows_lock:
-                if provider in _active_flows:
-                    _active_flows[provider]['status'] = 'timeout'
-                    _active_flows[provider]['error'] = 'Timeout — no callback received'
+            _update_active_flow(
+                provider,
+                flow_id,
+                status='timeout',
+                error='Timeout — no callback received',
+            )
 
     except OSError as e:
         logger.error('[OAuth Relay] Failed to bind :%d: %s', port, e)
         with _servers_lock:
-            _active_servers.pop(provider, None)
-        with _flows_lock:
-            if provider in _active_flows:
-                _active_flows[provider]['status'] = 'error'
-                _active_flows[provider]['error'] = f'Port {port} already in use. Try again in a few seconds.'
+            if _active_servers.get(provider) is server:
+                _active_servers.pop(provider, None)
+        _update_active_flow(
+            provider,
+            flow_id,
+            status='error',
+            error=f'Port {port} already in use. Try again in a few seconds.',
+        )

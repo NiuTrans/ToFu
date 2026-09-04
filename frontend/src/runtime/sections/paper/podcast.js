@@ -90,6 +90,22 @@ var _PODCAST_POLL_MS = 1200;
 // Consecutive poll failures before the honest 'lost' terminal state (拍板 A).
 var _PC_POLL_FAIL_LIMIT = 5;
 
+// Explicit retained presentation ports consumed by the lazy typed runtime.
+// These stay module-private: featureRegistry resolves them through runtimeScope.
+Object.assign(runtimeScope, {
+  _pcSeedOptions,
+  _pcPersistOptions,
+  _pcPickPersist,
+  _pcT,
+  _pcEsc,
+  _pcRender,
+  _pcRenderProgress,
+  _pcRenderActivity,
+  _podcastSeekSegment,
+  _podcastSleepTimerChange,
+  _podcastExportScript,
+});
+
 function _pcT(key, fallback) {
   return (typeof t === 'function') ? t(key) : (fallback || key);
 }
@@ -339,7 +355,7 @@ function _pcRender() {
       '<select id="podcastLangSel" class="pm-sr" tabindex="-1" aria-hidden="true">' +
       '<option value="zh"' + (s.lang === 'zh' ? ' selected' : '') + '>中文</option>' +
       '<option value="en"' + (s.lang === 'en' ? ' selected' : '') + '>English</option></select></div>';
-    h += _pmModelFieldHtml('podcast', s);
+    h += modelFieldHtml('podcast', s);
     h += '<div class="pm-field"><div class="pm-field-label">' +
       _pcEsc(_pcT('paper.mediaOptVoice', 'Voice')) +
       '<span class="pm-field-opt">' +
@@ -378,7 +394,7 @@ function _pcRender() {
     host.innerHTML = h;
     _pcRenderProgress();
     _pcRenderActivity();
-    _pcStartTick();
+    startPodcastTick();
     return;
   }
 
@@ -418,7 +434,7 @@ function _pcRender() {
   if (s.artifactModel) {
     h += '<span class="paper-podcast-badge" id="podcastModelBadge" title="' +
       _pcEsc(_pcT('paper.mediaModelTitle', 'Model used for generation')) + '">' +
-      _pcEsc(_pmShortName(s.artifactModel)) + '</span>';
+      _pcEsc(shortModelName(s.artifactModel)) + '</span>';
   }
   if (d.durationSec) {
     var mm = Math.floor(d.durationSec / 60), ss = Math.round(d.durationSec % 60);
@@ -456,7 +472,7 @@ function _pcRender() {
   }
 
   h += '<div class="paper-podcast-actions">';
-  h += _pmModelInlineHtml('podcast', s);
+  h += modelInlineHtml('podcast', s);
   h += '<button class="paper-podcast-btn paper-podcast-btn-ghost" data-tofu-action="_podcastExportScript()">' +
     _pcIconSvg('file') + '<span>' +
     _pcEsc(_pcT('paper.podcastExportScript', 'Export script (md)')) + '</span></button>';

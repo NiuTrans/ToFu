@@ -2,161 +2,49 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Tofu Agent · Provider Setup</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tofu Agent · 接入配置</title>
   <link rel="stylesheet" href="/setup/assets/setup.css">
-  <script defer src="/setup/assets/setup.js"></script>
 </head>
 <body>
-  <div class="page-shell">
-    <header class="topbar">
-      <a class="brand" href="/setup" aria-label="Tofu Agent Provider Setup">
-        <span class="brand-seal" aria-hidden="true">豆</span>
-        <span>
-          <strong>Tofu Agent</strong>
-          <small data-i18n="controlPlane">Provider control plane</small>
-        </span>
-      </a>
-      <div class="top-actions">
-        <button id="languageButton" class="quiet-button" type="button">EN</button>
-        <span id="connectionBadge" class="status-badge is-loading">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span data-i18n="connecting">Connecting</span>
-        </span>
-      </div>
-    </header>
-
-    <main>
-      <section class="hero" aria-labelledby="pageTitle">
-        <div>
-          <p class="eyebrow" data-i18n="eyebrow">ONE-TIME MODEL SETUP</p>
-          <h1 id="pageTitle" data-i18n="title">Configure the model once. Keep app code clean.</h1>
-          <p class="hero-copy" data-i18n="subtitle">
-            Choose a Provider, discover its models, and save a managed default.
-            Every application can then call Tofu with only messages.
-          </p>
+  <header class="topbar">
+    <a class="brand" href="/setup" aria-label="Tofu Agent 接入配置">
+      <span class="brand-mark">豆</span>
+      <span><strong>Tofu Agent</strong><small>模型路由 v2</small></span>
+    </a>
+    <span id="statusBadge" class="status-badge">正在连接</span>
+  </header>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">TOFU.MODEL-ROUTING/V2</p>
+      <h1>统一管理服务商、接入点、凭证、模型供给与部署路由</h1>
+      <p>粘贴完整 v2 接入契约。凭证正文只进入本机加密文件，读取接口不会返回正文。</p>
+    </section>
+    <section class="provider-card">
+      <header class="provider-card-header">
+        <div class="provider-mark">v2</div>
+        <div><p class="eyebrow">接入配置</p><h2>完整契约</h2></div>
+        <span id="configState" class="provider-state">尚未配置</span>
+      </header>
+      <form id="routingForm">
+        <div class="provider-card-body">
+          <label class="field wide-field">
+            <span>JSON 接入信封</span>
+            <textarea id="routingJson" rows="22" spellcheck="false" required></textarea>
+            <small>字段：model_routing、model、routing、credential_secrets。已保存 secret 不会回显；编辑时需重新填写。</small>
+          </label>
         </div>
-        <aside class="promise-card" aria-label="Integration contract">
-          <span class="promise-kicker" data-i18n="appsNeed">APPLICATIONS ONLY NEED</span>
-          <code>TOFU_BASE_URL</code>
-          <code>TOFU_API_KEY</code>
-          <p data-i18n="noModelConfig">No Provider key or model name in downstream services.</p>
-        </aside>
-      </section>
-
-      <section id="unlockPanel" class="unlock-panel is-hidden" aria-labelledby="unlockTitle">
-        <div>
-          <span class="section-number">00</span>
-          <h2 id="unlockTitle" data-i18n="unlockTitle">Unlock remote settings</h2>
-          <p data-i18n="unlockCopy">Paste the tofu-agent Bearer token. It stays only in this tab and is never saved by the browser.</p>
-        </div>
-        <form id="unlockForm" class="unlock-form">
-          <label for="accessToken" data-i18n="serverToken">Server token</label>
-          <div class="inline-field">
-            <input id="accessToken" type="password" autocomplete="off" spellcheck="false" required>
-            <button id="unlockButton" class="primary-button" type="submit" data-i18n="unlock">Unlock</button>
+        <footer class="provider-card-footer">
+          <p id="message" role="status" aria-live="polite"></p>
+          <div class="button-row">
+            <button id="deleteButton" class="ghost-button is-hidden" type="button">删除</button>
+            <button id="testButton" class="secondary-button" type="button">探测实际路由</button>
+            <button id="saveButton" class="primary-button" type="submit">保存接入配置</button>
           </div>
-        </form>
-      </section>
-
-      <div id="loadError" class="notice notice-error is-hidden" role="alert"></div>
-      <div id="lockedNotice" class="notice notice-warn is-hidden" role="status"></div>
-
-      <section id="settingsSurface" class="settings-surface is-disabled" aria-busy="true">
-        <div class="section-heading">
-          <span class="section-number">01</span>
-          <div>
-            <h2 data-i18n="chooseProvider">Choose a Provider</h2>
-            <p data-i18n="chooseProviderCopy">Start from a known endpoint or use any OpenAI-compatible service.</p>
-          </div>
-        </div>
-        <div id="templateGrid" class="template-grid" aria-label="Provider templates"></div>
-
-        <form id="providerForm" novalidate>
-          <article class="provider-card">
-            <header class="provider-card-header">
-              <div class="provider-mark" aria-hidden="true">AI</div>
-              <div>
-                <p class="card-kicker" data-i18n="managedDefault">MANAGED DEFAULT</p>
-                <h2 id="providerName" data-i18n="newProvider">New Provider</h2>
-              </div>
-              <span id="providerStatus" class="provider-state" data-i18n="notConfigured">Not configured</span>
-            </header>
-
-            <div class="provider-card-body">
-              <div class="field field-wide">
-                <label for="baseUrl" data-i18n="endpoint">API endpoint</label>
-                <input id="baseUrl" name="base_url" type="url"
-                       placeholder="https://api.example.com/v1"
-                       autocomplete="url" spellcheck="false" required>
-                <small data-i18n="endpointHelp">Paste a base URL or a full /chat/completions URL; Tofu normalizes it.</small>
-              </div>
-
-              <div class="field field-wide">
-                <label for="apiKey" data-i18n="apiKey">API key</label>
-                <div class="secret-field">
-                  <input id="apiKey" name="api_key" type="password"
-                         placeholder="sk-…" autocomplete="new-password"
-                         spellcheck="false">
-                  <button id="revealKeyButton" class="field-button" type="button" data-i18n="show">Show</button>
-                </div>
-                <div class="field-meta">
-                  <small id="apiKeyHint" data-i18n="keyOptional">May be empty for a local model server.</small>
-                  <label id="clearKeyRow" class="check-row is-hidden">
-                    <input id="clearApiKey" type="checkbox">
-                    <span data-i18n="clearKey">Clear the saved key</span>
-                  </label>
-                </div>
-              </div>
-
-              <div class="field field-model">
-                <label for="model" data-i18n="defaultModel">Default model</label>
-                <input id="model" name="model" list="modelList"
-                       placeholder="Select or type a model id"
-                       autocomplete="off" spellcheck="false" required>
-                <datalist id="modelList"></datalist>
-                <small id="modelHelp" data-i18n="modelHelp">Discover the catalogue, or type the exact wire model id.</small>
-              </div>
-
-              <div class="action-stack">
-                <button id="discoverButton" class="secondary-button" type="button">
-                  <span data-i18n="discover">Discover models</span>
-                </button>
-                <button id="testButton" class="secondary-button" type="button">
-                  <span data-i18n="test">Test connection</span>
-                </button>
-              </div>
-            </div>
-
-            <footer class="provider-card-footer">
-              <div id="statusMessage" class="status-message" role="status" aria-live="polite">
-                <span class="message-dot" aria-hidden="true"></span>
-                <span data-i18n="waiting">Waiting for configuration</span>
-              </div>
-              <div class="footer-actions">
-                <button id="deleteButton" class="danger-button is-hidden" type="button" data-i18n="remove">Remove</button>
-                <button id="saveButton" class="primary-button save-button" type="submit" data-i18n="save">Save Provider</button>
-              </div>
-            </footer>
-          </article>
-        </form>
-      </section>
-
-      <section class="security-note">
-        <span class="security-icon" aria-hidden="true">◇</span>
-        <div>
-          <h2 data-i18n="encryptedTitle">Encrypted locally, never returned</h2>
-          <p data-i18n="encryptedCopy">Provider secrets are encrypted on disk. This page receives only a short key hint; saved keys and custom header values are never sent back to the browser.</p>
-        </div>
-        <button id="forgetTokenButton" class="quiet-button is-hidden" type="button" data-i18n="forgetToken">Forget server token</button>
-      </section>
-    </main>
-
-    <footer class="page-footer">
-      <span>tofu-agent /setup</span>
-      <span data-i18n="storageBoundary">No database · No ChatUI application frontend</span>
-    </footer>
-  </div>
+        </footer>
+      </form>
+    </section>
+  </main>
+  <script src="/setup/assets/setup.js" defer></script>
 </body>
 </html>

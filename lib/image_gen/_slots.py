@@ -108,6 +108,9 @@ def _pick_image_slot(prefer_model: str = ''):
             prefer_model=prefer_model or None,
         )
         if slot:
+            # Local v2 Connections may be intentionally unauthenticated.
+            # Slot presence, not API-key truthiness, is the availability
+            # signal; provider adapters already know how to omit auth.
             return slot.api_key, slot.model, slot
     except Exception as e:
         logger.warning('[ImageGen] Dispatch pick failed: %s', e)

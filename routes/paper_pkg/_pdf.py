@@ -10,12 +10,18 @@ from quart import Response, request
 
 from lib.api_response import (
     api_bad_request,
+    api_error,
     api_internal_error,
     api_not_found,
     api_ok,
+    api_service_unavailable,
 )
 from lib.log import get_logger
 from lib.paper_identity import PAPER_DIR
+from lib.pdf_parser.admission import (
+    PdfParseCapacityExceeded,
+    PdfParseTimeoutError,
+)
 from lib.request_parser import async_parse_body
 
 logger = get_logger(__name__)
@@ -167,7 +173,7 @@ async def reparse_paper():
     def _reparse():
         with open(filepath, "rb") as f:
             pdf_bytes = f.read()
-        from lib.pdf_parser.core import parse_pdf as _parse_pdf
+        from lib.pdf_parser.pool import parse_pdf_pooled as _parse_pdf
 
         t0 = time.time()
         result = _parse_pdf(pdf_bytes, max_text_chars=0, max_images=0)
@@ -192,6 +198,22 @@ async def reparse_paper():
                 "total_pages": total_pages,
                 "text_length": text_length,
             }
+        )
+    except PdfParseCapacityExceeded as e:
+        logger.info("[Paper:Reparse] Capacity full for %s: %s", filename, e)
+        return api_service_unavailable(
+            str(e),
+            retry_after=1,
+            kind="server_busy",
+            retryable=True,
+        )
+    except PdfParseTimeoutError as e:
+        logger.warning("[Paper:Reparse] Timed out for %s: %s", filename, e)
+        return api_error(
+            str(e),
+            status=504,
+            kind="timeout",
+            retryable=True,
         )
     except Exception as e:
         logger.error("[Paper:Reparse] Failed for %s: %s", filename, e, exc_info=True)

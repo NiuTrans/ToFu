@@ -90,3 +90,34 @@ def test_all_control_actions_are_registered() -> None:
     for action in ('create', 'register', 'checkpoint', 'submit', 'retry',
                    'discard', 'promote', 'reconcile-head', 'prune'):
         assert 'POST' in paths[base + action]
+
+
+def test_unexpected_control_plane_failure_is_redacted(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib.api_keys import local_admin_context
+    from quart import Quart, g
+    from routes.api_v1 import integration as route
+
+    def _crash(*_args, **_kwargs):
+        raise RuntimeError('/secret/repo?credential=do-not-expose')
+
+    monkeypatch.setattr(
+        'lib.integration_control.integration_status', _crash)
+    app = Quart(__name__)
+
+    @app.before_request
+    async def _auth():
+        g.auth_ctx = local_admin_context()
+
+    app.register_blueprint(route.api_v1_integration_bp)
+
+    async def _run():
+        response = await app.test_client().get(
+            '/api/v1/project/integration/status?path=%2Ftmp%2Frepo')
+        return response.status_code, await response.get_json()
+
+    status, body = asyncio.run(_run())
+    assert status == 500
+    assert body['ok'] is False
+    assert '/secret/repo' not in str(body)
+    assert 'do-not-expose' not in str(body)

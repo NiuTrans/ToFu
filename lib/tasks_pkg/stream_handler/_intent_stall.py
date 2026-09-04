@@ -39,6 +39,7 @@ import re
 from typing import Any
 
 from lib.log import get_logger
+from lib.tool_round_identity import execution_batch_keys
 
 logger = get_logger(__name__)
 
@@ -104,17 +105,15 @@ def parse_end_turn_reason(content: str) -> str | None:
 
 def _ordered_rounds(task: dict[str, Any]) -> list:
     """Tool rounds in the order the orchestrator appended them."""
-    rounds = [r for r in (task.get('toolRounds') or []) if isinstance(r, dict)]
-    if not rounds:
+    if not isinstance(task, dict):
         return []
-    try:
-        return sorted(
-            rounds,
-            key=lambda r: (r.get('llmRound') or 0, r.get('roundNum') or 0),
-        )
-    except Exception as e:  # pragma: no cover — defensive
-        logger.debug('[IntentStall] tool-round ordering failed: %s', e)
-        return rounds
+    raw_rounds = task.get('toolRounds') or []
+    if not isinstance(raw_rounds, (list, tuple)):
+        return []
+    # Append order is the authority: llmRound/roundNum are executor-local and
+    # may restart after a resumed attempt. Sorting by those counters can move
+    # an older failure behind the actual final batch and fire a false nudge.
+    return [r for r in raw_rounds if isinstance(r, dict)]
 
 
 def strip_end_turn_marker(content: str) -> str:
@@ -204,12 +203,6 @@ def build_stall_nudge_record(task: dict[str, Any], round_num: int) -> dict:
     }
 
 
-def _last_tool_round(task: dict[str, Any]) -> dict | None:
-    """The most recent tool round, ordered the way the orchestrator appends."""
-    ordered = _ordered_rounds(task)
-    return ordered[-1] if ordered else None
-
-
 def _uncovered_failure(task: dict[str, Any]) -> dict | None:
     """Criterion A's selector: a failure in the turn's FINAL tool batch.
 
@@ -233,8 +226,12 @@ def _uncovered_failure(task: dict[str, Any]) -> dict | None:
     ordered = _ordered_rounds(task)
     if not ordered:
         return None
-    last_key = (ordered[-1].get('llmRound') or 0)
-    final_batch = [r for r in ordered if (r.get('llmRound') or 0) == last_key]
+    batch_keys = execution_batch_keys(ordered)
+    last_key = batch_keys[-1]
+    final_batch = [
+        r for r, batch_key in zip(ordered, batch_keys)
+        if batch_key == last_key
+    ]
     failed = [r for r in final_batch if _round_failed(r)]
     return failed[-1] if failed else None
 

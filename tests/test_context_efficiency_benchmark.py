@@ -5,7 +5,9 @@ from unittest import mock
 
 import pytest
 
+from benchmarks.context_efficiency import runtime as benchmark_runtime
 from benchmarks.context_efficiency.analyze import (
+    analyze_stage,
     compare_arm,
     freeze_candidate,
     summarize_arm,
@@ -20,6 +22,7 @@ from benchmarks.context_efficiency.runtime import (
     _TOFU_DRIVER,
     _base_reset_and_diff,
     _codex_usage,
+    _evaluation_infrastructure_error,
     _read_inference,
     arm_config,
     build_agent_prompt,
@@ -49,6 +52,7 @@ def _record(task_id: str, passed: bool, *, cost: float = 1,
             optimization_decisions: list[dict] | None = None,
             multi_agent_calls: int = 0,
             prompt_profile: str = 'full',
+            api_rounds: int = 0,
             ) -> dict:
     prompt_evidence = {
         'contractVersion': PROMPT_PROFILE_EVIDENCE_VERSION,
@@ -78,6 +82,8 @@ def _record(task_id: str, passed: bool, *, cost: float = 1,
             'programRuns': program_runs or [],
             'optimizationDecisions': optimization_decisions or [],
             'multiAgentCalls': multi_agent_calls,
+            'apiRounds': api_rounds,
+            'toolCalls': api_rounds,
         },
         'compactions': [{}] * compactions,
     }
@@ -109,6 +115,10 @@ def test_arm_config_is_nested_and_candidate_can_be_loaded(tmp_path):
         'promptProfile': 'full'}
     assert arm_config('tofu-control')['orchestration'] == {
         'multiAgent': 'off'}
+    assert arm_config('tofu-ptc-additive')['tools'][
+        'programmaticExposure'] == 'additive'
+    assert arm_config('tofu-ptc-serial-gateway')['tools'][
+        'programmaticExposure'] == 'serial_gateway'
     candidate = tmp_path / 'candidate.json'
     candidate.write_text(json.dumps({'config': {
         'tools': {'nativeExposure': 'routed'}}}))
@@ -117,6 +127,51 @@ def test_arm_config_is_nested_and_candidate_can_be_loaded(tmp_path):
     assert 'Work alone' in build_agent_prompt(_task(1))
     assert 'root agent alone may edit files' in build_agent_prompt(
         _task(1), allow_subagents=True)
+
+
+def test_round_trip_report_accepts_a_paired_noncontrol_baseline(tmp_path):
+    from lib.benchmark_contract import (
+        BenchmarkJsonlWriter,
+        build_manifest,
+        build_task_record,
+    )
+
+    stage_dir = tmp_path / 'calibration'
+    stage_dir.mkdir()
+    arms = {
+        'tofu-ptc-additive': _record(
+            'task-1', True, cost=2, latency=200, prompt_tokens=200,
+            api_rounds=10),
+        'tofu-ptc-serial-gateway': _record(
+            'task-1', True, cost=1, latency=150, prompt_tokens=150,
+            api_rounds=7),
+    }
+    for arm, record in arms.items():
+        path = stage_dir / f'{arm}.jsonl'
+        writer = BenchmarkJsonlWriter(path)
+        writer.append(build_manifest(
+            run_id=arm, dataset='fixture', tasks=['task-1'], agent='Tofu',
+            agent_version='test', model='test', effort='high',
+            experiment_arm=arm, timeout_seconds=60,
+            network_policy='off', single_agent=True,
+            max_infra_retries=0, environment={}))
+        writer.append(build_task_record(
+            run_id=arm, dataset='fixture', task_id='task-1', agent='Tofu',
+            agent_version='test', model='test', effort='high',
+            experiment_arm=arm, oracle_passed=True, oracle_type='tests',
+            final_patch='', test_result={}, round_usage=[],
+            prefix_fingerprints=[], cost=record['cost'],
+            latency_ms=record['latencyMs'],
+            context_telemetry=record['contextTelemetry'], compactions=[]))
+
+    report = analyze_stage(
+        tmp_path, 'calibration', baseline_arm='tofu-ptc-additive')
+    comparison = report['comparisons']['tofu-ptc-serial-gateway']
+    assert report['baselineArm'] == 'tofu-ptc-additive'
+    assert comparison['candidateApiRounds'] == 7
+    assert comparison['baselineApiRounds'] == 10
+    assert comparison['apiRoundReduction'] == pytest.approx(0.3)
+    assert comparison['promptTokenReduction'] == pytest.approx(0.25)
 
 
 def test_codex_usage_and_frozen_official_price_card():
@@ -134,10 +189,20 @@ def test_codex_usage_and_frozen_official_price_card():
     assert priced['costUsd'] == 0.0053
 
 
+def test_benchmark_price_projection_supports_kimi_cache_rates():
+    pricing = benchmark_runtime._public_pricing_for_model('kimi-k3')
+    assert pricing['inputUsdPerMillion'] == 2.76
+    assert pricing['cacheReadUsdPerMillion'] == pytest.approx(0.276)
+    assert pricing['cacheWriteUsdPerMillion'] == 2.76
+    assert pricing['outputUsdPerMillion'] == 13.81
+
+
 def test_tofu_driver_recovery_path_compiles_and_preserves_task_lookup():
     compile(_TOFU_DRIVER, '<tofu_driver>', 'exec')
     assert '/api/v1/tasks/by-conv/' in _TOFU_DRIVER
     assert 'build_result({}, state, task_id, request_error)' in _TOFU_DRIVER
+    assert "routing_document.get('offerings')" in _TOFU_DRIVER
+    assert "'offering_id':str(item.get('offering_id')" in _TOFU_DRIVER
 
 
 def test_patch_capture_filters_agent_and_compiler_scratch_files():
@@ -156,6 +221,114 @@ def test_missing_usage_with_http_error_is_retryable_infrastructure(tmp_path):
     outcome = _read_inference(tmp_path, 0, None, backend='Tofu')
     assert outcome.patch
     assert outcome.infrastructure_error is True
+
+
+def test_zero_metered_usage_with_terminal_error_is_infrastructure(tmp_path):
+    (tmp_path / 'inference.json').write_text(json.dumps({
+        'status': 'error',
+        'error': 'Codex subscription not logged in',
+        'usage': {'prompt_tokens': 0, 'completion_tokens': 0,
+                  'total_tokens': 0},
+    }))
+    outcome = _read_inference(tmp_path, 0, None, backend='Tofu')
+    assert outcome.infrastructure_error is True
+
+
+def test_gradle_wrapper_dns_failure_is_benchmark_infrastructure():
+    output = '''
+>>>>> Start Test Output
+Downloading gradle-wrapper.jar from https://raw.githubusercontent.com/gradle/gradle/v7.6.0/gradle/wrapper/gradle-wrapper.jar
+ERROR: Could not download gradle-wrapper.jar (UnknownHostException: raw.githubusercontent.com).
+>>>>> End Test Output
+'''
+    assert _evaluation_infrastructure_error(output).startswith(
+        'evaluation bootstrap failed:')
+    assert _evaluation_infrastructure_error(
+        'test_network_error: expected UnknownHostException') == ''
+
+
+def test_evaluate_patch_returns_infrastructure_before_official_grader(
+        tmp_path, monkeypatch):
+    output = (
+        'Downloading gradle-wrapper.jar\n'
+        'ERROR: Could not download gradle-wrapper.jar '
+        '(UnknownHostException: raw.githubusercontent.com).\n'
+    )
+    monkeypatch.setattr(
+        benchmark_runtime, 'ensure_container', lambda _task: ('image', ''))
+    udocker = mock.Mock(return_value=mock.Mock(stdout=output, returncode=1))
+    monkeypatch.setattr(benchmark_runtime, '_udocker', udocker)
+
+    outcome = benchmark_runtime.evaluate_patch(
+        _task(1), 'diff --git a/x b/x\n+new\n', tmp_path)
+
+    assert outcome.infrastructure_error is True
+    assert outcome.patch_applies is True
+    assert outcome.error.startswith('evaluation bootstrap failed:')
+    assert (tmp_path / 'eval' / 'test_output.txt').read_text() == output
+
+
+def test_tofu_data_prefers_explicit_live_config(tmp_path, monkeypatch):
+    live_config = tmp_path / 'live-config'
+    frozen_config = tmp_path / 'runtime' / 'chatui' / 'data' / 'config'
+    live_config.mkdir()
+    frozen_config.mkdir(parents=True)
+    (live_config / 'source.json').write_text('{"source":"live"}')
+    (frozen_config / 'source.json').write_text('{"source":"frozen"}')
+    monkeypatch.setattr(benchmark_runtime, 'TOFU_CONFIG_SOURCE', live_config)
+    monkeypatch.setattr(
+        benchmark_runtime, 'TOFU_RUNTIME', tmp_path / 'runtime')
+    monkeypatch.setattr(
+        benchmark_runtime, 'TOFU_DATA_ROOT', tmp_path / 'isolated')
+
+    data_dir = benchmark_runtime._prepare_tofu_data(tmp_path / 'attempt')
+
+    assert json.loads((data_dir / 'config' / 'source.json').read_text()) == {
+        'source': 'live'}
+
+
+def test_tofu_data_projects_non_subscription_route_to_selected_model(
+        tmp_path, monkeypatch):
+    live_config = tmp_path / 'live-config'
+    live_config.mkdir()
+    source = {
+        'providers': [
+            {'id': 'default', 'api_keys': ['kept-in-isolated-copy'],
+             'base_url': 'https://api.openai.com/v1',
+             'models': [
+                 {'model_id': 'kimi-k3', 'enabled': True},
+                 {'model_id': 'unrelated', 'enabled': True}]},
+            {'id': 'other', 'models': [{'model_id': 'kimi-k3'}]},
+        ],
+        'model_catalog': {
+            'models': {'kimi-k3': {}, 'unrelated': {}},
+            'offerings': {
+                'wanted': {'provider_id': 'example-corp',
+                           'model_id': 'kimi-k3'},
+                'other': {'provider_id': 'other', 'model_id': 'kimi-k3'},
+            },
+            'routes': {'kimi-k3': {}, 'unrelated': {}},
+        },
+        'proxy_bypass_domains': ['.internal.example.com', '.example.test'],
+    }
+    (live_config / 'server_config.json').write_text(json.dumps(source))
+    monkeypatch.setattr(benchmark_runtime, 'TOFU_CONFIG_SOURCE', live_config)
+    monkeypatch.setattr(benchmark_runtime, 'TOFU_RUNTIME', tmp_path / 'runtime')
+    monkeypatch.setattr(
+        benchmark_runtime, 'TOFU_DATA_ROOT', tmp_path / 'isolated')
+    monkeypatch.setattr(benchmark_runtime, 'BENCHMARK_PROVIDER_ID', 'example-corp')
+    monkeypatch.setattr(benchmark_runtime, 'BENCHMARK_MODEL_ID', 'kimi-k3')
+
+    data_dir = benchmark_runtime._prepare_tofu_data(tmp_path / 'attempt')
+    projected = json.loads(
+        (data_dir / 'config' / 'server_config.json').read_text())
+
+    assert [row['id'] for row in projected['providers']] == ['example-corp']
+    assert [row['model_id'] for row in projected['providers'][0]['models']] == [
+        'kimi-k3']
+    assert list(projected['model_catalog']['offerings']) == ['wanted']
+    assert projected['model_defaults']['fallback_model'] == 'kimi-k3'
+    assert projected['proxy_bypass_domains'] == ['.example.test']
 
 
 def test_recovered_usage_keeps_deadline_as_agent_outcome(tmp_path):
@@ -219,6 +392,24 @@ def test_benchmark_can_explicitly_trust_authenticated_proxy_probe_block():
             'https://chatgpt.com/backend-api/codex/responses')
     assert [route.route_id for route in selected] == ['pool:bench']
     pick.assert_not_called()
+
+
+def test_benchmark_proxy_removes_selected_provider_from_no_proxy(
+        monkeypatch):
+    monkeypatch.setattr(
+        benchmark_runtime, 'BENCHMARK_ALLOW_HOSTS', 'your-llm-gateway.example.com')
+    no_proxy = 'localhost,127.0.0.1,.internal.example.com,.example.test'
+    monkeypatch.setenv('no_proxy', no_proxy)
+    monkeypatch.setenv('NO_PROXY', no_proxy)
+
+    flags = benchmark_runtime._proxy_env_flags()
+    values = [flags[index + 1] for index, value in enumerate(flags[:-1])
+              if value == '--env']
+    rendered = next(value for value in values if value.startswith('NO_PROXY='))
+
+    assert '.internal.example.com' not in rendered
+    assert '.example.test' in rendered
+    assert '127.0.0.1' in rendered
 
 
 def test_ptc_candidate_requires_clean_observed_protocol_evidence():

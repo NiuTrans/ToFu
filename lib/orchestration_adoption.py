@@ -47,12 +47,15 @@ _ACTUAL_EVIDENCE_KINDS = (
 _PUBLIC_DECISION_FIELDS = (
     "policyVersion", "compositionMode", "shape", "round",
     "programmaticCalling", "programmaticReason", "programmaticTier",
-    "programmaticBackend", "multiAgent", "multiAgentReason",
+    "programmaticBackend", "programmaticExposurePolicy",
+    "programmaticExposure", "programmaticExposureReason",
+    "programmaticSerialChainLength", "programmaticHiddenDirectToolCount",
+    "multiAgent", "multiAgentReason",
     "multiAgentBackend", "maxConcurrentAgents", "expectedSavings",
 )
 _PUBLIC_EVIDENCE_FIELDS = (
     "kind", "lane", "backend", "callId", "status", "agentCount",
-    "childCallCount", "round",
+    "childCallCount", "round", "outputPosition",
 )
 
 
@@ -90,7 +93,7 @@ def _bounded_public_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
         key: evidence[key] for key in _PUBLIC_EVIDENCE_FIELDS
         if key in evidence and evidence[key] not in (None, "")
     }
-    for field in ("agentCount", "childCallCount", "round"):
+    for field in ("agentCount", "childCallCount", "round", "outputPosition"):
         if field in public:
             try:
                 public[field] = max(0, int(public[field]))
@@ -134,6 +137,7 @@ def record_orchestration_execution(
     task: dict[str, Any], *, lane: str, kind: str, backend: str = "",
     call_id: str = "", status: str = "started", agent_count: int | None = None,
     child_call_count: int | None = None, round_index: int | None = None,
+    output_position: int | None = None,
 ) -> None:
     """Attach one real program/agent/runner trajectory to its v2 decision."""
     if kind not in _ACTUAL_EVIDENCE_KINDS:
@@ -160,6 +164,8 @@ def record_orchestration_execution(
         evidence["agentCount"] = agent_count
     if child_call_count is not None:
         evidence["childCallCount"] = child_call_count
+    if output_position is not None:
+        evidence["outputPosition"] = output_position
     _append_unique(decision, "adoptionEvidence", evidence)
 
 
@@ -172,7 +178,8 @@ def reconcile_response_orchestration(
         status="completed", round_index=round_index)
     if not isinstance(assistant_message, dict):
         return
-    for item in assistant_message.get("_responses_items") or ():
+    for output_position, item in enumerate(
+            assistant_message.get("_responses_items") or ()):
         if not isinstance(item, dict) \
                 or item.get("type") != "multi_agent_call":
             continue
@@ -181,7 +188,7 @@ def reconcile_response_orchestration(
             backend="native_openai",
             call_id=str(item.get("call_id") or item.get("id") or ""),
             status=str(item.get("status") or "started"),
-            round_index=round_index)
+            round_index=round_index, output_position=output_position)
 
 
 def _actual_kinds(row: dict[str, Any]) -> set[str]:

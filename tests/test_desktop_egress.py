@@ -3,7 +3,7 @@
 Covers:
   * 域名白名单（精确 host 匹配，防 evil.com 后缀）
   * route_request 三态探测（ok/geo_blocked/network_fail）+ agent 选择
-    （egress capability 过滤、user_id 租户隔离、'' 用户 legacy 回落、
+    （egress capability 过滤、user_id 所有者隔离、缺失所有者默认拒绝、
     无 agent → EgressUnavailable）
   * egress_http 结果适配（status/json 与 requests.Response 同形）
   * agent 侧 cmd_egress_http（白名单再校验、proxy_mode 解析、结果形状）
@@ -33,7 +33,7 @@ from lib.desktop.egress import EgressUnavailable
 from lib.subscription_routes import ProbeResult, Route, manager as route_manager
 
 
-def _agent(agent_id='a1', user_id='', egress_cap=True, name='box'):
+def _agent(agent_id='a1', user_id='1', egress_cap=True, name='box'):
     return {
         'agent_id': agent_id, 'name': name, 'platform': 'win32',
         'capabilities': {'egress': egress_cap},
@@ -68,44 +68,46 @@ class TestRouteRequest(unittest.TestCase):
     def test_probe_ok_routes_direct(self):
         with mock.patch.object(egress, '_probe_host', return_value='ok'):
             self.assertEqual(egress.route_request(
-                'https://api.anthropic.com/v1/messages', user_id='u1'), 'direct')
+                'https://api.anthropic.com/v1/messages', user_id='1'), 'direct')
 
     def test_geo_block_without_agent_raises(self):
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
              self._agents([]):
             with self.assertRaises(EgressUnavailable):
                 egress.route_request('https://api.anthropic.com/v1/messages',
-                                     user_id='u1')
+                                     user_id='1')
 
     def test_geo_block_with_agent_returns_egress_target(self):
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
-             self._agents([_agent(user_id='u1')]):
+             self._agents([_agent(user_id='1')]):
             target = egress.route_request('https://api.anthropic.com/v1/messages',
-                                          user_id='u1')
+                                          user_id='1')
         self.assertEqual(target, 'a1')
 
     def test_network_fail_also_routes_to_agent(self):
         with mock.patch.object(egress, '_probe_host', return_value='network_fail'), \
-             self._agents([_agent(user_id='u1')]):
-            self.assertEqual(egress.route_request('https://api.anthropic.com/v1/x', user_id='u1'), 'a1')
+             self._agents([_agent(user_id='1')]):
+            self.assertEqual(egress.route_request('https://api.anthropic.com/v1/x', user_id='1'), 'a1')
 
     def test_non_egress_agent_not_selected(self):
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
              self._agents([_agent(egress_cap=False)]):
             with self.assertRaises(EgressUnavailable):
-                egress.route_request('https://api.anthropic.com/v1/x', user_id='u1')
+                egress.route_request('https://api.anthropic.com/v1/x', user_id='1')
 
     def test_tenant_isolation(self):
-        # u2's agent must not serve u1's egress.
+        # Owner 2's agent must not serve owner 1's egress.
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
-             self._agents([_agent(user_id='u2')]):
+             self._agents([_agent(user_id='2')]):
             with self.assertRaises(EgressUnavailable):
-                egress.route_request('https://api.anthropic.com/v1/x', user_id='u1')
+                egress.route_request('https://api.anthropic.com/v1/x', user_id='1')
 
-    def test_legacy_empty_user_any_agent(self):
+    def test_missing_owner_never_selects_deployment_global_agent(self):
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
-             self._agents([_agent(user_id='')]):
-            self.assertEqual(egress.route_request('https://api.anthropic.com/v1/x', user_id=''), 'a1')
+             self._agents([_agent(user_id='1')]):
+            with self.assertRaises(EgressUnavailable):
+                egress.route_request(
+                    'https://api.anthropic.com/v1/x', user_id='')
 
     def test_probe_result_cached_per_host(self):
         # The manager, rather than the UI verdict mirror, owns reachability.
@@ -121,6 +123,23 @@ class TestRouteRequest(unittest.TestCase):
             egress.route_request('https://api.anthropic.com/b', user_id='')
         self.assertEqual(probe.call_count, 1)
         route_manager.reset()
+
+    def test_steady_healthy_probe_logs_are_debug_only(self):
+        infos = []
+        debugs = []
+        with mock.patch.object(egress, '_probe_host_paths', return_value='ok'), \
+             mock.patch.object(
+                 egress.logger, 'info',
+                 side_effect=lambda *args, **_kwargs: infos.append(args)), \
+             mock.patch.object(
+                 egress.logger, 'debug',
+                 side_effect=lambda *args, **_kwargs: debugs.append(args)):
+            verdict = egress._probe_host(
+                'https://chatgpt.com/backend-api/codex/responses')
+
+        self.assertEqual(verdict, 'ok')
+        self.assertEqual(infos, [])
+        self.assertEqual(len(debugs), 1)
 
     def test_network_failure_cache_expires_before_proxy_cooldown_retry(self):
         """Transient network failure must not poison routing for 300s."""
@@ -143,42 +162,42 @@ class TestRouteRequest(unittest.TestCase):
 
     def test_multi_agent_requires_pinned_choice(self):
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
-             self._agents([_agent('a1', 'u1'), _agent('a2', 'u1', name='box2')]), \
+             self._agents([_agent('a1', '1'), _agent('a2', '1', name='box2')]), \
              mock.patch.object(egress, '_pinned_agent', return_value='a2'):
-            self.assertEqual(egress.route_request('https://api.anthropic.com/v1/x', user_id='u1'), 'a2')
+            self.assertEqual(egress.route_request('https://api.anthropic.com/v1/x', user_id='1'), 'a2')
 
     def test_multi_agent_unpinned_orders_by_recency(self):
         # G1: an unpinned multi-agent deployment no longer raises — the chain
         # is ordered (pinned → last egress success → last_seen).
-        a1 = _agent('a1', 'u1'); a1['last_seen'] = 100.0
-        a2 = _agent('a2', 'u1', name='box2'); a2['last_seen'] = 200.0
+        a1 = _agent('a1', '1'); a1['last_seen'] = 100.0
+        a2 = _agent('a2', '1', name='box2'); a2['last_seen'] = 200.0
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
              self._agents([a1, a2]), \
              mock.patch.object(egress, '_pinned_agent', return_value=''):
             self.assertEqual(egress.route_request(
-                'https://api.anthropic.com/v1/x', user_id='u1'), 'a2')
+                'https://api.anthropic.com/v1/x', user_id='1'), 'a2')
             # A recent transport-level success beats last_seen.
             egress._note_success('a1')
             try:
                 self.assertEqual(egress.route_request(
-                    'https://api.anthropic.com/v1/x', user_id='u1'), 'a1')
+                    'https://api.anthropic.com/v1/x', user_id='1'), 'a1')
             finally:
                 with egress._success_lock:
                     egress._last_success.pop('a1', None)
 
     def test_pinned_agent_offline_falls_back(self):
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \
-             self._agents([_agent('a1', 'u1')]), \
+             self._agents([_agent('a1', '1')]), \
              mock.patch.object(egress, '_pinned_agent', return_value='gone'):
             self.assertEqual(egress.route_request(
-                'https://api.anthropic.com/v1/x', user_id='u1'), 'a1')
+                'https://api.anthropic.com/v1/x', user_id='1'), 'a1')
 
 
 class TestEgressHttp(unittest.TestCase):
 
     def test_whitelist_enforced(self):
         with self.assertRaises(EgressUnavailable):
-            egress.egress_http('https://evil.com/x', user_id='u1')
+            egress.egress_http('https://evil.com/x', user_id='1')
 
     def test_happy_path_result_shape(self):
         payload = json.dumps({'access_token': 'tok-1', 'expires_in': 3600}).encode()
@@ -194,13 +213,13 @@ class TestEgressHttp(unittest.TestCase):
             resp = egress.egress_http(
                 'https://api.anthropic.com/v1/oauth/token',
                 method='POST', headers={'Content-Type': 'application/json'},
-                body=b'{"x":1}', timeout=30, user_id='u1')
+                body=b'{"x":1}', timeout=30, user_id='1')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()['access_token'], 'tok-1')
         # 命令按设计带 TTL + 目标 agent + user 作用域
         _args, kwargs = send.call_args
         self.assertEqual(kwargs.get('target_agent_id'), 'a1')
-        self.assertEqual(kwargs.get('user_id'), 'u1')
+        self.assertEqual(kwargs.get('user_id'), '1')
         self.assertEqual(kwargs.get('ttl'), 120)
         # body 走 base64
         params = send.call_args[0][1]
@@ -211,14 +230,22 @@ class TestEgressHttp(unittest.TestCase):
              mock.patch('lib.desktop.send_desktop_command',
                         return_value=({'status': 0, 'error': 'DNS fail'}, None)):
             with self.assertRaises(EgressUnavailable):
-                egress.egress_http('https://api.anthropic.com/x', user_id='')
+                egress.egress_http('https://api.anthropic.com/x', user_id='1')
 
     def test_bridge_error_raises_unavailable(self):
         with mock.patch.object(egress, 'route_candidates', return_value=['a1']), \
              mock.patch('lib.desktop.send_desktop_command',
                         return_value=(None, 'Desktop agent timeout')):
             with self.assertRaises(EgressUnavailable):
-                egress.egress_http('https://api.anthropic.com/x', user_id='')
+                egress.egress_http('https://api.anthropic.com/x', user_id='1')
+
+    def test_explicit_agent_still_requires_owner_scope(self):
+        with mock.patch('lib.desktop.send_desktop_command') as send:
+            with self.assertRaises(EgressUnavailable):
+                egress.egress_http(
+                    'https://api.anthropic.com/x',
+                    user_id='', agent_id='a1')
+        send.assert_not_called()
 
 
 class TestAgentFallback(unittest.TestCase):
@@ -240,7 +267,7 @@ class TestAgentFallback(unittest.TestCase):
         with mock.patch.object(egress, 'route_candidates',
                                return_value=['a1', 'a2']), \
              mock.patch('lib.desktop.send_desktop_command', side_effect=_send):
-            resp = egress.egress_http('https://api.anthropic.com/x', user_id='')
+            resp = egress.egress_http('https://api.anthropic.com/x', user_id='1')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(calls, ['a1', 'a2'])
 
@@ -252,7 +279,7 @@ class TestAgentFallback(unittest.TestCase):
         with mock.patch.object(egress, 'route_candidates',
                                return_value=['a1', 'a2']), \
              mock.patch('lib.desktop.send_desktop_command', side_effect=_send):
-            resp = egress.egress_http('https://api.anthropic.com/x', user_id='')
+            resp = egress.egress_http('https://api.anthropic.com/x', user_id='1')
         self.assertEqual(resp.status_code, 200)
 
     def test_http_delivered_error_status_never_fails_over(self):
@@ -266,7 +293,7 @@ class TestAgentFallback(unittest.TestCase):
         with mock.patch.object(egress, 'route_candidates',
                                return_value=['a1', 'a2']), \
              mock.patch('lib.desktop.send_desktop_command', side_effect=_send):
-            resp = egress.egress_http('https://api.anthropic.com/x', user_id='')
+            resp = egress.egress_http('https://api.anthropic.com/x', user_id='1')
         self.assertEqual(resp.status_code, 500)
         self.assertEqual(calls, ['a1'])
 
@@ -284,7 +311,7 @@ class TestAgentFallback(unittest.TestCase):
              mock.patch.object(egress.EgressStreamReader, 'wait_headers',
                                new=lambda self: setattr(self, 'status_code', 200)):
             reader = egress.open_stream('https://api.anthropic.com/v1/messages',
-                                        user_id='')
+                                        user_id='1')
         self.assertEqual(enqueued, ['a1', 'a2'])
         self.assertEqual(reader._agent_id, 'a2')
 
@@ -300,7 +327,7 @@ class TestAgentFallback(unittest.TestCase):
              mock.patch.object(egress, 'cancel_stream'):
             with self.assertRaises(EgressUnavailable):
                 egress.open_stream('https://api.anthropic.com/v1/messages',
-                                   user_id='')
+                                   user_id='1')
 
 
 class TestAgentExecutor(unittest.TestCase):
@@ -501,6 +528,38 @@ class TestExchangeViaEgress(unittest.TestCase):
         self.assertEqual(out['access_token'], 'sk-ant-oat01-NEW')
         self.assertTrue(save.called)
         self.assertTrue(eg.called)
+
+
+class TestLlmOwnerPropagation(unittest.TestCase):
+
+    def test_non_stream_transport_reuses_selected_agent_and_owner(self):
+        from lib.llm.chat import chat
+
+        response = mock.Mock(status_code=200, headers={})
+        response.json.return_value = {
+            'choices': [{
+                'message': {'role': 'assistant', 'content': 'ok'},
+                'finish_reason': 'stop',
+            }],
+            'usage': {'prompt_tokens': 1, 'completion_tokens': 1},
+        }
+        with mock.patch(
+                'lib.desktop.egress.route_request',
+                return_value='agent-41') as route, \
+             mock.patch(
+                 'lib.desktop.egress.egress_http',
+                 return_value=response) as relay:
+            content, _usage = chat(
+                [{'role': 'user', 'content': 'hi'}],
+                model='gpt-x', api_key='k',
+                base_url='https://api.anthropic.com/v1',
+                owner_user_id=41, max_retries=0,
+            )
+
+        self.assertEqual(content, 'ok')
+        self.assertEqual(route.call_args.kwargs['user_id'], '41')
+        self.assertEqual(relay.call_args.kwargs['user_id'], '41')
+        self.assertEqual(relay.call_args.kwargs['agent_id'], 'agent-41')
 
 
 if __name__ == '__main__':

@@ -9,9 +9,8 @@ Speed knobs (env-tunable, all optional):
                             tokens per call (and a higher chance the model
                             hits its output cap on dense pages). Set to 1
                             to restore the legacy one-page-per-call mode.
-    PDF_VLM_MAX_WORKERS   — concurrent VLM calls (default = number of
-                            batches, i.e. fully parallel). Lower this on
-                            shared keys to avoid 429 storms.
+    PDF_VLM_MAX_WORKERS   — optional lower cap below the launch-probed
+                            process policy. It cannot increase concurrency.
     PDF_VLM_MAX_TOKENS    — output-token cap per call (default 16384,
                             scaled with batch size).
 """

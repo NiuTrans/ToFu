@@ -103,6 +103,13 @@ _STRUCTURAL_OVERHEAD_TOKENS = 400
 """Tokens we reserve for the implicit request overhead the counter
 never sees (beta headers, tool_choice, cache_control markers, …)."""
 
+REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY = (
+    '_reusableTextTokenCountsByIdentity')
+"""Call-local exact text counts; never retain, serialize, or audit this map."""
+
+REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_MAX = 4_096
+"""Hard ceiling for call-local immutable-string identity reuse hints."""
+
 
 def iter_message_texts(messages: list, system: Any = None, tools: Any = None):
     """Yield every text blob we want to count, in rough wire order.
@@ -192,4 +199,6 @@ __all__ = [
     'CountResult', 'TokenCounter',
     'iter_message_texts', 'count_images',
     '_IMAGE_TOKENS_DEFAULT', '_STRUCTURAL_OVERHEAD_TOKENS',
+    'REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY',
+    'REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_MAX',
 ]

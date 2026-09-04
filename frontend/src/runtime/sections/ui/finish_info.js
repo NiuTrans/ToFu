@@ -45,6 +45,16 @@ const _CACHE_CAUSE_PHRASES = [
   //    rounds. FULL sentences precede their shorter substrings. Guarded by
   //    tests/test_frontend_cache_verdict_render.py, which DERIVES these
   //    strings from the backend fn so any future drift turns the test red. ──
+  // ── Inline-built verdicts (detect_cache_break returns these keys DIRECTLY,
+  //    not via _resolve_break_cause, so they were previously missing from the
+  //    table and rendered as raw English on the zh UI). Fully-static prose
+  //    (no dynamic numbers) — keep the longer compaction variant FIRST. ──
+  ['zero read-back on a substantial write, but no break gate could fire because this round followed a compaction, which is structurally exempt from every break predicate. The spend is real and counted here; the CAUSE is unresolved — this round is NOT evidence of a healthy cache.',
+   '一次可观的写入零读回，但没有任何断点闸门被触发，因为本轮紧随一次压缩之后——压缩在结构上被所有断点判定豁免。这笔花费是真实的并已计入；但原因未解——本轮不能作为缓存健康的证据。'],
+  ['zero read-back on a substantial write, but no break gate could fire. The spend is real and counted here; the CAUSE is unresolved — this round is NOT evidence of a healthy cache.',
+   '一次可观的写入零读回，但没有任何断点闸门被触发。这笔花费是真实的并已计入；但原因未解——本轮不能作为缓存健康的证据。'],
+  ['mid-history cache anchor drifted past Anthropic\'s ~20-block cache lookback window behind the rolling tail — the tail could not extend the prior cache entry, so the whole prefix past the mid anchor was re-billed uncached even though the body bytes were identical. A client-side breakpoint-layout miss (the stepping-stone trail/step params), NOT a server-side or gateway fault.',
+   '历史中间的缓存锚点漂移到了 Anthropic 约 20 块缓存回看窗口之后——尾部无法延续先前的缓存条目，因此即使正文字节完全相同，中间锚点之后的整段前缀仍被按未命中重新计费。这是一次客户端断点布局失误（步进锚点的 trail/step 参数），不是服务端或网关故障。'],
   ['The routing was also identical (key + anthropic-beta + endpoint all match last round), so this is not a client cache-namespace switch either.',
    '本轮的路由也完全相同（key、anthropic-beta 头、endpoint 均与上一轮一致），因此也不是客户端切换了缓存命名空间。'],
   ['The cached prefix was not reused upstream: an upstream cache miss (a per-request gateway miss or a TTL boundary).',
@@ -220,13 +230,52 @@ const _CP_WARN_SVG = '<svg class="cp-ico" width="11" height="11" viewBox="0 0 24
 function _cacheBreakReason(cb) {
   if (!cb || typeof cb !== 'object') return '';
   const bits = [];
+  // Structured sibling fields the backend attaches next to the two
+  // parameterized verdicts below. They are INPUT to the t() templates, not
+  // standalone display lines — skipping them keeps a raw "262000" from leaking
+  // into the popover as its own bullet.
+  const _meta = new Set(['prev_read', 'read', 'gap_s', 'cold_gap_s']);
+  const _num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : '';
+  };
   for (const k of Object.keys(cb)) {
     const val = cb[k];
-    if (k === 'server_side' || k === 'no_cache_reuse' || k === 'prefix_mutation'
-        || k === 'turn_boundary_rebill') {
+    if (_meta.has(k)) continue;
+    if (k === 'server_side' || k === 'no_cache_reuse' || k === 'prefix_mutation') {
       // Render the backend's own cause string verbatim (translated). No
       // fixed label that could contradict it.
       if (val) bits.push(escapeHtml(_translateCacheCause(val)));
+    } else if (k === 'turn_boundary_rebill') {
+      // Parameterized i18n when the backend attached structured fields; the
+      // free-form string cause is the back-compat fallback for OLD persisted
+      // rows that carry only the plain string.
+      if (cb.prev_read !== undefined && cb.read !== undefined) {
+        bits.push(t('finishInfo.cb.turnBoundaryRebill', {
+          prev: _num(cb.prev_read), read: _num(cb.read), gap: _num(cb.gap_s),
+        }));
+      } else if (val) {
+        bits.push(escapeHtml(_translateCacheCause(val)));
+      }
+    } else if (k === 'cache_write_unsettled') {
+      if (cb.cold_gap_s !== undefined) {
+        bits.push(t('finishInfo.cb.cacheWriteUnsettled', {
+          coldGap: _num(cb.cold_gap_s), gap: _num(cb.gap_s),
+        }));
+      } else if (val) {
+        bits.push(escapeHtml(_translateCacheCause(val)));
+      }
+    } else if (k === 'codex_cache' && val && typeof val === 'object') {
+      // Provider-specific Codex responses-endpoint verdict (stamped by
+      // cache_settle via _cache_round_accounting). It is a STRUCTURED dict,
+      // not a free-form cause string, so the old "unknown dict key" path
+      // silently DROPPED it. Render a label from the status + measured drop.
+      if (val.status === 'implicit_breakpoint_fallback') {
+        const _drop = Number(val.drop_tokens) || 0;
+        bits.push(t('finishInfo.cb.codexCacheFallback', { drop: String(_drop) }));
+      } else {
+        bits.push(t('finishInfo.cb.codexCacheMiss'));
+      }
     } else if (k === 'model' || k === 'message_count') {
       bits.push(t('finishInfo.cbWithVal', { label: t('finishInfo.cb.' + k), val: escapeHtml(String(val)) }));
     } else if (k === 'tools' && typeof val === 'string' && val.includes('changed:')) {
@@ -272,6 +321,16 @@ function _cacheBreakState(cb) {
   //   so the popover surfaces it as a real, client-visible miss (likely a
   //   tail-TTL window boundary; see the tail-TTL ticket). Keyed on the dict key.
   if ('turn_boundary_rebill' in cb) return 'boundary';
+  // Codex responses-endpoint verdict: wire-proven provider behaviour
+  // (wire_append_only) — NOT our client change → 'proven' (server-side).
+  if ('codex_cache' in cb) return 'proven';
+  // Cache-write-settle race (SDK #1451) and mid-anchor-out-of-window are
+  // CLIENT-side causes (fast tool loop / breakpoint-layout params) → culprit.
+  if ('cache_write_unsettled' in cb) return 'culprit';
+  if ('cache_mid_out_of_window' in cb) return 'culprit';
+  // Indeterminate: the detector reached NO conclusion (often a compaction
+  // zero-read rebuild) — honest 'unproven', not a reassuring no-badge.
+  if ('indeterminate' in cb) return 'unproven';
   // Otherwise inspect the server_side / no_cache_reuse cause text.
   const txt = String(cb.server_side || cb.no_cache_reuse || '');
   // LEGACY persisted rows: the old 'upstream cache eviction' verdict + the
@@ -400,6 +459,81 @@ function _subscriptionQuotaForMessage(msg) {
   return { latest, deltas, baselines, turnTokens };
 }
 
+/** Wall-clock turn duration: 8.4s → "8.4s", 65s → "1m05s", 75m → "1h15m". */
+function _formatTurnDuration(ms) {
+  const totalSeconds = Math.max(0, Number(ms) || 0) / 1000;
+  if (totalSeconds < 10) {
+    return `${(Math.round(totalSeconds * 10) / 10).toFixed(1)}s`;
+  }
+  const seconds = Math.round(totalSeconds);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m${String(remSeconds).padStart(2, '0')}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${String(minutes % 60).padStart(2, '0')}m`;
+}
+
+
+
+
+const _waitingBlockPolls = new Map();
+function _waitText(key, fallback, values) {
+  const value = typeof t === 'function' ? t(key, values) : '';
+  return value && value !== key ? value : fallback;
+}
+function _waitingAgentChips(agents) {
+  return (Array.isArray(agents) ? agents : []).map((agent) =>
+    `<span class="wait-block-agent-chip"><b>${escapeHtml(String(agent?.role || '?'))}</b> ${escapeHtml(String(agent?.status || '?'))}</span>`).join('');
+}
+function renderWaitingOnBlock(waitingOn, context) {
+  if (!waitingOn || waitingOn.kind !== 'swarm' || !waitingOn.swarmKey) return '';
+  const note = waitingOn.autoResume
+    ? _waitText('waitBlock.autoResume', 'Will continue automatically when the blocker settles.')
+    : _waitText('waitBlock.manualResume', 'Resume manually when the blocker settles.');
+  const key = String(waitingOn.swarmKey);
+  return `<details class="wait-block" data-wait-swarm-key="${escapeHtml(key)}" data-wait-conv-id="${escapeHtml(context?.conversationId || '')}"><summary><span class="wait-block-icon">${Icon('hourglass', 14)}</span><span class="wait-block-title">${escapeHtml(_waitText('waitBlock.title', 'Waiting on background work'))}</span><span class="wait-block-note">${escapeHtml(note)}</span><span class="wait-block-snapshot">${_waitingAgentChips(waitingOn.agents)}</span></summary><div class="wait-block-body"><div class="wait-block-live">${escapeHtml(_waitText('waitBlock.viewStatus', 'View live status'))}</div></div></details>`;
+}
+function _stopWaitingBlockPoll(details) {
+  const timer = _waitingBlockPolls.get(details);
+  if (timer != null) clearInterval(timer);
+  _waitingBlockPolls.delete(details);
+}
+function _renderWaitingBlockStatus(details, status) {
+  const body = details.querySelector('.wait-block-body');
+  if (!body) return;
+  const rows = (Array.isArray(status?.agents) ? status.agents : []).map((agent) => `<div class="wait-block-agent-row"><code>${escapeHtml(String(agent?.id || '?'))}</code><span>${escapeHtml(String(agent?.role || '?'))}</span><span>${escapeHtml(String(agent?.status || '?'))}${agent?.rounds != null ? ` · ${escapeHtml(String(agent.rounds))} rounds` : ''}</span></div>`).join('');
+  body.innerHTML = rows || `<div class="wait-block-live">${escapeHtml(_waitText('waitBlock.agentStatus', 'No live agent status yet.'))}</div>`;
+}
+async function _pollWaitingBlock(details) {
+  if (!details.isConnected || !details.open) {
+    _stopWaitingBlockPoll(details);
+    return;
+  }
+  if (typeof Api === 'undefined' || !Api.swarm?.status) return;
+  try {
+    const status = await Api.swarm.status(details.getAttribute('data-wait-swarm-key'));
+    if (!details.isConnected || !details.open) return;
+    _renderWaitingBlockStatus(details, status);
+    if (status?.terminated || (status?.known === true && status?.active === false)) {
+      const body = details.querySelector('.wait-block-body');
+      if (body) body.insertAdjacentHTML('afterbegin', `<div class="wait-block-resolved">${escapeHtml(_waitText('waitBlock.resolved', 'Background work resolved.'))}</div>`);
+      _stopWaitingBlockPoll(details);
+    }
+  } catch (_ignored) {}
+}
+function _startWaitingBlockPoll(details) {
+  _stopWaitingBlockPoll(details);
+  _pollWaitingBlock(details);
+  _waitingBlockPolls.set(details, setInterval(() => _pollWaitingBlock(details), 3000));
+}
+if (typeof document !== 'undefined') document.addEventListener('toggle', (event) => {
+  const details = event.target;
+  if (!details?.classList?.contains('wait-block')) return;
+  if (details.open) _startWaitingBlockPoll(details);
+  else _stopWaitingBlockPoll(details);
+}, true);
+
 function renderFinishInfo(msg, turnId) {
   // A recovery command is pending locally but the authoritative ACK has not
   // arrived yet. Keep the same bubble visibly active and never flash its old
@@ -419,25 +553,20 @@ function renderFinishInfo(msg, turnId) {
   // Model tag — auto-detect brand from model_id
   const depthIcons = { medium: '', high: '', max: '', ultra: '' };
   const depthLabels = { medium: "Med", high: "Hi", max: "Max", ultra: "Ultra" };
-  // Resolve the ACTUAL slot that served this turn — real model / key /
-  //   provider, recorded by the dispatcher in usage._dispatch. The preset
-  //   ("opus") and msg.model can be an alias that routes to a different
-  //   upstream model, so prefer the resolved values for an honest finish bar.
-  let _disp = null;
-  const _dispRounds = msg.apiRounds || [];
-  for (let i = _dispRounds.length - 1; i >= 0; i--) {
-    const d = ((_dispRounds[i] && _dispRounds[i].usage) || {})._dispatch;
-    if (d && (d.model || d.provider_id || d.key)) { _disp = d; break; }
-  }
-  if (!_disp && u && u._dispatch) _disp = u._dispatch;
-  const _realModel = (_disp && _disp.model) || _mid;
-  const _realProvider = (_disp && _disp.provider_id) || _pid;
+  // The typed owner reads the canonical response-authoring round. It may use
+  // a bounded main-round compatibility scan for old projections, but internal
+  // compaction and discarded billing rows can never become the finish route.
+  const _route = typeof resolveTurnServingRoute === 'function'
+    ? resolveTurnServingRoute(msg)
+    : { model: _mid, providerId: _pid, keyName: '', keyTail: '' };
+  const _realModel = _route.model || _mid;
+  const _realProvider = _route.providerId || _pid;
   // Friendly key display: prefer the last 4 chars of the real API key
   //   (rendered as ••1234), else fall back to the raw slot name.
-  const _keyTail = _disp && _disp.key_tail;
-  const _keyDisplay = _keyTail ? ('••' + _keyTail) : (_disp && _disp.key) || "";
+  const _keyTail = _route.keyTail;
+  const _keyDisplay = _keyTail ? ('••' + _keyTail) : _route.keyName || "";
 
-  if (_mid) {
+  if (_realModel) {
     const _brand = typeof _detectBrand === 'function' ? _detectBrand(_realModel) : 'generic';
     const icon = (typeof _brandSvg === 'function') ? _brandSvg(_brand, 12) : Icon('star', 12);
     // Show the actual model id (e.g. "aws.claude-opus-4.8"), not the
@@ -451,7 +580,25 @@ function renderFinishInfo(msg, turnId) {
       depthStr = ` ${depthIcons[depth] || ""}${depthLabels[depth]}`;
     }
     parts.push(
-      `<span class="finish-tag preset" data-preset="${_brand}" title="Model: ${escapeHtml(_realModel)}${depth ? ' · Depth: ' + escapeHtml(depth) : ''}">${icon} ${displayName}${depthStr}</span>`,
+      `<span class="finish-tag preset" data-preset="${_brand}" title="Model: ${escapeHtml(_realModel)}${depth ? ' · Depth: ' + escapeHtml(depth) : ''}">${icon} ${escapeHtml(displayName)}${depthStr}</span>`,
+    );
+  }
+
+  const _modelRoute = msg.orchestration?.modelRoute;
+  if (_modelRoute?.selectedModel && _modelRoute.resolvedModel
+      && _modelRoute.selectedModel !== _modelRoute.resolvedModel) {
+    const _modelRouteLabel = t('finishInfo.modelRouteTag', {
+      from: _modelRoute.selectedModel,
+      to: _modelRoute.resolvedModel,
+    });
+    const _modelRouteTip = t('finishInfo.modelRouteTip', {
+      from: _modelRoute.selectedModel,
+      to: _modelRoute.resolvedModel,
+      role: _modelRoute.role || '?',
+      tier: _modelRoute.tier || '?',
+    });
+    parts.push(
+      `<span class="finish-tag warn model-route" title="${escapeHtml(_modelRouteTip)}">${escapeHtml(_modelRouteLabel)}</span>`,
     );
   }
 
@@ -498,11 +645,15 @@ function renderFinishInfo(msg, turnId) {
     ? _detail : (_detail ? JSON.stringify(_detail) : '');
   const _detailText = _terminalEnv && typeof errorEnvelopeMessage === 'function'
     ? errorEnvelopeMessage(_terminalEnv)
-    : _presentationDetail;
-  if (_turnStatus === 'completed') {
+    : (_presentationDetail
+       || (typeof _terminalError === 'string' ? _terminalError : ''));
+  /* A goal-mode/flow worker step can fail inside a turn that later
+   * completes: its durable message carries msg.error. Render the error tag
+   * on THAT message instead of a ✓ over the failure text. */
+  if (_turnStatus === 'completed' && !_terminalError) {
     const _completedLabel = _presentation?.label || 'Completed';
     parts.push(`<span class="finish-tag ok" title="${escapeHtml(_completedLabel)}" aria-label="${escapeHtml(_completedLabel)}">${Icon('check', 12)}</span>`);
-  } else if (_turnStatus === 'failed') {
+  } else if (_turnStatus === 'failed' || _terminalError) {
     const _failedTone = (_terminalEnv?.severity === 'warning'
       || _presentation?.tone === 'warning') ? 'warn' : 'err';
     const _failedLabel = _kindLabel || t('finishInfo.reasonFailed');
@@ -515,21 +666,63 @@ function renderFinishInfo(msg, turnId) {
   } else {
     parts.push(`<span class="finish-tag warn" title="${escapeHtml(_detailText)}">${escapeHtml(_presentation?.label || _turnStatus)}</span>`);
   }
+  /* Task completion timing — settle clock time + wall-clock duration from
+   * the authoritative TurnRecord lifecycle (createdAt → updatedAt), passed
+   * through by the turn store as _turnCreatedAt/_turnUpdatedAt. */
+  const _tCreated = Number(msg._turnCreatedAt) || 0;
+  const _tSettled = Number(msg._turnUpdatedAt) || 0;
+  if (_tSettled > 0) {
+    const _settledDate = new Date(_tSettled);
+    if (!Number.isNaN(_settledDate.getTime())) {
+      const _clockText = _settledDate.toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+      const _hasDuration = _tCreated > 0 && _tSettled >= _tCreated
+        && (typeof _formatTurnDuration === 'function');
+      const _durationText = _hasDuration
+        ? _formatTurnDuration(_tSettled - _tCreated) : '';
+      const _fullStamp = _settledDate.toLocaleString([], {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+      const _timingTip = _hasDuration
+        ? t('finishInfo.timingTip', { time: _fullStamp, duration: _durationText })
+        : t('finishInfo.timingTipNoDuration', { time: _fullStamp });
+      const _timingLabel = _durationText
+        ? `${_clockText} · ${_durationText}` : _clockText;
+      parts.push(
+        `<span class="finish-tag timing" title="${escapeHtml(_timingTip)}">` +
+        `${Icon('clock', 12)} ${escapeHtml(_timingLabel)}</span>`,
+      );
+    }
+  }
   if (u) {
     const inp = u.prompt_tokens || u.input_tokens || 0;
     const out = u.completion_tokens || u.output_tokens || 0;
     // API rounds info
     const rounds = msg.apiRounds || [];
     const numRounds = rounds.length;
-    /* Compute display input: for Anthropic-style APIs, prompt_tokens is
-     *   only the uncached portion. The total input = uncached + cw + cr. */
     const _cw0 = u.cache_write_tokens || u.cache_creation_input_tokens || 0;
     const _cr0 = u.cache_read_tokens || u.cache_read_input_tokens || 0;
-    const _displayInp = (inp <= _cw0 + _cr0 && (_cw0 > 0 || _cr0 > 0))
-      ? inp + _cw0 + _cr0   /* Anthropic: inp is uncached only */
-      : inp;                /* OpenAI: inp is already total */
-    if (_displayInp > 0 || out > 0) {
-      let tokText = `${fmt(_displayInp)} → ${fmt(out)}`;
+    // Cost is computed server-side by lib.cost.compute_cost and carries the
+    // authoritative convention split. Never infer Anthropic/OpenAI semantics
+    // from token magnitudes in the browser.
+    const _settledCost = msg.cost || null;
+    const _displayInp = Number(_settledCost?.totalInputTokens ?? inp) || 0;
+    const _displayOut = Number(_settledCost?.outputTokens ?? out) || 0;
+    if (_displayInp > 0 || _displayOut > 0) {
+      // Equal total input/output can have radically different prices when one
+      // request reuses a warm prefix and another re-bills it uncached. Keep
+      // the collapsed footer honest by showing the backend's convention-safe
+      // split at a glance; the rich popover remains the per-round drill-down.
+      let tokText = _settledCost
+        ? escapeHtml(t('finishInfo.inputSplit', {
+            total: fmt(_displayInp),
+            uncached: fmt(Number(_settledCost.inputTokens) || 0),
+            cache: fmt(Number(_settledCost.cacheReadTokens) || 0),
+            output: fmt(_displayOut),
+          }))
+        : `${fmt(_displayInp)} → ${fmt(_displayOut)}`;
       if (thk > 0)
         tokText += ` <span style="color:#a78bfa;opacity:0.8">(${fmt(thk)}${t('msg.thinking')})</span>`;
       parts.push(`<span class="token-tag">${tokText}</span>`);
@@ -572,10 +765,22 @@ function renderFinishInfo(msg, turnId) {
           tokens: fmt(_quota.turnTokens),
         }));
         _tips.push(t('finishInfo.quotaCaveat'));
-        const _visible = [t('finishInfo.quotaPrefix'), ..._labels];
-        if (exactTokens) _visible.push(exactTokens);
-        if (observed) _visible.push(observed);
-        parts.push(`<span class="subscription-quota-tag" title="${escapeHtml(_tips.join('\n'))}">${escapeHtml(_visible.join(' · '))}</span>`);
+        /* One flex item per fact, never one monolithic joined blob: the
+         * finish row's flex-wrap can only break BETWEEN items, and every
+         * tag is white-space:nowrap, so a single joined quota string
+         * (~half the row wide) dropped whole to the next line whenever it
+         * missed the remaining space by a pixel — stranding half of line 1
+         * empty. Split facts pack greedily and wrap one by one. The group
+         * prefix rides on the first fact; every fact keeps the full detail
+         * tooltip so hover anywhere in the group shows the same breakdown. */
+        const _facts = _labels.slice();
+        if (exactTokens) _facts.push(exactTokens);
+        if (observed) _facts.push(observed);
+        _facts[0] = `${t('finishInfo.quotaPrefix')} · ${_facts[0]}`;
+        const _quotaTip = escapeHtml(_tips.join('\n'));
+        for (const _fact of _facts) {
+          parts.push(`<span class="subscription-quota-tag" title="${_quotaTip}">${escapeHtml(_fact)}</span>`);
+        }
       }
     }
     const cw = u.cache_write_tokens || u.cache_creation_input_tokens || 0;
@@ -583,7 +788,7 @@ function renderFinishInfo(msg, turnId) {
     // Enhanced cost display with per-round breakdown.
     // Prefer cost from the authoritative settled-turn projection. Fall back
     // to lazy calculation while the live terminal projection is arriving.
-    const costInfo = msg.cost || calcCostCny(u, _mid, _pid);
+    const costInfo = _settledCost || calcCostCny(u, _mid, _pid);
     if (costInfo && costInfo.costCny > 0) {
       /* Epic-E sub-8: the popover builds LAZILY on first open — the
        * builder lives in ui/finish_info_rich.js and the feature bridge
@@ -641,14 +846,14 @@ function renderFinishInfo(msg, turnId) {
      *   settled fallback used to read as "回退 → kimi-k3" with no cause at
      *   all — the reason (often an entire upstream HTML error page) was
      *   locked inside `title`. Formatting comes from the shared
-     *   core/error_envelope.js helper so this tag and the live streaming
+     *   typed error-presentation owner so this tag and the live streaming
      *   banner can never name the same failure differently. */
     const _fb = (typeof fallbackCauseParts === 'function')
       ? fallbackCauseParts(msg)
-      /* core/error_envelope.js is loaded before this file in BOTH the bundle
-       * and the index.html script-tag path. The guard is for the isolated
-       * isolated JSDOM harnesses that load finish_info.js alone; degrade to the
-       * verbatim cause rather than throwing and killing the whole finish bar. */
+      /* The composition prelude binds the typed presentation owner before this
+       * retained adapter. The guard is for isolated JSDOM harnesses that load
+       * finish_info.js alone; degrade to the verbatim cause rather than
+       * throwing and killing the whole finish bar. */
       : { kindLabel: '', detail: String(msg.fallbackReason || msg.fallbackKind || ''),
           shown: '', hasCause: false };
     const _reasonLine = _fb.detail || _fb.kindLabel
@@ -667,6 +872,10 @@ function renderFinishInfo(msg, turnId) {
       );
     }
   }
+  const waitingBlock = renderWaitingOnBlock(msg.waitingOn, {
+    conversationId: msg._conversationId,
+  });
+  if (waitingBlock) parts.push(waitingBlock);
   if (parts.length === 0) return "";
   return `<div class="message-finish">${parts.join("")}</div>`;
 }

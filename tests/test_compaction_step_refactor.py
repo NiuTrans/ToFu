@@ -197,6 +197,72 @@ def test_compacts_fire_where_expected():
 
 
 @pytest.mark.unit
+def test_default_tool_tail_is_token_bounded_but_keeps_newest_batch():
+    from lib.tasks_pkg.compaction.api import micro_compact
+
+    msgs = [{'role': 'user', 'content': 'go'}]
+    for i in range(2):
+        msgs.append(_mk_asst(tool_calls=[{
+            'id': f'old{i}',
+            'function': {'name': 'read_files', 'arguments': '{}'},
+        }]))
+        msgs.append(_mk_tool('read_files', _big(12_000), f'old{i}'))
+
+    newest_ids = [f'new{i}' for i in range(3)]
+    msgs.append(_mk_asst(tool_calls=[{
+        'id': call_id,
+        'function': {'name': 'read_files', 'arguments': '{}'},
+    } for call_id in newest_ids]))
+    for call_id in newest_ids:
+        msgs.append(_mk_tool('read_files', _big(12_000), call_id))
+
+    micro_compact(
+        msgs,
+        conv_id='',
+        steps=['compact_tool_results'],
+        constant_overrides={
+            'MICRO_HOT_TAIL': 40,
+            'MICRO_HOT_TAIL_TOKENS': 1_000,
+        },
+    )
+
+    by_id = {
+        msg.get('tool_call_id'): msg.get('content')
+        for msg in msgs if msg.get('role') == 'tool'
+    }
+    assert all('compacted' in by_id[f'old{i}'] for i in range(2))
+    assert all(by_id[call_id] == _big(12_000) for call_id in newest_ids)
+
+
+@pytest.mark.unit
+def test_consumed_latest_batch_no_longer_bypasses_token_budget():
+    from lib.tasks_pkg.compaction.api import micro_compact
+
+    msgs = [{'role': 'user', 'content': 'go'}]
+    msgs.append(_mk_asst(tool_calls=[{
+        'id': 'consumed',
+        'function': {'name': 'read_files', 'arguments': '{}'},
+    }]))
+    msgs.append(_mk_tool('read_files', _big(12_000), 'consumed'))
+    msgs.append(_mk_asst(text='I used that result.'))
+    msgs.append({'role': 'user', 'content': 'continue'})
+
+    micro_compact(
+        msgs,
+        conv_id='',
+        steps=['compact_tool_results'],
+        constant_overrides={
+            'MICRO_HOT_TAIL': 40,
+            'MICRO_HOT_TAIL_TOKENS': 1_000,
+        },
+    )
+
+    result = next(msg['content'] for msg in msgs
+                  if msg.get('tool_call_id') == 'consumed')
+    assert 'compacted' in result
+
+
+@pytest.mark.unit
 def test_phase_d_off_by_default():
     from lib.tasks_pkg.compaction.api import micro_compact
     msgs, _ = _fx_assistant_compact()  # has the data but no kwarg

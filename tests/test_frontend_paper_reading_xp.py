@@ -22,11 +22,13 @@ DB-free; skips cleanly when node + jsdom aren't installed.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import os
 import shutil
 import subprocess
 
 import pytest
+from tests._paper_vite import compiled_typescript
 from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
@@ -52,25 +54,23 @@ def _node_deps_available() -> bool:
 
 
 @pytest.fixture(scope='module')
-def native_reading_owners(tmp_path_factory):
+def native_reading_owners():
     if not _node_deps_available() or not os.path.isfile(ESBUILD):
         pytest.skip('node + jsdom + vite test bundler dev dependencies required')
-    output = tmp_path_factory.mktemp('paper-reading-xp')
-    built = {}
-    for key, source in {
-        'notes': NOTES_TS,
-        'deepen': DEEPEN_TS,
-        'xp': XP_TS,
-        'qa': QA_TS,
-    }.items():
-        target = output / f'{key}.js'
-        compiled = subprocess.run(
-            [ESBUILD, source, '--bundle', '--format=iife',
-             '--platform=browser', f'--outfile={target}'],
-            capture_output=True, text=True, timeout=60)
-        assert compiled.returncode == 0, compiled.stderr
-        built[key] = str(target)
-    return built
+    with ExitStack() as stack:
+        built = {
+            key: stack.enter_context(compiled_typescript(
+                source,
+                expose_feature_registry_to_window=True,
+            ))
+            for key, source in {
+                'notes': NOTES_TS,
+                'deepen': DEEPEN_TS,
+                'xp': XP_TS,
+                'qa': QA_TS,
+            }.items()
+        }
+        yield built
 
 
 _HARNESS = r"""
@@ -158,10 +158,14 @@ _buildReportTOC = () => '';
 _buildReadingTimeBar = () => null;
 _wireReportScrollSpy = () => {};
 _wireReadingTimeTracking = () => {};
-_captureReadingAnchor = () => null;
-_loadReadingPosition = () => null;
-_restoreReadingAnchor = () => {};
-_persistReadingPosition = () => {};
+// Reading-position capture/restore now lives on the typed report owner
+// (report-runtime.ts) and the retained renderer consumes it through
+// runtimeScope (=== win in this harness). Re-point the no-op stubs there so
+// the re-render seam still exercises the capture/restore path.
+win._captureReadingAnchor = () => null;
+win._loadReadingPosition = () => null;
+win._restoreReadingAnchor = () => {};
+win._persistReadingPosition = () => {};
 _syncReportToolbar = () => {};
 
 const out = [];
@@ -591,8 +595,8 @@ def test_after_render_seam_is_load_bearing(native_reading_owners):
     the seam (not some incidental render) is what surfaces anchored cards."""
     src = open(REPORT_JS, encoding='utf-8').read()
     marker = (
-        "  if (typeof window._paperXpAfterRender === 'function') {\n"
-        "    window._paperXpAfterRender(article, container, view);\n"
+        "  if (typeof runtimeScope._paperXpAfterRender === 'function') {\n"
+        "    runtimeScope._paperXpAfterRender(article, container, view);\n"
         "  }\n"
     )
     assert marker in src, 'after-render seam marker not found — test stale'

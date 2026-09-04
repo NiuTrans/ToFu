@@ -16,9 +16,14 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 REPO = Path(__file__).resolve().parent.parent
-STATUS_JS = REPO / "static" / "js" / "project-brain-status.js"
-I18N_JS = REPO / "static" / "js" / "i18n.js"
+STATUS_JS = REPO / "frontend" / "src" / "runtime" / "sections" / "project-brain-status.js"
+I18N_EN = REPO / "frontend" / "src" / "i18n" / "generated" / "en.generated.json"
+I18N_ZH = REPO / "frontend" / "src" / "i18n" / "generated" / "zh.generated.json"
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -153,12 +158,10 @@ def test_neuter_removing_invitation_text_fails_assertion():
 
 def test_status_tab_relabeled_status_and_watch():
     """Discoverability: the Status tab signals it's the interactive surface."""
-    txt = I18N_JS.read_text()
-    m = re.search(r"'projectBrain\.status':\s*\{[^}]*\}", txt)
-    assert m, "projectBrain.status i18n key not found"
-    entry = m.group(0)
-    assert "Status & Watch" in entry, entry
-    assert "状态与关注" in entry, entry
+    en = json.loads(I18N_EN.read_text())
+    zh = json.loads(I18N_ZH.read_text())
+    assert "Status & Watch" in en.get("projectBrain.status", ""), en
+    assert "状态与关注" in zh.get("projectBrain.status", ""), zh
 
 
 if __name__ == "__main__":

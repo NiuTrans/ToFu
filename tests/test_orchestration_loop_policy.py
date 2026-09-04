@@ -7,9 +7,11 @@ import pytest
 from lib.orchestration.loop_policy import (
     DEFAULT_EXECUTOR_MAX_ITERATIONS,
     DEFAULT_MAX_ITERATIONS,
+    MAX_EXECUTOR_MAX_ITERATIONS,
     MAX_REPLANS,
     MAX_ZERO_DELIVERABLE_TURNS,
     advance_zero_deliverable_streak,
+    bounded_executor_iterations,
     should_inject_zero_deliverable,
 )
 
@@ -40,6 +42,7 @@ def test_graph_runtime_consumes_the_shared_loop_policy():
     assert MAX_REPLANS == 3
     assert DEFAULT_MAX_ITERATIONS == 10
     assert DEFAULT_EXECUTOR_MAX_ITERATIONS == 12
+    assert MAX_EXECUTOR_MAX_ITERATIONS == 64
     assert policy.count('MAX_REPLANS = 3') == 1
     assert policy.count('MAX_ZERO_DELIVERABLE_TURNS = 2') == 1
     assert 'advance_zero_deliverable_streak(' in graph
@@ -55,8 +58,23 @@ def test_all_default_execution_entry_points_consume_the_shared_policy():
     chat = (ROOT / 'lib/orchestration_chat_flow_runner.py').read_text()
     controls = (ROOT / 'lib/orchestration/_control_specs.py').read_text()
 
-    for source in (engine, builtins, chat, controls):
+    for source in (engine, chat):
         assert 'DEFAULT_EXECUTOR_MAX_ITERATIONS' in source
+    assert 'DEFAULT_GOAL_MAX_ITERATIONS' in builtins
+    assert 'MAX_EXECUTOR_MAX_ITERATIONS' in controls
     assert 'DEFAULT_MAX_ITERATIONS' in controls
     assert '_DEFAULT_MAX_ITERATIONS = 12' not in engine
     assert "or 12" not in chat
+
+
+@pytest.mark.parametrize(
+    ('value', 'default', 'expected'),
+    [
+        (None, 40, 40),
+        ('bad', 40, 40),
+        (0, 40, 1),
+        (999, 40, 64),
+    ],
+)
+def test_executor_iteration_budget_is_always_bounded(value, default, expected):
+    assert bounded_executor_iterations(value, default=default) == expected

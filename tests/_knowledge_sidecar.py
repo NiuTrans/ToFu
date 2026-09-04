@@ -6,12 +6,25 @@ import uuid
 
 import pytest
 
+from tests.support.sidecar_fixtures import module_declares_plugin
+
 
 TEST_OWNER_USER_ID = 1
+_PLUGIN_NAME = 'tests._knowledge_sidecar'
 
 
 @pytest.fixture(scope="module", autouse=True)
-def knowledge_storage(tmp_path_factory):
+def knowledge_storage(request, tmp_path_factory):
+    """Install a knowledge Sidecar only for modules that declared it.
+
+    pytest registers ``pytest_plugins`` process-wide, so an autouse fixture
+    would otherwise run for every subsequently collected module and stop the
+    previous module's global runtime (fencing unrelated tests).
+    """
+    if not module_declares_plugin(request, _PLUGIN_NAME):
+        yield None
+        return
+
     from lib.storage import StorageRuntime, StorageSupervisor
     from lib.storage.service import install_runtime_for_test
 

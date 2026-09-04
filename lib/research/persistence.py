@@ -40,10 +40,11 @@ a paper whose text happens to match.
     human-readable digest so a reader opening the row directly is not met with
     raw JSON.
 
-**Failure posture: never destroy an expensive artifact.** An ideate pass costs
-many LLM calls. If the DB write fails, these functions log loudly and return
-``False`` — the artifact still flows back to the caller and on to the user.
-Persistence failing must never take down a run that already did the work.
+**Failure posture: never redo an expensive artifact.** An ideate pass costs
+many LLM calls. These adapters log and return ``False`` on a refused write;
+the recipe checkpoints generation first, then retries only its cheap terminal
+publication stage. An unconfirmed write blocks clean success without forcing
+the model-backed stages to run again.
 """
 
 from __future__ import annotations
@@ -88,8 +89,7 @@ def _upsert_row(phash: str, lang_key: str, report: str, meta: dict,
                 model: str, *, user_id: int) -> None:
     """Write one row through the Sidecar's research artifact operation.
 
-    Isolated as its own function so the failure posture above is testable
-    (a guard patches this to raise and asserts the artifact still survives).
+    Isolated as its own function so the failure posture above is fault-testable.
     """
     _storage(write=True).command('research.artifact.upsert', {
         'user_id': require_user_id(user_id, context='research artifact owner'),
@@ -108,15 +108,17 @@ def _storage(*, write: bool = False):
 
 
 def persist_survey(direction: str, lang: str, survey_md: str, open_gaps: dict,
-                   *, usage: dict | None = None, model: str = '',
+                   *, usage: dict | None = None,
+                   harvest_usage: dict | None = None, model: str = '',
                    user_id: int) -> bool:
     """Persist a survey + its open-gap map under ``survey:<lang>``.
 
     The gap map is R3's frozen input contract, so it is stored verbatim in
     ``meta`` rather than being re-derived from the prose later.
 
-    Returns True on success; False (logged) on refusal or DB failure — never
-    raises, so a storage problem cannot fail a completed survey stage.
+    Returns True on success; False (logged) on refusal or DB failure. The
+    terminal publication stage decides whether that acknowledgement is enough
+    to settle the enclosing task.
     """
     from lib.paper.survey import survey_lang_key
 
@@ -130,6 +132,8 @@ def persist_survey(direction: str, lang: str, survey_md: str, open_gaps: dict,
                 'open_gaps': open_gaps or {}}
         if usage:
             meta['usage'] = usage
+        if harvest_usage:
+            meta['harvest_usage'] = harvest_usage
         _upsert_row(
             phash, survey_lang_key(lang), survey_md or '', meta, model,
             user_id=user_id)
@@ -286,7 +290,9 @@ def load_research_artifacts(
                        direction, e)
         return out
 
-    stage_usage = {'survey': {}, 'ideate': {}, 'evaluate': None}
+    stage_usage = {
+        'harvest': {}, 'survey': {}, 'ideate': {}, 'evaluate': None,
+    }
     for row in rows or []:
         meta = row.get('meta') if isinstance(row, dict) else None
         if not isinstance(meta, dict):
@@ -296,6 +302,7 @@ def load_research_artifacts(
             out['survey_md'] = row.get('report') or ''
             out['open_gaps'] = meta.get('open_gaps') or {}
             stage_usage['survey'] = meta.get('usage') or {}
+            stage_usage['harvest'] = meta.get('harvest_usage') or {}
         elif meta.get('kind') == 'ideate':
             out['accepted'] = meta.get('accepted') or []
             out['rejected'] = meta.get('rejected') or []
@@ -311,5 +318,6 @@ def load_research_artifacts(
         from lib.research.telemetry import aggregate_research_usage
         out['usage'] = aggregate_research_usage(stage_usage['survey'],
                                                  stage_usage['ideate'],
-                                                 stage_usage['evaluate'])
+                                                 stage_usage['evaluate'],
+                                                 harvest_usage=stage_usage['harvest'])
     return out

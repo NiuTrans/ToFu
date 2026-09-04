@@ -276,7 +276,7 @@ class TestAwaitAgents(unittest.TestCase):
         self.assertEqual(json.loads(raw)['status'], 'error')
 
     def test_await_timeout_clamped_to_hard_cap(self):
-        # Hard cap is 120s; passing 99999 must clamp without crashing.
+        # Hard cap is 60s; passing 99999 must clamp without crashing.
         with _patch_factory():
             execute_swarm_tool(
                 'spawn_agents',
@@ -492,6 +492,137 @@ class TestAwaitAgents(unittest.TestCase):
         self.assertEqual(agent_inbox.peek(self.task_id), 0,
                          'await_agents did not consume delivered inbox items')
 
+    def test_repeated_no_id_any_waits_for_a_new_completion(self):
+        """A delivered early finisher must not satisfy every later await."""
+        import threading
+
+        release_slow = threading.Event()
+
+        class _MixedAgent(_FakeAgent):
+            def run(self):
+                if self.spec.id == 'slow':
+                    release_slow.wait(timeout=5)
+                return self.result
+
+        def _mixed_factory(spec, **_kwargs):
+            return _MixedAgent(spec)
+
+        try:
+            with patch('lib.swarm.master._build_sub_agent',
+                       side_effect=_mixed_factory):
+                execute_swarm_tool(
+                    'spawn_agents',
+                    {'agents': [
+                        {'id': 'fast', 'objective': 'F'},
+                        {'id': 'slow', 'objective': 'S'},
+                    ]},
+                    task={'id': self.task_id},
+                )
+                self.assertTrue(_wait_until(
+                    lambda: agent_inbox.peek(self.task_id) >= 1))
+                first = json.loads(execute_swarm_tool(
+                    'await_agents',
+                    {'mode': 'any', 'timeout_seconds': 5},
+                    task={'id': self.task_id},
+                ))
+                self.assertEqual(
+                    {row['agent_id'] for row in first['completed']}, {'fast'})
+
+                holder = {}
+                waiter = threading.Thread(
+                    target=lambda: holder.setdefault(
+                        'raw', execute_swarm_tool(
+                            'await_agents',
+                            {'mode': 'any', 'timeout_seconds': 5},
+                            task={'id': self.task_id},
+                        )),
+                    daemon=True,
+                )
+                waiter.start()
+                time.sleep(0.1)
+                self.assertTrue(
+                    waiter.is_alive(),
+                    'the second await replayed fast instead of waiting')
+                release_slow.set()
+                waiter.join(timeout=3)
+                self.assertFalse(waiter.is_alive())
+        finally:
+            release_slow.set()
+
+        second = json.loads(holder['raw'])
+        self.assertEqual(
+            {row['agent_id'] for row in second['completed']}, {'slow'})
+
+    def test_explicit_id_can_reread_a_delivered_result(self):
+        with _patch_factory():
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'reread', 'objective': 'R'}]},
+                task={'id': self.task_id},
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.task_id) >= 1))
+            first = json.loads(execute_swarm_tool(
+                'await_agents',
+                {'ids': ['reread'], 'mode': 'all', 'timeout_seconds': 5},
+                task={'id': self.task_id},
+            ))
+            second = json.loads(execute_swarm_tool(
+                'await_agents',
+                {'ids': ['reread'], 'mode': 'all', 'timeout_seconds': 5},
+                task={'id': self.task_id},
+            ))
+            delta = json.loads(execute_swarm_tool(
+                'await_agents',
+                {'mode': 'all', 'timeout_seconds': 5},
+                task={'id': self.task_id},
+            ))
+
+        self.assertEqual(first['completed'], second['completed'])
+        self.assertEqual(delta['completed'], [])
+        self.assertIn('already delivered', delta['note'])
+
+    def test_inbox_injection_marks_live_result_delivered(self):
+        """An auto-injected update must not be replayed by a no-id await."""
+        from lib.tasks_pkg.orchestrator._swarm_inbox import (
+            drain_and_inject_inbox,
+        )
+
+        task = {
+            'id': self.task_id,
+            '_userId': 1,
+            'status': 'running',
+        }
+        messages = [{'role': 'user', 'content': 'start'}]
+        with (
+            _patch_factory(),
+            patch('lib.swarm.persistence.mark_delivered'),
+            patch('lib.tasks_pkg.orchestrator._swarm_inbox.append_event'),
+        ):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'injected', 'objective': 'I'}]},
+                task=task,
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.task_id) >= 1))
+            drain_and_inject_inbox(
+                task=task,
+                messages=messages,
+                round_num=0,
+                tid=self.task_id[:8],
+            )
+            result = json.loads(execute_swarm_tool(
+                'await_agents',
+                {'mode': 'any', 'timeout_seconds': 5},
+                task=task,
+            ))
+
+        self.assertEqual(len(messages), 2)
+        self.assertIn('<swarm-update>', messages[-1]['content'])
+        self.assertEqual(result['completed'], [])
+        self.assertIn('already delivered', result['note'])
+
     def test_get_agent_result_consumes_inbox_for_that_agent(self):
         """De-dup: get_agent_result hands back the full answer, so that
         agent's pending <swarm-update> must be dropped — but OTHER agents'
@@ -549,6 +680,26 @@ class TestAwaitAgents(unittest.TestCase):
         self.assertIn('note', result)
         self.assertIn('still running', result['note'])
         self.assertIn('slow', result['still_running'])
+
+    def test_repeated_no_progress_await_is_suppressed(self):
+        spec = SubTaskSpec(role='general', objective='slow', id='slow')
+        orch = MasterOrchestrator(
+            task_id=self.task_id, conv_id='c1', specs=[spec], user_id=1)
+
+        first = orch.await_agents(
+            mode='all', ids=['slow'], timeout_seconds=0.02)
+        self.assertTrue(first['timed_out'])
+        self.assertNotIn('wait_suppressed', first)
+
+        started = time.monotonic()
+        repeated = orch.await_agents(
+            mode='all', ids=['slow'], timeout_seconds=1.0)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.1)
+        self.assertTrue(repeated['timed_out'])
+        self.assertTrue(repeated['wait_suppressed'])
+        self.assertEqual(repeated['still_running'], ['slow'])
 
     def test_await_when_swarm_finished_returns_note(self):
         """B2: await_agents when nothing is running returns a clear note."""
@@ -1539,6 +1690,36 @@ class TestRehydration(unittest.TestCase):
         keys = [s['swarm_key'] for s in self.p.load_resumable_sessions()]
         self.assertIn(self.key, keys)
 
+    def test_ownerless_rehydrate_quarantines_once_and_preserves_evidence(self):
+        from lib.swarm.integration._rehydrate import (
+            _rehydrate_one,
+            rehydrate_swarms_on_startup,
+        )
+
+        self.p.save_session(
+            self.key, conv_id=self.key, task_id='ownerless-task',
+            specs=[{'id': 'a1', 'role': 'coder', 'objective': 'resume me'}],
+            config={}, status='running')
+        self.p.save_agent(
+            self.key, 'a1', role='coder', objective='resume me',
+            status='running', messages=[{'role': 'user', 'content': 'work'}],
+            rounds_used=1, delivered=False)
+
+        candidate = next(
+            session for session in self.p.load_resumable_sessions()
+            if session['swarm_key'] == self.key)
+        self.assertFalse(_rehydrate_one(candidate))
+
+        durable = self.p.load_session(self.key)
+        self.assertEqual(durable['status'], 'quarantined:ownerless')
+        self.assertEqual(durable['agents'][0]['status'], 'running')
+        self.assertEqual(durable['agents'][0]['messages'][0]['content'], 'work')
+        self.assertNotIn(
+            self.key,
+            {session['swarm_key']
+             for session in self.p.load_resumable_sessions()})
+        self.assertEqual(rehydrate_swarms_on_startup(), 0)
+
     def test_native_upserts_preserve_creation_and_delivery_state(self):
         with patch.object(self.p, '_now_ms', side_effect=[100, 200, 300, 400]):
             self.p.save_session(
@@ -1637,6 +1818,12 @@ class TestRehydration(unittest.TestCase):
             done = _wait_until(lambda: master.completed_count >= 2, timeout=3.0)
 
         self.assertTrue(done, 'rehydrated swarm did not settle')
+        delta = master.await_agents(mode='all', timeout_seconds=1)
+        self.assertEqual(
+            {row['agent_id'] for row in delta['completed']},
+            {'a2'},
+            'rehydration must not replay a persisted delivered result',
+        )
         # a1 preloaded with its stored answer (not re-run → answer unchanged)
         r1 = master.get_agent_result('a1')
         self.assertEqual(r1['final_answer'], 'A1 FINAL')

@@ -15,7 +15,7 @@ ports; backend libraries never import routes or browser owners.
 | Identity, providers, OAuth, billing | `identity.py`, `api_keys/`, `oauth/`, `billing/`, `llm_dispatch/` | `docs/modules/auth_providers_billing.md` |
 | Tasks and agent execution | `tasks_pkg/`, `agent_core/`, `swarm/` | `docs/modules/task_engine.md` |
 | Orchestration graphs | `orchestration/`, `orchestration_*.py` | `docs/modules/orchestration_dag.md` |
-| Model I/O | `llm/`, `llm_dispatch/`, `model_*`, `pricing/` | `docs/modules/llm_io.md` |
+| Model I/O | `llm/`, `llm_dispatch/`, `local_serve/`, `model_*`, `pricing/` | `docs/modules/llm_io.md` |
 | Tools, MCP, browser | `tools/`, `mcp/`, `browser/`, `project_mod/` | `docs/modules/tools_execution.md` |
 | Context and memory | `tasks_pkg/context_composer/`, `tasks_pkg/compaction/`, `memory/`, `token_counter/` | `docs/modules/context_engineering.md` |
 | Conversations and project state | `conversation_sync/`, `conversations/`, `project_mod/`, `presence/` | `docs/modules/conversations_project_brain.md` |

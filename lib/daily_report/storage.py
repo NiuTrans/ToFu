@@ -149,7 +149,7 @@ def _invalidate_calendar(date_str, *, owner_user_id):
 
     parsed = _parse_report_date(date_str)
     owner_id = _owner_id(owner_user_id, context='daily report calendar')
-    _calendar_cache.pop((owner_id, parsed.year, parsed.month), None)
+    _calendar_cache.invalidate((owner_id, parsed.year, parsed.month))
 
 
 def _log_saved(date_str, payload, *, owner_user_id):

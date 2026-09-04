@@ -359,17 +359,29 @@ const captureActiveConversationSettings = () => { saved++; };
 const _saveConvProjectPath = (p, extras) => { savePathCalls.push({ p: p || '' }); };
 const _applyProjectData = stub, _updateProjectUI = stub, closeProjectModal = stub,
       saveRecentProject = stub, debugLog = stub, renderConversationList = stub,
-      saveConversations = stub, escapeHtml = (s) => String(s);
+      reconcileConversationCatalogMetadata = stub, escapeHtml = (s) => String(s);
 const document = { getElementById: (id) => ({
   classList: { add() {}, remove() {} },
   set innerHTML(v) {}, get innerHTML() { return ''; },
 }) };
-const Api = { project: { setPaths: __SET_PATHS__ } };
+const setPathsCalls = [];
+const setPathsImpl = __SET_PATHS__;
+const Api = { project: { setPaths: async (...args) => {
+  setPathsCalls.push(args);
+  return setPathsImpl(...args);
+} } };
 const conversations = [];
 let activeConvId = 'c1';
 let _mpFolders = ['/__new__'];
 let _mpReadOnly = new Set();
 let projectState = __PREV_STATE__;
+const ProjectPresentationShellState = {
+  get activeConversationId() { return activeConvId; },
+  set activeConversationId(value) { activeConvId = value; },
+  get conversations() { return conversations; },
+  get projectState() { return projectState; },
+  set projectState(value) { projectState = value; },
+};
 __ON_ATTACHED__
 __ON_CLEARED__
 let opaCalls = 0, opcCalls = 0;
@@ -381,7 +393,7 @@ __MP_APPLY__
   await mpApplyFolders();
   console.log(JSON.stringify({
     appliedLog, saved, savePathCalls, opaCalls, opcCalls,
-    chatMode, statePath: projectState.path || '',
+    chatMode, statePath: projectState.path || '', setPathsCalls,
   }));
 })();
 """
@@ -450,6 +462,9 @@ def test_success_path_still_promotes_without_demotion():
     assert out["appliedLog"] == ["studio"]
     assert out["saved"] == 1
     assert out["opcCalls"] == 0
+    assert out["setPathsCalls"] == [
+        [["/__new__"], [], ["/__new__"]],
+    ], "all selected roots must share the successful setPaths request"
 
 
 def test_NC_rollback_without_demotion_strands_studio():

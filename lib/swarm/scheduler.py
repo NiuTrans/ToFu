@@ -23,8 +23,17 @@ from lib.swarm.protocol import (
     compress_result,
 )
 from lib.swarm.rate_limiter import RateLimiter
+from lib.swarm.resource_policy import (
+    swarm_max_agents_per_session,
+    swarm_max_parallel,
+    swarm_max_retries,
+)
 
 logger = get_logger(__name__)
+
+
+class SwarmAgentCapacityExceeded(ValueError):
+    """A wave would exceed the finite retained-agent session allowance."""
 
 # Import resolve_execution_order — avoid circular import by importing at
 # module level (master.py imports from scheduler.py, but
@@ -63,7 +72,8 @@ class StreamingScheduler:
                  on_agent_complete: Callable | None = None,
                  on_agent_start: Callable | None = None,
                  on_retry: Callable | None = None,
-                 progress_beacon: ProgressBeacon | None = None):
+                 progress_beacon: ProgressBeacon | None = None,
+                 max_total_agents: int | None = None):
         """
         Parameters
         ----------
@@ -90,14 +100,33 @@ class StreamingScheduler:
         self._factory = agent_factory
         self._rate_limiter = rate_limiter
         self._abort_check = abort_check or (lambda: False)
-        self._default_retries = default_retries
+        retry_ceiling = swarm_max_retries()
+        try:
+            requested_retries = max(0, int(default_retries))
+        except (TypeError, ValueError, OverflowError):
+            requested_retries = retry_ceiling
+        self._default_retries = min(requested_retries, retry_ceiling)
         self._on_complete = on_agent_complete
         self._on_start = on_agent_start
         self._on_retry = on_retry
         self._beacon = progress_beacon or ProgressBeacon()
 
+        parallel_ceiling = swarm_max_parallel()
+        try:
+            requested_parallel = max(1, int(max_parallel))
+        except (TypeError, ValueError, OverflowError):
+            requested_parallel = parallel_ceiling
+        self.max_parallel = min(requested_parallel, parallel_ceiling)
+        session_ceiling = swarm_max_agents_per_session()
+        try:
+            requested_total = int(max_total_agents or session_ceiling)
+        except (TypeError, ValueError, OverflowError):
+            requested_total = session_ceiling
+        self.max_total_agents = max(
+            1, min(requested_total, session_ceiling))
+
         self._pool = ThreadPoolExecutor(
-            max_workers=max_parallel,
+            max_workers=self.max_parallel,
             thread_name_prefix='swarm-stream',
         )
 
@@ -115,7 +144,8 @@ class StreamingScheduler:
         self._all_results: list[tuple[SubTaskSpec, SubAgentResult]] = []
 
         # Queue used to notify consumers of completions
-        self._results_queue: queue.Queue = queue.Queue()
+        self._results_queue: queue.Queue = queue.Queue(
+            maxsize=self.max_total_agents)
 
     # ── Public API ───────────────────────────────────
 
@@ -179,6 +209,14 @@ class StreamingScheduler:
                 logger.debug('[Scheduler] All %d specs were duplicates, nothing to add',
                              len(specs))
                 return []
+
+            retained_agents = (
+                len(self._completed) + len(self._pending) + len(self._running))
+            if retained_agents + len(deduped_specs) > self.max_total_agents:
+                raise SwarmAgentCapacityExceeded(
+                    f'swarm session agent capacity exceeded '
+                    f'({retained_agents + len(deduped_specs)} > '
+                    f'{self.max_total_agents})')
 
             if len(deduped_specs) < len(specs):
                 logger.debug('[Scheduler] Deduped %d → %d specs',
@@ -523,7 +561,16 @@ class StreamingScheduler:
 
     def _run_one(self, spec: SubTaskSpec):
         """Execute one agent with auto-retry.  Runs in pool thread."""
-        effective_retries = spec.max_retries if spec.max_retries > 0 else self._default_retries
+        retry_ceiling = swarm_max_retries()
+        if spec.max_retries is None:
+            requested_retries = self._default_retries
+        else:
+            try:
+                requested_retries = int(spec.max_retries)
+            except (TypeError, ValueError, OverflowError):
+                requested_retries = self._default_retries
+        effective_retries = max(
+            0, min(retry_ceiling, requested_retries))
         result: SubAgentResult | None = None
         t0 = time.monotonic()
 
@@ -556,7 +603,10 @@ class StreamingScheduler:
                 agent = self._factory(spec)
 
                 if self._rate_limiter:
-                    result = self._rate_limiter.run_agent(agent)
+                    result = self._rate_limiter.run_agent(
+                        agent,
+                        abort_check=self._abort_check,
+                    )
                 else:
                     result = agent.run()
 

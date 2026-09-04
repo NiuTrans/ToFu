@@ -80,8 +80,8 @@ The live run pinned the provider, model, source tree and permitted endpoint:
 
 ```bash
 export CONTEXT_BENCH_MODEL_ID=kimi-k3
-export CONTEXT_BENCH_PROVIDER_ID=example-corp
-export CONTEXT_BENCH_ALLOW_HOSTS=your-llm-gateway.example.com
+export CONTEXT_BENCH_PROVIDER_ID=sankuai
+export CONTEXT_BENCH_ALLOW_HOSTS=<your-api-host>
 export CONTEXT_BENCH_TOFU_SOURCE="$PWD/output/serial_gateway_eval/source_snapshot_20260901a"
 ```
 

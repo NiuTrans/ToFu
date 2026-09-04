@@ -4,7 +4,6 @@
 Extracted from orchestrator.py to reduce file size and isolate concerns.
 """
 
-from datetime import datetime, timezone
 
 from lib.log import get_logger
 
@@ -16,17 +15,6 @@ import lib as _lib  # module ref for hot-reload (Settings changes take effect wi
 from lib.tools.registry import (
     ToolContext, all_specs, assemble_tool_list, resolve_enabled_plugins,
 )
-
-
-def _build_search_addendum() -> str:
-    """Build a minimal timestamp string so the model knows 'now'.
-
-    Static search guidance lives in system_prompt_cc.section_using_tools
-    and does NOT belong here — putting it here caused it to be injected into
-    every user message on every round, bloating the conversation.
-    """
-    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    return f'Current date and time: {now}'
 
 
 _ULTRATHINK_RE = re.compile(r'\bultrathink\b', re.IGNORECASE)

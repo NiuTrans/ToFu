@@ -1,8 +1,8 @@
-"""Lazy activation boundary for chatui's optional tofu-search runtime.
+"""Lazy activation boundary for the Tofu host's optional search runtime.
 
 Responsibility: keep the heavyweight search/fetch dependency graph out of
 ordinary server boot and non-search requests while guaranteeing that every
-real network search/fetch entry point receives chatui's configuration,
+real network search/fetch entry point receives the host's configuration,
 browser, and auth-source providers before use.
 
 Entry points:
@@ -68,7 +68,11 @@ def _linkage_diagnostic(error: BaseException) -> str:
     try:
         from lib.server_linkage_forensics import capture_linkage_forensics
         return f' | LINKAGE: {capture_linkage_forensics()}'
-    except Exception:
+    except Exception as diagnostic_error:
+        logger.debug(
+            'Native linkage forensics unavailable: %s',
+            type(diagnostic_error).__name__,
+        )
         return ' | LINKAGE: unavailable'
 
 

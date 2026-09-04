@@ -7,6 +7,7 @@ network skip followed by heuristic fallback must reuse the same scan.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -21,7 +22,10 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(autouse=True)
 def _default_dispatch_mode(monkeypatch):
     """Keep operator environment overrides out of dispatcher unit tests."""
+    usage_cache._reset_usage_cache_for_tests()
     monkeypatch.setattr(token_api, 'MODE', 'auto')
+    yield
+    usage_cache._reset_usage_cache_for_tests()
 
 
 @dataclass
@@ -146,3 +150,178 @@ def test_usage_cache_verifies_only_bounded_prefix_tail():
         (stop - start <= 3) or start >= recorded_count
         for start, stop, _step in spans
     ), spans
+
+
+def test_usage_cache_capacity_evicts_least_recently_used(monkeypatch):
+    monkeypatch.setattr(usage_cache, '_USAGE_CACHE_CAPACITY', 3)
+    monkeypatch.setattr(usage_cache.time, 'time', lambda: 100.0)
+    for index, conv_id in enumerate(('a', 'b', 'c'), start=1):
+        usage_cache.record_usage(
+            conv_id,
+            prompt_tokens=index,
+            model='gpt-5.6-sol',
+            message_count=1,
+            messages=[{'role': 'user', 'content': conv_id}],
+        )
+    assert usage_cache._lookup('a') is not None
+
+    usage_cache.record_usage(
+        'd',
+        prompt_tokens=4,
+        model='gpt-5.6-sol',
+        message_count=1,
+        messages=[{'role': 'user', 'content': 'd'}],
+    )
+
+    assert tuple(usage_cache._cache) == ('c', 'a', 'd')
+    snapshot = usage_cache.usage_cache_snapshot()
+    assert snapshot['entries'] == snapshot['capacity'] == 3
+    assert snapshot['capacityEvictions'] == 1
+
+
+def test_usage_cache_capacity_reclaims_expired_before_live_entry(
+        monkeypatch):
+    clock = {'now': 100.0}
+    monkeypatch.setattr(usage_cache, '_USAGE_CACHE_CAPACITY', 2)
+    monkeypatch.setattr(
+        usage_cache.time, 'time', lambda: clock['now'])
+    for conv_id in ('expired-a', 'expired-b'):
+        usage_cache.record_usage(
+            conv_id,
+            prompt_tokens=1,
+            model='gpt-5.6-sol',
+            message_count=1,
+            messages=[{'role': 'user', 'content': conv_id}],
+        )
+    clock['now'] += usage_cache.USAGE_CACHE_TTL_SEC + 1
+
+    usage_cache.record_usage(
+        'live',
+        prompt_tokens=2,
+        model='gpt-5.6-sol',
+        message_count=1,
+        messages=[{'role': 'user', 'content': 'live'}],
+    )
+
+    snapshot = usage_cache.usage_cache_snapshot()
+    assert tuple(usage_cache._cache) == ('live',)
+    assert snapshot['expiredEvictions'] == 2
+    assert snapshot['capacityEvictions'] == 0
+
+
+def test_usage_cache_expiration_cannot_delete_concurrent_fresh_write(
+        monkeypatch):
+    conv_id = 'atomic-expiration'
+    usage_cache._cache[conv_id] = usage_cache._UsageEntry(
+        prompt_tokens=1,
+        model='gpt-5.6-sol',
+        ts=0.0,
+        message_count=1,
+        tail_signature='user:old',
+    )
+    lookup_in_expiration = threading.Event()
+    release_lookup = threading.Event()
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+
+    def blocked_time():
+        lookup_in_expiration.set()
+        assert release_lookup.wait(1.0)
+        return usage_cache.USAGE_CACHE_TTL_SEC + 1
+
+    monkeypatch.setattr(usage_cache.time, 'time', blocked_time)
+    lookup_thread = threading.Thread(target=usage_cache._lookup, args=(conv_id,))
+
+    def write_fresh_entry():
+        writer_started.set()
+        with usage_cache._lock:
+            usage_cache._cache[conv_id] = usage_cache._UsageEntry(
+                prompt_tokens=999,
+                model='gpt-5.6-sol',
+                ts=usage_cache.USAGE_CACHE_TTL_SEC + 1,
+                message_count=1,
+                tail_signature='user:fresh',
+            )
+        writer_done.set()
+
+    writer_thread = threading.Thread(target=write_fresh_entry)
+    try:
+        lookup_thread.start()
+        assert lookup_in_expiration.wait(1.0)
+        writer_thread.start()
+        assert writer_started.wait(1.0)
+        assert not writer_done.wait(0.05)
+    finally:
+        release_lookup.set()
+        lookup_thread.join(1.0)
+        writer_thread.join(1.0)
+
+    assert writer_done.is_set()
+    assert usage_cache._cache[conv_id].prompt_tokens == 999
+
+
+def test_usage_cache_carries_latest_opaque_reasoning_into_next_prompt():
+    conv_id = 'opaque-reasoning-reserve'
+    prefix = [{'role': 'user', 'content': 'question'}]
+    usage_cache.record_usage(
+        conv_id,
+        prompt_tokens=100_000,
+        model='gpt-5.6-sol',
+        message_count=len(prefix),
+        messages=prefix,
+        opaque_replay_tokens=12_000,
+    )
+    try:
+        without_opaque = prefix + [
+            {'role': 'assistant', 'content': 'short answer'}]
+        visible_only = usage_cache.UsageCacheCounter().count(
+            without_opaque, model='gpt-5.6-sol', conv_id=conv_id)
+
+        with_opaque = prefix + [{
+            'role': 'assistant',
+            'content': 'short answer',
+            '_responses_items': [{
+                'type': 'reasoning',
+                'encrypted_content': 'opaque-state',
+            }],
+        }]
+        replayed = usage_cache.UsageCacheCounter().count(
+            with_opaque, model='gpt-5.6-sol', conv_id=conv_id)
+    finally:
+        usage_cache.invalidate(conv_id)
+
+    assert visible_only is not None
+    assert replayed == visible_only + 12_000
+
+
+def test_usage_cache_recognizes_claude_redacted_thinking_replay():
+    conv_id = 'redacted-thinking-reserve'
+    prefix = [{'role': 'user', 'content': 'question'}]
+    usage_cache.record_usage(
+        conv_id,
+        prompt_tokens=80_000,
+        model='claude-opus-5',
+        message_count=1,
+        messages=prefix,
+        opaque_replay_tokens=7_500,
+    )
+    try:
+        plain_messages = prefix + [{
+            'role': 'assistant', 'content': 'answer'}]
+        plain_count = usage_cache.UsageCacheCounter().count(
+            plain_messages, model='claude-opus-5', conv_id=conv_id)
+        messages = prefix + [{
+            'role': 'assistant',
+            'content': 'answer',
+            '_anthropic_content_blocks': [{
+                'type': 'redacted_thinking', 'data': 'encrypted-state'},
+                {'type': 'text', 'text': 'answer'},
+            ],
+        }]
+        counted = usage_cache.UsageCacheCounter().count(
+            messages, model='claude-opus-5', conv_id=conv_id)
+    finally:
+        usage_cache.invalidate(conv_id)
+
+    assert plain_count is not None
+    assert counted == plain_count + 7_500

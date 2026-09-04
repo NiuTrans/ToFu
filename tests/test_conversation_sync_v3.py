@@ -118,6 +118,51 @@ def test_file_change_routes_validate_and_bind_stable_turn_commands(
     assert len(calls) == 2
 
 
+def test_perception_route_accepts_only_content_free_bounded_receipts(
+    flask_client, monkeypatch,
+):
+    from lib.conversation_sync.command_service import CommandOutcome
+    from routes import conversation_sync_v3 as sync_routes
+
+    calls = []
+
+    def record_perception(conversation_id, turn_id, user_id, body):
+        calls.append((conversation_id, turn_id, user_id, dict(body)))
+        return CommandOutcome({"conversationRevision": 12})
+
+    monkeypatch.setattr(
+        sync_routes.conversation_turn_commands,
+        "record_perception",
+        record_perception,
+    )
+    payload = {
+        "observationId": "page-a:paint:1",
+        "attemptId": "attempt-a",
+        "kind": "phase_painted",
+        "clientId": "page-a",
+        "phase": "waiting_model",
+        "serverEmittedAt": 1000,
+        "receivedAt": 1125,
+        "paintedAt": 1160,
+        "visibility": "visible",
+    }
+    response = flask_client.post(
+        "/api/v3/conversations/conv-a/turns/turn-a/perception",
+        json=payload,
+    )
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "conversationRevision": 12}
+    assert calls == [("conv-a", "turn-a", 1, payload)]
+
+    content_bearing = flask_client.post(
+        "/api/v3/conversations/conv-a/turns/turn-a/perception",
+        json={**payload, "observationId": "page-a:paint:2",
+              "content": "must never be captured"},
+    )
+    assert content_bearing.status_code == 400
+    assert len(calls) == 1
+
+
 def test_generator_rejects_duplicate_keys_and_derives_client_paths():
     import yaml
 
@@ -142,7 +187,10 @@ def test_generator_rejects_duplicate_keys_and_derives_client_paths():
     new_path = "/api/v3/conversations/{conversationId}/authoritative-sync"
     document["paths"][new_path] = document["paths"].pop(old_path)
     generated = render_typescript(document)
-    assert "/authoritative-sync`" in generated
+    assert (
+        "/authoritative-sync?segmentPayload=refs&turnWindow=tail-96&artifactHint=has-any`"
+        in generated
+    )
     assert "/sync`" not in generated
     assert '"maxAttempts": 4' in generated
     assert "attempt < policy.maxAttempts" in generated
@@ -150,6 +198,19 @@ def test_generator_rejects_duplicate_keys_and_derives_client_paths():
     assert "streamGeneration?: number" in generated
     assert "streamClientId=${encodeURIComponent(streamClientId)}" in generated
     assert "streamGeneration=${encodeURIComponent(String(streamGeneration))}" in generated
+    assert "snapshot(conversationId: string, options?: RequestOptions)" in generated
+    assert (
+        "turnPage(conversationId: string, laneId: string, syncSeq: number, "
+        "beforeOrdinal?: number, limit?: number, options?: RequestOptions)"
+        in generated
+    )
+    assert "`laneId=${encodeURIComponent(laneId)}`" in generated
+
+    document["paths"][new_path]["get"]["x-tofu-client-fixed-query"] = {
+        "undeclared": "refs",
+    }
+    with pytest.raises(ValueError, match="fixes undeclared query"):
+        render_typescript(document)
 
 
 def test_turn_projection_and_settlement_have_named_generated_contracts():
@@ -163,6 +224,10 @@ def test_turn_projection_and_settlement_have_named_generated_contracts():
     assert schemas['TurnProjection']['properties']['segments']['items'][
         '$ref'
     ].endswith('/TurnContentSegment')
+    assert schemas['TurnProjection']['properties']['lastRoundUsage'][
+        '$ref'
+    ].endswith('/TurnLastRoundUsage')
+    assert schemas['TurnLastRoundUsage']['additionalProperties'] is False
     assert schemas['TurnContentSegment']['oneOf']
     assert schemas['TurnSettlement']['additionalProperties'] is False
     settlement = schemas['TurnSettlement']['properties']
@@ -174,6 +239,7 @@ def test_turn_projection_and_settlement_have_named_generated_contracts():
 
     generated = render_typescript(document)
     assert 'export type TurnProjection = {' in generated
+    assert 'export type TurnLastRoundUsage = {' in generated
     assert 'export type TurnContentSegment = (TurnTextSegment)' in generated
     assert 'export type TurnSettlement = {' in generated
     assert 'export type ProviderStreamState = ' in generated
@@ -192,9 +258,12 @@ def test_sidecar_commit_atomically_appends_compact_owner_scoped_replay(
     from lib.storage import StorageError
     from lib.storage.commit_events import subscribe_committed_events
     from lib.turn_lifecycle import (
+        bind_task,
+        claim_attempt_start,
         create_attempt,
         create_turn_pair,
         get_turn,
+        mark_task_started,
         record_task_event,
         update_turn_projection,
     )
@@ -264,20 +333,25 @@ def test_sidecar_commit_atomically_appends_compact_owner_scoped_replay(
             "segments": [],
             "config": {"model": "gpt-4o"},
         }
+        assert claim_attempt_start(attempt_id, user_id=1) is True
+        assert bind_task(attempt_id, "task-atomic", user_id=1)["status"] == "pending"
+        assert mark_task_started(
+            attempt_id, "task-atomic", user_id=1,
+        )["status"] == "running"
         assert record_task_event(task, {"type": "delta"}) is True
         task["content"] += "y"
         assert record_task_event(task, {"type": "delta"}) is True
 
         tail = client.query(
             "turn.sync.changes",
-            {"conversation_id": "conv-sync-a", "user_id": 1, "after": 2},
+            {"conversation_id": "conv-sync-a", "user_id": 1, "after": 4},
         )
-        assert [event["syncSeq"] for event in tail["events"]] == [3]
+        assert [event["syncSeq"] for event in tail["events"]] == [5]
         compact_event = tail["events"][0]
         attempt_payload = compact_event["payload"]["event"]["payload"]
         assert "projection" not in attempt_payload
-        assert attempt_payload["projectionPatch"]["baseRevision"] == 2
-        assert attempt_payload["projectionPatch"]["targetRevision"] == 3
+        assert attempt_payload["projectionPatch"]["baseRevision"] == 4
+        assert attempt_payload["projectionPatch"]["targetRevision"] == 5
         assert len(json.dumps(compact_event)) < 5_000
 
         # Low-frequency settled mutations must obey the same payload rule.
@@ -435,6 +509,239 @@ def test_sidecar_commit_atomically_appends_compact_owner_scoped_replay(
         unsubscribe()
 
 
+def test_turn_history_page_is_bounded_owner_scoped_and_exclusive(
+    conversation_sync_db,
+):
+    from lib.conversation_sync.repository import SidecarConversationSyncRepository
+    from lib.conversation_sync.service import ConversationSyncService
+    from lib.conversation_sync.validation import decode
+
+    client = conversation_sync_db
+    for ordinal in range(7):
+        client.command(
+            "turn.append_settled",
+            {
+                "conversation_id": "conv-sync-a",
+                "user_id": 1,
+                "command_id": f"history-page-{ordinal}",
+                "actor": "assistant",
+                "kind": "fixture",
+                "projection": {"content": f"page-{ordinal}-" * 100},
+                "created_at": ordinal + 1,
+            },
+            f"history-page-{ordinal}",
+        )
+
+    head = client.query(
+        "turn.sync.snapshot",
+        {"conversation_id": "conv-sync-a", "user_id": 1},
+    )["syncSequence"]
+    first = client.query(
+        "turn.sync.page",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "lane_id": "main",
+            "sync_sequence": head,
+            "limit": 3,
+        },
+    )
+    assert [turn["ordinal"] for turn in first["turns"]] == [4, 5, 6]
+    assert first["nextBeforeOrdinal"] == 4
+    assert first["hasMore"] is True
+    assert first["totalTurns"] == 7
+    assert len(first["attempts"]) == 3
+    assert {attempt["turnId"] for attempt in first["attempts"]} == {
+        turn["turnId"] for turn in first["turns"]
+    }
+
+    second = client.query(
+        "turn.sync.page",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "lane_id": "main",
+            "sync_sequence": first["syncSequence"],
+            "before_ordinal": first["nextBeforeOrdinal"],
+            "limit": 3,
+        },
+    )
+    assert [turn["ordinal"] for turn in second["turns"]] == [1, 2, 3]
+    assert {turn["turnId"] for turn in first["turns"]}.isdisjoint(
+        turn["turnId"] for turn in second["turns"]
+    )
+    assert second["nextBeforeOrdinal"] == 1
+    assert second["hasMore"] is True
+    assert client.query(
+        "turn.sync.page",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 2,
+            "lane_id": "main",
+            "sync_sequence": first["syncSequence"],
+            "limit": 3,
+        },
+    ) is None
+    stale = client.query(
+        "turn.sync.page",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "lane_id": "main",
+            "sync_sequence": head - 1,
+            "limit": 3,
+        },
+    )
+    assert stale == {"stale": True, "syncSequence": head}
+
+    service = ConversationSyncService(SidecarConversationSyncRepository(
+        client_factory=lambda write=False: client,
+    ))
+    page = service.turn_page(
+        "conv-sync-a",
+        1,
+        lane_id="main",
+        expected_sync_sequence=first["syncSequence"],
+        limit=3,
+        segment_payload="refs",
+    )
+    assert decode("ConversationTurnPage", page) is page
+    assert page["syncSeq"] == first["syncSequence"]
+    assert len(page["turns"]) == 3
+    assert len(page["snapshotProjectionRefs"]) == 3
+    assert all("content" not in turn["projection"] for turn in page["turns"])
+
+
+def test_snapshot_tail_window_is_bounded_and_branch_safe(conversation_sync_db):
+    from lib.conversation_sync.repository import SidecarConversationSyncRepository
+    from lib.conversation_sync.service import ConversationSyncService
+    from lib.conversation_sync.validation import decode
+
+    client = conversation_sync_db
+    for ordinal in range(7):
+        client.command(
+            "turn.append_settled",
+            {
+                "conversation_id": "conv-sync-a",
+                "user_id": 1,
+                "command_id": f"snapshot-window-{ordinal}",
+                "actor": "assistant",
+                "projection": {"content": f"tail-{ordinal}"},
+                "created_at": ordinal + 1,
+            },
+            f"snapshot-window-{ordinal}",
+        )
+
+    full = client.query(
+        "turn.sync.snapshot",
+        {"conversation_id": "conv-sync-a", "user_id": 1},
+    )
+    assert len(full["turns"]) == 7
+    assert "turnWindow" not in full
+    assert "hasArtifacts" not in full
+    empty_hint = client.query(
+        "turn.sync.snapshot",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "include_artifact_hint": True,
+        },
+    )
+    assert empty_hint["hasArtifacts"] is False
+    artifact_id = f"snapshot-hint-{uuid.uuid4().hex}"
+    client.command(
+        "artifact.create",
+        {
+            "artifact_id": artifact_id,
+            "conv_id": "conv-sync-a",
+            "source": "test",
+            "format": "markdown",
+            "content": "bounded hint",
+            "created_at": 2,
+        },
+        f"create-{artifact_id}",
+    )
+    assert client.query(
+        "turn.sync.snapshot",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "include_artifact_hint": True,
+        },
+    )["hasArtifacts"] is True
+    assert client.query(
+        "turn.sync.snapshot",
+        {
+            "conversation_id": "conv-sync-b",
+            "user_id": 1,
+            "include_artifact_hint": True,
+        },
+    )["hasArtifacts"] is False
+    tail = client.query(
+        "turn.sync.snapshot",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "turn_limit": 3,
+        },
+    )
+    assert [turn["ordinal"] for turn in tail["turns"]] == [4, 5, 6]
+    assert tail["turnWindow"] == {
+        "laneId": "main",
+        "nextBeforeOrdinal": 4,
+        "hasMore": True,
+        "totalTurns": 7,
+    }
+    assert len(tail["attempts"]) == 3
+
+    service = ConversationSyncService(SidecarConversationSyncRepository(
+        client_factory=lambda write=False: client,
+    ))
+    public_tail = service.snapshot(
+        "conv-sync-a",
+        1,
+        turn_limit=3,
+        segment_payload="refs",
+        include_artifact_hint=True,
+    )
+    assert decode("ConversationSyncSnapshot", public_tail) is public_tail
+    assert public_tail["turnWindow"] == tail["turnWindow"]
+    assert len(public_tail["turns"]) == 3
+    assert public_tail["hasArtifacts"] is True
+
+    client.command(
+        "turn.append_settled",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "command_id": "snapshot-window-branch",
+            "lane_id": "branch-safe",
+            "actor": "assistant",
+            "projection": {"content": "branch"},
+            "created_at": 20,
+        },
+        "snapshot-window-branch",
+    )
+    branch_safe = client.query(
+        "turn.sync.snapshot",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "turn_limit": 3,
+        },
+    )
+    assert len(branch_safe["turns"]) == 8
+    assert "turnWindow" not in branch_safe
+    assert {turn["laneId"] for turn in branch_safe["turns"]} == {
+        "main", "branch-safe"
+    }
+    client.command(
+        "artifact.delete",
+        {"artifact_id": artifact_id, "deleted_at": 3},
+        f"delete-{artifact_id}",
+    )
+
+
 def test_conversation_delete_is_hidden_and_restore_rebuilds_settled_authority(
     conversation_sync_db,
 ):
@@ -507,7 +814,7 @@ def test_v3_create_retry_and_snapshot_share_one_authority(
     first = first_response.get_json()
     assert first["ok"] is True
     assert first["conversationId"] == "conv-sync-a"
-    assert first["turn"]["status"] == "running"
+    assert first["turn"]["status"] == "pending"
 
     retry = flask_client.post(
         "/api/v3/conversations/conv-sync-a/turns", json=body).get_json()
@@ -520,6 +827,9 @@ def test_v3_create_retry_and_snapshot_share_one_authority(
     assert response.status_code == 200
     snapshot = response.get_json()
     assert snapshot["contract"] == "tofu.conversation-sync.snapshot/v1"
+    assert snapshot["scope"] == {
+        "kind": "conversation", "ownerId": 1, "threadId": "conv-sync-a",
+    }
     assert snapshot["conversationId"] == "conv-sync-a"
     assert isinstance(snapshot["cursor"], str) and snapshot["cursor"]
     assert snapshot["syncSeq"] >= 1
@@ -590,6 +900,205 @@ def test_v3_rejects_schema_drift_and_cross_conversation_cursor(
         },
     )
     assert invalid_stream_generation.status_code == 400
+
+    invalid_segment_payload = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync",
+        query_string={"segmentPayload": "compact"},
+    )
+    assert invalid_segment_payload.status_code == 400
+    assert invalid_segment_payload.get_json()["error"] == (
+        "Invalid conversation segment payload"
+    )
+
+    duplicate_segment_payload = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync?segmentPayload=refs&segmentPayload=full"
+    )
+    assert duplicate_segment_payload.status_code == 400
+
+    invalid_turn_window = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync",
+        query_string={"turnWindow": "tail-unbounded"},
+    )
+    assert invalid_turn_window.status_code == 400
+    assert invalid_turn_window.get_json()["error"] == (
+        "Invalid conversation snapshot turn window"
+    )
+
+    duplicate_turn_window = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync?turnWindow=tail-96&turnWindow=full"
+    )
+    assert duplicate_turn_window.status_code == 400
+
+    invalid_artifact_hint = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync",
+        query_string={"artifactHint": "metadata"},
+    )
+    assert invalid_artifact_hint.status_code == 400
+    assert invalid_artifact_hint.get_json()["error"] == (
+        "Invalid conversation snapshot artifact hint"
+    )
+
+    duplicate_artifact_hint = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync?"
+        "artifactHint=has-any&artifactHint=has-any"
+    )
+    assert duplicate_artifact_hint.status_code == 400
+
+    reference_snapshot = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync",
+        query_string={"segmentPayload": "refs"},
+    )
+    assert reference_snapshot.status_code == 200
+    reference_payload = reference_snapshot.get_json()
+    assert reference_payload["conversationId"] == "conv-sync-a"
+    assert "hasArtifacts" not in reference_payload
+
+    bounded_snapshot = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync",
+        query_string={
+            "segmentPayload": "refs",
+            "turnWindow": "tail-96",
+            "artifactHint": "has-any",
+        },
+    )
+    assert bounded_snapshot.status_code == 200
+    assert bounded_snapshot.get_json()["turnWindow"] == {
+        "laneId": "main",
+        "nextBeforeOrdinal": None,
+        "hasMore": False,
+        "totalTurns": 0,
+    }
+    assert bounded_snapshot.get_json()["hasArtifacts"] is False
+
+    history_page = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/turns/history",
+        query_string={
+            "laneId": "main",
+            "syncSeq": reference_payload["syncSeq"],
+            "limit": 1,
+        },
+    )
+    assert history_page.status_code == 200
+    assert history_page.get_json()["contract"] == (
+        "tofu.conversation-sync.turn-page/v1"
+    )
+
+    missing_history_lane = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/turns/history",
+    )
+    assert missing_history_lane.status_code == 400
+    oversized_history_page = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/turns/history",
+        query_string={
+            "laneId": "main",
+            "syncSeq": reference_payload["syncSeq"],
+            "limit": 257,
+        },
+    )
+    assert oversized_history_page.status_code == 400
+    duplicate_history_cursor = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/turns/history"
+        f"?laneId=main&syncSeq={reference_payload['syncSeq']}"
+        "&beforeOrdinal=2&beforeOrdinal=1",
+    )
+    assert duplicate_history_cursor.status_code == 400
+    stale_history_page = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/turns/history",
+        query_string={
+            "laneId": "main",
+            "syncSeq": reference_payload["syncSeq"] + 1,
+            "limit": 1,
+        },
+    )
+    assert stale_history_page.status_code == 409
+    assert stale_history_page.get_json()["error"] == "history_page_stale"
+
+
+def test_refs_snapshot_serves_legacy_turn_images_lazily_and_immutably(
+    flask_client, conversation_sync_db,
+):
+    import base64
+
+    raw = b"\x89PNG\r\n\x1a\n" + (b"legacy-image" * 100)
+    encoded = base64.b64encode(raw).decode("ascii")
+    conversation_sync_db.command(
+        "turn.append_settled",
+        {
+            "conversation_id": "conv-sync-a",
+            "user_id": 1,
+            "command_id": "legacy-turn-image",
+            "actor": "assistant",
+            "kind": "fixture",
+            "projection": {
+                "content": "historical image",
+                "images": [{
+                    "base64": encoded,
+                    "preview": f"data:image/png;base64,{encoded}",
+                    "mediaType": "image/png",
+                }],
+            },
+            "created_at": 2,
+        },
+        "legacy-turn-image",
+    )
+    turn = conversation_sync_db.query(
+        "turn.list",
+        {"conversation_id": "conv-sync-a", "user_id": 1},
+    )[0]
+
+    full = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync",
+    ).get_json()
+    assert full["turns"][0]["projection"]["images"][0]["base64"] == encoded
+
+    refs = flask_client.get(
+        "/api/v3/conversations/conv-sync-a/sync",
+        query_string={"segmentPayload": "refs"},
+    ).get_json()
+    image = refs["turns"][0]["projection"]["images"][0]
+    assert "base64" not in image
+    assert (
+        f"/turns/{turn['turnId']}/images/0"
+        f"?projectionRevision={turn['projectionRevision']}"
+    ) in image["preview"]
+    owner_scope = image["preview"].split("ownerScope=", 1)[1]
+
+    loaded = flask_client.get(image["preview"])
+
+    assert loaded.status_code == 200
+    assert loaded.get_data() == raw
+    assert loaded.headers["Content-Type"].startswith("image/png")
+    assert loaded.headers["Cache-Control"] == (
+        "private, max-age=31536000, immutable"
+    )
+    assert loaded.headers["X-Content-Type-Options"] == "nosniff"
+    assert loaded.headers["ETag"]
+
+    not_modified = flask_client.get(
+        image["preview"],
+        headers={"If-None-Match": loaded.headers["ETag"]},
+    )
+    assert not_modified.status_code == 304
+    assert not_modified.get_data() == b""
+
+    wrong_owner_scope = image["preview"][:-1] + (
+        "0" if image["preview"][-1] != "0" else "1"
+    )
+    assert flask_client.get(wrong_owner_scope).status_code == 404
+
+    missing_fence = flask_client.get(image["preview"].split("?", 1)[0])
+    assert missing_fence.status_code == 400
+    stale = flask_client.get(
+        image["preview"].split("?", 1)[0],
+        query_string={
+            "projectionRevision": turn["projectionRevision"] + 1,
+            "ownerScope": owner_scope,
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.get_json()["currentProjectionRevision"] == (
+        turn["projectionRevision"]
+    )
 
 
 def test_v3_stream_capacity_stops_native_reconnect_without_leaking_subscription(
@@ -831,6 +1340,8 @@ def test_browser_has_one_generated_sync_owner_and_no_v2_fallback():
     )
 
     assert "/api/v3/conversations/" in generated
+    assert "turnImageUrl(" in generated
+    assert "projectionRevision=${encodeURIComponent" in generated
     assert "/api/v2/conversations/" not in generated
     assert "Api.turnsV2" not in app_runtime
     assert "/api/v2/conversations/" not in app_runtime
@@ -847,3 +1358,29 @@ def test_browser_has_one_generated_sync_owner_and_no_v2_fallback():
     assert "invalidateConversation" in invalidation_handler
     assert "hydrate" not in invalidation_handler
     assert "dispatch" not in invalidation_handler
+
+
+def test_browser_does_not_consume_server_only_snapshot_evidence_fields():
+    authored_roots = (
+        ROOT / "frontend/src/core",
+        ROOT / "frontend/src/conversation",
+        ROOT / "frontend/src/runtime/sections",
+    )
+    server_only_fields = (
+        "_responsesItems",
+        "_anthropicContentBlocks",
+        "_codex_cache",
+        "_network_route",
+        "_stream_state",
+        "_transport_bytes_received",
+        "pricingSnapshot",
+    )
+    consumers = []
+    for authored_root in authored_roots:
+        for path in authored_root.rglob("*"):
+            if path.suffix not in {".ts", ".js"}:
+                continue
+            source = path.read_text(encoding="utf-8")
+            if any(field in source for field in server_only_fields):
+                consumers.append(path.relative_to(ROOT).as_posix())
+    assert consumers == []

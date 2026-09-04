@@ -3,9 +3,9 @@
 Single source of truth (2026-06-24): this is the ONE place per-token cost
 arithmetic happens. Both surfaces delegate here:
 
-  * **Display** — the headless ``/api/v1/messages/cost`` endpoint + the SSE
-    done-event / persisted ``cost`` stamps; the JS ``calcCostCny`` is a thin
-    fetch wrapper to that endpoint (it does NO client-side pricing math).
+  * **Display** — the headless single/batch message-cost endpoints + the SSE
+    done-event / persisted ``cost`` stamps; the JS ``calcCostCny`` only batches
+    missing historical projections (it does NO client-side pricing math).
   * **Billing** — ``lib/billing/cost.compute_request_cost`` calls
     ``compute_cost`` and converts the per-component USD sub-costs
     (``inputCostUsd`` / ``outputCostUsd`` / ``cacheWriteCostUsd`` /
@@ -39,6 +39,10 @@ Public API
       Returns ``{costUsd, costCny, inputTokens, outputTokens, ...}`` —
       same shape as the JS ``calcCostCny`` output. ``None`` when there
       is nothing to charge for (zeros across the board).
+
+  compute_api_rounds_cost(api_rounds, ...) -> dict | None
+      Prices each request with its own model/provider/tier, then folds the
+      normalized money/token components for a turn-level display total.
 """
 
 from __future__ import annotations
@@ -58,7 +62,7 @@ logger = get_logger(__name__)
 # so ``a or b`` and ``b or a`` are equivalent — the fallback order is
 # immaterial. This helper is DELIBERATELY just the key aliasing: it does NOT
 # apply the Anthropic-vs-OpenAI cache-token convention (`inp <= cw+cr`), which
-# stays where the arithmetic lives (``compute_cost`` / ``cost_estimator``).
+# stays where the arithmetic lives (``compute_cost``).
 #
 # Key aliases (OpenAI ⇄ Anthropic):
 #   input   : prompt_tokens              ⇄ input_tokens
@@ -329,7 +333,20 @@ def split_input_tokens(usage: Optional[dict]) -> tuple[int, int]:
         return _anthropic_residual_input(usage, inp), \
             _anthropic_residual_input(usage, inp) + cw + cr
     # OpenAI-compat: prompt_tokens is the total; cache is a subset of it.
-    return max(0, inp - cw - cr), inp
+    uncached = max(0, inp - cw - cr)
+    total = inp
+    # A provider that reports cache tokens WITHOUT any prompt-token field
+    # (``prompt_tokens`` / ``input_tokens`` both absent or 0 — e.g. the
+    # Kimi/sankuai gateway reports the auto-cache hit in ``cached_tokens`` and
+    # omits the prompt total) would otherwise collapse ``total`` to 0 while
+    # ``cache_read`` is tens of thousands — the frontend then renders the
+    # contradictory "total input 0 · cache read 39.2k". The total prompt can
+    # never be smaller than the cache tokens it read/wrote, so fall back to
+    # that sum as an honest lower bound (uncached stays 0, which is all we can
+    # know when the provider hid the prompt total).
+    if total == 0:
+        total = cw + cr
+    return uncached, total
 
 
 def synthesize_usage(*, input_tokens: int = 0, output_tokens: int = 0,
@@ -427,6 +444,8 @@ def compute_cost(
     usage: Optional[dict],
     model_id: str = '',
     provider_id: Optional[str] = None,
+    *,
+    at: Optional[float] = None,
 ) -> Optional[dict]:
     """Compute USD + CNY cost from a usage dict.
 
@@ -460,8 +479,12 @@ def compute_cost(
 
     # One resolver call selects ONE context tier from the COMPLETE prompt.
     # Input/output/cache read/cache write all consume the resulting rates.
-    mp = lookup_pricing(model_id, provider_id,
-                        prompt_tokens=total_input) if model_id else None
+    mp = lookup_pricing(
+        model_id,
+        provider_id,
+        at=at,
+        prompt_tokens=total_input,
+    ) if model_id else None
     peak_mul = None
     if mp:
         base_in = float(mp.get('input') or 0)
@@ -555,6 +578,86 @@ def compute_cost(
     }
 
 
-__all__ = ['compute_cost', 'normalize_usage', 'canonicalize_usage_cache_keys',
+def compute_api_rounds_cost(
+    api_rounds,
+    *,
+    fallback_model_id: str = '',
+    fallback_provider_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Sum an API-round ledger without flattening model/pricing identity.
+
+    A turn may contain main-model, fallback-model, and compaction-model calls.
+    Merging their usage first and pricing the result under the final model is
+    mathematically wrong even when the token totals are exact. This helper
+    prices every round under its own model/provider/tier, then folds only the
+    resulting money and normalized token components for the top-level display.
+    It does not mutate the round ledger.
+    """
+    costs: list[dict] = []
+    models: set[str] = set()
+    providers: set[str] = set()
+    sources: set[str] = set()
+    for round_entry in api_rounds or ():
+        if not isinstance(round_entry, dict):
+            continue
+        usage = round_entry.get('usage')
+        if not isinstance(usage, dict) or not usage:
+            continue
+        model = str(round_entry.get('model') or fallback_model_id or '')
+        provider = (round_entry.get('provider_id')
+                    or round_entry.get('providerId')
+                    or fallback_provider_id)
+        cost = compute_cost(
+            usage, model_id=model, provider_id=provider)
+        if not cost:
+            continue
+        costs.append(cost)
+        if model:
+            models.add(model)
+        if provider:
+            providers.add(str(provider))
+        if cost.get('pricingSource'):
+            sources.add(str(cost['pricingSource']))
+    if not costs:
+        return None
+
+    token_keys = (
+        'inputTokens', 'outputTokens', 'totalInputTokens',
+        'cacheWriteTokens', 'cacheReadTokens', 'thinkingTokens',
+    )
+    usd_component_keys = (
+        'inputCostUsd', 'outputCostUsd',
+        'cacheWriteCostUsd', 'cacheReadCostUsd',
+    )
+    cny_component_keys = (
+        'inputCostCny', 'outputCostCny',
+        'cacheWriteCostCny', 'cacheReadCostCny',
+    )
+
+    def total(key: str) -> float:
+        return sum(float(cost.get(key) or 0.0) for cost in costs)
+
+    aggregate = {
+        'costUsd': _round(sum(total(key) for key in usd_component_keys)),
+        'costCny': _round(sum(total(key) for key in cny_component_keys)),
+        'pricingSource': 'api_round_aggregate',
+        'pricingSnapshot': {
+            'kind': 'apiRoundAggregate',
+            'rounds': len(costs),
+            'models': sorted(models),
+            'providers': sorted(providers),
+            'sources': sorted(sources),
+        },
+        **{key: int(total(key)) for key in token_keys},
+        **{key: _round(total(key), 9) for key in usd_component_keys},
+        **{key: _round(total(key), 6) for key in cny_component_keys},
+        'cacheSavingsUsd': _round(total('cacheSavingsUsd'), 6),
+        'cacheSavingsCny': _round(total('cacheSavingsCny'), 6),
+    }
+    return aggregate
+
+
+__all__ = ['compute_cost', 'compute_api_rounds_cost',
+           'normalize_usage', 'canonicalize_usage_cache_keys',
            'split_input_tokens', 'usage_cache_convention', 'synthesize_usage',
            'merge_usage_totals']

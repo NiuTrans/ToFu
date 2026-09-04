@@ -39,8 +39,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sys
+import threading
+import time
+from dataclasses import replace
+from queue import Full
 
 import pytest
 
@@ -56,7 +61,12 @@ TEST_OWNER_USER_ID = 1
 @pytest.fixture(autouse=True)
 def _no_real_webhook_dns(monkeypatch):
     """Delivery-shape tests mock transport, so keep DNS off the test host."""
+    wh._reset_subscription_cache()
+    with wh._DROP_LOCK:
+        wh._DROP_COUNTS.clear()
     monkeypatch.setattr(wh, '_validate_webhook_url', lambda _url: None)
+    yield
+    wh._reset_subscription_cache()
 
 
 def _sub(**over):
@@ -214,7 +224,7 @@ def test_event_type_filter_excludes_unlisted_types(subs, queued):
     _fanout('chat', 't1', {'type': 'phase'})
     assert queued == [], 'an unsubscribed event type was delivered'
     _fanout('chat', 't1', {'type': 'error'})
-    assert [i['payload']['type'] for i in queued] == ['error']
+    assert [json.loads(i['event_json'])['type'] for i in queued] == ['error']
 
 
 def test_empty_event_types_means_all_types(subs, queued):
@@ -256,9 +266,9 @@ def test_enqueued_item_carries_the_delivery_context(subs, queued):
     item = queued[0]
     assert item['channel'] == 'chat'
     assert item['task_id'] == 'task-9'
-    assert item['payload'] == {
-        'type': 'done', 'x': 1, '_ownerUserId': str(TEST_OWNER_USER_ID),
-    }
+    assert json.loads(item['event_json']) == {'type': 'done', 'x': 1}
+    assert 'payload' not in item
+    assert item['_retained_bytes'] >= len(item['event_json'].encode('utf-8'))
     assert item['attempt'] == 0
     assert isinstance(item['ts'], float)
 
@@ -342,6 +352,31 @@ def test_transport_exception_is_a_failure_not_a_crash(monkeypatch):
                         'payload': {}, 'ts': 1.0, 'attempt': 0}) is False
 
 
+def test_delivery_failure_logs_redacted_url_and_error(monkeypatch, caplog):
+    sensitive_url = (
+        'https://user:password@example.invalid/private/hook?token=bearer')
+
+    def boom(*_args, **_kwargs):
+        raise OSError(f'failed to reach {sensitive_url}')
+
+    monkeypatch.setattr(wh, 'http_post', boom)
+    with caplog.at_level(logging.WARNING, logger='routes.api_v1.webhooks'):
+        delivered = wh._deliver({
+            'sub': _sub(url=sensitive_url),
+            'channel': 'c',
+            'task_id': 't',
+            'payload': {},
+            'ts': 1.0,
+            'attempt': 0,
+        })
+
+    assert delivered is False
+    assert 'https://example.invalid/…' in caplog.text
+    assert 'password' not in caplog.text
+    assert 'token=bearer' not in caplog.text
+    assert '/private/hook' not in caplog.text
+
+
 @pytest.mark.parametrize('status', [200, 201, 202, 204, 299])
 def test_any_2xx_counts_as_delivered(monkeypatch, status):
     class _Resp:
@@ -385,13 +420,245 @@ def test_queue_full_is_swallowed_so_push_keeps_working(subs, monkeypatch):
 
 def test_retry_schedule_is_bounded_and_uses_no_timer_threads():
     """A failed endpoint consumes heap entries, never one OS thread per retry."""
-    import itertools
-    delayed = []
-    item = {'sub': _sub(), 'attempt': 0}
-    assert wh._schedule_retry(delayed, itertools.count(), item, now=10.0)
+    delayed = wh._BoundedRetryHeap(
+        capacity=2,
+        byte_capacity=4_096,
+        max_attempts=5,
+    )
+    item = {'sub': _sub(), 'attempt': 0, '_retained_bytes': 1_024}
+    assert wh._schedule_retry(delayed, item, now=10.0)
     assert len(delayed) == 1
-    assert delayed[0][0] == 12.0
+    assert delayed.next_ready_at() == 12.0
+    assert delayed.retained_bytes == 1_024
     assert item['attempt'] == 1
+
+    assert delayed.pop_ready(11.0) is None
+    assert delayed.pop_ready(12.0) is item
+    assert delayed.retained_bytes == 0
+
+
+def test_retry_heap_rejects_before_retaining_excess_bytes():
+    delayed = wh._BoundedRetryHeap(
+        capacity=8,
+        byte_capacity=1_500,
+        max_attempts=5,
+    )
+    first = {'attempt': 0, '_retained_bytes': 1_000}
+    second = {'attempt': 0, '_retained_bytes': 1_000}
+
+    assert wh._schedule_retry(delayed, first, now=1.0) is True
+    assert wh._schedule_retry(delayed, second, now=1.0) is False
+    assert len(delayed) == 1
+    assert delayed.retained_bytes == 1_000
+
+
+def test_subscription_failure_gate_defers_siblings_without_spending_attempts():
+    gate = wh._SubscriptionFailureGate(capacity=2)
+    delayed = wh._BoundedRetryHeap(
+        capacity=4,
+        byte_capacity=8_192,
+        max_attempts=5,
+    )
+    first = {'attempt': 0, '_retained_bytes': 1_024}
+    sibling = {'attempt': 0, '_retained_bytes': 1_024}
+
+    retry_at = gate.record_retryable_failure('wh_down', 10.0)
+    assert retry_at == 12.0
+    assert gate.blocked_until('wh_down', 10.5) == 12.0
+    assert delayed.schedule(
+        first,
+        now=10.0,
+        ready_at=retry_at,
+    )
+    assert delayed.schedule(
+        sibling,
+        now=10.5,
+        ready_at=retry_at,
+        increment_attempt=False,
+    )
+
+    assert first['attempt'] == 1
+    assert sibling['attempt'] == 0
+    assert delayed.pop_ready(11.9) is None
+    assert delayed.pop_ready(12.0) is first
+    assert delayed.pop_ready(12.0) is sibling
+
+
+def test_subscription_failure_gate_is_finite_and_success_clears_it():
+    gate = wh._SubscriptionFailureGate(capacity=2)
+    gate.record_retryable_failure('wh_oldest', 0.0)
+    gate.record_retryable_failure('wh_middle', 0.0)
+    gate.record_retryable_failure('wh_newest', 0.0)
+
+    assert gate.blocked_until('wh_oldest', 0.5) is None
+    assert gate.blocked_until('wh_middle', 0.5) == 2.0
+    gate.clear('wh_middle')
+    assert gate.blocked_until('wh_middle', 0.5) is None
+
+
+def test_worker_transient_failure_gates_sibling_http_attempts(monkeypatch):
+    delivery_queue = wh._ByteBoundedDeliveryQueue(
+        capacity=4,
+        byte_capacity=16_384,
+    )
+    stop = threading.Event()
+    items = [
+        {
+            'sub': _sub(id='wh_down'),
+            'attempt': 0,
+            '_retained_bytes': 1_024,
+        }
+        for _ in range(3)
+    ]
+    for item in items:
+        delivery_queue.put_nowait(item)
+    calls = []
+
+    def fail_delivery(item):
+        calls.append(item)
+        item['_last_status'] = None
+        return False
+
+    monkeypatch.setattr(wh, '_QUEUE', delivery_queue)
+    monkeypatch.setattr(wh, '_WORKER_STOP', stop)
+    monkeypatch.setattr(wh, '_subscription_is_active', lambda _sub: True)
+    monkeypatch.setattr(wh, '_deliver', fail_delivery)
+    worker = threading.Thread(target=wh._worker_loop)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 2
+        while delivery_queue.qsize() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert delivery_queue.qsize() == 0
+        assert calls == [items[0]]
+        assert [item['attempt'] for item in items] == [1, 0, 0]
+    finally:
+        stop.set()
+        delivery_queue.put_nowait(None)
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+
+
+def test_delivery_queue_releases_byte_budget_when_item_is_claimed():
+    delivery_queue = wh._ByteBoundedDeliveryQueue(
+        capacity=4,
+        byte_capacity=1_500,
+    )
+    first = {'_retained_bytes': 1_000}
+    delivery_queue.put_nowait(first)
+    with pytest.raises(Full):
+        delivery_queue.put_nowait({'_retained_bytes': 1_000})
+
+    assert delivery_queue.retained_bytes == 1_000
+    assert delivery_queue.get_nowait() is first
+    assert delivery_queue.retained_bytes == 0
+    delivery_queue.task_done()
+
+
+def test_subscription_snapshot_amortizes_burst_reads(monkeypatch):
+    calls = []
+    stored = [_sub()]
+
+    def load():
+        calls.append('load')
+        return list(stored)
+
+    monkeypatch.setattr(wh, '_load', load)
+    first = wh._subscription_snapshot()
+    second = wh._subscription_snapshot()
+
+    assert first == second
+    assert len(first) == 1
+    assert calls == ['load']
+
+
+def test_local_save_publishes_subscription_cache_immediately(monkeypatch):
+    monkeypatch.setattr(wh, 'update_json_atomic', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        wh,
+        '_load',
+        lambda: pytest.fail('fresh local save should not reread storage'),
+    )
+    replacement = _sub(id='wh_new')
+
+    wh._save([replacement])
+
+    assert [sub['id'] for sub in wh._subscription_snapshot()] == ['wh_new']
+
+
+def test_concurrent_subscription_appends_do_not_lose_updates(
+    monkeypatch,
+    tmp_path,
+):
+    store_path = tmp_path / 'webhooks.json'
+    monkeypatch.setattr(wh, '_STORE', str(store_path))
+    barrier = threading.Barrier(3)
+    results = []
+
+    def append(index):
+        barrier.wait(timeout=2)
+        results.append(wh._append_subscription(
+            _sub(id=f'wh_{index}', owner_user_id=str(index))))
+
+    workers = [threading.Thread(target=append, args=(index,)) for index in (1, 2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait(timeout=2)
+    for worker in workers:
+        worker.join(timeout=2)
+
+    stored = json.loads(store_path.read_text(encoding='utf-8'))
+    assert results == ['', '']
+    assert {sub['id'] for sub in stored['subs']} == {'wh_1', 'wh_2'}
+
+
+def test_subscription_capacity_is_checked_inside_atomic_update(
+    monkeypatch,
+    tmp_path,
+):
+    store_path = tmp_path / 'webhooks.json'
+    monkeypatch.setattr(wh, '_STORE', str(store_path))
+    monkeypatch.setattr(
+        wh,
+        '_WEBHOOK_BUDGET',
+        replace(
+            wh._WEBHOOK_BUDGET,
+            subscription_capacity=2,
+            owner_subscription_capacity=1,
+        ),
+    )
+
+    assert wh._append_subscription(_sub(id='wh_a', owner_user_id='1')) == ''
+    assert wh._append_subscription(_sub(id='wh_b', owner_user_id='1')) == 'owner'
+    assert wh._append_subscription(_sub(id='wh_c', owner_user_id='2')) == ''
+    assert wh._append_subscription(_sub(id='wh_d', owner_user_id='3')) == 'process'
+
+    stored = json.loads(store_path.read_text(encoding='utf-8'))
+    assert [sub['id'] for sub in stored['subs']] == ['wh_a', 'wh_c']
+
+
+def test_oversized_event_is_rejected_before_queue_residency(
+    subs,
+    queued,
+    monkeypatch,
+):
+    subs.append(_sub())
+    monkeypatch.setattr(
+        wh,
+        '_WEBHOOK_BUDGET',
+        type('Budget', (), {
+            **{
+                field: getattr(wh._WEBHOOK_BUDGET, field)
+                for field in wh._WEBHOOK_BUDGET.__dataclass_fields__
+            },
+            'event_max_bytes': 8,
+        })(),
+    )
+
+    _fanout('chat', 'task-large', {'type': 'delta', 'text': 'too large'})
+
+    assert queued == []
+    assert wh.webhook_runtime_snapshot()['drops']['event_too_large'] == 1
 
 
 def test_permanent_4xx_is_not_retryable_but_transient_failures_are():

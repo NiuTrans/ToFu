@@ -24,21 +24,20 @@ Routes:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from quart import Blueprint
 
 from lib.orchestration.application_services import (
     OrchestrationApplicationServices,
 )
-from lib.orchestration.authoring_service import OrchestrationAuthoringService
-from lib.orchestration.definition_service import (
-    OrchestrationDefinitionService,
-)
-from lib.orchestration.run_service import OrchestrationRunService
-from lib.orchestration.sidecar_run_store import SidecarOrchestrationRunStore
-from lib.orchestration.human_gate_service import (
-    OrchestrationHumanGateService,
-)
 from lib.agent_core.task_runtime import TaskRuntime
+
+if TYPE_CHECKING:
+    from lib.orchestration.authoring_service import OrchestrationAuthoringService
+    from lib.orchestration.definition_service import OrchestrationDefinitionService
+    from lib.orchestration.human_gate_service import OrchestrationHumanGateService
+    from lib.orchestration.run_service import OrchestrationRunService
 
 from .orchestration_definition_routes import (
     register_orchestration_definition_routes,
@@ -62,6 +61,8 @@ orchestration_run_runtime = TaskRuntime('orchestration-run', ttl=3600,
 
 
 def _definitions() -> OrchestrationDefinitionService:
+    from lib.orchestration.definition_service import OrchestrationDefinitionService
+
     ctx = current_auth()
     if ctx is None or ctx.owner_user_id is None:
         raise RuntimeError('orchestration request has no repository owner')
@@ -71,6 +72,9 @@ def _definitions() -> OrchestrationDefinitionService:
 
 def _run_instances() -> OrchestrationRunService:
     """Construct the framework-free durable-run application boundary."""
+    from lib.orchestration.run_service import OrchestrationRunService
+    from lib.orchestration.sidecar_run_store import SidecarOrchestrationRunStore
+
     ctx = current_auth()
     if ctx is None or ctx.owner_user_id is None:
         raise RuntimeError('orchestration request has no repository owner')
@@ -82,11 +86,15 @@ def _run_instances() -> OrchestrationRunService:
 
 def _authoring() -> OrchestrationAuthoringService:
     """Construct the stateless authoring application boundary."""
+    from lib.orchestration.authoring_service import OrchestrationAuthoringService
+
     return OrchestrationAuthoringService()
 
 
 def _human_gates() -> OrchestrationHumanGateService:
     """Compose the shared chat/orchestration gate-resolution boundary."""
+    from lib.orchestration.human_gate_service import OrchestrationHumanGateService
+
     return OrchestrationHumanGateService()
 
 

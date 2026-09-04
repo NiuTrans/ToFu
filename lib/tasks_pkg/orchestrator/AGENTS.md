@@ -18,9 +18,10 @@ their separate owners.
   side effects.
 - Tool calls flow through the unified gateway; child agents and human guidance
   use declared ports. Never call a domain private implementation directly.
-- Propagate disconnect/cancellation through queued model slots, streams, tools,
-  child agents, persistence, and post-loop hooks while preserving recoverable
-  state.
+- Propagate explicit owner cancellation through queued model slots, streams,
+  tools, child agents, persistence, and post-loop hooks while preserving
+  recoverable state. HTTP/SSE/push observer loss does not own cancellation of
+  an already-started provider dispatch.
 - Bound rounds, tool batches, child work, server messages, pending events, and
   finalization time. Helper extraction must not create shadow state.
 

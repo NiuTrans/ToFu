@@ -1,12 +1,13 @@
 """routes/api_v1/uploads.py — Image-generation + VLM-task JSON routes.
 
 This blueprint defines ``api_v1_uploads_bp``. The actual handlers live
-in :mod:`routes.upload`, which imports this blueprint and registers 4
-of its 9 routes here:
+in :mod:`routes.upload`, which imports this blueprint and registers 5
+of its 10 routes here:
 
   POST /api/v1/images/generate         — text-to-image generation
   GET  /api/v1/images/models           — available image models
   GET  /api/v1/pdf/vlm-parse/<task_id> — poll a VLM parse task
+  DELETE /api/v1/pdf/vlm-parse/<task_id> — cancel an owned VLM parse task
   GET  /api/v1/pdf/vlm-tasks           — list active VLM tasks
 
 The other 5 routes stay on ``upload_bp`` because they're multipart

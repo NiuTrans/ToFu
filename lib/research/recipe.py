@@ -1,4 +1,4 @@
-"""lib/research/recipe.py — direction → harvest → survey → ideate → evaluate.
+"""lib/research/recipe.py — checkpointed research generation and publication.
 
 The auto-research recipe's spine wires the three generative primitives
 (harvest / survey / ideate) and an independent LLM evaluation pass into the production stage graph
@@ -6,7 +6,7 @@ The auto-research recipe's spine wires the three generative primitives
 runs the whole chain with checkpointed crash-resume — and each stage stays
 independently callable.
 
-Stages:  harvest → survey → ideate → evaluate
+Stages:  harvest → survey → ideate → evaluate → publish
 
 This is the FOURTH capability on the production substrate (after motion-video /
 paper-podcast / longform-report). It deliberately owns NO lifecycle machinery:
@@ -34,6 +34,9 @@ carry real schema, not in-memory globals):
   * evaluate → independent rubric scores from two judges, with a third
       tiebreaker only on material disagreement. This replaces subjective
       manual usefulness scoring with versioned, costed experiment evidence.
+  * publish → one cheap, retryable terminal boundary that copies the validated
+      survey and final evaluated idea artifact into their durable repository.
+      Publication retries never re-run an upstream model stage.
 
 Every seam into R1–R3 is resolved through this module (``_harvest_batch`` /
 ``_build_survey`` / ``_generate_ideas`` / ``_search_arxiv``) so a test patches
@@ -44,10 +47,21 @@ wiring and crash-resume are provable with zero network and zero real LLM.
 from __future__ import annotations
 
 import os
+from itertools import islice
 
 from lib.identity import require_user_id
 from lib.log import get_logger
+from lib.paper.contracts import PAPER_TITLE_HINT_MAX_CHARS
 from lib.production.stages import Stage, run_stages
+from lib.research.contracts import (
+    DEFAULT_RESEARCH_HARVEST_PAPERS,
+    MAX_RESEARCH_SEED_PAPERS,
+    normalize_discovered_arxiv_ids,
+    normalize_research_harvest_count,
+    normalize_research_idea_count,
+    normalize_research_request,
+    normalize_research_seed_arxiv_ids,
+)
 
 logger = get_logger(__name__)
 
@@ -55,7 +69,7 @@ __all__ = ['build_research_from_direction', 'research_recipe_stages']
 
 #: How many arXiv papers to seed the harvest with when the caller gives no
 #: explicit id list (derived from the direction via search).
-_DEFAULT_HARVEST_N = 20
+_DEFAULT_HARVEST_N = DEFAULT_RESEARCH_HARVEST_PAPERS
 #: A harvest must land at least this many papers or the survey has nothing to
 #: fan in — the gate fails and the stage retries.
 _MIN_HARVEST_PAPERS = 3
@@ -71,11 +85,44 @@ def _search_arxiv(query, max_results=20):
     return search_arxiv(query, max_results=max_results)
 
 
+def _translate_direction_for_search(direction, *, abort_check=None):
+    """Return an English arXiv query while preserving the user's direction.
+
+    arXiv metadata is overwhelmingly English, whereas the research workbench
+    invites directions in the active UI language.  Translate only the
+    discovery alias; every downstream prompt and persisted identity continues
+    to use the original direction.
+    """
+    from lib.text_lang import guess_language
+
+    if guess_language(direction) not in ('zh', 'mixed'):
+        return direction, {}
+
+    from lib.translate import _build_translate_prompt, _translate_freetext
+
+    translated, usage = _translate_freetext(
+        direction,
+        _build_translate_prompt('English'),
+        chunk_label=':research-discovery',
+        source='',
+        target='English',
+        overall_deadline=45,
+        abort_check=abort_check,
+        max_429_attempts=1,
+        defer_on_shared_contention=True,
+    )
+    query = ' '.join(str(translated or '').split())
+    if not query:
+        raise RuntimeError('direction translation returned an empty query')
+    return query, usage or {}
+
+
 def _harvest_batch(arxiv_ids, *, folder_id, user_id, abort_check=None,
-                   on_progress=None):
+                   on_progress=None, titles_by_arxiv_id=None):
     from lib.paper.harvest import harvest_arxiv_batch
     return harvest_arxiv_batch(arxiv_ids, folder_id=folder_id, user_id=user_id,
-                               abort_check=abort_check, on_progress=on_progress)
+                               abort_check=abort_check, on_progress=on_progress,
+                               titles_by_arxiv_id=titles_by_arxiv_id)
 
 
 def _build_survey(direction, arxiv_ids, *, lang, user_id, folder_id, abort=None,
@@ -100,11 +147,13 @@ def _evaluate_result(direction, result, *, model=None, abort=None):
 
 
 def _persist_survey(
-    direction, lang, survey_md, open_gaps, usage=None, *, user_id: int,
+    direction, lang, survey_md, open_gaps, usage=None, *,
+    harvest_usage=None, user_id: int,
 ):
     from lib.research.persistence import persist_survey
     return persist_survey(
-        direction, lang, survey_md, open_gaps, usage=usage, user_id=user_id)
+        direction, lang, survey_md, open_gaps, usage=usage,
+        harvest_usage=harvest_usage, user_id=user_id)
 
 
 def _persist_ideate(direction, lang, artifact, *, user_id: int):
@@ -113,10 +162,13 @@ def _persist_ideate(direction, lang, artifact, *, user_id: int):
 
 
 def _aggregate_usage(survey_usage: dict, ideate_usage: dict,
-                     evaluate_usage: dict | None = None) -> dict:
+                     evaluate_usage: dict | None = None, *,
+                     harvest_usage: dict | None = None) -> dict:
     """Fold stage snapshots without reimplementing per-call token pricing."""
     from lib.research.telemetry import aggregate_research_usage
-    return aggregate_research_usage(survey_usage, ideate_usage, evaluate_usage)
+    return aggregate_research_usage(
+        survey_usage, ideate_usage, evaluate_usage,
+        harvest_usage=harvest_usage)
 
 
 # ── Stage: harvest ─────────────────────────────────────────────────────────
@@ -131,19 +183,62 @@ def _run_harvest(ctx: dict) -> dict:
     direction = ctx['direction']
     folder_id = ctx['folder_id']
     user_id = require_user_id(ctx.get('user_id'), context='research harvest stage')
-    seed = list(ctx.get('seed_arxiv_ids') or [])
+    seed = list(normalize_research_seed_arxiv_ids(
+        ctx.get('seed_arxiv_ids')))
+    titles_by_arxiv_id = {}
+    search_usage = {}
     if not seed:
-        n = ctx.get('harvest_n', _DEFAULT_HARVEST_N)
+        n = normalize_research_harvest_count(
+            ctx.get('harvest_n', _DEFAULT_HARVEST_N))
         try:
-            hits = _search_arxiv(direction, max_results=n) or []
-            seed = [h.get('arxiv_id') for h in hits if h.get('arxiv_id')]
+            if '_research_search_query' not in ctx:
+                query, raw_usage = _translate_direction_for_search(
+                    direction, abort_check=ctx.get('abort_check'))
+                from lib.research.telemetry import ResearchUsageMeter
+                meter = ResearchUsageMeter(
+                    'harvest', token_budget=8_000, dispatch_budget=1,
+                    repeat_limit=0)
+                if raw_usage:
+                    meter.record(raw_usage)
+                ctx['_research_search_query'] = query
+                ctx['_research_search_usage'] = (
+                    meter.snapshot() if raw_usage else {})
+                if query != direction:
+                    logger.info(
+                        '[Research:harvest] translated discovery query %.60s → %.80s',
+                        direction, query)
+            query = ctx['_research_search_query']
+            search_usage = ctx.get('_research_search_usage') or {}
+            hits = list(islice(
+                iter(_search_arxiv(query, max_results=n) or ()),
+                MAX_RESEARCH_SEED_PAPERS))
+            seed = list(normalize_discovered_arxiv_ids(
+                h.get('arxiv_id') for h in hits
+                if isinstance(h, dict) and h.get('arxiv_id')))
+            seed_set = set(seed)
+            from lib.paper.arxiv import normalize_arxiv_id
+            for hit in hits:
+                if not isinstance(hit, dict):
+                    continue
+                arxiv_id = normalize_arxiv_id(hit.get('arxiv_id'))
+                title = hit.get('title')
+                if (
+                    arxiv_id in seed_set
+                    and isinstance(title, str)
+                    and title.strip()
+                ):
+                    titles_by_arxiv_id.setdefault(
+                        arxiv_id,
+                        title.strip()[:PAPER_TITLE_HINT_MAX_CHARS],
+                    )
         except Exception as e:
             logger.warning('[Research:harvest] seed search failed for %.60s: %s',
                            direction, e)
             seed = []
     abort_check = ctx.get('abort_check')
     out = _harvest_batch(seed, folder_id=folder_id, user_id=user_id,
-                         abort_check=abort_check)
+                         abort_check=abort_check,
+                         titles_by_arxiv_id=titles_by_arxiv_id)
     # The ids actually in the shelf after this run (parsed this run OR already
     # cached) — this is what survey fans in.
     shelf_ids = [r['arxivId'] for r in (out.get('results') or [])
@@ -153,7 +248,7 @@ def _run_harvest(ctx: dict) -> dict:
                 out.get('cache_hits', 0), folder_id)
     return {'folder_id': folder_id, 'arxiv_ids': shelf_ids,
             'harvested': out.get('parsed', 0), 'cache_hits': out.get('cache_hits', 0),
-            'errors': out.get('errors', 0)}
+            'errors': out.get('errors', 0), 'usage': search_usage}
 
 
 def _gate_harvest(ctx: dict, art: dict) -> list:
@@ -187,13 +282,6 @@ def _run_survey(ctx: dict) -> dict:
            'inputs_used': res.get('inputs_used', 0),
            'citation_audit': res.get('citation_audit'),
            'usage': res.get('usage') or {}}
-    # Durable BEFORE the checkpoint: the task registry is in-memory with a TTL,
-    # so without this the survey vanishes ~2h after the run (and instantly on a
-    # restart). Never raises — a storage fault must not discard a finished
-    # survey (see lib/research/persistence.py).
-    _persist_survey(ctx['direction'], ctx.get('lang', 'en'), art['survey_md'],
-                    art['open_gaps'], art['usage'],
-                    user_id=int(ctx['user_id']))
     return art
 
 
@@ -228,7 +316,8 @@ def _run_ideate(ctx: dict) -> dict:
     """
     s = ctx['artifacts']['survey']
     user_id = require_user_id(ctx.get('user_id'), context='research ideate stage')
-    kwargs = dict(lang=ctx.get('lang', 'en'), n_ideas=ctx.get('n_ideas', 6),
+    kwargs = dict(lang=ctx.get('lang', 'en'),
+                  n_ideas=normalize_research_idea_count(ctx.get('n_ideas')),
                   user_id=user_id, abort=ctx.get('abort'))
     if ctx.get('emit') is not None:
         kwargs['on_tool_event'] = ctx['emit']
@@ -250,12 +339,6 @@ def _run_ideate(ctx: dict) -> dict:
         art['degraded'] = True
         art['degraded_reason'] = res.get('degraded_reason') or 'pipeline degraded'
         logger.error('[Research:ideate] DEGRADED — %s', art['degraded_reason'])
-    # Durable BEFORE the checkpoint. The rejection audit carried here is the
-    # calibration data for IDEATE_GATE_THRESHOLD, so losing it to a TTL sweep
-    # forfeits the ability to tune the gate from real runs.
-    _persist_ideate(
-        ctx['direction'], ctx.get('lang', 'en'), art,
-        user_id=int(ctx['user_id']))
     return art
 
 
@@ -311,20 +394,56 @@ def _run_evaluate(ctx: dict) -> dict:
             'usage': {}, 'tiebreaker_used': False,
         }
 
-    # The ideate row is the durable research-decision record. Upsert it again
-    # with the evaluation attached; this is idempotent and does not create a
-    # third schema/key family.
-    _persist_ideate(ctx['direction'], ctx.get('lang', 'en'), {
-        **ideate, 'evaluation': evaluation,
-    }, user_id=int(ctx['user_id']))
     return evaluation
+
+
+# ── Stage: publish ─────────────────────────────────────────────────────────
+
+def _run_publish(ctx: dict) -> dict:
+    """Publish the complete research artifact after every quality stage.
+
+    Expensive generation is already checkpointed at this boundary. A transient
+    Sidecar failure therefore retries only these idempotent writes; an
+    unconfirmed write can never be projected as a clean terminal success.
+    """
+    survey = ctx['artifacts']['survey']
+    ideate = ctx['artifacts']['ideate']
+    evaluation = ctx['artifacts']['evaluate']
+    user_id = require_user_id(
+        ctx.get('user_id'), context='research publication stage')
+    receipts = ctx.setdefault('_research_publication_receipts', {})
+
+    if not receipts.get('survey'):
+        # Historical checkpoints and isolated publication tests predate the
+        # optional discovery-translation usage snapshot.
+        harvest = ctx['artifacts'].get('harvest') or {}
+        survey_saved = _persist_survey(
+            ctx['direction'], ctx.get('lang', 'en'),
+            survey.get('survey_md') or '', survey.get('open_gaps') or {},
+            survey.get('usage') or {},
+            harvest_usage=harvest.get('usage') or {}, user_id=user_id)
+        if not survey_saved:
+            raise RuntimeError(
+                'research repository did not confirm survey publication')
+        receipts['survey'] = True
+
+    if not receipts.get('ideas'):
+        ideas_saved = _persist_ideate(
+            ctx['direction'], ctx.get('lang', 'en'), {
+                **ideate, 'evaluation': evaluation,
+            }, user_id=user_id)
+        if not ideas_saved:
+            raise RuntimeError(
+                'research repository did not confirm evaluated-ideas publication')
+        receipts['ideas'] = True
+
+    return {'confirmed': True, 'rows': 2}
 
 
 # ── Stage graph + runner ───────────────────────────────────────────────────
 
 def research_recipe_stages() -> list:
-    """The ordered research stage graph. Static (unlike longform) — four
-    fixed stages; the data-dependent fan-out lives INSIDE harvest/survey."""
+    """The ordered research graph; data-dependent fan-out stays inside stages."""
     return [
         Stage('harvest', _run_harvest, gate=_gate_harvest, retry=1),
         Stage('survey', _run_survey, gate=_gate_survey, retry=1,
@@ -332,6 +451,8 @@ def research_recipe_stages() -> list:
         Stage('ideate', _run_ideate, gate=_gate_ideate, retry=1,
               checkpoint_version='causal-mechanism-v2'),
         Stage('evaluate', _run_evaluate, checkpoint_version='llm-judge-v1'),
+        Stage('publish', _run_publish, retry=2,
+              checkpoint_version='research-artifacts-v1'),
     ]
 
 
@@ -340,12 +461,11 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
                                   seed_arxiv_ids=None, harvest_n: int = _DEFAULT_HARVEST_N,
                                   abort_event=None, emit=None,
                                   evaluation_model: str | None = None) -> dict:
-    """Run harvest → survey → ideate → evaluate for one direction.
+    """Run harvest → survey → ideate → evaluate → publish for one direction.
 
-    One pass over a static four-stage graph, checkpointed: a process killed
-    mid-graph resumes at the first unfinished stage (harvest papers already in
-    the shelf, and a survey/ideate artifact already committed, are never
-    redone).
+    One pass over a static five-stage graph, checkpointed: a process killed
+    mid-graph resumes at the first unfinished stage. Publication is terminal,
+    so storage retries never redo harvested papers or model work.
 
     Args:
         direction: the research direction (free text).
@@ -359,12 +479,16 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
     ``survey_md`` / ``open_gaps`` / ``folder_id`` folded in for the caller.
     """
     user_id = require_user_id(user_id, context='research recipe')
+    request = normalize_research_request(
+        direction, lang=lang, n_ideas=n_ideas,
+        seed_arxiv_ids=seed_arxiv_ids)
+    harvest_n = normalize_research_harvest_count(harvest_n)
     os.makedirs(workdir, exist_ok=True)
     folder_id = f'research_{os.path.basename(workdir.rstrip("/"))}'
     ctx = {
-        'direction': direction, 'workdir': workdir, 'lang': lang,
-        'user_id': user_id, 'n_ideas': n_ideas, 'folder_id': folder_id,
-        'seed_arxiv_ids': list(seed_arxiv_ids or []), 'harvest_n': harvest_n,
+        'direction': request.direction, 'workdir': workdir, 'lang': request.lang,
+        'user_id': user_id, 'n_ideas': request.n_ideas, 'folder_id': folder_id,
+        'seed_arxiv_ids': list(request.seed_arxiv_ids), 'harvest_n': harvest_n,
         'evaluation_model': evaluation_model,
         'abort_event': abort_event,
         'emit': emit,
@@ -381,7 +505,8 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
     harvest = artifacts.get('harvest') or {}
     evaluation = artifacts.get('evaluate') or {}
     out = {
-        'direction': direction, 'lang': lang, 'folder_id': folder_id,
+        'direction': request.direction, 'lang': request.lang,
+        'folder_id': folder_id,
         'accepted': ideate.get('accepted', []),
         'rejected': ideate.get('rejected', []),
         'threshold': ideate.get('threshold'),
@@ -395,7 +520,8 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
         'evaluation': evaluation,
         'usage': _aggregate_usage(survey.get('usage') or {},
                                   ideate.get('usage') or {},
-                                  evaluation.get('usage') or {}),
+                                  evaluation.get('usage') or {},
+                                  harvest_usage=harvest.get('usage') or {}),
     }
     if ideate.get('degraded'):
         out['degraded'] = True

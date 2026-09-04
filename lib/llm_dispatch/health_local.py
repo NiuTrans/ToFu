@@ -2,18 +2,15 @@
 
 Self-hosted vLLM / SGLang / Ollama boxes have no SLA — they restart, swap
 models, and die. This module owns the single local-endpoint monitor thread.
-For every provider tagged as a local endpoint it:
+For every owner-scoped v2 ProviderAccess tagged as local it:
 
-  1. Probes ``{endpoint}/models`` every ``HEALTH_INTERVAL`` seconds for each
-     URL in the provider's ``endpoints`` list (or the single ``base_url``
-     when no list is configured).
+  1. Probes each enabled local Connection every ``HEALTH_INTERVAL`` seconds.
   2. On failure → cools down only the slots whose ``base_url`` matches the
      dead endpoint, so a single sick node doesn't take the whole fleet
      offline.
-  3. On recovery, clears those slots' cooldowns and (if served-model
-     drift is detected) re-runs ``discover_models`` on the live endpoints,
-     unions the served-model sets, patches ``server_config.json``, and
-     rebuilds the dispatcher's slot pool.
+  3. On recovery, clears those slots' cooldowns and (for deterministic auto/
+     managed bundles) refreshes observed models through the same revision-CAS
+     registration service that created the ProviderAccess.
 
 Cloud providers are NOT polled — that would waste quota and leak hosts. The
 same cancellable loop also schedules the well-known-port discovery job in
@@ -21,6 +18,7 @@ same cancellable loop also schedules the well-known-port discovery job in
 """
 
 import os
+from dataclasses import dataclass
 import threading
 import time
 
@@ -28,6 +26,11 @@ import requests
 
 from lib.http_client import http_get
 from lib.log import audit_log, get_logger
+from lib.model_routing import (
+    ModelRoutingError,
+    OwnerBoundary,
+    upsert_local_provider,
+)
 from lib.proxy import (
     register_no_proxy_url,
 )
@@ -61,24 +64,88 @@ _thread_lock = threading.Lock()
 _success_streak: dict[tuple, int] = {}
 
 
-def _provider_endpoints(prov: dict) -> list:
-    """Return the normalized URL list for a provider (multi-endpoint aware)."""
-    raw = prov.get('endpoints') or []
-    urls = []
-    seen = set()
-    if isinstance(raw, list):
-        for u in raw:
-            if not isinstance(u, str):
-                continue
-            n = normalize_base_url(u.strip())
-            if n and n not in seen:
-                seen.add(n)
-                urls.append(n)
-    if not urls and prov.get('base_url'):
-        n = normalize_base_url(prov['base_url'])
-        if n:
-            urls.append(n)
-    return urls
+@dataclass(frozen=True, slots=True)
+class _LocalHealthTarget:
+    provider_id: str
+    display_name: str
+    endpoints: tuple[str, ...]
+    configured_model_ids: frozenset[str]
+
+
+def _local_health_targets(document: dict) -> list[_LocalHealthTarget]:
+    """Project only monitorable, credential-free local v2 resources."""
+    providers = {
+        row['provider_id']: row for row in document.get('providers', [])
+    }
+    accesses = {
+        row['provider_access_id']: row
+        for row in document.get('provider_accesses', [])
+        if row.get('enabled') is True
+    }
+    # Background probing must not resolve or retain secrets. A local-identity
+    # credential explicitly proves that its authorized Connections are safe to
+    # probe without an Authorization header.
+    credential_free_connections = {
+        connection_id
+        for row in document.get('credentials', [])
+        if row.get('enabled') is True and row.get('kind') == 'local_identity'
+        for connection_id in (row.get('authorization') or {}).get(
+            'connection_ids', [])
+    }
+    connections_by_access: dict[str, list[dict]] = {}
+    for row in document.get('connections', []):
+        access_id = row.get('provider_access_id')
+        if (
+            row.get('enabled') is True
+            and access_id in accesses
+            and row.get('connection_id') in credential_free_connections
+        ):
+            connections_by_access.setdefault(access_id, []).append(row)
+    offerings = {
+        row['offering_id']: row
+        for row in document.get('offerings', [])
+        if row.get('enabled') is True and not row.get('stale')
+    }
+    models_by_access: dict[str, set[str]] = {}
+    for deployment in document.get('deployments', []):
+        offering = offerings.get(deployment.get('offering_id'))
+        if offering is None:
+            continue
+        model_id = (
+            offering.get('pending_model_id')
+            if offering.get('identity_state') == 'pending_identity'
+            else (offering.get('model') or {}).get('model_id')
+        )
+        if model_id:
+            models_by_access.setdefault(
+                offering['provider_access_id'], set()).add(model_id)
+
+    targets: list[_LocalHealthTarget] = []
+    for access_id, rows in connections_by_access.items():
+        access = accesses[access_id]
+        provider = providers.get(access['provider_id'])
+        if provider is None:
+            continue
+        endpoints = tuple(sorted({
+            normalize_base_url(row['base_url'])
+            for row in rows
+            if is_local_endpoint(row['base_url'])
+            or is_raw_ip_host(row['base_url'])
+        }))
+        if not endpoints:
+            continue
+        if provider.get('brand') != 'local' and not all(
+            is_local_endpoint(endpoint) for endpoint in endpoints
+        ):
+            continue
+        targets.append(_LocalHealthTarget(
+            provider_id=provider['provider_id'],
+            display_name=(access.get('display_name') or provider['name']),
+            endpoints=endpoints,
+            configured_model_ids=frozenset(
+                models_by_access.get(access_id, set())),
+        ))
+    return sorted(targets, key=lambda target: target.provider_id)
 
 
 def _get_dispatcher():
@@ -134,7 +201,7 @@ def _ephemeral_slots_by_endpoint() -> dict:
     """Group live ephemeral/BYO slots by their (base_url, api_key).
 
     Ephemeral slots are injected straight into the dispatcher (not present
-    in server_config.json), so the config-driven provider sweep can't see
+    in the durable model-routing v2 authority), so the authority-driven sweep can't see
     them. Returns ``{base_url: api_key}`` for every slot whose provider_id
     is tagged ``ephemeral:…``. Only self-hosted / raw-IP endpoints are
     included — cloud BYO endpoints have their own SLA and polling them
@@ -233,52 +300,8 @@ def _check_ephemeral_endpoints() -> dict:
     return {'endpoints_ok': n_ok, 'cooldowns': n_cool}
 
 
-def _persist_provider_models(prov_id: str, models: list[dict],
-                             endpoint_models: dict | None = None,
-                             endpoints: list | None = None) -> bool:
-    """Update server_config.json with refreshed model state for one provider.
-
-    Persists the model list and — when given — the per-endpoint
-    served-model binding (``endpoint_models``) and the (possibly
-    /v1-normalized) endpoint URL list.
-
-    Uses ``update_json_atomic`` so this read-modify-write is serialised
-    against the other concurrent writers of this shared file. The provider
-    is re-found in the FRESH on-disk config under the lock, so a concurrent
-    Settings save that just added/removed a provider is not clobbered.
-    Returns True iff the provider was found and its models persisted.
-    """
-    try:
-        from lib import _SERVER_CONFIG_PATH
-        from lib.json_store import update_json_atomic
-
-        found = {'ok': False}
-
-        def _mutate(cfg):
-            if not isinstance(cfg, dict):
-                return None
-            for p in (cfg.get('providers') or []):
-                if p.get('id') == prov_id:
-                    p['models'] = models
-                    if endpoint_models is not None:
-                        p['endpoint_models'] = endpoint_models
-                    if endpoints is not None:
-                        p['endpoints'] = endpoints
-                        p['base_url'] = endpoints[0] if endpoints else p.get('base_url', '')
-                    found['ok'] = True
-                    return cfg
-            return None  # provider gone — no write
-
-        update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-        return found['ok']
-    except Exception as e:
-        logger.warning('[HealthLocal] Failed to persist models for %s: %s',
-                       prov_id, e, exc_info=True)
-        return False
-
-
 def _rebuild_dispatcher_slots():
-    """Re-create the slot pool from the (now-updated) server_config.json.
+    """Re-create the slot pool from the updated v2 authority.
 
     Cheaper than restarting the process — slot stats reset, but for a
     box that just came back up that's actually what we want.
@@ -360,211 +383,149 @@ def _check_endpoint(endpoint_url: str, api_key: str) -> dict:
             'effective_url': effective}
 
 
-def check_once() -> dict:
-    """Run one pass over all local providers. Returns a stats dict for testing."""
+def check_once(*, boundary: OwnerBoundary | None = None, repository=None) -> dict:
+    """Run one owner-scoped pass over credential-free local Connections."""
+    if boundary is None or repository is None:
+        from .autodiscover_local import _runtime_context
+
+        runtime_context = _runtime_context()
+        if runtime_context is None:
+            return {
+                'providers': 0, 'endpoints_ok': 0, 'cooldowns': 0,
+                'resynced': 0, 'owner_enumeration_required': True,
+            }
+        runtime_boundary, runtime_repository = runtime_context
+        boundary = boundary or runtime_boundary
+        repository = repository or runtime_repository
     try:
-        from lib import _load_server_config
-    except Exception as e:
-        logger.debug('[HealthLocal] Cannot load server config: %s', e)
-        return {'providers': 0, 'endpoints_ok': 0, 'cooldowns': 0, 'resynced': 0}
-
-    cfg = _load_server_config()
-    providers = cfg.get('providers') or []
-    locals_ = []
-    for p in providers:
-        if not p.get('enabled', True):
-            continue
-        if p.get('brand') == 'local':
-            locals_.append(p)
-            continue
-        # Legacy heuristic — pre-brand-tag local providers.
-        for url in _provider_endpoints(p):
-            if is_local_endpoint(url):
-                locals_.append(p)
-                break
-
-    if not locals_:
-        # No config-driven local providers, but ephemeral/BYO slots may
-        # still need health-checking — sweep them before returning.
-        eph = _check_ephemeral_endpoints()
-        return {'providers': 0,
-                'endpoints_ok': eph['endpoints_ok'],
-                'cooldowns': eph['cooldowns'], 'resynced': 0}
+        authority = repository.get(boundary)
+    except ModelRoutingError as exc:
+        logger.warning('[HealthLocal] Cannot load model-routing authority: %s', exc)
+        return {
+            'providers': 0, 'endpoints_ok': 0, 'cooldowns': 0,
+            'resynced': 0, 'authority_unavailable': True,
+        }
+    targets = (
+        _local_health_targets(authority.document)
+        if authority.revision > 0 else []
+    )
 
     n_endpoints_ok = 0
     n_cooldown = 0
     n_resynced = 0
     rebuilt = False
-
-    for prov in locals_:
-        prov_id = prov.get('id') or 'unknown'
-        endpoints = _provider_endpoints(prov)
-        if not endpoints:
-            continue
-
-        api_key = (prov.get('api_keys') or [''])[0]
-        configured_ids = {m.get('model_id') for m in (prov.get('models') or [])
-                          if m.get('model_id')}
-
-        live_endpoints = []
-        per_ep_served: dict = {}
-        effective_of: dict = {}
-        union_served: set = set()
-        any_ok = False
-
-        for endpoint in endpoints:
-            result = _check_endpoint(endpoint, api_key)
-            streak_key = (prov_id, endpoint)
-
+    for target in targets:
+        for endpoint in target.endpoints:
+            result = _check_endpoint(endpoint, '')
+            streak_key = (target.provider_id, endpoint)
             if not result['ok']:
                 _success_streak[streak_key] = 0
-                cooled = _cooldown_endpoint_slots(prov_id, endpoint, COOLDOWN_ON_DEAD)
+                cooled = _cooldown_endpoint_slots(
+                    target.provider_id, endpoint, COOLDOWN_ON_DEAD)
                 if cooled:
                     n_cooldown += cooled
-                    logger.warning('[HealthLocal] %s @ %s %s — cooled %d slot(s)',
-                                   prov_id, endpoint, result['status'], cooled)
-                    audit_log('local_endpoint_down', provider_id=prov_id,
-                              endpoint=endpoint, reason=result['status'])
+                    logger.warning(
+                        '[HealthLocal] %s @ %s %s — cooled %d slot(s)',
+                        target.provider_id, endpoint, result['status'], cooled)
+                    audit_log(
+                        'local_endpoint_down',
+                        provider_id=target.provider_id,
+                        endpoint=endpoint,
+                        reason=result['status'],
+                        owner_user_id=boundary.owner_user_id,
+                    )
                 continue
 
-            any_ok = True
             n_endpoints_ok += 1
-            ep_key = result.get('effective_url') or endpoint
-            effective_of[endpoint] = ep_key
-            live_endpoints.append(ep_key)
-            served = result['served_models']
-            per_ep_served[ep_key] = served
-            union_served |= served
-
-            cleared = _clear_endpoint_cooldowns(prov_id, endpoint)
+            effective = result.get('effective_url') or endpoint
+            served_ids = set(result['served_models'])
+            cleared = _clear_endpoint_cooldowns(target.provider_id, endpoint)
             if cleared:
-                logger.info('[HealthLocal] %s @ %s recovered — cleared %d cooldown(s)',
-                            prov_id, endpoint, cleared)
-                audit_log('local_endpoint_recovered', provider_id=prov_id,
-                          endpoint=endpoint)
+                logger.info(
+                    '[HealthLocal] %s @ %s recovered — cleared %d cooldown(s)',
+                    target.provider_id, endpoint, cleared)
+                audit_log(
+                    'local_endpoint_recovered',
+                    provider_id=target.provider_id,
+                    endpoint=endpoint,
+                    owner_user_id=boundary.owner_user_id,
+                )
             _success_streak[streak_key] = _success_streak.get(streak_key, 0) + 1
 
-        if not any_ok:
-            continue
-
-        # Trigger re-discovery when the configured-set drifts from the
-        # union of served sets, when per-endpoint PLACEMENT drifts from the
-        # persisted binding (a model moved boxes — union alone can't see
-        # that), or once every RESYNC_EVERY successful cycles.
-        old_binding = {}
-        for bk, bv in (prov.get('endpoint_models') or {}).items():
-            if isinstance(bk, str) and isinstance(bv, list):
-                old_binding[normalize_base_url(bk.strip())] = sorted(
-                    x for x in bv if isinstance(x, str) and x)
-        binding_drift = any(
-            old_binding.get(ep) != sorted(per_ep_served[ep])
-            for ep in live_endpoints
-        )
-        max_streak = max((_success_streak.get((prov_id, e), 0)
-                          for e in live_endpoints), default=0)
-        needs_resync = (
-            not configured_ids
-            or union_served != configured_ids
-            or binding_drift
-            or (max_streak % RESYNC_EVERY == 0)
-        )
-        if not needs_resync:
-            continue
-
-        # ── Per-endpoint re-discovery (heterogeneous-fleet safe) ──
-        # Each model's metadata comes from the endpoint that ACTUALLY
-        # serves it. The pre-binding code discovered from live_endpoints[0]
-        # alone and union-filtered, which silently dropped every model
-        # hosted on the other boxes (the picker-flap bug).
-        existing_by_id = {m.get('model_id'): m
-                          for m in (prov.get('models') or [])
-                          if m.get('model_id')}
-        new_binding: dict = {}
-        merged: dict = {}
-        order: list = []
-        for ep in live_endpoints:
+            # Auto/managed providers are deterministic products of discovery.
+            # User-authored v2 Providers may have deliberate identity/pricing/
+            # enablement edits, so background health observes but never
+            # rewrites them. A multi-Connection bundle likewise requires an
+            # explicit placement decision because one wire ID has one factual
+            # Deployment in v2.
+            managed = target.provider_id.startswith(('auto_', 'managed_'))
+            periodic = _success_streak[streak_key] % max(1, RESYNC_EVERY) == 0
+            if (
+                not managed
+                or len(target.endpoints) != 1
+                or (
+                    served_ids == set(target.configured_model_ids)
+                    and effective == endpoint
+                    and not periodic
+                )
+            ):
+                continue
             try:
-                ep_models = discover_models(ep, api_key)
-            except Exception as e:
-                logger.warning('[HealthLocal] Discovery failed for %s: %s',
-                               ep, e, exc_info=True)
-                ep_models = []
-            if not ep_models:
-                # The health probe succeeded but full discovery failed —
-                # keep the check-derived placement + existing metadata
-                # rather than writing a spurious empty binding.
-                ids = sorted(per_ep_served.get(ep) or [])
-                for mid in ids:
-                    if mid not in merged and mid in existing_by_id:
-                        merged[mid] = existing_by_id[mid]
-                        order.append(mid)
-                new_binding[ep] = ids
+                models = discover_models(effective, '')
+            except Exception as exc:
+                logger.warning(
+                    '[HealthLocal] Discovery failed for %s: %s',
+                    effective, exc, exc_info=True)
                 continue
-            ids = []
-            for m in ep_models:
-                mid = m['model_id']
-                ids.append(mid)
-                if mid not in merged:
-                    merged[mid] = m
-                    order.append(mid)
-            new_binding[ep] = sorted(ids)
-
-        # A transiently-DOWN endpoint keeps its previous binding and its
-        # models (restarting a box must not wipe the picker).
-        for ep in endpoints:
-            if ep in effective_of:
+            if not models:
+                # A successful cheap probe plus a failed full discovery is not
+                # evidence that configured models vanished.
                 continue
-            prev = old_binding.get(ep)
-            if prev:
-                new_binding[ep] = prev
-                for mid in prev:
-                    if mid not in merged and mid in existing_by_id:
-                        merged[mid] = existing_by_id[mid]
-                        order.append(mid)
-
-        # Preserve user-set per-model flags (enabled toggle, custom rpm/cost)
-        # across re-discovery — discover_models() returns a fresh list with no
-        # knowledge of what the user toggled in Settings.
-        for mid, m in merged.items():
-            prev = existing_by_id.get(mid)
-            if prev is not None and prev.get('enabled') is False:
-                m['enabled'] = False
-
-        filtered = [merged[mid] for mid in order]
-
-        new_ids = {m['model_id'] for m in filtered}
-        new_endpoints = [effective_of.get(ep, ep) for ep in endpoints]
-        if (new_ids == configured_ids
-                and new_binding == old_binding
-                and new_endpoints == endpoints):
-            continue  # zero drift — rewriting would just churn the slot pool
-
-        if _persist_provider_models(prov_id, filtered,
-                                    endpoint_models=new_binding,
-                                    endpoints=new_endpoints):
+            try:
+                mutation = upsert_local_provider(
+                    repository,
+                    boundary,
+                    provider_id=target.provider_id,
+                    display_name=target.display_name,
+                    base_url=effective,
+                    models=models,
+                )
+            except ModelRoutingError as exc:
+                logger.warning(
+                    '[HealthLocal] v2 refresh failed for %s: %s',
+                    target.provider_id, exc, exc_info=True)
+                continue
+            if not mutation.changed:
+                continue
             n_resynced += 1
             rebuilt = True
-            added = sorted(new_ids - configured_ids)
-            removed = sorted(configured_ids - new_ids)
-            logger.info('[HealthLocal] Provider %s model state updated '
-                        '(+%d / -%d models, %d bound endpoints): added=%s removed=%s',
-                        prov_id, len(added), len(removed), len(new_binding),
-                        added[:5], removed[:5])
-            audit_log('local_endpoint_models_updated', provider_id=prov_id,
-                      added=added, removed=removed)
+            new_ids = {model['model_id'] for model in models}
+            added = sorted(new_ids - set(target.configured_model_ids))
+            removed = sorted(set(target.configured_model_ids) - new_ids)
+            logger.info(
+                '[HealthLocal] Provider %s model state updated '
+                '(+%d / -%d): added=%s removed=%s',
+                target.provider_id, len(added), len(removed),
+                added[:5], removed[:5])
+            audit_log(
+                'local_endpoint_models_updated',
+                provider_id=target.provider_id,
+                added=added,
+                removed=removed,
+                owner_user_id=boundary.owner_user_id,
+                model_routing_revision=mutation.authority.revision,
+            )
 
     if rebuilt:
         _rebuild_dispatcher_slots()
 
-    # Ephemeral/BYO self-hosted slots aren't in server_config — sweep them
-    # in the same cycle so they get the same cool-on-dead / clear-on-recover
-    # treatment as configured local providers.
-    eph = _check_ephemeral_endpoints()
-
+    # Request-owned ephemeral/BYO slots remain outside durable model-routing
+    # and receive only process-local endpoint cooldown accounting.
+    ephemeral = _check_ephemeral_endpoints()
     return {
-        'providers': len(locals_),
-        'endpoints_ok': n_endpoints_ok + eph['endpoints_ok'],
-        'cooldowns': n_cooldown + eph['cooldowns'],
+        'providers': len(targets),
+        'endpoints_ok': n_endpoints_ok + ephemeral['endpoints_ok'],
+        'cooldowns': n_cooldown + ephemeral['cooldowns'],
         'resynced': n_resynced,
     }
 

@@ -176,7 +176,6 @@ class EventType:
     MODEL_REQUEST_START = 'model_request_start'
     MODEL_REQUEST_COMPLETE = 'model_request_complete'
     MODEL_FALLBACK = 'model_fallback'
-    BUDGET_WARNING = 'budget_warning'
     # ── content ──
     DELTA = 'delta'
     DELTA_RESET = 'delta_reset'
@@ -264,6 +263,7 @@ class Phase:
     RETRYING = 'retrying'
     WAITING_MODEL = 'waiting_model'
     STREAM_STALLED = 'stream_stalled'
+    EXECUTOR_QUEUED = 'executor_queued'
     WORKING = 'working'
     COMPACTING = 'compacting'
     TODO_CONTINUATION = 'todo_continuation'
@@ -349,6 +349,10 @@ _SPECS: tuple[EventSpec, ...] = (
                                    'absent',
                       'detailArgs': '(optional) interpolation args for `detailKey` '
                                     '(e.g. {"round": 3, "model": "claude-4"})',
+                      'model': '(optional) resolved model id',
+                      'modelRoute': '(optional) selected→resolved orchestration '
+                                    'route (selectedModel/resolvedModel/role/'
+                                    'tier/kind)',
                       'roundNum': 'round number',
                       'tools': '(optional, tool_exec phase) raw tool-name list '
                                'of this dispatch — the i18n client composes '
@@ -380,7 +384,7 @@ _SPECS: tuple[EventSpec, ...] = (
               'Non-terminal (a `done` still follows on the terminal path).',
               fields={'roundNum': 'the round index this boundary closes',
                       'reason': 'tools|final|aborted|budget|error|tool_timeout|'
-                                'tool_loop — why the round ended'}),
+                                'tool_loop|success_poll — why the round ended'}),
     EventSpec(EventType.DONE, _C.LIFECYCLE,
               'Terminal event — the turn finished (success or, with `error`, failure).',
               terminal=True,
@@ -426,6 +430,8 @@ _SPECS: tuple[EventSpec, ...] = (
                       'durationMs': 'wall-clock request duration in milliseconds',
                       'errorKind': '(failure only) typed exception/error kind',
                       'errorDetail': '(failure only) bounded safe detail',
+                      'errorUrl': '(failure only) request URL the error is '
+                                  'bound to (abort/endpoint diagnostics)',
                       'statusCode': '(failure only) HTTP status when known',
                       'routeId': '(optional) credential-free concrete network route id',
                       'routeMode': '(optional) direct|proxy|env|desktop|unknown',
@@ -446,15 +452,6 @@ _SPECS: tuple[EventSpec, ...] = (
                       'fallbackKind': 'error kind that triggered the fallback',
                       'fallbackReason': 'human-readable reason (kind: detail, '
                                         'capped at 300 chars)'}),
-    EventSpec(EventType.BUDGET_WARNING, _C.LIFECYCLE,
-              'A task crossed a configured soft threshold or entered its '
-              'model-round finalization reserve. Work may continue until '
-              'the corresponding hard limit is reached.',
-              fields={'limit': 'promptTokens|apiRounds|toolOutputBytes|elapsedSeconds|estimatedCostUsd',
-                      'used': 'current measured consumption',
-                      'remaining': 'amount remaining before hard termination',
-                      'hardLimit': 'configured hard ceiling',
-                      'unit': 'tokens|rounds|bytes|seconds'}),
     # ───────────────────────── content ─────────────────────────
     EventSpec(EventType.DELTA, _C.CONTENT,
               'Incremental assistant output — append to the live bubble.',
@@ -485,6 +482,10 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolArgs': 'serialized args',
                       'caller': '(optional) Responses nested-call owner',
                       'programCallId': '(optional) parent program call id',
+                      'parentToolCallId': '(optional) presentation-only parent '
+                                          'for nested/recovery calls',
+                      'attentionKind': '(optional) stable routine, important, '
+                                       'or interactive semantic importance',
                       'status': "(optional) 'rejected' when the tool was a "
                                 'hallucination and never ran',
                       '_rejected': '(optional) {attempted, suggestions} for a '
@@ -567,6 +568,21 @@ _SPECS: tuple[EventSpec, ...] = (
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
                       'toolName': 'canonical tool name',
                       'toolContent': 'final model-visible tool result',
+                      'toolTokens': '(optional) real tokens of the final '
+                                    'model-visible toolContent',
+                      'compactionLayer': "(optional) 'L0'/'unchanged' when the "
+                                         'result was budget-enveloped or '
+                                         'receipt-replaced before first '
+                                         'entering context',
+                      'compactedFromChars': 'pre-compaction producer chars',
+                      'compactedToChars': 'post-compaction model-visible '
+                                          'chars',
+                      'rawToolTokens': '(optional) real tokens of the '
+                                       'pre-compaction producer result '
+                                       '(never entered context)',
+                      'toolResultEvidence': '(optional) bounded non-model '
+                                            'tofu.tool-result-evidence/v1 '
+                                            'sidecar for runtime/evaluation',
                       'isError': 'bool',
                       'status': "(optional) terminal NON-SUCCESS verdict — "
                                 "'rejected' / 'aborted' / 'error' (tool raised "
@@ -606,7 +622,15 @@ _SPECS: tuple[EventSpec, ...] = (
                       'parentSpanId': 'owning model request span'}),
     EventSpec(EventType.TOOL_COMPACTED, _C.TOOL,
               'A prior tool result was compacted out of context to save tokens.',
-              fields={'toolCallId': 'tool-call id', 'roundNum': 'round index'}),
+              fields={'toolCallId': 'tool-call id', 'roundNum': 'round index',
+                      'toolName': 'canonical tool name',
+                      'compactionLayer': 'replacement compaction layer',
+                      'compactedFromChars': 'prior model-visible chars',
+                      'compactedToChars': 'replacement model-visible chars',
+                      'toolTokens': 'replacement model-visible tokens',
+                      'compactedContent': 'replacement model-visible result',
+                      'toolResultEvidence': '(optional) replacement bounded '
+                                            'non-model evidence sidecar'}),
     EventSpec(EventType.TOOL_CALL_REPLAY, _C.TOOL,
               'A previously settled idempotent tool call was reused without '
               'executing the tool again.',
@@ -988,6 +1012,19 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
                       'detailKey': 'i18n key',
                       'detailArgs': 'model, total elapsed, semantic idle',
                       'model': 'raw model id'}),
+    PhaseSpec(Phase.EXECUTOR_QUEUED, (_CHAT,),
+              'The accepted task is waiting in the bounded, host-local FIFO '
+              'for a physical root-agent worker. This is server scheduling, '
+              'not provider or API quota.',
+              fields={'detail': 'English fallback with current queue evidence',
+                      'detailKey': 'i18n key',
+                      'detailArgs': 'position, queued, active, capacity and '
+                                    'waitSeconds',
+                      'queuePosition': 'one-based position in the FIFO',
+                      'queued': 'total queued root tasks',
+                      'active': 'root tasks holding physical worker slots',
+                      'capacity': 'configured physical root-worker slots',
+                      'waitSeconds': 'elapsed residence in this FIFO'}),
     PhaseSpec(Phase.WORKING, (_CHAT,),
               'Generic working status: ordinary-turn and VU startup stages, '
               'Flow producer step_phase forwards, external CLI '

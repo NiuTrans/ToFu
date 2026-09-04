@@ -3,7 +3,19 @@
  * and lib/orchestration/browser_endpoint_policy.py.
  * DO NOT EDIT BY HAND.
  */
+export type OrchestrationHttpMethod =
+  'GET' | 'POST' | 'PUT' | 'DELETE';
 export interface OrchestrationRequestContract {
+  readonly route: string;
+  readonly method: OrchestrationHttpMethod;
+  readonly pathArgs?: Readonly<Record<string, number>>;
+  readonly queryArgs?: Readonly<Record<string, number>>;
+  readonly bodyArgs?: Readonly<Record<string, number>>;
+  readonly bodyArg?: number;
+  readonly requestOptionsArg?: number;
+  readonly writeOperation?: string;
+  readonly writeVersionArg?: number;
+  readonly writeContractArg?: number;
   readonly resultMethod: string;
   readonly directMethod: string;
   readonly optionName: string;
@@ -14,10 +26,12 @@ export interface OrchestrationRequestContract {
 
 const contracts: Record<string, OrchestrationRequestContract> = {
   "definition-list": {
+    "route": "/api/v1/orchestrations",
+    "method": "GET",
+    "responseContract": "definition-list",
     "resultMethod": "listResult",
     "directMethod": "list",
     "optionName": "normalizeList",
-    "responseContract": "definition-list",
     "responseRequiredFields": [
       "ok",
       "format",
@@ -25,10 +39,15 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "definition-read": {
+    "route": "/api/v1/orchestrations/<orch_id>",
+    "method": "GET",
+    "responseContract": "definition-read",
+    "pathArgs": {
+      "orch_id": 0
+    },
     "resultMethod": "getResult",
     "directMethod": "get",
     "optionName": "normalizeRead",
-    "responseContract": "definition-read",
     "responseRequiredFields": [
       "ok",
       "format",
@@ -40,10 +59,14 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "definition-create": {
+    "route": "/api/v1/orchestrations",
+    "method": "POST",
+    "responseContract": "definition-save",
+    "bodyArg": 0,
+    "writeOperation": "create",
     "resultMethod": "save",
     "directMethod": "create",
     "optionName": "normalizeSave",
-    "responseContract": "definition-save",
     "responseRequiredFields": [
       "ok",
       "format",
@@ -58,10 +81,19 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "definition-update": {
+    "route": "/api/v1/orchestrations/<orch_id>",
+    "method": "PUT",
+    "responseContract": "definition-save",
+    "pathArgs": {
+      "orch_id": 0
+    },
+    "bodyArg": 1,
+    "writeOperation": "replace",
+    "writeVersionArg": 2,
+    "writeContractArg": 3,
     "resultMethod": "save",
     "directMethod": "update",
     "optionName": "normalizeSave",
-    "responseContract": "definition-save",
     "responseRequiredFields": [
       "ok",
       "format",
@@ -76,19 +108,31 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "definition-delete": {
+    "route": "/api/v1/orchestrations/<orch_id>",
+    "method": "DELETE",
+    "responseContract": "definition-delete",
+    "pathArgs": {
+      "orch_id": 0
+    },
+    "writeOperation": "delete",
+    "writeVersionArg": 1,
+    "writeContractArg": 2,
     "resultMethod": "remove",
     "directMethod": "remove",
     "optionName": "normalizeDelete",
-    "responseContract": "definition-delete",
     "responseRequiredFields": [
       "ok"
     ]
   },
   "validation": {
+    "route": "/api/v1/orchestrations/validate",
+    "method": "POST",
+    "responseContract": "validation",
+    "bodyArg": 0,
+    "requestOptionsArg": 1,
     "resultMethod": "validateResult",
     "directMethod": "validate",
     "optionName": "normalizeRead",
-    "responseContract": "validation",
     "responseRequiredFields": [
       "format",
       "ok",
@@ -99,10 +143,17 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "compose": {
+    "route": "/api/v1/orchestrations/compose",
+    "method": "POST",
+    "responseContract": "compose",
+    "bodyArgs": {
+      "requirement": 0,
+      "current": 1,
+      "history": 2
+    },
     "resultMethod": "composeResult",
     "directMethod": "compose",
     "optionName": "normalizeComposeResult",
-    "responseContract": "compose",
     "responseRequiredFields": [
       "ok",
       "reply",
@@ -112,10 +163,15 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "builtin": {
+    "route": "/api/v1/orchestrations/builtin/<name>",
+    "method": "GET",
+    "responseContract": "builtin",
+    "pathArgs": {
+      "name": 0
+    },
     "resultMethod": "builtinResult",
     "directMethod": "builtin",
     "optionName": "normalizeBuiltin",
-    "responseContract": "builtin",
     "responseRequiredFields": [
       "ok",
       "definition",
@@ -123,10 +179,16 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "layout": {
+    "route": "/api/v1/orchestrations/layout",
+    "method": "POST",
+    "responseContract": "layout",
+    "bodyArgs": {
+      "definition": 0,
+      "id": 1
+    },
     "resultMethod": "layoutResult",
     "directMethod": "layout",
     "optionName": "normalizeLayout",
-    "responseContract": "layout",
     "responseRequiredFields": [
       "ok",
       "definition",
@@ -134,10 +196,12 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "authoring-contract": {
+    "route": "/api/v1/orchestrations/authoring-contract",
+    "method": "GET",
+    "responseContract": "authoring-contract",
     "resultMethod": "authoringContractResult",
     "directMethod": "authoringContract",
     "optionName": "normalizeRead",
-    "responseContract": "authoring-contract",
     "responseRequiredFields": [
       "ok",
       "format",
@@ -173,10 +237,16 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "plan": {
+    "route": "/api/v1/orchestrations/plan",
+    "method": "POST",
+    "responseContract": "plan",
+    "bodyArgs": {
+      "definition": 0,
+      "id": 1
+    },
     "resultMethod": "planResult",
     "directMethod": "plan",
     "optionName": "normalizePlan",
-    "responseContract": "plan",
     "responseRequiredFields": [
       "ok",
       "steps",
@@ -188,10 +258,18 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "run-start": {
+    "route": "/api/v1/orchestrations/run",
+    "method": "POST",
+    "responseContract": "run-start",
+    "bodyArgs": {
+      "definition": 0,
+      "input": 1,
+      "id": 2,
+      "originId": 3
+    },
     "resultMethod": "runResult",
     "directMethod": "run",
     "optionName": "normalizeStart",
-    "responseContract": "run-start",
     "responseRequiredFields": [
       "ok",
       "start",
@@ -202,10 +280,18 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "run-poll": {
+    "route": "/api/v1/orchestrations/run/poll/<task_id>",
+    "method": "GET",
+    "responseContract": "run-poll",
+    "pathArgs": {
+      "task_id": 0
+    },
+    "queryArgs": {
+      "cursor": 1
+    },
     "resultMethod": "runPollResult",
     "directMethod": "runPoll",
     "optionName": "normalizePoll",
-    "responseContract": "run-poll",
     "responseRequiredFields": [
       "format",
       "ok",
@@ -220,40 +306,64 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "run-abort": {
+    "route": "/api/v1/orchestrations/run/abort/<task_id>",
+    "method": "POST",
+    "responseContract": "mutation",
+    "pathArgs": {
+      "task_id": 0
+    },
     "resultMethod": "runAbort",
     "directMethod": "runAbort",
     "optionName": "normalizeMutation",
-    "responseContract": "mutation",
     "responseRequiredFields": [
       "ok",
       "mutation"
     ]
   },
   "human-approve": {
+    "route": "/api/v1/orchestrations/run/human-approve",
+    "method": "POST",
+    "responseContract": "mutation",
+    "bodyArgs": {
+      "requestId": 0,
+      "approved": 1
+    },
     "resultMethod": "humanApprove",
     "directMethod": "humanApprove",
     "optionName": "normalizeMutation",
-    "responseContract": "mutation",
     "responseRequiredFields": [
       "ok",
       "mutation"
     ]
   },
   "human-input": {
+    "route": "/api/v1/orchestrations/run/human-input",
+    "method": "POST",
+    "responseContract": "mutation",
+    "bodyArgs": {
+      "requestId": 0,
+      "response": 1
+    },
     "resultMethod": "humanInput",
     "directMethod": "humanInput",
     "optionName": "normalizeMutation",
-    "responseContract": "mutation",
     "responseRequiredFields": [
       "ok",
       "mutation"
     ]
   },
   "task-list": {
+    "route": "/api/v1/orchestrations/tasks",
+    "method": "GET",
+    "responseContract": "task-list",
+    "queryArgs": {
+      "status": 0,
+      "orch_id": 1,
+      "limit": 2
+    },
     "resultMethod": "taskListResult",
     "directMethod": "taskList",
     "optionName": "normalizeList",
-    "responseContract": "task-list",
     "responseRequiredFields": [
       "ok",
       "runs",
@@ -261,20 +371,33 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "task-read": {
+    "route": "/api/v1/orchestrations/tasks/<run_id>",
+    "method": "GET",
+    "responseContract": "task-read",
+    "pathArgs": {
+      "run_id": 0
+    },
     "resultMethod": "taskGet",
     "directMethod": "taskGet",
     "optionName": "normalizeRead",
-    "responseContract": "task-read",
     "responseRequiredFields": [
       "ok",
       "run"
     ]
   },
   "task-create": {
+    "route": "/api/v1/orchestrations/tasks",
+    "method": "POST",
+    "responseContract": "task-create",
+    "bodyArgs": {
+      "definition": 0,
+      "input": 1,
+      "id": 2,
+      "originId": 3
+    },
     "resultMethod": "taskCreate",
     "directMethod": "taskCreate",
     "optionName": "normalizeCreate",
-    "responseContract": "task-create",
     "responseRequiredFields": [
       "ok",
       "start",
@@ -285,10 +408,18 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "task-events": {
+    "route": "/api/v1/orchestrations/tasks/<run_id>/events",
+    "method": "GET",
+    "responseContract": "task-events",
+    "pathArgs": {
+      "run_id": 0
+    },
+    "queryArgs": {
+      "cursor": 1
+    },
     "resultMethod": "taskEventsResult",
     "directMethod": "taskEvents",
     "optionName": "normalizeEvents",
-    "responseContract": "task-events",
     "responseRequiredFields": [
       "format",
       "ok",
@@ -301,20 +432,30 @@ const contracts: Record<string, OrchestrationRequestContract> = {
     ]
   },
   "task-abort": {
+    "route": "/api/v1/orchestrations/tasks/<run_id>/abort",
+    "method": "POST",
+    "responseContract": "mutation",
+    "pathArgs": {
+      "run_id": 0
+    },
     "resultMethod": "taskAbort",
     "directMethod": "taskAbort",
     "optionName": "normalizeMutation",
-    "responseContract": "mutation",
     "responseRequiredFields": [
       "ok",
       "mutation"
     ]
   },
   "task-remove": {
+    "route": "/api/v1/orchestrations/tasks/<run_id>",
+    "method": "DELETE",
+    "responseContract": "mutation",
+    "pathArgs": {
+      "run_id": 0
+    },
     "resultMethod": "taskRemove",
     "directMethod": "taskRemove",
     "optionName": "normalizeMutation",
-    "responseContract": "mutation",
     "responseRequiredFields": [
       "ok",
       "mutation"
@@ -322,6 +463,9 @@ const contracts: Record<string, OrchestrationRequestContract> = {
   }
 };
 Object.values(contracts).forEach((contract) => {
+  for (const field of ['pathArgs', 'queryArgs', 'bodyArgs'] as const) {
+    if (contract[field]) Object.freeze(contract[field]);
+  }
   Object.freeze(contract.responseRequiredFields);
   Object.freeze(contract);
 });

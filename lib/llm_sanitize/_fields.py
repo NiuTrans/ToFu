@@ -34,7 +34,25 @@ _API_MESSAGE_FIELDS = frozenset({
 })
 
 
-def _strip_non_api_fields(messages: list) -> list:
+# Producer-owned private fields that explain an intentional same-role seam.
+# They are NOT provider fields.  The opt-in field-strip path collapses them to
+# one short-lived boolean so the final structural merge can classify the
+# ORIGINAL adjacency after frontend metadata has been removed.  The merge
+# consumes and deletes this hint on every output path.
+_SAME_ROLE_SEAM_SOURCE_FIELDS = frozenset({
+    '_contextComposer',
+    '_isMeta',
+    '_isVuDirective',
+    '_isObjectiveAnchor',
+})
+_SAME_ROLE_SEAM_HINT_FIELD = '_tofuSameRoleSeam'
+
+
+def _strip_non_api_fields(
+    messages: list,
+    *,
+    carry_same_role_seam_hints: bool = False,
+) -> list:
     """Return a new message list with only API-relevant fields.
 
     Strips frontend metadata (toolRounds, thinking, translatedContent,
@@ -52,20 +70,41 @@ def _strip_non_api_fields(messages: list) -> list:
     for image conversations). Immutable scalars (role/name strings, and the big
     base64 payloads inside content — deepcopy returns immutables as-is) are not
     duplicated, so the copy stays cheap on the hot path.
+
+    ``carry_same_role_seam_hints`` is reserved for the two final wire builders.
+    It reduces known producer markers to one transient boolean used only by
+    ``_merge_consecutive_same_role``.  The default remains a strict API-field
+    projection, and the transient hint is never part of
+    ``_API_MESSAGE_FIELDS``.
     """
     cleaned = []
     stripped_keys = set()
+    dropped_messages = 0
     for msg in messages:
+        if not isinstance(msg, dict):
+            dropped_messages += 1
+            continue
+        intentional_same_role_seam = (
+            carry_same_role_seam_hints
+            and any(msg.get(field)
+                    for field in _SAME_ROLE_SEAM_SOURCE_FIELDS)
+        )
         clean = {}
         for k, v in msg.items():
             if k in _API_MESSAGE_FIELDS:
                 clean[k] = copy.deepcopy(v) if isinstance(v, (list, dict)) else v
             else:
                 stripped_keys.add(k)
+        if intentional_same_role_seam:
+            clean[_SAME_ROLE_SEAM_HINT_FIELD] = True
         cleaned.append(clean)
     if stripped_keys:
         logger.debug('[build_body] Stripped non-API fields from %d messages: %s',
                      len(messages), ', '.join(sorted(stripped_keys)))
+    if dropped_messages:
+        logger.warning(
+            '[build_body] Dropped %d malformed non-object message carrier(s) '
+            'before provider serialization', dropped_messages)
     return cleaned
 
 

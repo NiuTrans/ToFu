@@ -8,7 +8,8 @@ authority).  The root fix is four-layered and every layer is pinned here:
    full projection lands transactionally only on the turn-row authority.
 2. Legacy ``turn.events.list`` readers get one hydrated page tail; patch-mode
    readers replay only the compact patches, with no multi-MB wire expansion.
-3. ``turn.events.prune`` deletes OLD settled attempts' streams in bounded,
+3. After retained Conversation Sync references expire,
+   ``turn.events.prune`` deletes OLD settled attempts' streams in bounded,
    resumable slices; live attempts are structurally untouchable.
 4. ``system.reclaim`` returns the freelist to the filesystem through bounded
    incremental_vacuum slices, and fresh authorities are born with
@@ -106,7 +107,7 @@ def test_nonterminal_frames_are_slim_and_page_tail_is_hydrated(turn_service, sto
                for frame in patch_frames)
     assert patch_frames[-1]['payload']['projectionPatch'][
         'targetRevision'] == patch_frames[-1]['projectionRevision']
-    # The turn row remains the permanent authority with the full projection.
+    # The Turn authority still rehydrates the complete logical projection.
     turn = turn_service.get_turn(
         'slim-conv', created['turn']['turnId'], user_id=1)
     assert turn['projection']['content'] == 'partial one two three'
@@ -122,8 +123,8 @@ def test_patch_frame_size_does_not_scale_with_existing_projection(turn_service, 
     ]
     assert turn_service.record_task_event(task, {'type': 'tool_start'}) is True
 
-    # A new structural frame still writes the full ~2 MiB turn authority, but
-    # the SSE replay frame carries only the newly appended round.
+    # A new structural frame retains >2 MiB of logical projection evidence,
+    # while the physical checkpoint/head and SSE replay patch stay compact.
     task['toolRounds'].append({
         'index': 64, 'status': 'running', 'toolContent': 'new round',
     })
@@ -263,8 +264,10 @@ def test_completed_tool_round_drops_redundant_partial_output(turn_service, stora
     turn = turn_service.get_turn(
         'trimmed-round-conv', created['turn']['turnId'], user_id=1)
     assert turn['projection']['toolRounds'] == [{
+        'attemptId': task['_attemptId'],
         'index': 0,
         'status': 'done',
+        'taskId': task['id'],
         'toolContent': 'settled output',
     }]
 
@@ -356,6 +359,14 @@ def test_terminal_frame_keeps_full_projection(turn_service, storage):
 
 
 def _prune(storage, *, cutoff_ms, max_attempts=16, max_rows=4096):
+    while True:
+        sync_result = storage.client.command(
+            'turn.sync.prune',
+            {'created_before_ms': cutoff_ms, 'max_rows': max_rows},
+            None, priority='maintenance', deadline=60,
+        )
+        if not sync_result['remaining']:
+            break
     return storage.client.command(
         'turn.events.prune',
         {'settled_before_ms': cutoff_ms, 'max_attempts': max_attempts,

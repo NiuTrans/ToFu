@@ -21,18 +21,44 @@ function previewPendingImage(i) {
   if (!img || !img.preview) return;
   openImagePreview(img.preview);
 }
-function previewPendingPdfText(i) {
+// Preview text stays server-side after the unified attachment ingest; fetch
+// the parsed chunks on demand instead of relying on a client-side copy.
+const _PREVIEW_TEXT_CAP = 200000;
+async function previewPendingPdfText(i) {
   const pdf = pendingPdfTexts[i];
   if (!pdf) return;
+  const _t = (typeof t === "function") ? t : (k, d) => d;
   const sizeStr =
     pdf.textLength >= 1024
       ? `${(pdf.textLength / 1024).toFixed(1)}KB`
       : `${pdf.textLength} chars`;
-  openTextPreview(
-    `📄 ${pdf.name}`,
-    `${pdf.pages} pages · ${sizeStr}`,
-    pdf.text || "",
-  );
+  const title = `📄 ${pdf.name}`;
+  const meta = `${pdf.pages} pages · ${sizeStr}`;
+  let text = pdf.text || "";
+  if (String(text).trim() || !pdf.attachmentId ||
+      !(typeof Api !== "undefined" && Api.knowledge && Api.knowledge.content)) {
+    openTextPreview(title, meta, text);
+    return;
+  }
+  openTextPreview(title, meta, _t("knowledge.contentLoading", "Loading…"));
+  try {
+    const data = await Api.knowledge.content(pdf.attachmentId, 0, 200);
+    const chunks = (data && data.chunks) || [];
+    text = chunks
+      .map((c) => {
+        const section = String((c && c.section) || "").trim();
+        const content = String((c && c.content) || "");
+        return section ? `[${section}]\n${content}` : content;
+      })
+      .filter((part) => part.trim())
+      .join("\n\n");
+    if (text.length > _PREVIEW_TEXT_CAP)
+      text = `${text.slice(0, _PREVIEW_TEXT_CAP)}\n[preview truncated]`;
+  } catch (e) {
+    console.warn("[Preview] content fetch failed:", e && e.message);
+    text = "";
+  }
+  openTextPreview(title, meta, text);
 }
 function openImagePreview(src) {
   if (!src) return;

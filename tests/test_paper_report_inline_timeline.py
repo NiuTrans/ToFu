@@ -219,7 +219,7 @@ def _start_generation(page, view: str = 'report', *, enter: bool = True) -> None
     if enter:
         _enter_paper_mode(page)
     page.evaluate(
-        "(entryAction) => {"
+        "async (entryAction) => {"
         " const resolve = window.TofuModules.resolveAction;"
         " const create = resolve('_createPaperEntry');"
         " const setActive = resolve('_setActivePaperId');"
@@ -231,8 +231,8 @@ def _start_generation(page, view: str = 'report', *, enter: bool = True) -> None
         # ``open`` because open first saves the prior active entry; otherwise
         # the empty reader state would overwrite this fixture's parsed text.
         " setActive('');"
-        " open(paper);"
-        " resolve(entryAction)();"
+        " await open(paper);"
+        " await resolve(entryAction)();"
         " }",
         _VIEWS[view]['entry'])
 

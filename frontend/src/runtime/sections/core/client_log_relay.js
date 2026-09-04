@@ -1,7 +1,8 @@
 /* ===== migrated source: core/client_log_relay.js ===== */
 /* Responsibility: relay the full browser console to logs/frontend.log.
    Entry: the installed runtimeScope.__clientLogRelay.flush port.
-   Dependencies: native console/fetch/storage plus late-bound apiUrl/push health.
+   Dependencies: native console/storage, typed demand clock, and late-bound
+   apiUrl/push health.
    Contract: original console calls always win; 400 queued/200 per flush/800
    chars per line; outage batches fail soft without retry or recursive logs.
    Disable client-side with localStorage.tofu_client_log_relay='0'. */
@@ -12,24 +13,12 @@
   var MAX_BUF = 400;
   var MAX_FLUSH = 200;
   var MAX_MSG = 800;
-  function _constrainedProxy() {
-    try {
-      var tag = document.getElementById('tofu-boot-config');
-      var config = tag && tag.textContent ? JSON.parse(tag.textContent) : null;
-      if (config && config.transportProfile === 'constrained-proxy') return true;
-      if (config && config.transportProfile === 'direct') return false;
-    } catch (e) { /* path fallback below */ }
-    try { return /\/(?:proxy|absproxy)\/\d+(?:\/|$)/.test(location.pathname || ''); }
-    catch (e) { return false; }
-  }
-
-  // Every tab owns a bounded relay. A constrained gateway needs fewer,
-  // de-synchronised batches so several open tabs cannot form a 15s request
-  // pulse. Direct/LAN deployments retain the existing cadence.
-  var FLUSH_MS = _constrainedProxy() ? 60000 : 15000;
+  // The typed resolver preserves the 15/60-second direct/proxy profiles.
+  var FLUSH_MS = clientLogFlushBaseDelayMs(document, location);
   var buf = [];
   var flushing = false;
   var dropped = 0;
+  var _flushScheduler = null;
   var sid = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
   function _enabled() {
@@ -60,13 +49,14 @@
     var last = buf[buf.length - 1];
     if (last && last.lv === lv && last.msg === msg) {      // spam fold
       last.n = (last.n || 1) + 1;
-      return;
+    } else {
+      buf.push({ t: Date.now(), lv: lv, msg: msg });
+      if (buf.length > MAX_BUF) {
+        buf.splice(0, buf.length - MAX_BUF);
+        dropped++;
+      }
     }
-    buf.push({ t: Date.now(), lv: lv, msg: msg });
-    if (buf.length > MAX_BUF) {
-      buf.splice(0, buf.length - MAX_BUF);
-      dropped++;
-    }
+    if (_flushScheduler) _flushScheduler.demand();
   }
 
   ['log', 'info', 'warn', 'error'].forEach(function (fn) {
@@ -110,6 +100,7 @@
     if (useBeacon && typeof navigator !== 'undefined' && navigator.sendBeacon) {
       try {
         navigator.sendBeacon(_relayUrl(), new Blob([payload], { type: 'application/json' }));
+        if (_flushScheduler) _flushScheduler.demand();
         return;
       } catch (e) { /* fall through to fetch */ }
     }
@@ -121,29 +112,32 @@
     // second channel (the never-amplify doctrine).
     var api = (typeof Api !== 'undefined' && Api.logs) || null;
     if (!api || typeof api.clientRelay !== 'function') { flushing = false; return; }
-    Promise.resolve(api.clientRelay(payload)).catch(function () {
+    var request;
+    try { request = api.clientRelay(payload); }
+    catch (e) { flushing = false; return; }
+    return Promise.resolve(request).catch(function () {
       /* drop the batch — a down server must not be amplified by its own
        * telemetry; the next flush carries whatever is new. */
     }).then(function () { flushing = false; });
   }
 
-  function _scheduleFlush() {
-    if (typeof setTimeout !== 'function') return;
-    var delay = Math.round(FLUSH_MS * (0.85 + Math.random() * 0.30));
-    setTimeout(function () {
-      // A hidden tab keeps collecting its bounded diagnostics but spends no
-      // periodic proxy request. pagehide still gets one best-effort beacon.
-      if (!(typeof document !== 'undefined' && document.hidden)) flush(false);
-      _scheduleFlush();
-    }, delay);
+  _flushScheduler = createClientLogFlushScheduler({
+    baseDelayMs: FLUSH_MS,
+    schedule: window,
+    visibility: document,
+    hasPending: function () { return buf.length > 0; },
+    random: Math.random,
+    flush: function () { return flush(false); },
+  });
+  if (typeof retainedCompositionLifecycle !== 'undefined') {
+    retainedCompositionLifecycle.add(function () { _flushScheduler.destroy(); });
   }
-  _scheduleFlush();
   if (typeof window.addEventListener === 'function') {
     window.addEventListener('pagehide', function () { flush(true); });
   }
 
   runtimeScope.__clientLogRelay = {
-    flush: function () { flush(false); },
+    flush: function () { _flushScheduler.flushNow(); },
     _buf: buf,
     _session: sid,
   };

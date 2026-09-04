@@ -762,7 +762,8 @@ def test_maintenance_dry_run_creates_no_directories_or_lock_files(tmp_path):
 def test_maintenance_hardens_only_declared_log_permissions(tmp_path):
     log_dir = tmp_path / 'logs'
     data_dir = tmp_path / 'data'
-    log_dir.mkdir(mode=0o775)
+    log_dir.mkdir()
+    os.chmod(log_dir, 0o775)  # umask-independent precondition for the dry run
     data_dir.mkdir()
     managed = log_dir / 'app.log'
     managed.write_text('managed evidence')

@@ -35,14 +35,11 @@ from lib.tasks_pkg.compaction._constants import (
 logger = get_logger(__name__)
 
 _WORKING_SET_AUDITED: set[int] = set()
+_TASK_TOOL_SCHEMA = object()
 
-_FIXED_SURVIVAL_PAYBACK_STEPS: tuple[tuple[int, float], ...] = (
-    (64, 6.0),
-    (32, 5.0),
-    (16, 4.0),
-    (8, 3.0),
-    (4, 2.0),
-)
+_PRICING_TIER_WORKING_SET_MARGIN = 0.90
+_COMPACTION_CADENCE_MAX_GAPS = 8
+_COMPACTION_CADENCE_MAX_PAYBACK_ROUNDS = 6.0
 
 # ── Multimodal estimate helpers (Codex-inspired, codex-rs utils/audio) ──
 
@@ -132,10 +129,9 @@ def _estimate_audio_tokens(block: dict) -> int:
 def _estimate_msg_tokens(msg: dict) -> int:
     """Rough token estimate for a single message (CJK-aware).
 
-    Uses ``lib.token_counter.heuristic.cheap_estimate_text`` which is
-    the same entropy-aware heuristic (1 token per CJK char + 1 token per
-    dense base64/hex char + 1 token per ~3 other chars) that gates the
-    richer counter backends.
+    Uses the shared digest-cached entropy heuristic (1 token per CJK char +
+    1 token per dense base64/hex char + 1 token per ~3 other chars) that gates
+    the richer counter backends. Reuse changes cost, never the estimate.
 
     For a bit-exact authoritative count (via tiktoken / Anthropic
     count_tokens / HF tokenizer), callers should use
@@ -149,7 +145,7 @@ def _estimate_msg_tokens(msg: dict) -> int:
     payload decodes (10 tokens/sec, the codex-rs constant), size-heuristic
     fallback otherwise; cached by payload sha1.
     """
-    from lib.token_counter.heuristic import cheap_estimate_text
+    from lib.token_counter import cached_cheap_estimate_text
 
     text_tokens = 0
     image_tokens = 0
@@ -158,12 +154,13 @@ def _estimate_msg_tokens(msg: dict) -> int:
         if not val:
             continue
         if isinstance(val, str):
-            text_tokens += cheap_estimate_text(val)
+            text_tokens += cached_cheap_estimate_text(val, reusable=True)
         elif isinstance(val, list):
             for block in val:
                 if isinstance(block, dict):
                     if block.get('type') == 'text':
-                        text_tokens += cheap_estimate_text(block.get('text', ''))
+                        text_tokens += cached_cheap_estimate_text(
+                            block.get('text', ''), reusable=True)
                     elif block.get('type') == 'image_url':
                         image_tokens += _image_block_tokens(block)
                     elif block.get('type') == 'input_audio':
@@ -172,7 +169,8 @@ def _estimate_msg_tokens(msg: dict) -> int:
                         # letting audio blow past the compaction gate).
                         image_tokens += _estimate_audio_tokens(block)
     for tc in msg.get('tool_calls', []):
-        text_tokens += cheap_estimate_text(tc.get('function', {}).get('arguments', ''))
+        text_tokens += cached_cheap_estimate_text(
+            tc.get('function', {}).get('arguments', ''), reusable=True)
     return text_tokens + image_tokens
 
 
@@ -181,11 +179,30 @@ def _estimate_total_tokens(messages: list) -> int:
     return sum(_estimate_msg_tokens(m) for m in messages)
 
 
+def _fallback_tool_schema_tokens(tools, *, model: str) -> int:
+    """Keep the full-request contract when the canonical counter degrades."""
+    if not tools:
+        return 0
+    try:
+        from lib.context_telemetry import tool_schema_tokens
+
+        return max(0, int(tool_schema_tokens(tools, model=model) or 0))
+    except Exception as exc:
+        logger.warning(
+            '[Compact] tool-schema fallback failed; request estimate may be '
+            'incomplete: %s',
+            exc,
+        )
+        return 0
+
+
 def _count_tokens_authoritative(
     messages: list,
     task: dict | None = None,
     *,
     measurement_out: dict | None = None,
+    tool_schema=_TASK_TOOL_SCHEMA,
+    collect_reusable_text_counts: bool = False,
 ) -> tuple[int, str]:
     """Authoritative token count via ``lib.token_counter.count_tokens``.
 
@@ -203,7 +220,11 @@ def _count_tokens_authoritative(
     # orchestrator.py `_assemble_tool_list`). It ships in every request and
     # the gateway tokenizes it, so the gate must include it or it
     # under-counts by the whole tool-schema size on tool-heavy configs.
-    tools = (task or {}).get('_tool_schema') or None
+    tools = (
+        (task or {}).get('_tool_schema') or None
+        if tool_schema is _TASK_TOOL_SCHEMA
+        else tool_schema or None
+    )
 
     try:
         from lib.token_counter import count_tokens as _ct_count_tokens
@@ -214,7 +235,9 @@ def _count_tokens_authoritative(
     message_tokens: int | None = None
     if _ct_count_tokens is None:
         message_tokens = _estimate_total_tokens(messages)
-        auth_tokens, method = message_tokens, 'heuristic_fallback'
+        auth_tokens = message_tokens + _fallback_tool_schema_tokens(
+            tools, model=model)
+        method = 'heuristic_fallback'
     else:
         try:
             result = _ct_count_tokens(
@@ -223,6 +246,12 @@ def _count_tokens_authoritative(
                 tools=tools,
                 conv_id=conv_id or None,
                 context_limit=context_limit,
+                measurement_out=(
+                    measurement_out
+                    if (collect_reusable_text_counts
+                        and isinstance(measurement_out, dict))
+                    else None
+                ),
             )
             auth_tokens = int(result.get('tokens', 0))
             method = str(result.get('method', 'unknown'))
@@ -230,7 +259,9 @@ def _count_tokens_authoritative(
             logger.warning('[Compact] count_tokens call failed, falling back to '
                            'heuristic: %s', e)
             message_tokens = _estimate_total_tokens(messages)
-            auth_tokens, method = message_tokens, 'heuristic_fallback'
+            auth_tokens = message_tokens + _fallback_tool_schema_tokens(
+                tools, model=model)
+            method = 'heuristic_fallback'
 
     # Exact tiers are provider/usage-MEASURED — they outrank any estimate or
     # anchor. Everything else (tiktoken / offline tokenizers / heuristic)
@@ -525,7 +556,9 @@ def _working_set_token_limit(task: dict | None = None) -> int:
 
     A per-request ``config.compaction.workingSetTokens`` override wins over
     ``TOFU_WORKING_CONTEXT_TOKENS``.  Zero disables the economic ceiling.
-    Invalid values fail open to the default; positive values are clamped so a
+    Without an explicit override, a provider/model rate card with a proven
+    price increase selects 90% of the last cheaper tier. Flat/unknown pricing
+    retains the conservative 128K default. Positive values are clamped so a
     typo cannot cause constant tiny-context compactions or remove all bounds.
     """
     import os
@@ -539,9 +572,25 @@ def _working_set_token_limit(task: dict | None = None) -> int:
             '_adaptiveCompactionWorkingSetTokens') or 0)
         return max(32_000, min(2_000_000, adaptive)) if adaptive > 0 else 0
     raw = comp_cfg.get('workingSetTokens') if isinstance(comp_cfg, dict) else None
+    if raw is None and 'TOFU_WORKING_CONTEXT_TOKENS' in os.environ:
+        raw = os.environ.get('TOFU_WORKING_CONTEXT_TOKENS')
     if raw is None:
-        raw = os.environ.get('TOFU_WORKING_CONTEXT_TOKENS',
-                             str(_DEFAULT_WORKING_SET_TOKENS))
+        value = _DEFAULT_WORKING_SET_TOKENS
+        try:
+            from lib.pricing import first_pricing_increase_boundary
+            cfg = (task or {}).get('config', {}) or {}
+            model = str(cfg.get('model') or (task or {}).get('model') or '')
+            provider_id = str((task or {}).get('provider_id') or '')
+            boundary = first_pricing_increase_boundary(
+                model, provider_id or None) if model else None
+            if boundary:
+                value = int(
+                    int(boundary['maxPromptTokens'])
+                    * _PRICING_TIER_WORKING_SET_MARGIN)
+        except Exception as exc:
+            logger.debug('[Compact] pricing-tier working-set lookup failed: %s',
+                         exc)
+        return max(32_000, min(2_000_000, value))
     try:
         value = int(raw)
     except (TypeError, ValueError) as e:
@@ -553,29 +602,90 @@ def _working_set_token_limit(task: dict | None = None) -> int:
     return max(32_000, min(2_000_000, value))
 
 
-def _fixed_observed_survival_payback_horizon(
+def _record_compaction_cadence(
+    task: dict | None,
+    current_round: object = None,
+) -> int | None:
+    """Record one successful prefix rewrite and its task-local round gap.
+
+    State is deliberately bounded and lives on the request task, never in a
+    process global. A second rewrite in the same round is idempotent. The
+    observed gaps predict how many cache-read rounds the next rewritten prefix
+    is likely to survive; total task age is not evidence for that lifetime.
+    """
+    if not isinstance(task, dict):
+        return None
+    try:
+        round_num = int(current_round)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if round_num < 0:
+        return None
+    previous_raw = task.get('_compactionCadenceLastRound')
+    try:
+        previous = int(previous_raw) if previous_raw is not None else None
+    except (TypeError, ValueError, OverflowError):
+        previous = None
+    gap = None
+    if previous is not None and round_num > previous:
+        gap = round_num - previous
+        gaps = task.setdefault('_compactionCadenceRoundGaps', [])
+        if not isinstance(gaps, list):
+            gaps = []
+            task['_compactionCadenceRoundGaps'] = gaps
+        gaps.append(gap)
+        if len(gaps) > _COMPACTION_CADENCE_MAX_GAPS:
+            del gaps[:-_COMPACTION_CADENCE_MAX_GAPS]
+    if previous is None or round_num > previous:
+        task['_compactionCadenceLastRound'] = round_num
+    return gap
+
+
+def _fixed_compaction_cadence_payback_horizon(
+    task: dict | None,
     current_round: object = None,
     *,
     remaining_api_rounds: object = None,
 ) -> float:
-    """Return a bounded fixed-policy ROI horizon from observed task survival.
+    """Return a bounded ROI horizon from observed compaction-window cadence.
 
-    Round zero through three retain the shipped one-round cache-rewrite rule.
-    A task earns a wider horizon only by demonstrably surviving more model
-    rounds, and never beyond the hard API-round budget still available to it.
-    The six-round ceiling matches the established adaptive-policy default.
+    The conservative prediction is the shortest of the recent successful
+    rewrite gaps and the current window's already-observed age. A task that is
+    100 rounds old but rewrites its prefix every three rounds therefore gets a
+    three-round horizon, not the old six-round task-survival allowance.
     """
     minimum = max(0.0, float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
     try:
-        completed_rounds = max(0, int(current_round or 0))
+        round_num = max(0, int(current_round or 0))
     except (TypeError, ValueError, OverflowError):
-        completed_rounds = 0
+        round_num = 0
+
+    observations: list[int] = []
+    if isinstance(task, dict):
+        raw_gaps = task.get('_compactionCadenceRoundGaps')
+        if isinstance(raw_gaps, list):
+            for raw_gap in raw_gaps[-4:]:
+                try:
+                    gap = int(raw_gap)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if gap > 0:
+                    observations.append(gap)
+        previous_raw = task.get('_compactionCadenceLastRound')
+        try:
+            previous = (int(previous_raw)
+                        if previous_raw is not None else None)
+        except (TypeError, ValueError, OverflowError):
+            previous = None
+        if previous is not None and round_num > previous:
+            observations.append(round_num - previous)
 
     horizon = minimum
-    for observed_rounds, candidate_horizon in _FIXED_SURVIVAL_PAYBACK_STEPS:
-        if completed_rounds >= observed_rounds:
-            horizon = max(minimum, candidate_horizon)
-            break
+    if observations:
+        horizon = max(minimum, min(
+            _COMPACTION_CADENCE_MAX_PAYBACK_ROUNDS,
+            float(min(observations)),
+        ))
 
     if remaining_api_rounds is not None:
         try:
@@ -744,6 +854,20 @@ def _should_force_compact(
     total_tokens, method = _count_tokens_authoritative(
         messages, task, measurement_out=measurement_out)
 
+    # Public vendor APIs can own the economic working-set compaction at the
+    # exact rendered-token boundary (including opaque reasoning state that the
+    # local message projection cannot inspect). Keep local L1 above this gate,
+    # but defer lossy local L2 until the model-window safety threshold. Manual
+    # compaction and the reactive prompt-too-long path do not call this policy
+    # branch and remain available.
+    if ((task or {}).get('_nativeCompactionPrimary')
+            and total_tokens <= window_threshold):
+        logger.debug('[Compact] native-primary defer conv=%s mode=%s '
+                     'tokens=%d <= hard_window=%d',
+                     log_id, (task or {}).get('_nativeCompactionMode') or '?',
+                     total_tokens, window_threshold)
+        return False
+
     comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction')
     adaptive = (isinstance(comp_cfg, dict)
                 and str(comp_cfg.get('strategy') or '').lower() == 'adaptive')
@@ -788,7 +912,8 @@ def _should_force_compact(
                 witnessed_payback_limit = float(
                     _AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
             current_payback_limit = (
-                _fixed_observed_survival_payback_horizon(
+                _fixed_compaction_cadence_payback_horizon(
+                    task,
                     current_round,
                     remaining_api_rounds=remaining_api_rounds,
                 )

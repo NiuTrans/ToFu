@@ -44,6 +44,17 @@ def _new_longform_task(task_id: str, *, topic: str, workdir: str, lang: str,
                 'depth': depth, 'conv_id': conv_id})
 
 
+def _claim_longform_task(key: tuple, task_id: str, *, topic: str, workdir: str,
+                         lang: str, depth: str, user_id: int,
+                         conv_id: str = ''):
+    """Atomically join identical live work or create the winning task."""
+    return _production.claim_task(
+        key, task_id, user_id=user_id,
+        meta={'topic': topic, 'lang': lang, 'depth': depth},
+        fields={'topic': topic, 'workdir': workdir, 'lang': lang,
+                'depth': depth, 'conv_id': conv_id})
+
+
 def _append_longform_event(task, event):
     return _production.append_event(task, event)
 
@@ -59,6 +70,7 @@ def _longform_task_id():
 __all__ = [
     '_production', '_longform_runtime', '_longform_index_get',
     '_longform_index_register', '_new_longform_task',
+    '_claim_longform_task',
     '_append_longform_event', '_cleanup_stale_longform_tasks',
     '_longform_task_id',
 ]

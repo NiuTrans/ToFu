@@ -32,6 +32,10 @@ function _vlmSaveState() {
         vlmTaskId: p._vlmTaskId || '', vlmProgress: p.vlmProgress || '',
         vlmError: p.vlmError || '',
         _docIcon: p._docIcon || '',
+        attachmentId: p.attachmentId || '', kind: p.kind || '',
+        status: p.status || '', mimeType: p.mimeType || '',
+        sizeBytes: p.sizeBytes || 0, sourceUrl: p.sourceUrl || '',
+        previewUrl: p.previewUrl || '', textChars: p.textChars || 0,
       };
     });
     if (items.length > 0) {
@@ -72,6 +76,10 @@ async function _vlmRestoreState() {
       vlmStatus: saved.vlmStatus || '', vlmProgress: saved.vlmProgress || '',
       vlmError: saved.vlmError || '',
       _vlmAlive: true, _docIcon: saved._docIcon || '',
+      attachmentId: saved.attachmentId || '', kind: saved.kind || '',
+      status: saved.status || '', mimeType: saved.mimeType || '',
+      sizeBytes: saved.sizeBytes || 0, sourceUrl: saved.sourceUrl || '',
+      previewUrl: saved.previewUrl || '', textChars: saved.textChars || 0,
     };
     pendingPdfTexts.push(pdfObj);
 
@@ -277,33 +285,31 @@ async function processImageFile(file) {
   return d;
 }
 
-// ── Shared core: parse a PDF file via server backend ──
-// Populates and returns a pdfObj. If opts.startVlm is true and an onUpdate
-// callback is provided, auto-starts VLM background parse.
+// ── Shared core: persist + index a PDF through the unified attachment API ──
+// The composer keeps only canonical display metadata; parsed text and page
+// images remain server-side and are projected into a model request on demand.
 // Used by: handlePDFUpload, drag-drop, edit mode.
 async function parsePdfToServer(file, pdfObj, opts) {
-  const { onUpdate, isAlive } = opts || {};
+  const { onUpdate } = opts || {};
   const formData = new FormData();
   formData.append("file", file);
-  formData.append("maxImageWidth", "0");
-  formData.append("maxImages", "0");
-  formData.append("maxTextChars", "0");
-  const data = await Api.pdf.parse(formData);
-  if (!data || !data.success) throw new Error((data && data.error) || "Parse failed");
-  pdfObj.text = data.text || "";
-  pdfObj.pages = data.totalPages;
-  pdfObj.textLength = data.textLength;
-  pdfObj.isScanned = data.isScanned;
-  pdfObj.method = data.method;
+  const data = await Api.media.upload(formData);
+  const attachment = data && data.attachment;
+  if (!attachment || !attachment.attachmentId)
+    throw new Error((data && data.error) || "Attachment indexing failed");
+  Object.assign(pdfObj, attachment, {
+    text: "",
+    pages: attachment.pages || 0,
+    textLength: attachment.textChars || 0,
+    isScanned: false,
+    method: attachment.method || "indexed",
+  });
   if (onUpdate) onUpdate();
   _vlmSaveState();  // Persist text parse result so it survives refresh
-  // Auto-start VLM high-quality parse in background
-  if (typeof runtimeScope._vlmParseEntry === "function" && onUpdate) {
-    pdfObj._vlmAlive = true;
-    const alive = isAlive || (() => pdfObj._vlmAlive !== false);
-    runtimeScope._vlmParseEntry(file, pdfObj, alive, onUpdate);
-  }
-  return { data }; // caller can inspect data.textLength, data.isScanned etc.
+  return { data: {
+    textLength: pdfObj.textLength, totalPages: pdfObj.pages,
+    isScanned: false, method: pdfObj.method, warnings: [],
+  } };
 }
 
 // ── Document extensions recognized for server-side parsing ──
@@ -527,7 +533,9 @@ async function _handleImageDrop(f) {
   }
   pendingImages.push(imgObj);
   renderImagePreviews();
-  if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
+  if (typeof runtimeScope._igUpdateGenButton === 'function') {
+    runtimeScope._igUpdateGenButton();
+  }
   await _processPendingImage(f, imgObj);
 }
 
@@ -588,10 +596,9 @@ async function _waitForImageProcessing() {
 
 // ── Video upload + analysis (P1: frames + transcript) ─────────────
 // The video is processed ENTIRELY at upload time (owner ruling 2026-08-04):
-// POST → video_id → poll /api/v1/videos/<id> until the server has extracted
-// durable frames + transcript. The ready entry's full payload is embedded in
-// the conversation message at send time (self-contained, like images[]), so
-// reload / resume / multi-turn all keep working.
+// POST → durable attachment ref → background poll. A send waits only for the
+// upload to establish that ref, never for frame/transcript analysis; turns stay
+// small and later model requests resolve the latest server-side evidence.
 var _VIDEO_EXTS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi']);
 var _VIDEO_MAX_BYTES = 512 * 1024 * 1024;  // mirrors TOFU_VIDEO_MAX_BYTES default
 
@@ -608,6 +615,18 @@ function _fmtVideoDur(s) {
   return (m < 10 ? '0' + m : m) + ':' + (ss < 10 ? '0' + ss : ss);
 }
 
+function _applyVideoAttachment(vObj, attachment) {
+  if (!attachment || !attachment.attachmentId) return;
+  Object.assign(vObj, attachment);
+  // Pending-chip aliases only; _videoPayloadForSend emits the unified shape.
+  vObj.video_id = attachment.attachmentId;
+  vObj.video_url = attachment.sourceUrl || '';
+  vObj.poster = attachment.previewUrl || '';
+  vObj.duration_s = attachment.durationSeconds || 0;
+  vObj.frame_count = attachment.frameCount || 0;
+  vObj.transcript_status = attachment.transcriptStatus || 'none';
+}
+
 async function _handleVideoDrop(f) {
   if (f.size > _VIDEO_MAX_BYTES) {
     debugLog(t('upload.videoTooLarge') + ' — ' + (f.name || ''), 'error');
@@ -622,10 +641,11 @@ async function _handleVideoDrop(f) {
     const up = await Api.videos.upload(fd);
     if (!up || up.ok === false || !up.video_id)
       throw new Error((up && up.error) || 'upload failed');
+    _applyVideoAttachment(vObj, up.attachment || up);
     vObj.video_id = up.video_id;
-    vObj._status = 'processing';
+    vObj._status = up.status === 'ready' ? '' : 'processing';
     renderImagePreviews();
-    await _pollVideoReady(vObj);
+    if (up.status !== 'ready') await _pollVideoReady(vObj);
   } catch (e) {
     if (!pendingVideos.includes(vObj)) return;  // chip removed mid-flight
     vObj._status = 'failed';
@@ -643,19 +663,7 @@ async function _pollVideoReady(vObj) {
     try { rec = await Api.videos.status(vObj.video_id); } catch (_e) { rec = null; }
     if (!rec) continue;  // transient network — keep polling
     if (rec.status === 'ready') {
-      vObj.video_url = rec.video_url || '';
-      vObj.poster = rec.poster || '';
-      vObj.duration_s = rec.duration_s || 0;
-      vObj.width = rec.width || 0;
-      vObj.height = rec.height || 0;
-      vObj.frames = rec.frames || [];
-      vObj.frame_count = rec.frame_count || vObj.frames.length;
-      vObj.avg_frame_bytes = rec.avg_frame_bytes || 0;
-      vObj.transcript = rec.transcript || '';
-      vObj.transcript_status = rec.transcript_status || 'none';
-      vObj.transcript_model = rec.transcript_model || '';
-      vObj.storyboard = rec.storyboard || '';
-      vObj.storyboard_model = rec.storyboard_model || '';
+      _applyVideoAttachment(vObj, rec.attachment || rec);
       delete vObj._status;
       delete vObj._phase;
       renderImagePreviews();
@@ -672,7 +680,12 @@ async function _pollVideoReady(vObj) {
 }
 
 function removeVideo(i) {
-  pendingVideos.splice(i, 1);
+  const removed = pendingVideos.splice(i, 1)[0];
+  if (removed?.attachmentId && Api.media?.remove) {
+    void Api.media.remove(removed.attachmentId).catch((error) => {
+      debugLog('Video attachment cleanup failed: ' + error.message, 'warn');
+    });
+  }
   renderImagePreviews();
 }
 
@@ -686,34 +699,51 @@ function openVideoUrl(url) {
 // + server-side model-aware frame clamping kept.
 function _videoPayloadForSend(v) {
   return {
-    video_id: v.video_id || '',
+    attachmentId: v.attachmentId || v.video_id || '',
+    kind: 'video',
     name: v.name || 'video',
-    video_url: v.video_url || '',
-    poster: v.poster || '',
-    duration_s: v.duration_s || 0,
+    status: v.status || (v._status === 'processing' ? 'processing' : 'ready'),
+    mimeType: v.mimeType || '',
+    sizeBytes: v.sizeBytes || 0,
+    sourceUrl: v.sourceUrl || v.video_url || '',
+    previewUrl: v.previewUrl || v.poster || '',
+    durationSeconds: v.durationSeconds || v.duration_s || 0,
     width: v.width || 0,
     height: v.height || 0,
-    frames: v.frames || [],
-    frame_count: v.frame_count || (v.frames || []).length,
-    avg_frame_bytes: v.avg_frame_bytes || 0,
-    transcript: v.transcript || '',
-    transcript_status: v.transcript_status || 'none',
-    transcript_model: v.transcript_model || '',
-    storyboard: v.storyboard || '',
-    storyboard_model: v.storyboard_model || '',
+    frameCount: v.frameCount || v.frame_count || 0,
+    avgFrameBytes: v.avgFrameBytes || 0,
+    transcriptStatus: v.transcriptStatus || v.transcript_status || 'none',
   };
 }
 
-// Send gate: wait for in-flight analyses, then drop any entry that is not
-// ready so a half-processed video never rides the turn.
+function _documentPayloadForSend(documentAttachment) {
+  return {
+    attachmentId: documentAttachment.attachmentId || '',
+    kind: 'document',
+    name: documentAttachment.name || 'document',
+    status: documentAttachment.status || 'ready',
+    mimeType: documentAttachment.mimeType || '',
+    sizeBytes: documentAttachment.sizeBytes || 0,
+    sourceUrl: documentAttachment.sourceUrl || '',
+    previewUrl: documentAttachment.previewUrl || '',
+    pages: documentAttachment.pages || 0,
+    textChars: documentAttachment.textChars
+      || documentAttachment.textLength || 0,
+    method: documentAttachment.method || '',
+  };
+}
+
+// Send gate: wait only until the upload has a durable reference. Analysis is
+// a server-owned dependency and may continue after the turn is submitted.
 async function _waitForPendingVideos() {
-  const deadline = Date.now() + 12 * 60 * 1000;
-  while (pendingVideos.some(v => v && (v._status === 'uploading' || v._status === 'processing'))) {
+  const deadline = Date.now() + 2 * 60 * 1000;
+  while (pendingVideos.some(v => v && v._status === 'uploading')) {
     if (Date.now() > deadline) break;
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 100));
   }
   const before = pendingVideos.length;
-  pendingVideos = pendingVideos.filter(v => v && !v._status);
+  pendingVideos = pendingVideos.filter(v =>
+    v && v.attachmentId && v._status !== 'failed');
   if (pendingVideos.length < before) {
     const msg = t('upload.videoSkipped');
     if (typeof showToast === 'function') showToast(msg, 'warning');
@@ -744,17 +774,19 @@ async function handleDocUpload(file) {
   try {
     const formData = new FormData();
     formData.append("file", file, uploadName);
-    formData.append("maxTextChars", "0");
-    const data = await Api.doc.parse(formData);
-    if (!data || !data.success) throw new Error((data && data.error) || "Parse failed");
+    const data = await Api.media.upload(formData);
+    const attachment = data && data.attachment;
+    if (!attachment || !attachment.attachmentId)
+      throw new Error((data && data.error) || "Attachment indexing failed");
 
     const docObj = {
-      name: file.name,
-      text: data.text || "",
-      pages: data.totalPages || 1,
-      textLength: data.textLength || 0,
+      ...attachment,
+      name: attachment.name || file.name,
+      text: "",
+      pages: attachment.pages || 1,
+      textLength: attachment.textChars || 0,
       isScanned: false,
-      method: data.method || ext,
+      method: attachment.method || ext,
       _docIcon: icon,
     };
     pendingPdfTexts.push(docObj);
@@ -762,8 +794,8 @@ async function handleDocUpload(file) {
     _vlmSaveState();  // Persist doc upload for refresh recovery
 
     pFill.style.width = "100%";
-    const sizeStr = data.textLength >= 1024
-      ? `${(data.textLength / 1024).toFixed(1)}KB` : `${data.textLength} chars`;
+    const sizeStr = docObj.textLength >= 1024
+      ? `${(docObj.textLength / 1024).toFixed(1)}KB` : `${docObj.textLength} chars`;
     const parts = [sizeStr];
     if (data.warnings?.length) parts.push(`⚠️ ${data.warnings.join("; ")}`);
     pText.textContent = `✓ ${file.name}: ${parts.join(" · ")}`;
@@ -863,7 +895,9 @@ function removeImage(i) {
     try { URL.revokeObjectURL(gone._objectUrl); } catch (e) { /* ignore */ }
   }
   renderImagePreviews();
-  if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
+  if (typeof runtimeScope._igUpdateGenButton === 'function') {
+    runtimeScope._igUpdateGenButton();
+  }
 }
 
 // ── Drag-to-reorder image preview chips ──────────────
@@ -963,7 +997,17 @@ document.addEventListener('drop', (e) => {
 function removePdfText(i) {
   const entry = pendingPdfTexts[i];
   if (entry) entry._vlmAlive = false; // Kill VLM polling for this entry
+  if (entry?._vlmTaskId && Api.pdf?.vlmCancel) {
+    void Api.pdf.vlmCancel(entry._vlmTaskId).catch((error) => {
+      debugLog('VLM task cancellation failed: ' + error.message, 'warn');
+    });
+  }
   pendingPdfTexts.splice(i, 1);
+  if (entry?.attachmentId && Api.media?.remove) {
+    void Api.media.remove(entry.attachmentId).catch((error) => {
+      debugLog('Document attachment cleanup failed: ' + error.message, 'warn');
+    });
+  }
   renderImagePreviews();
   _vlmSaveState();  // Update persistence
 }

@@ -740,6 +740,60 @@ def test_report_endpoint_reads_task_results_projection(flask_client,
     assert calls[0][1]['completed_at_gte'] == now_ms - 20 * 86_400_000
 
 
+def test_cost_experiment_repository_resumes_bounded_storage_pages():
+    """A cold legacy scan resumes pages instead of restarting one giant RPC."""
+    from lib.cost_experiment_repository import scan_cost_experiment_outcomes
+
+    calls = []
+
+    class _Storage:
+        def query(self, operation, payload):
+            calls.append((operation, dict(payload)))
+            if len(calls) == 1:
+                return {
+                    'records': [{
+                        'task_id': 'older', 'conv_id': 'conv-a',
+                        'completed_at': 100, 'outcome': {'arm': 'control'},
+                    }],
+                    'invalid': 1,
+                    'scanned': 256,
+                    'capped': False,
+                    'exhausted': False,
+                    'next_cursor': 'task-page-1',
+                }
+            return {
+                'records': [{
+                    'task_id': 'newer', 'conv_id': 'conv-b',
+                    'completed_at': 200, 'outcome': {'arm': 'optimized'},
+                }],
+                'invalid': 2,
+                'scanned': 11,
+                'capped': False,
+                'exhausted': True,
+                'next_cursor': '',
+            }
+
+    result = scan_cost_experiment_outcomes(
+        user_id=7,
+        completed_at_gte=50,
+        experiment_id='exp-v1',
+        limit=5_000,
+        storage_client=_Storage(),
+    )
+
+    assert [row['task_id'] for row in result['records']] == [
+        'newer', 'older']
+    assert result['invalid'] == 3
+    assert result['scanned'] == 267
+    assert result['capped'] is False
+    assert len(calls) == 2
+    assert calls[0][0] == 'task_results.cost_experiment_scan'
+    assert calls[0][1]['user_id'] == 7
+    assert calls[0][1]['after_key'] == ''
+    assert calls[0][1]['scan_limit'] == 256
+    assert calls[1][1]['after_key'] == 'task-page-1'
+
+
 @pytest.mark.parametrize('field,value', [
     ('traffic_percent', -1),
     ('traffic_percent', 101),

@@ -64,6 +64,14 @@ _STORM_WINDOW_SECS = float(os.environ.get('TOFU_RESTART_STORM_WINDOW_SECS', '120
 # left in state="running" is, by definition, none of these — it is a kill.
 CLEAN_REASONS = frozenset({'manual', 'signal', 'restart', 'memory_recycle'})
 
+# A generic signal is often only the transport used to complete a stronger
+# lifecycle request.  For example, the manual-shutdown route records
+# ``manual`` and then sends SIGTERM to itself; the signal handler runs a moment
+# later.  Replacing ``manual`` with ``signal`` loses the operator's durable
+# intent before the lifecycle manager can consume it.
+_SIGNAL_PRESERVES_REASONS = frozenset(
+    {'manual', 'restart', 'memory_recycle'})
+
 # classify_previous_shutdown verdicts.
 VERDICT_FIRST_BOOT = 'first_boot'   # no prior marker — nothing to classify
 VERDICT_CLEAN = 'clean'             # previous exit ran a graceful path
@@ -163,15 +171,33 @@ def mark_clean(reason: str = 'signal') -> None:
     """
     if reason not in CLEAN_REASONS:
         logger.debug('[shutdown_marker] non-standard clean reason %r → recorded as-is', reason)
-    try:
-        write_json_atomic(marker_path(), {
+    recorded_reason = reason
+
+    def _write_marker(current: Any) -> dict[str, Any]:
+        nonlocal recorded_reason
+        current = current if isinstance(current, dict) else {}
+        prior_reason = str(current.get('reason') or '')
+        if (reason == 'signal'
+                and current.get('state') == 'clean'
+                and current.get('pid') == os.getpid()
+                and prior_reason in _SIGNAL_PRESERVES_REASONS):
+            # Preserve the first, stronger intent and its original timestamp.
+            # The marker is an exit-intent certificate, not a signal history.
+            recorded_reason = prior_reason
+            return current
+        return {
             'state': 'clean',
             'pid': os.getpid(),
             'host': socket.gethostname(),
             'clean_ts': time.time(),
             'reason': reason,
-        }, fsync=True)
-        logger.info('[shutdown_marker] marked clean (reason=%s)', reason)
+        }
+
+    try:
+        update_json_atomic(
+            marker_path(), _write_marker, default=None, fsync=True)
+        logger.info(
+            '[shutdown_marker] marked clean (reason=%s)', recorded_reason)
     except OSError as e:
         logger.warning('[shutdown_marker] mark_clean failed (non-fatal): %s', e)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 import time
 from typing import Any
 
@@ -10,11 +11,29 @@ import orjson
 
 from lib.log import get_logger
 from lib.storage.errors import StorageError
-from lib.storage_projection import project_task_result_metadata_for_storage
+from lib.storage_projection import (
+    project_event_usage_for_storage,
+    project_task_result_metadata_for_storage,
+)
 from lib.storage_sidecar.adapters.base import Session
+from lib.storage_sidecar.projection_codec import ProjectionCodecError
+from lib.storage_sidecar.task_result_field_codec import (
+    decode_task_result_fields_from_storage,
+    encode_task_result_fields_for_storage,
+)
+from lib.task_result_checkpoint_contract import (
+    CONVERSATION_CACHE_PREFIX_HWM_SETTING,
+    CONVERSATION_LAST_TURN_CACHE_READ_SETTING,
+    TASK_RESULT_CACHE_FACT_MAXIMUM,
+    TASK_RESULT_CACHE_PREFIX_HWM_FIELD,
+    TASK_RESULT_CACHE_SETTINGS_CONTRACT,
+    TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+    TASK_RESULT_LAST_TURN_CACHE_READ_FIELD,
+)
 from lib.storage_sidecar.task_event_codec import (
     decode_task_event_payload,
     encode_task_event_payload,
+    task_event_decoded_size,
 )
 
 
@@ -23,6 +42,9 @@ logger = get_logger(__name__)
 _LEGACY_BLANK_EVENT_RECOVERY_MAX_ROWS = 100
 _LEGACY_BLANK_EVENT_RECOVERY_PAYLOAD_BYTES = 4 * 1024 * 1024
 _LEGACY_OPAQUE_EVENT_KIND = "__tofu_legacy_opaque__"
+_RATE_LIMIT_PRUNE_BATCH = 256
+_COST_EXPERIMENT_SCAN_PAGE_ROWS = 8
+_COST_EXPERIMENT_SCAN_MAX_ROWS = 256
 
 
 from lib.storage_sidecar.operations_pkg._common import (
@@ -32,6 +54,39 @@ from lib.storage_sidecar.operations_pkg._common import (
     _load,
     _required_text,
 )
+
+
+def _encoded_task_result_document(value: Any) -> bytes:
+    """Encode one public task result or reject private/malformed input."""
+    try:
+        return encode_task_result_fields_for_storage(value).stored_document
+    except ProjectionCodecError as exc:
+        raise StorageError(
+            "database_protocol_error", "Task result storage encoding is invalid"
+        ) from exc
+
+
+def _hydrated_task_result_value(
+    value: Any,
+    *,
+    fields: set[str] | None = None,
+) -> Any:
+    """Hydrate all or selected private fields at a semantic read boundary."""
+    try:
+        return decode_task_result_fields_from_storage(value, fields=fields)
+    except ProjectionCodecError as exc:
+        raise StorageError(
+            "database_integrity", "Stored task result field encoding is invalid"
+        ) from exc
+
+
+def _load_record_value(namespace: str, raw_value: Any) -> Any:
+    value = _load(raw_value)
+    return (
+        _hydrated_task_result_value(value)
+        if namespace == "task_results"
+        else value
+    )
 
 
 def _record_get(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -45,7 +100,7 @@ def _record_get(session: Session, payload: Mapping[str, Any]) -> Any:
     if row is None:
         return None
     return {
-        "value": _load(row["value_json"]),
+        "value": _load_record_value(namespace, row["value_json"]),
         "version": int(row["version"]),
         "updated_at_ms": int(row["updated_at_ms"]),
     }
@@ -68,7 +123,7 @@ def _record_list(session: Session, payload: Mapping[str, Any]) -> Any:
     return [
         {
             "key": row["record_key"],
-            "value": _load(row["value_json"]),
+            "value": _load_record_value(namespace, row["value_json"]),
             "version": int(row["version"]),
             "updated_at_ms": int(row["updated_at_ms"]),
         }
@@ -81,6 +136,108 @@ _TASK_RESULT_SUMMARY_ORDERS = {
     "completed_at_asc",
     "updated_at_asc",
 }
+
+
+def _task_results_replay_get(
+    session: Session,
+    payload: Mapping[str, Any],
+) -> Any:
+    """Return one owner-scoped compact replay projection.
+
+    A task-result row can carry MiB of cumulative content, thinking and tool
+    diagnostics. Cursor clients need only owner/status/clocks until their last
+    page, so keep those heavy fields inside the Sidecar unless the caller
+    explicitly requests the terminal payload.
+    """
+    key = _required_text(payload, "key")
+    user_id = _integer(payload, "user_id", minimum=1)
+    include_terminal_payload = payload.get(
+        "include_terminal_payload", False)
+    if not isinstance(include_terminal_payload, bool):
+        raise StorageError(
+            "database_protocol_error",
+            "include_terminal_payload must be boolean",
+        )
+    include_metadata = payload.get("include_metadata", False)
+    if not isinstance(include_metadata, bool):
+        raise StorageError(
+            "database_protocol_error", "include_metadata must be boolean")
+    row = session.fetch_one(
+        "SELECT value_json, version, updated_at_ms FROM storage_records "
+        "WHERE namespace=? AND record_key=?",
+        ("task_results", key),
+    )
+    if row is None:
+        return None
+    try:
+        value = _load(row["value_json"])
+        replay_fields = {"metadata", "error"}
+        if include_terminal_payload:
+            replay_fields.update({"content", "thinking"})
+        value = _hydrated_task_result_value(value, fields=replay_fields)
+    except (TypeError, ValueError, orjson.JSONDecodeError) as exc:
+        raise StorageError(
+            "database_integrity", "Stored task result is invalid") from exc
+    if not isinstance(value, Mapping):
+        raise StorageError(
+            "database_integrity", "Stored task result is not an object")
+    raw_user_id = value.get("user_id")
+    try:
+        row_user_id = (
+            0 if isinstance(raw_user_id, bool) else int(raw_user_id or 0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    # Owner filtering precedes every projection so foreign and missing rows
+    # are indistinguishable at the application boundary.
+    if row_user_id != user_id:
+        return None
+    stored_task_id = str(value.get("task_id") or key)
+    if stored_task_id != key:
+        raise StorageError(
+            "database_integrity", "Stored task-result identity is invalid")
+
+    metadata = value.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = orjson.loads(metadata)
+        except (orjson.JSONDecodeError, ValueError):
+            metadata = {}
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    replay_metadata = (
+        dict(metadata) if include_metadata else {
+            field: metadata[field]
+            for field in ("finishReason", "model", "requestId")
+            if field in metadata
+        }
+    )
+    try:
+        created_at = int(value.get("created_at") or 0)
+        completed_at = int(value.get("completed_at") or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise StorageError(
+            "database_integrity", "Stored task-result clocks are invalid"
+        ) from exc
+    if isinstance(value.get("created_at"), bool) or isinstance(
+        value.get("completed_at"), bool
+    ):
+        raise StorageError(
+            "database_integrity", "Stored task-result clocks are invalid")
+    result = {
+        "task_id": key,
+        "conv_id": str(value.get("conv_id") or ""),
+        "user_id": row_user_id,
+        "status": str(value.get("status") or "running"),
+        "error": value.get("error"),
+        "metadata": replay_metadata,
+        "created_at": created_at,
+        "completed_at": completed_at,
+        "version": int(row["version"]),
+        "updated_at_ms": int(row["updated_at_ms"]),
+    }
+    if include_terminal_payload:
+        result["content"] = value.get("content") or ""
+        result["thinking"] = value.get("thinking") or ""
+    return result
 
 
 def _task_results_summary_list(
@@ -220,6 +377,78 @@ def _task_results_summary_list(
     }
 
 
+def _project_cost_experiment_candidate(
+    row: Mapping[str, Any],
+    *,
+    cutoff: int,
+    experiment_id: str,
+    experiment_id_bytes: bytes | None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Return one compact exact-match projection and its invalid-row bit."""
+    try:
+        if int(row.get("updated_at_ms") or 0) < cutoff:
+            return None, False
+        raw_value = row["value_json"]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None, True
+    if isinstance(raw_value, str):
+        if experiment_id not in raw_value:
+            return None, False
+    else:
+        try:
+            if (
+                experiment_id_bytes is not None
+                and experiment_id_bytes not in bytes(raw_value)
+            ):
+                return None, False
+        except (TypeError, ValueError):
+            return None, True
+    try:
+        value = _load(raw_value)
+        value = _hydrated_task_result_value(value, fields={"metadata"})
+    except (
+        TypeError,
+        ValueError,
+        orjson.JSONDecodeError,
+        StorageError,
+    ):
+        return None, True
+    if not isinstance(value, dict):
+        return None, True
+    completed_at = value.get("completed_at")
+    if (
+        not isinstance(completed_at, int)
+        or isinstance(completed_at, bool)
+        or completed_at < cutoff
+    ):
+        return None, False
+    metadata = value.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = orjson.loads(metadata)
+        except (orjson.JSONDecodeError, ValueError):
+            return None, True
+    outcome = (
+        (metadata or {}).get("costExperiment")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if not isinstance(outcome, dict) or not outcome:
+        return None, False
+    outcome_experiment_id = str(
+        outcome.get("experimentId") or outcome.get("experiment_id") or ""
+    )
+    if outcome_experiment_id != experiment_id:
+        return None, False
+    conv_id = str(value.get("conv_id") or "")
+    return {
+        "task_id": str(row["record_key"]),
+        "conv_id": conv_id,
+        "completed_at": int(completed_at),
+        "outcome": outcome,
+    }, False
+
+
 def _task_results_cost_experiment_scan(
     session: Session, payload: Mapping[str, Any]
 ) -> Any:
@@ -237,93 +466,89 @@ def _task_results_cost_experiment_scan(
     """
     cutoff = _integer(payload, "completed_at_gte", minimum=0)
     limit = _integer(payload, "limit", default=5000, minimum=1, maximum=10000)
+    scan_limit = _integer(
+        payload,
+        "scan_limit",
+        default=256,
+        minimum=1,
+        maximum=_COST_EXPERIMENT_SCAN_MAX_ROWS,
+    )
     user_id = _integer(payload, "user_id", minimum=1)
     experiment_id = _required_text(payload, "experiment_id", 128)
-    # ``updated_at_ms`` equals the terminal write's completed_at for terminal
-    # rows, so it is a safe coarse filter; the exact window is re-checked on
-    # the value below.  The LIKE prefilter keeps metadata-less rows out of
-    # the Python parse entirely.
-    if session.backend == "postgres":
-        document = "convert_from(r.value_json, 'UTF8')::jsonb"
-        conv_id_expression = f"({document} ->> 'conv_id')"
-        projection_expression = f"({document} ->> 'cost_experiment_id')"
-        completed_expression = f"CAST(({document} ->> 'completed_at') AS BIGINT)"
-        searchable_document = "convert_from(r.value_json, 'UTF8')"
-    else:
-        document = "CAST(r.value_json AS TEXT)"
-        conv_id_expression = f"json_extract({document}, '$.conv_id')"
-        projection_expression = (
-            f"json_extract({document}, '$.cost_experiment_id')"
+    after_key = payload.get("after_key", "")
+    if not isinstance(after_key, str) or len(after_key) > 1024:
+        raise StorageError(
+            "database_protocol_error", "Invalid cost-experiment scan cursor"
         )
-        completed_expression = (
-            f"CAST(json_extract({document}, '$.completed_at') AS INTEGER)"
-        )
-        searchable_document = document
-    # New checkpoints carry an exact top-level projection.  The LIKE branch is
-    # a bounded compatibility path for rows written before that projection
-    # existed; exact outcome identity is rechecked after decoding.
-    escaped_experiment_id = (
-        experiment_id.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-    )
-    rows = session.fetch_all(
-        "SELECT r.record_key, r.value_json FROM storage_records r "
-        "JOIN storage_conversations c ON c.id = " + conv_id_expression + " "
-        "WHERE r.namespace = 'task_results' AND r.updated_at_ms >= ? AND "
-        + completed_expression + " >= ? "
-        "AND c.user_id = ? AND (" + projection_expression + " = ? OR ("
-        + projection_expression + " IS NULL AND " + searchable_document
-        + " LIKE ? ESCAPE '!')) ORDER BY r.updated_at_ms DESC LIMIT ?",
-        (cutoff, cutoff, user_id, experiment_id,
-         f"%{escaped_experiment_id}%", limit + 1),
-    )
+
+    # ``storage_records`` deliberately remains a generic, backend-neutral
+    # document table. Historical task rows predate the tiny top-level
+    # experiment projection, so an exact SQL JSON predicate still reads and
+    # parses every multi-kilobyte task result. More importantly, one SQLite
+    # deadline interrupt loses all scan progress and the read retry restarts at
+    # the first 177 MiB page. Walk the existing (namespace, record_key) primary
+    # key instead: each RPC advances an explicit cursor and each fetch
+    # materializes at most eight BLOBs. The route-level repository resumes up
+    # to its independent hard row budget.
     parsed: list[dict[str, Any]] = []
     invalid = 0
     conv_ids: set[str] = set()
-    for row in rows:
-        value = _load(row["value_json"])
-        if not isinstance(value, dict):
-            invalid += 1
-            continue
-        completed_at = value.get("completed_at")
-        if (
-            not isinstance(completed_at, int)
-            or isinstance(completed_at, bool)
-            or completed_at < cutoff
-        ):
-            continue
-        metadata = value.get("metadata")
-        if isinstance(metadata, str):
-            try:
-                metadata = orjson.loads(metadata)
-            except (orjson.JSONDecodeError, ValueError):
-                invalid += 1
+    try:
+        experiment_id_bytes = experiment_id.encode("ascii", errors="strict")
+    except UnicodeEncodeError:
+        # The public experiment contract is ASCII. A direct semantic-storage
+        # caller may still carry an older Unicode id; preserve correctness by
+        # disabling only the cheap byte prefilter for that compatibility case.
+        experiment_id_bytes = None
+    scanned = 0
+    exhausted = False
+    while scanned < scan_limit:
+        page_limit = min(
+            _COST_EXPERIMENT_SCAN_PAGE_ROWS,
+            scan_limit - scanned,
+        )
+        page = session.fetch_all(
+            "SELECT record_key, value_json, updated_at_ms "
+            "FROM storage_records "
+            "WHERE namespace = ? AND record_key > ? "
+            "ORDER BY record_key LIMIT ?",
+            ("task_results", after_key, page_limit),
+        )
+        if not page:
+            exhausted = True
+            break
+        for row in page:
+            after_key = str(row["record_key"])
+            scanned += 1
+            candidate, row_invalid = _project_cost_experiment_candidate(
+                row,
+                cutoff=cutoff,
+                experiment_id=experiment_id,
+                experiment_id_bytes=experiment_id_bytes,
+            )
+            invalid += int(row_invalid)
+            if candidate is None:
                 continue
-        outcome = (
-            (metadata or {}).get("costExperiment")
-            if isinstance(metadata, dict)
-            else None
-        )
-        if not isinstance(outcome, dict) or not outcome:
-            continue
-        outcome_experiment_id = str(
-            outcome.get("experimentId") or outcome.get("experiment_id") or ""
-        )
-        if outcome_experiment_id != experiment_id:
-            continue
-        conv_id = str(value.get("conv_id") or "")
-        parsed.append(
-            {
-                "task_id": str(row["record_key"]),
-                "conv_id": conv_id,
-                "completed_at": int(completed_at),
-                "outcome": outcome,
-            }
-        )
-        if conv_id:
-            conv_ids.add(conv_id)
+            parsed.append(candidate)
+            conv_id = candidate["conv_id"]
+            if conv_id:
+                conv_ids.add(conv_id)
+        if len(page) < page_limit:
+            exhausted = True
+            break
+    if not exhausted:
+        # A full final page is ambiguous: it may end exactly at the source
+        # boundary. Probe only the next primary key (never its BLOB) so an
+        # exact 10,000-row repository scan is not falsely marked truncated.
+        exhausted = not bool(session.fetch_all(
+            "SELECT record_key FROM storage_records "
+            "WHERE namespace = ? AND record_key > ? "
+            "ORDER BY record_key LIMIT 1",
+            ("task_results", after_key),
+        ))
     owned: set[str] = set()
     for chunk_start in range(0, len(conv_ids), 500):
-        chunk = list(conv_ids)[chunk_start : chunk_start + 500]
+        chunk = sorted(conv_ids)[chunk_start : chunk_start + 500]
         marks = ",".join("?" for _ in chunk)
         owners = session.fetch_all(
             "SELECT id FROM storage_conversations "
@@ -335,11 +560,17 @@ def _task_results_cost_experiment_scan(
         item for item in parsed
         if item["conv_id"] and item["conv_id"] in owned
     ]
+    records.sort(
+        key=lambda item: (item["completed_at"], item["task_id"]),
+        reverse=True,
+    )
     return {
         "records": records[:limit],
         "invalid": invalid,
-        "scanned": len(rows),
+        "scanned": scanned,
         "capped": len(records) > limit,
+        "exhausted": exhausted,
+        "next_cursor": "" if exhausted else after_key,
     }
 
 
@@ -393,8 +624,17 @@ def _record_put(session: Session, payload: Mapping[str, Any]) -> Any:
     value = payload.get("value")
     if namespace == "task_results":
         value = _project_task_result_experiment(value)
-    encoded = _dump(value)
+    encoded = (
+        _encoded_task_result_document(value)
+        if namespace == "task_results"
+        else _dump(value)
+    )
     now = int(time.time() * 1000)
+    # Serialize the read-version-then-upsert CAS per record.  SQLite's single
+    # writer already provides this exclusion; PostgreSQL serializes two
+    # concurrent writers on the same key so only one can observe a stale
+    # expected_version.
+    session.lock_key("record", f"{namespace}:{key}")
     current = session.fetch_one(
         "SELECT version FROM storage_records WHERE namespace = ? AND record_key = ?",
         (namespace, key),
@@ -431,24 +671,292 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
         raise StorageError(
             "database_protocol_error", "Invalid task result checkpoint"
         )
+    guard_contract = payload.get("guard_contract")
+    if guard_contract not in (None, TASK_RESULT_CHECKPOINT_GUARD_CONTRACT):
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid task result checkpoint guard contract",
+        )
+    guarded = guard_contract == TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
+    require_parent = payload.get("require_parent", False)
+    if guarded and not isinstance(require_parent, bool):
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid task result parent requirement",
+        )
+    if not guarded and "require_parent" in payload:
+        raise StorageError(
+            "database_protocol_error",
+            "Task result parent requirement needs a guard contract",
+        )
     expected = _expected_version(payload)
     if expected is None:
         raise StorageError(
             "database_protocol_error",
             "task_results.checkpoint requires expected_version",
         )
-    encoded = _dump(_project_task_result_experiment(value))
+    checkpoint_value = _project_task_result_experiment(value)
+    if not isinstance(checkpoint_value, Mapping):
+        raise StorageError(
+            "database_protocol_error", "Invalid projected task result"
+        )
+    checkpoint_value = dict(checkpoint_value)
+
+    cache_settings_contract = payload.get("cache_settings_contract")
+    cache_prefix_hwm_present = (
+        TASK_RESULT_CACHE_PREFIX_HWM_FIELD in checkpoint_value
+    )
+    last_turn_cache_read_present = (
+        TASK_RESULT_LAST_TURN_CACHE_READ_FIELD in checkpoint_value
+    )
+    cache_settings_requested = (
+        cache_prefix_hwm_present or last_turn_cache_read_present
+    )
+    if cache_settings_contract not in (
+        None, TASK_RESULT_CACHE_SETTINGS_CONTRACT,
+    ):
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid task result cache settings contract",
+        )
+    if cache_settings_requested:
+        if (cache_settings_contract != TASK_RESULT_CACHE_SETTINGS_CONTRACT
+                or not guarded or require_parent is not True):
+            raise StorageError(
+                "database_protocol_error",
+                "Task result cache settings need a guarded parent",
+            )
+    elif cache_settings_contract is not None:
+        raise StorageError(
+            "database_protocol_error",
+            "Task result cache settings contract has no facts",
+        )
+
+    def cache_fact(field: str, present: bool) -> int | None:
+        if not present:
+            return None
+        candidate = checkpoint_value.get(field)
+        if (isinstance(candidate, bool)
+                or not isinstance(candidate, int)
+                or candidate < 1
+                or candidate > TASK_RESULT_CACHE_FACT_MAXIMUM):
+            raise StorageError(
+                "database_protocol_error",
+                f"Invalid task result cache fact: {field}",
+            )
+        return candidate
+
+    requested_cache_prefix_hwm = cache_fact(
+        TASK_RESULT_CACHE_PREFIX_HWM_FIELD, cache_prefix_hwm_present,
+    )
+    requested_last_turn_cache_read = cache_fact(
+        TASK_RESULT_LAST_TURN_CACHE_READ_FIELD,
+        last_turn_cache_read_present,
+    )
+
+    def guarded_result(
+        *,
+        owned: bool,
+        version: int = 0,
+        updated_at_ms: int = 0,
+        cache_settings_committed: bool = False,
+        cache_settings_values: Mapping[str, int] | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "key": key,
+            "version": version,
+            "updated_at_ms": updated_at_ms,
+            "owned": owned,
+            "guard_contract": TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+        }
+        if cache_settings_requested:
+            result.update({
+                "cache_settings_contract": (
+                    TASK_RESULT_CACHE_SETTINGS_CONTRACT
+                ),
+                "cache_settings_committed": cache_settings_committed,
+            })
+            if cache_settings_committed and cache_settings_values:
+                result.update(cache_settings_values)
+        return result
+
+    incoming_user_id = 0
+    conversation_id = ""
+    parent_settings: dict[str, Any] | None = None
+    if guarded:
+        raw_user_id = checkpoint_value.get("user_id")
+        if (isinstance(raw_user_id, bool)
+                or not isinstance(raw_user_id, int)
+                or raw_user_id < 1):
+            raise StorageError(
+                "database_protocol_error",
+                "Guarded task result checkpoint requires a valid owner",
+            )
+        incoming_user_id = raw_user_id
+        if checkpoint_value.get("task_id") != key:
+            raise StorageError(
+                "database_protocol_error",
+                "Guarded task result checkpoint identity is invalid",
+            )
+        if require_parent:
+            conversation_id = checkpoint_value.get("conv_id")
+            if (not isinstance(conversation_id, str)
+                    or not conversation_id
+                    or len(conversation_id) > 512):
+                raise StorageError(
+                    "database_protocol_error",
+                    "Guarded task result checkpoint requires a parent",
+                )
+            # Share the conversation lifecycle lock used by delete/purge.
+            # A plain parent SELECT inside the same transaction is not enough
+            # under PostgreSQL READ COMMITTED: a concurrent purge could delete
+            # the header after this check but before the checkpoint write.
+            session.lock_key(
+                "conversation", f"{incoming_user_id}:{conversation_id}",
+            )
+            selected_parent_columns = (
+                "settings_json" if cache_settings_requested else "1 AS present"
+            )
+            parent = session.fetch_one(
+                f"SELECT {selected_parent_columns} FROM storage_conversations "
+                "WHERE id=? AND user_id=?",
+                (conversation_id, incoming_user_id),
+            )
+            if parent is None:
+                return guarded_result(owned=False)
+            if cache_settings_requested:
+                loaded_settings = _load(parent["settings_json"]) or {}
+                if not isinstance(loaded_settings, Mapping):
+                    raise StorageError(
+                        "database_integrity",
+                        "Conversation settings are malformed",
+                    )
+                parent_settings = dict(loaded_settings)
+    # Match task_results.abort's per-key lock so concurrent checkpoint CAS
+    # writers serialize before reading the witnessed version (PostgreSQL).
+    # SQLite treats lock_key as a no-op: its single writer already serializes.
+    session.lock_key("task_result", key)
     current = session.fetch_one(
         "SELECT value_json, version, updated_at_ms FROM storage_records "
         "WHERE namespace = ? AND record_key = ?",
         ("task_results", key),
     )
     actual = int(current["version"]) if current else 0
+    current_value: Mapping[str, Any] | None = None
+    if guarded and current is not None:
+        decoded_current = _load(current["value_json"])
+        if not isinstance(decoded_current, Mapping):
+            raise StorageError(
+                "database_integrity", "Task result checkpoint is malformed"
+            )
+        current_value = decoded_current
+        raw_current_user_id = current_value.get("user_id")
+        if (isinstance(raw_current_user_id, bool)
+                or not isinstance(raw_current_user_id, int)):
+            raise StorageError(
+                "database_integrity",
+                "Task result checkpoint owner is malformed",
+            )
+        if raw_current_user_id != incoming_user_id:
+            # A foreign task id is intentionally indistinguishable from a
+            # missing/fenced task id.
+            return guarded_result(owned=False)
+        current_status = current_value.get("status")
+        incoming_status = checkpoint_value.get("status")
+        if current_status == "interrupted" or (
+            incoming_status in ("pending", "running")
+            and current_status not in (None, "pending", "running")
+        ):
+            return guarded_result(owned=False)
+        for tombstone_key in ("abort_requested_at", "abort_source"):
+            if tombstone_key in current_value:
+                checkpoint_value[tombstone_key] = current_value[tombstone_key]
+
+    encoded = _encoded_task_result_document(checkpoint_value)
+
+    def commit_cache_settings(*, ambiguous_replay: bool) -> dict[str, int]:
+        """Merge requested facts while the conversation lock is held.
+
+        HWM is monotonic and therefore safe to repair on every replay.  The
+        last-read fact is LWW only for a NEW task checkpoint.  On an identical
+        task replay, a different stored value may belong to a newer task whose
+        transaction committed after the ambiguous ACK; never regress it.
+        """
+        if not cache_settings_requested or parent_settings is None:
+            return {}
+        changed = False
+        authoritative: dict[str, int] = {}
+        if requested_cache_prefix_hwm is not None:
+            current_hwm = parent_settings.get(
+                CONVERSATION_CACHE_PREFIX_HWM_SETTING,
+            )
+            current_hwm = (
+                current_hwm
+                if isinstance(current_hwm, int)
+                and not isinstance(current_hwm, bool)
+                and 0 < current_hwm <= TASK_RESULT_CACHE_FACT_MAXIMUM
+                else 0
+            )
+            merged_hwm = max(current_hwm, requested_cache_prefix_hwm)
+            if merged_hwm != current_hwm:
+                parent_settings[
+                    CONVERSATION_CACHE_PREFIX_HWM_SETTING
+                ] = merged_hwm
+                changed = True
+            authoritative[TASK_RESULT_CACHE_PREFIX_HWM_FIELD] = merged_hwm
+        if requested_last_turn_cache_read is not None:
+            current_last_read = parent_settings.get(
+                CONVERSATION_LAST_TURN_CACHE_READ_SETTING,
+            )
+            current_last_read = (
+                current_last_read
+                if isinstance(current_last_read, int)
+                and not isinstance(current_last_read, bool)
+                and 0 < current_last_read <= TASK_RESULT_CACHE_FACT_MAXIMUM
+                else 0
+            )
+            if not ambiguous_replay or current_last_read == 0:
+                if current_last_read != requested_last_turn_cache_read:
+                    parent_settings[
+                        CONVERSATION_LAST_TURN_CACHE_READ_SETTING
+                    ] = requested_last_turn_cache_read
+                    changed = True
+                current_last_read = requested_last_turn_cache_read
+            authoritative[
+                TASK_RESULT_LAST_TURN_CACHE_READ_FIELD
+            ] = current_last_read
+        if changed:
+            session.execute(
+                "UPDATE storage_conversations SET settings_json=? "
+                "WHERE id=? AND user_id=?",
+                (_dump(parent_settings), conversation_id, incoming_user_id),
+            )
+        return authoritative
+
     if current is not None:
         current_encoded = current["value_json"]
         if isinstance(current_encoded, memoryview):
             current_encoded = bytes(current_encoded)
-        if current_encoded == encoded:
+        semantic_replay = False
+        if current_encoded != encoded and expected != actual:
+            decoded_for_replay = _hydrated_task_result_value(
+                _load(current["value_json"])
+            )
+            semantic_replay = (
+                _dump(decoded_for_replay) == _dump(checkpoint_value)
+            )
+        if current_encoded == encoded or semantic_replay:
+            if guarded:
+                cache_settings_values = commit_cache_settings(
+                    ambiguous_replay=True,
+                )
+                return guarded_result(
+                    owned=True,
+                    version=actual,
+                    updated_at_ms=int(current["updated_at_ms"]),
+                    cache_settings_committed=cache_settings_requested,
+                    cache_settings_values=cache_settings_values,
+                )
             return {
                 "key": key,
                 "version": actual,
@@ -465,11 +973,22 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
         "updated_at_ms = excluded.updated_at_ms",
         ("task_results", key, encoded, version, now),
     )
+    if guarded:
+        cache_settings_values = commit_cache_settings(
+            ambiguous_replay=False,
+        )
+        return guarded_result(
+            owned=True,
+            version=version,
+            updated_at_ms=now,
+            cache_settings_committed=cache_settings_requested,
+            cache_settings_values=cache_settings_values,
+        )
     return {"key": key, "version": version, "updated_at_ms": now}
 
 
 def _task_results_abort(session: Session, payload: Mapping[str, Any]) -> Any:
-    """Atomically signal one running task owned by the requesting user."""
+    """Atomically signal one pending/running task owned by the requester."""
     key = _required_text(payload, "task_id")
     user_id = _integer(payload, "user_id", minimum=1)
     source = _required_text(payload, "source", 128)
@@ -489,7 +1008,8 @@ def _task_results_abort(session: Session, payload: Mapping[str, Any]) -> Any:
             "database_integrity", "Task result ownership metadata is invalid"
         ) from exc
     # A foreign id is intentionally indistinguishable from a missing id.
-    if record_user_id != user_id or value.get("status") != "running":
+    if (record_user_id != user_id
+            or value.get("status") not in ("pending", "running")):
         return {"signaled": False, "changed": False}
     if value.get("abort_requested_at"):
         return {"signaled": True, "changed": False}
@@ -541,7 +1061,7 @@ def _task_results_abort_requested(
 def _task_results_recover_running(
     session: Session, payload: Mapping[str, Any]
 ) -> Any:
-    """Settle a bounded page of orphaned task snapshots after restart.
+    """Settle a bounded page of orphaned live task snapshots after restart.
 
     Task snapshots are a read model for task inspection and transport replay;
     they never write conversation projections.  Turn recovery is owned by the
@@ -581,7 +1101,10 @@ def _task_results_recover_running(
                 value = _load(row["value_json"])
             except (TypeError, ValueError, orjson.JSONDecodeError):
                 continue
-            if not isinstance(value, Mapping) or value.get("status") != "running":
+            if (
+                not isinstance(value, Mapping)
+                or value.get("status") not in {"pending", "running"}
+            ):
                 continue
             document = dict(value)
             document["status"] = "interrupted"
@@ -643,18 +1166,28 @@ def _record_delete(session: Session, payload: Mapping[str, Any]) -> Any:
 
 
 def _append_event_row(session: Session, payload: Mapping[str, Any]) -> dict[str, Any]:
-    from lib.task_event_contract import STREAM_KINDS, TASK_STREAM_KIND
+    from lib.task_event_contract import TASK_STREAM_KIND
 
     task_id = _required_text(payload, "task_id")
     sequence = payload.get("sequence")
     if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
         raise StorageError("database_protocol_error", "Invalid event sequence")
-    event = payload.get("event")
+    # The manager normally projects its live object before crossing the RPC
+    # boundary. Repeat the pure projection at the storage authority so an
+    # importer, older producer, or future atomic carrier cannot persist the
+    # private ``_wire_*`` graphs that made historical round-usage rows grow
+    # with the complete prompt once per model round. The helper is copy-on-
+    # change, so ordinary already-projected events retain their fast path.
+    event = project_event_usage_for_storage(payload.get("event"))
     raw_encoded = _dump(event)
     encoded = encode_task_event_payload(raw_encoded)
     stream_kind = str(payload.get("stream_kind") or TASK_STREAM_KIND)
-    if stream_kind not in STREAM_KINDS:
-        raise StorageError("database_protocol_error", "Invalid event stream kind")
+    if stream_kind != TASK_STREAM_KIND:
+        raise StorageError(
+            "database_protocol_error",
+            "event.append only accepts task streams; Project Brain uses its "
+            "transactional semantic command boundary",
+        )
     event_type = (
         str(event.get("type") or "")[:128]
         if isinstance(event, Mapping) else ""
@@ -708,14 +1241,63 @@ def _event_append_batch(session: Session, payload: Mapping[str, Any]) -> Any:
     }
 
 
+# Literal characters only — a GLOB prefix must never become a pattern.
+_EVENT_TYPE_PREFIX_SAFE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$")
+
+
+def _event_type_filter(payload: Mapping[str, Any]) -> tuple[str, tuple]:
+    """Optional storage-level event-type filter for ``event.list``.
+
+    ``types`` are exact event types; ``type_prefixes`` are LITERAL prefixes
+    (matched as ``event_type GLOB '<prefix>*'``). A task's event log is
+    dominated by streaming rows (per-token deltas, phase lines, tool
+    progress); a metadata reader such as the Request Inspector fold only
+    needs the few structural rows per round, and filtering in SQL means the
+    noise rows are never JSON-decoded or transferred. Callers must still
+    re-check types consumer-side — the filter is a bandwidth/decoding
+    optimization, not an authorization boundary.
+    """
+    types = payload.get("types") or []
+    prefixes = payload.get("type_prefixes") or []
+    if not isinstance(types, (list, tuple)) or len(types) > 64:
+        raise StorageError(
+            "database_protocol_error", "Invalid types in storage request")
+    if not isinstance(prefixes, (list, tuple)) or len(prefixes) > 16:
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid type_prefixes in storage request")
+    for value in types:
+        if not isinstance(value, str) or not 1 <= len(value) <= 128:
+            raise StorageError(
+                "database_protocol_error", "Invalid types in storage request")
+    clauses = []
+    params: list = []
+    if types:
+        clauses.append("event_type IN (" + ",".join("?" for _ in types) + ")")
+        params.extend(types)
+    for prefix in prefixes:
+        if not isinstance(prefix, str) or not _EVENT_TYPE_PREFIX_SAFE.match(
+                prefix):
+            raise StorageError(
+                "database_protocol_error",
+                "Invalid type_prefixes in storage request")
+        clauses.append("event_type GLOB ?")
+        params.append(prefix + "*")
+    if not clauses:
+        return "", ()
+    return " AND (" + " OR ".join(clauses) + ")", tuple(params)
+
+
 def _event_list(session: Session, payload: Mapping[str, Any]) -> Any:
     task_id = _required_text(payload, "task_id")
     after = _integer(payload, "after_sequence", default=-1, minimum=-1)
     limit = _integer(payload, "limit", default=500, minimum=1, maximum=1000)
+    type_clause, type_params = _event_type_filter(payload)
     rows = session.fetch_all(
         "SELECT sequence, event_json, created_at_ms FROM storage_events "
-        "WHERE task_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
-        (task_id, after, limit),
+        "WHERE task_id = ? AND sequence > ?" + type_clause +
+        " ORDER BY sequence LIMIT ?",
+        (task_id, after, *type_params, limit),
     )
     return [
         {
@@ -740,6 +1322,30 @@ def _event_latest(session: Session, payload: Mapping[str, Any]) -> Any:
         "sequence": int(row["sequence"]),
         "event": _load(decode_task_event_payload(row["event_json"])),
         "created_at_ms": int(row["created_at_ms"]),
+    }
+
+
+def _event_bounds(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Return exact replay-window bounds without materializing event bodies."""
+    task_id = _required_text(payload, "task_id")
+    row = session.fetch_one(
+        "SELECT COUNT(*) AS retained_count, MIN(sequence) AS base_cursor, "
+        "MAX(sequence) AS latest_sequence FROM storage_events WHERE task_id = ?",
+        (task_id,),
+    )
+    retained_count = int(row["retained_count"] or 0) if row else 0
+    if retained_count <= 0:
+        return {
+            "retained_count": 0,
+            "base_cursor": 0,
+            "next_cursor": 0,
+        }
+    base_cursor = max(0, int(row["base_cursor"]))
+    latest_sequence = max(base_cursor, int(row["latest_sequence"]))
+    return {
+        "retained_count": retained_count,
+        "base_cursor": base_cursor,
+        "next_cursor": latest_sequence + 1,
     }
 
 
@@ -847,9 +1453,19 @@ def _recover_legacy_blank_event_page(
         (TASK_STREAM_KIND, _LEGACY_OPAQUE_EVENT_KIND, cutoff, candidate_limit),
     )
     selected: list[Mapping[str, Any]] = []
+    oversize_keys: list[tuple[str, int]] = []
+    oversize_stored_bytes = 0
     selected_payload_bytes = 0
     for row in candidates:
         payload_bytes = max(0, int(row["payload_bytes"] or 0))
+        key = (str(row["task_id"]), int(row["sequence"]))
+        if payload_bytes > _LEGACY_BLANK_EVENT_RECOVERY_PAYLOAD_BYTES:
+            # Retain an individually oversized legacy diagnostic under the
+            # conservative structural horizon, but never materialize it on the
+            # maintenance writer. Marking it opaque lets later rows progress.
+            oversize_keys.append(key)
+            oversize_stored_bytes += payload_bytes
+            continue
         if (selected and selected_payload_bytes + payload_bytes
                 > _LEGACY_BLANK_EVENT_RECOVERY_PAYLOAD_BYTES):
             break
@@ -858,27 +1474,36 @@ def _recover_legacy_blank_event_page(
         if (selected_payload_bytes
                 >= _LEGACY_BLANK_EVENT_RECOVERY_PAYLOAD_BYTES):
             break
-    if not selected:
+    if not selected and not oversize_keys:
         return None
 
-    key_placeholders = ",".join("(?, ?)" for _ in selected)
-    key_params = tuple(
-        value
-        for row in selected
-        for value in (str(row["task_id"]), int(row["sequence"]))
-    )
-    payload_rows = session.fetch_all(
-        "SELECT task_id, sequence, event_json FROM storage_events WHERE "
-        f"(task_id, sequence) IN ({key_placeholders})",
-        key_params,
-    )
+    payload_rows = []
+    if selected:
+        key_placeholders = ",".join("(?, ?)" for _ in selected)
+        key_params = tuple(
+            value
+            for row in selected
+            for value in (str(row["task_id"]), int(row["sequence"]))
+        )
+        payload_rows = session.fetch_all(
+            "SELECT task_id, sequence, event_json FROM storage_events WHERE "
+            f"(task_id, sequence) IN ({key_placeholders})",
+            key_params,
+        )
     payloads = {
         (str(row["task_id"]), int(row["sequence"])): row["event_json"]
         for row in payload_rows
     }
+    selected_payload_sizes = {
+        (str(row["task_id"]), int(row["sequence"])): max(
+            0, int(row["payload_bytes"] or 0)
+        )
+        for row in selected
+    }
     delete_keys: list[tuple[str, int]] = []
     structural_updates: list[tuple[str, str, str, int]] = []
-    opaque_keys: list[tuple[str, int]] = []
+    opaque_keys: list[tuple[str, int]] = list(oversize_keys)
+    oversize_opaque_count = len(oversize_keys)
     for row in selected:
         key = (str(row["task_id"]), int(row["sequence"]))
         if key not in payloads:
@@ -886,7 +1511,14 @@ def _recover_legacy_blank_event_page(
                 "database_integrity",
                 "Legacy blank task event disappeared during classification",
             )
-        decoded = decode_task_event_payload(payloads[key])
+        stored_payload = payloads[key]
+        if (task_event_decoded_size(stored_payload)
+                > _LEGACY_BLANK_EVENT_RECOVERY_PAYLOAD_BYTES):
+            opaque_keys.append(key)
+            oversize_opaque_count += 1
+            oversize_stored_bytes += selected_payload_sizes[key]
+            continue
+        decoded = decode_task_event_payload(stored_payload)
         try:
             event = orjson.loads(decoded)
         except orjson.JSONDecodeError:
@@ -929,11 +1561,14 @@ def _recover_legacy_blank_event_page(
             "WHERE task_id = ? AND sequence = ? AND event_type = ''",
             (recovered_type, recovered_kind, task_id, sequence),
         )
-    for task_id, sequence in opaque_keys:
+    if opaque_keys:
+        opaque_placeholders = ",".join("(?, ?)" for _ in opaque_keys)
+        opaque_params = tuple(value for key in opaque_keys for value in key)
         updated += session.execute(
             "UPDATE storage_events SET event_kind = ? "
-            "WHERE task_id = ? AND sequence = ? AND event_type = ''",
-            (_LEGACY_OPAQUE_EVENT_KIND, task_id, sequence),
+            "WHERE event_type = '' AND (task_id, sequence) IN ("
+            + opaque_placeholders + ")",
+            (_LEGACY_OPAQUE_EVENT_KIND, *opaque_params),
         )
     expected_updates = len(structural_updates) + len(opaque_keys)
     if int(updated) != expected_updates:
@@ -943,10 +1578,12 @@ def _recover_legacy_blank_event_page(
         )
     return {
         "deleted": int(deleted),
-        "classified": len(selected),
+        "classified": len(selected) + len(oversize_keys),
         "recovered_types": len(delete_keys) + len(structural_updates),
         "opaque": len(opaque_keys),
         "payload_bytes": selected_payload_bytes,
+        "oversize_opaque": oversize_opaque_count,
+        "oversize_stored_bytes": oversize_stored_bytes,
         # A separately committed follow-up must establish that the blank page
         # and any typed backlog are both drained.
         "has_more": True,
@@ -959,6 +1596,7 @@ def _legacy_index_event_prune(
     *,
     cutoff: int,
     limit: int,
+    legacy_recovery_limit: int,
     retention_class: str,
     required_index: str,
 ) -> Any:
@@ -1046,7 +1684,7 @@ def _legacy_index_event_prune(
             }
 
     recovered = _recover_legacy_blank_event_page(
-        session, cutoff=cutoff, limit=limit)
+        session, cutoff=cutoff, limit=legacy_recovery_limit)
     if recovered is not None:
         return recovered
     return {
@@ -1071,23 +1709,30 @@ def _event_prune(session: Session, payload: Mapping[str, Any]) -> Any:
             "database_protocol_error", "Invalid event retention class")
     required_index, tier_predicate = retention_spec
     if not session.index_exists(required_index):
-        if session.index_exists(LEGACY_TASK_EVENT_RETENTION_INDEX_NAME):
-            return _legacy_index_event_prune(
-                session,
-                cutoff=cutoff,
-                limit=limit,
-                retention_class=retention_class,
-                required_index=required_index,
-            )
-        # Retention is best-effort, while a scan of the payload-bearing event
-        # table can monopolize SQLite's sole writer until its watchdog fires.
-        # Refuse that unsafe plan explicitly. The maintenance owner disables
+        # The compatibility index orders by ``event_type`` before age.  Even
+        # though the legacy helper bounds deleted rows, finding those rows can
+        # still walk a huge payload-bearing event table once per event type.
+        # On an established multi-GiB SQLite authority that held the sole
+        # writer for seconds at a time and starved interactive turn.create /
+        # turn.attempt.claim commands.  A row limit is not an execution-time
+        # budget, so online maintenance must require the age-leading partial
+        # index and fail closed before issuing any legacy scan.
+        #
+        # Keep the legacy helper above for explicit offline repair/forensics;
+        # the live sidecar never invokes it.  The maintenance owner disables
         # this tier for the process and startup already reports the missing
         # offline-maintenance prerequisite.
+        legacy_index_present = session.index_exists(
+            LEGACY_TASK_EVENT_RETENTION_INDEX_NAME
+        )
         return {
             "deleted": 0,
             "deferred": True,
-            "reason": "missing_index",
+            "reason": (
+                "legacy_index_offline_required"
+                if legacy_index_present
+                else "missing_index"
+            ),
             "required_index": required_index,
         }
     # One statement riding the age-leading retention index, not a SELECT round
@@ -1121,7 +1766,13 @@ def _rate_limit_record_and_check(
     per_seconds = _integer(payload, "per_seconds", minimum=1, maximum=7 * 24 * 60 * 60)
     now = int(time.time() * 1000)
     window_start = now - per_seconds * 1000
-    stale_cutoff = now - per_seconds * 2 * 1000
+    expires_at = now + per_seconds * 1000
+    pruned = int(session.execute(
+        "DELETE FROM storage_rate_limit_events WHERE event_id IN ("
+        "SELECT event_id FROM storage_rate_limit_events "
+        "WHERE expires_at_ms <= ? ORDER BY expires_at_ms, event_id LIMIT ?)",
+        (now, _RATE_LIMIT_PRUNE_BATCH),
+    ) or 0)
     # PostgreSQL TEXT cannot carry NUL bytes.  A length prefix preserves an
     # unambiguous composite bucket key for both adapters.
     session.lock_key("rate_limit_bucket", f"{len(endpoint)}:{endpoint}{client_key}")
@@ -1132,15 +1783,11 @@ def _rate_limit_record_and_check(
     )
     current = int(row["event_count"]) if row else 0
     if current >= limit:
-        return {"allowed": False, "count": current}
+        return {"allowed": False, "count": current, "pruned": pruned}
     session.execute(
         "INSERT INTO storage_rate_limit_events("
-        "event_id, endpoint, client_key, occurred_at_ms) VALUES (?, ?, ?, ?)",
-        (event_id, endpoint, client_key, now),
+        "event_id, endpoint, client_key, occurred_at_ms, expires_at_ms) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (event_id, endpoint, client_key, now, expires_at),
     )
-    session.execute(
-        "DELETE FROM storage_rate_limit_events "
-        "WHERE endpoint = ? AND client_key = ? AND occurred_at_ms < ?",
-        (endpoint, client_key, stale_cutoff),
-    )
-    return {"allowed": True, "count": current + 1}
+    return {"allowed": True, "count": current + 1, "pruned": pruned}

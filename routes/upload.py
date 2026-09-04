@@ -29,7 +29,7 @@ def _detect_image_format(head: bytes) -> str | None:
 from lib.log import get_logger
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
-    api_payload,
+    api_payload, api_service_unavailable, api_typed_error,
 )
 from lib.request_parser import parse_body
 
@@ -38,7 +38,7 @@ logger = get_logger(__name__)
 upload_bp = Blueprint('upload', __name__)
 # v1 blueprint for the JSON routes (the 5 carve-outs above stay on upload_bp).
 from routes.api_v1.uploads import api_v1_uploads_bp  # noqa: E402
-from routes.api_v1.auth import request_user_id  # noqa: E402
+from routes.api_v1.auth import current_auth, request_user_id  # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # User-uploaded images are USER STATE and must live under the resolved
@@ -575,9 +575,18 @@ def generate_image_route():
         logger.info('[ImageGen] Route called: prompt=%.60s model=%s aspect=%s res=%s edit=%s',
                     prompt[:60], model or '(auto)', aspect_ratio, resolution, is_edit)
     t0 = time.time()
-    result = generate_image(prompt, model=model, aspect_ratio=aspect_ratio,
-                            resolution=resolution, history=history,
-                            source_images=source_images)
+    auth = current_auth()
+    result = generate_image(
+        prompt,
+        model=model,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        history=history,
+        source_images=source_images,
+        owner_user_id=int(request_user_id()),
+        tenant_id=auth.tenant_id if auth else None,
+        preferred_provider_id=str(data.get('provider_id') or ''),
+    )
     elapsed = time.time() - t0
 
     if not result.get('ok'):
@@ -747,40 +756,25 @@ def _resolve_history_images(history: list) -> list:
 
 @api_v1_uploads_bp.route('/api/v1/images/models', methods=['GET'])
 def list_image_models():
-    """List available image generation models from dispatch config."""
-    models = []
+    """List runnable image Offerings from the request owner's v2 authority."""
     try:
-        from lib.llm_dispatch import get_dispatcher
-        disp = get_dispatcher()
+        from lib.model_routing import (
+            ModelRoutingRepository,
+            OwnerBoundary,
+            list_capability_routes,
+        )
 
-        # Build provider_id → name mapping from saved config
-        prov_names = {}
-        try:
-            from routes.config import _read_server_config
-            saved = _read_server_config()
-            for p in saved.get('providers', []):
-                prov_names[p.get('id', '')] = p.get('name', p.get('id', ''))
-        except Exception as e:
-            logger.debug('Failed to read server config for provider names: %s', e)
-
-        seen_per_provider = set()  # (provider_id, model) dedup — allow same model on different providers
-        for slot in disp.slots:
-            caps = getattr(slot, 'capabilities', set())
-            if 'image_gen' not in caps:
-                continue
-            pid = getattr(slot, 'provider_id', 'default')
-            key = (pid, slot.model)
-            if key in seen_per_provider:
-                continue
-            seen_per_provider.add(key)
-            models.append({
-                'model': slot.model,
-                'available': slot.is_available,
-                'provider_id': pid,
-                'provider_name': prov_names.get(pid, pid),
-            })
+        auth = current_auth()
+        boundary = OwnerBoundary.create(
+            int(request_user_id()), auth.tenant_id if auth else None)
+        models = [
+            route.public_dict()
+            for route in list_capability_routes(
+                ModelRoutingRepository(), boundary, 'image_gen')
+        ]
     except Exception as e:
         logger.warning('[ImageGen] Failed to list models: %s', e)
+        models = []
 
     return api_ok({'models': models})
 
@@ -814,7 +808,11 @@ def parse_pdf():
     if pdf_bytes[:5] != b'%PDF-' and not file.filename.lower().endswith('.pdf'):
         logger.warning('[parse_pdf] Not a PDF: %s (header=%.10s)', file.filename, pdf_bytes[:10])
         return api_bad_request('Not a PDF')
-    from lib.pdf_parser.pool import parse_pdf_pooled as _parse_pdf
+    from lib.pdf_parser.pool import (
+        PdfParseCapacityExceeded,
+        PdfParseTimeoutError,
+        parse_pdf_pooled as _parse_pdf,
+    )
     logger.info('[parse_pdf] Starting parse: %s (%d bytes, %.1f MB)',
                 file.filename, len(pdf_bytes), len(pdf_bytes) / 1048576)
     form = request_form()
@@ -849,6 +847,35 @@ def parse_pdf():
             max_images=max_images,
             text_mode=_requested_mode,
         )
+    except PdfParseCapacityExceeded as e:
+        elapsed = time.time() - t0
+        logger.info(
+            '[parse_pdf] Capacity full for %s (%d bytes) after %.3fs',
+            file.filename,
+            len(pdf_bytes),
+            elapsed,
+        )
+        return api_service_unavailable(
+            str(e),
+            retry_after=1,
+            kind='server_busy',
+            retryable=True,
+        )
+    except PdfParseTimeoutError as e:
+        elapsed = time.time() - t0
+        logger.warning(
+            '[parse_pdf] Timed out for %s (%d bytes) after %.1fs: %s',
+            file.filename,
+            len(pdf_bytes),
+            elapsed,
+            e,
+        )
+        return api_error(
+            str(e),
+            status=504,
+            kind='timeout',
+            retryable=True,
+        )
     except Exception as e:
         elapsed = time.time() - t0
         logger.error('[parse_pdf] Failed for %s (%d bytes) after %.1fs: %s',
@@ -865,7 +892,7 @@ def parse_pdf():
 @upload_bp.route('/api/pdf/vlm-parse', methods=['POST'])
 def pdf_vlm_parse():
     """Start async VLM-based PDF parsing."""
-    from lib.pdf_parser.vlm import start_vlm_task
+    from lib.pdf_parser.vlm import VlmTaskQueueFull, start_vlm_task
     from lib.pdf_parser._common import MAX_PDF_BYTES
 
     files = request_files()
@@ -896,6 +923,17 @@ def pdf_vlm_parse():
             filename=filename,
             user_id=int(request_user_id()),
         )
+    except VlmTaskQueueFull as e:
+        logger.info('[VLM-Parse] Capacity full for %s (%d bytes)',
+                    filename, len(pdf_bytes))
+        return api_typed_error(
+            'server_busy',
+            status=503,
+            detail=str(e),
+            context='vlm-pdf-parse:admission',
+            source='routes.upload',
+            retryable=True,
+        )
     except Exception as e:
         logger.error('[VLM-Parse] Failed to start task for %s (%d bytes): %s',
                      filename, len(pdf_bytes), e, exc_info=True)
@@ -923,6 +961,21 @@ def pdf_vlm_status(task_id):
     if task['status'] == 'error':
         resp['error'] = task['error']
     return api_ok(resp)
+
+
+@api_v1_uploads_bp.route(
+    '/api/v1/pdf/vlm-parse/<task_id>', methods=['DELETE'])
+def pdf_vlm_cancel(task_id):
+    """Cooperatively cancel one owned queued/running VLM parse task."""
+    from lib.pdf_parser.vlm import cancel_vlm_task
+
+    cancelled = cancel_vlm_task(
+        task_id,
+        user_id=int(request_user_id()),
+    )
+    if cancelled is None:
+        return api_not_found('Task not found')
+    return api_ok({'cancelled': bool(cancelled)})
 
 
 @api_v1_uploads_bp.route('/api/v1/pdf/vlm-tasks', methods=['GET'])

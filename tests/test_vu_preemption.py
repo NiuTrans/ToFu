@@ -12,7 +12,7 @@ the deferral let the queue dispatch. That is not "immediately".
 
 FIX (three parts)
 -----------------
-1. ``lib/message_queue._preempt_vu_subtask_for_real_message`` — called from
+1. ``lib/message_queue._preempt_autonomous_work_for_real_message`` — called from
    ``enqueue_message`` for KIND_REAL rows ONLY (a human typing preempts;
    peer/workflow rows keep the cheap wait-for-completion deferral — their
    latency is not user-visible). Stamps ``aborted`` +
@@ -32,7 +32,7 @@ FIX (three parts)
    wait out the whole call; the fresh sub-task is aborted before its first
    round, closing the creation race.
 
-NEUTER (manual A/B): deleting the ``_preempt_vu_subtask_for_real_message``
+NEUTER (manual A/B): deleting the autonomous-work preemption
 call from ``enqueue_message`` turns test 1 red; deleting the preemption
 branch from ``run_virtual_user`` turns test 6 red (it would return a
 partial-text dict instead of None).
@@ -130,6 +130,42 @@ def test_real_enqueue_preempts_live_vu_subtask(registry):
     assert vu.get('_abort_reason') == 'real_message_preempts_vu'
     assert vu.get('_abort_timestamp'), 'abort timestamp must be stamped'
     assert not worker.get('aborted'), 'the preemption must NEVER touch worker tasks'
+
+
+@_unit
+def test_real_enqueue_preempts_flow_managed_goal_root_only(registry):
+    """The single new Goal owner yields to a later durable human command."""
+    conv_id = _seeded_conversation_id()
+    goal = registry({
+        'id': 'goal-root-' + uuid.uuid4().hex[:8],
+        'convId': conv_id,
+        '_userId': 1,
+        'status': 'running',
+        'aborted': False,
+        '_flow_managed': True,
+        'flow_mode': True,
+        'events': [],
+        'events_lock': threading.Lock(),
+        'config': {'autopilot': True},
+    })
+    custom_flow = registry({
+        'id': 'custom-flow-' + uuid.uuid4().hex[:8],
+        'convId': conv_id,
+        '_userId': 1,
+        'status': 'running',
+        'aborted': False,
+        '_flow_managed': True,
+        'flow_mode': True,
+        'events': [],
+        'events_lock': threading.Lock(),
+        'config': {'flowId': 'keep-running'},
+    })
+
+    _enqueue_real(conv_id)
+
+    assert goal['aborted'] is True
+    assert goal['_abort_reason'] == 'superseded_by_human'
+    assert not custom_flow.get('aborted')
 
 
 @_unit

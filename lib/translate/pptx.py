@@ -43,7 +43,8 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
     from .prompt import _build_translate_prompt
     from .runtime._state import _translate_runtime
 
-    if not _translate_runtime.get(task_id):
+    task = _translate_runtime.get(task_id)
+    if not task:
         return
 
     system_prompt = _build_translate_prompt(target, source)
@@ -54,7 +55,8 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
             return text
         c, _u = _translate_one_chunk(text, system_prompt,
                                      chunk_label=f':pptx-{task_id[:6]}',
-                                     source=source, target=target)
+                                     source=source, target=target,
+                                     abort_check=task['abort_event'].is_set)
         return c
 
     def _progress_cb(current, total, _status_msg):
@@ -120,6 +122,10 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
                     result.get('elapsed', 0))
 
     except Exception as e:
+        if task['abort_event'].is_set():
+            _translate_runtime.finish(task_id)
+            logger.info('[PPTX-Translate] Task %s aborted', task_id[:8])
+            return
         from lib.error_envelope import from_exception as _err_from_exc
         envelope = _err_from_exc(
             e, context='pptx-translate',

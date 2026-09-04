@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import { createLifecycleScope } from '../../lifecycle';
 import type { I18nKey } from '../../i18n';
 
@@ -42,7 +43,6 @@ interface NoteEditor {
 type PaperNotesWindow = Window & {
   Api?: { paper?: PaperNotesApi };
   t?: (key: string) => string;
-  escapeHtml?: (value: unknown) => string;
   _reportView?: (kind: string) => PaperNotesView;
   _paperHash?: string;
   _paperXpGet?: <T>(view: PaperNotesView, key: ViewKey) => T | undefined;
@@ -71,14 +71,6 @@ type PaperNotesWindow = Window & {
 
 function globals(): PaperNotesWindow {
   return featureRegistry as unknown as PaperNotesWindow;
-}
-
-function escape(value: unknown): string {
-  const fn = globals().escapeHtml;
-  if (typeof fn === 'function') return fn(value);
-  const span = document.createElement('span');
-  span.textContent = value == null ? '' : String(value);
-  return span.innerHTML;
 }
 
 function translate(key: I18nKey): string {

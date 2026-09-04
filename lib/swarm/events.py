@@ -91,13 +91,6 @@ class SwarmEvent:
     metadata: dict = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
-    # ── Convenience constructors ──
-
-    @classmethod
-    def from_type(cls, event_type: SwarmEventType, **kwargs) -> SwarmEvent:
-        """Create a SwarmEvent from a SwarmEventType enum member."""
-        return cls(type=event_type.value, **kwargs)
-
     # ── Serialisation ──
 
     def to_dict(self) -> dict:

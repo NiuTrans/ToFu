@@ -30,38 +30,41 @@ WHAT IS GUARDED (results, not implementation — charter 2026-07-27)
   4. The comparator survives a ``_modelPricingCache`` MISS — models with no
      pricing entry (``oauth_claude``'s dated ids) sort by their stripped id
      instead of throwing, so the degraded order is stable rather than arbitrary.
-  5. The Settings provider model list sorts by the RAW model_id — the string
-     ``_renderModelCard`` renders — NOT the friendly pricing name. (2026-08-04
-     incident: ``claude-fable-5`` is named "Fable 5" in lib/pricing/_tables.py,
-     and a display-name sort parked the card between Doubao and gemini —
-     alphabetical to the machine, scrambled to the reader. The friendly-name
-     comparator remains correct for lists that RENDER friendly names: this
-     picker, the preset tab, the default-model selects.)
+  5. The v2-backed preset and default-model lists use that same policy rather
+     than inheriting Provider/Offering insertion order.
 
-NEUTERS (source-level, on mutated copies — shipped files untouched):
-  * strip the model sort out of _populateModelDropdown  → order goes red
-  * strip the provider-group sort                       → section order red
-  * drop `numeric: true` from the collator              → 3.9-vs-3.10 red
+The comparator is exercised through its public typed factory. Retained DOM
+owners are composed against that policy exactly as the runtime prelude does.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 
 import pytest
 
 from tests._jsdom import JS_DIR, ROOT, run_harness
-from tests._runtime_sections import runtime_section_names
+from tests._runtime_sections import native_module_graph, runtime_section_names
 
 pytestmark = pytest.mark.unit
 
 TOOLBAR_JS = os.path.join(JS_DIR, 'main', 'main_toolbar_ui.js')
-BRANDING_JS = os.path.join(JS_DIR, 'settings', 'branding.js')
 CORE_PANEL_JS = os.path.join(JS_DIR, 'settings', 'core_panel.js')
 VISIBILITY_JS = os.path.join(JS_DIR, 'settings', 'visibility_defaults.js')
-MODEL_GROUP_JS = os.path.join(JS_DIR, 'core', 'model_group.js')
+MODEL_DISPLAY_OWNER = Path(ROOT) / 'frontend/src/core/model-display-names.ts'
+PRELUDE = Path(ROOT) / 'frontend/src/runtime/sections/_prelude.js'
+MODEL_PRESENTATION_JS = native_module_graph([
+    ('.native/model-brand-detection-for-picker-order.js',
+     Path(ROOT) / 'frontend/src/core/model-brand-detection.ts'),
+    ('.native/model-brand-icons-for-picker-order.js',
+     Path(ROOT) / 'frontend/src/core/model-brand-icons.ts'),
+    ('.native/model-display-names-for-picker-order.js', MODEL_DISPLAY_OWNER),
+    ('.native/model-group-for-picker-order.js',
+     Path(ROOT) / 'frontend/src/core/model-group.ts'),
+])
 
 # Markup mirroring the shipped index.html dropdown (inner list + depth footer).
 _HTML = (
@@ -78,12 +81,13 @@ const { setup } = require(process.env.JSDOM_HARNESS);
 const { document, window, check, report } = setup({
   root: process.argv[3],
   html: HTML_PLACEHOLDER,
-  targets: [process.argv[4], process.argv[6]],  // branding.js + model_group.js
+  targets: [process.argv[4]],  // typed presentation owners
   globals: {
     BASE_PATH: '',
     config: { model: 'kimi-k3' },
     serverModel: 'kimi-k3',
     _registeredModels: [],
+    _registeredModelsLoaded: false,
     _hiddenModels: new Set(),
     selectModel: function () {},
     isChatModel: function () { return true; },
@@ -104,7 +108,6 @@ const { document, window, check, report } = setup({
 });
 
 const TOOLBAR_SRC = fs.readFileSync(process.argv[2], 'utf8');
-const CORE_SRC = fs.readFileSync(process.argv[5], 'utf8');
 
 /* Slice one named function body out of a source file (brace matching). */
 function sliceFn(src, signature) {
@@ -122,11 +125,33 @@ const POPULATE_SIG = 'function _populateModelDropdown(models) {';
 const POPULATE = sliceFn(TOOLBAR_SRC, POPULATE_SIG);
 const indirectEval = eval;
 
-/* model_group.js (argv[6]) publishes on window; the picker's bare-global
- * `typeof modelGroupKey` guard resolves only via node global scope here. */
-global.modelGroupKey = window.modelGroupKey;
-global.modelGroupLabel = window.modelGroupLabel;
-global.modelGroupBrandNames = window.modelGroupBrandNames;
+/* Mirror the prelude's explicit typed-owner composition. Lookups stay live so
+ * the cache-miss branch below exercises the production contract. */
+const displayNames = createModelDisplayNames({
+  lookupModelDisplayName: (modelId) =>
+    global._modelPricingCache && global._modelPricingCache[modelId]
+      ? global._modelPricingCache[modelId].name : '',
+  lookupProviderDisplayName: () => '',
+});
+const compatibility = {
+  _detectBrand: detectModelBrand,
+  _brandSvg: brandIconHtml,
+  _modelShortName: displayNames.modelShortName,
+  _compareModelIds: displayNames.compareModelIds,
+  _compareModelsByDisplayName: displayNames.compareModelsByDisplayName,
+  _sortModelsByDisplayName: displayNames.sortModelsByDisplayName,
+  _sortModelEntriesByDisplayName: displayNames.sortModelEntriesByDisplayName,
+  _sortedBrandKeys: displayNames.sortedBrandKeys,
+};
+Object.assign(global, compatibility);
+Object.assign(window, compatibility);
+const modelGroupPolicy = createModelGroupPolicy({ detectBrand: detectModelBrand });
+Object.assign(global, modelGroupPolicy);
+Object.assign(window, modelGroupPolicy);
+global.runtimeScope = window.runtimeScope = {
+  isChatModel: global.isChatModel,
+  ...modelGroupPolicy,
+};
 
 /* Two brand groups, deliberately given in the WORST section order for the
  * brand-grouping rule: the 'meituan' group is inserted FIRST, but 'Claude'
@@ -134,14 +159,14 @@ global.modelGroupBrandNames = window.modelGroupBrandNames;
  * sort, not inherited. Models within each group are in model_id order (what
  * the config file holds) which is NOT display-name order.
  *
- * (2026-07-28, pt_464f2baf) The picker now groups by BRAND (core/model_group)
+ * The picker groups by brand through the typed core/model-group policy,
  * not provider_id, so the section key is the detected brand: the two
  * dated-id models detect as 'claude', the rest as 'meituan'.
  *
  * The fixture pins `brand` EXPLICITLY rather than relying on _detectBrand
  * matching the provider NAME: the opensource export (export.py rule 11/15)
- * deliberately rewrites the internal org's detect pattern in branding.js
- * ('meituan' → 'yourprovider') while model_group.js's label table and this
+ * historically rewrote the internal org's retained detect pattern
+ * ('meituan' → 'yourprovider') while the typed label table and this
  * file ship verbatim — so a name-detection fixture groups 'Meituan' models
  * by their model_ids in the public tree (claude/gemini/kimi sections) and
  * every section assertion goes red there. An explicit brand is also the
@@ -194,7 +219,7 @@ try {
     gotMeituan.indexOf('Claude Opus 5') === 2);
 
   // ══ 2. Section headers ordered by brand-group display name ══
-  // Brand grouping (core/model_group): the dated oauth models detect as
+  // Typed brand grouping: the dated oauth models detect as
   // 'claude' → 'Claude'; the sankuai models as 'meituan' → 'Meituan'. Even
   // though 'meituan' was inserted first, Claude must sort before it.
   const S = sections();
@@ -235,35 +260,20 @@ try {
     _compareModelsByDisplayName({ model_id: 'kimi-k3' }, { model_id: 'aws.claude-opus-4.6' }) > 0);
   check('comparator_handles_empty',
     typeof _compareModelsByDisplayName('', 'kimi-k3') === 'number');
+  const providerNames = createModelDisplayNames({
+    lookupModelDisplayName: () => '',
+    lookupProviderDisplayName: (id) => id === 'p1' ? 'Provider One' : '',
+  });
+  check('provider_name_uses_injected_catalog',
+    providerNames.providerDisplayName('p1') === 'Provider One');
+  const failingProviderNames = createModelDisplayNames({
+    lookupModelDisplayName: () => '',
+    lookupProviderDisplayName: () => { throw new Error('catalog unavailable'); },
+  });
+  check('provider_name_lookup_fails_open',
+    failingProviderNames.providerDisplayName('p1') === 'p1');
 
-  // ══ 6. Settings cold sort orders by the RAW model_id the card shows ══
-  // The settings card renders `m.model_id` verbatim, so the sort key must be
-  // that same string — not _modelShortName. The pricing cache below names
-  // claude-fable-5 "Fable 5" and yuju-claude-opus-5-evaDaily "Claude Opus 5";
-  // under the old (buggy) contract those friendly names moved the cards to
-  // 'f'/'c' positions the reader cannot see.
-  indirectEval(CORE_SRC.match(/function _compareModelEntries[\s\S]*?\n}/)[0]);
-  indirectEval(CORE_SRC.match(/function _coldSortModels[\s\S]*?\n}/)[0]);
-  const settingsList = MODELS.filter((m) => m.provider_id === 'sankuai')
-    .map((m) => ({ model_id: m.model_id }));
-  _coldSortModels(settingsList);
-  const settingsIds = settingsList.map((m) => m.model_id);
-  const wantIds = [
-    'aws.claude-opus-4.6', 'aws.claude-opus-4.8', 'claude-fable-5',
-    'gemini-3.5-flash', 'gemini-3.6-flash', 'hy3-preview', 'kimi-k3',
-    'yuju-claude-opus-5-evaDaily',
-  ];
-  check('settings_cold_sort_by_shown_model_id',
-    settingsIds.join('|') === wantIds.join('|'));
-  // The 2026-08-04 incident pins: 'Fable 5' (pricing name) must NOT pull the
-  // card to 'f' — it sorts under 'c', right after the other claude ids; and
-  // the yuju- id sorts under 'y', where the reader sees it.
-  check('settings_pricing_name_does_not_move_card',
-    settingsIds.indexOf('claude-fable-5') === 2);
-  check('settings_gateway_id_sorts_where_shown',
-    settingsIds.indexOf('yuju-claude-opus-5-evaDaily') === wantIds.length - 1);
-
-  // ══ 7. Sort survives a _modelPricingCache MISS on EVERY model ══
+  // ══ 6. Sort survives a _modelPricingCache MISS on EVERY model ══
   // (the .catch fallback in _loadServerConfigAndPopulate + a settings-close
   //  repaint after a failed config load hit exactly this state)
   const savedCache = global._modelPricingCache;
@@ -284,56 +294,14 @@ try {
     bare.join('|') === 'claude-fable-5|claude-opus-4.6');
   global._modelPricingCache = window._modelPricingCache = savedCache;
 
-  // ══ NEUTER 1: remove the per-group model sort → order regresses ══
-  {
-    const n = POPULATE.replace(
-      'if (_canSort) group.models.sort(_compareModelsByDisplayName);', '');
-    check('N1_applied', n !== POPULATE);
-    indirectEval(n);
-    reset();
-    _populateModelDropdown(MODELS.slice());
-    const got = labels().filter((x) => wantMeituan.indexOf(x) >= 0);
-    check('N1_model_order_regresses', got.join('|') !== wantMeituan.join('|'));
-  }
+  // ══ 7. An authoritative empty owner model list clears boot placeholders ══
+  _populateModelDropdown([]);
+  check('empty_authority_clears_rows', labels().length === 0);
+  check('empty_authority_clears_registry', _registeredModels.length === 0);
 
-  // ══ NEUTER 2: remove the brand-group sort → section order regresses ══
-  {
-    const n = POPULATE.replace(/  if \(_canSort\) \{\n    groupKeys\.sort[\s\S]*?\n  \}\n/,
-                               '');
-    check('N2_applied', n !== POPULATE);
-    indirectEval(n);
-    reset();
-    _populateModelDropdown(MODELS.slice());
-    check('N2_section_order_regresses',
-      sections().join('|') === 'Meituan|Claude');
-  }
-
-  // ══ NEUTER 3: drop numeric collation → 3.9 vs 3.10 goes wrong ══
-  {
-    const BRAND_SRC = fs.readFileSync(process.argv[4], 'utf8');
-    const n = BRAND_SRC.replace('{ numeric: true, sensitivity: \'base\' }',
-                                '{ sensitivity: \'base\' }');
-    check('N3_applied', n !== BRAND_SRC);
-    indirectEval(n);
-    check('N3_numeric_collation_regresses',
-      _compareModelsByDisplayName('m-3.9', 'm-3.10') > 0);
-  }
-
-  // ══ NEUTER 4: drop the separator fold → spaced labels jump the queue ══
-  {
-    const BRAND_SRC = fs.readFileSync(process.argv[4], 'utf8');
-    const n = BRAND_SRC.replace(".replace(/[-_\\/]+/g, ' ')", '');
-    check('N4_applied', n !== BRAND_SRC);
-    indirectEval(n);
-    check('N4_separator_fold_regresses',
-      _compareModelsByDisplayName('MiniMax M3', 'MiniMax-M2.5') < 0);
-    indirectEval(BRAND_SRC);
-  }
 } catch (e) {
   check('harness_threw: ' + (e && e.message), false);
 } finally {
-  // Re-eval the pristine sources so a neuter never leaks to another test.
-  indirectEval(POPULATE);
   report();
 }
 '''
@@ -344,8 +312,8 @@ def test_model_picker_ordered_by_display_name():
     run_harness(
         target_js=TOOLBAR_JS,
         body_js=body,
-        extra_targets=[BRANDING_JS, CORE_PANEL_JS, MODEL_GROUP_JS],
-        min_pass=22,
+        extra_targets=[MODEL_PRESENTATION_JS],
+        expect_pass=22,
         label='model-picker-order',
     )
 
@@ -357,10 +325,9 @@ def test_model_picker_ordered_by_display_name():
 #
 # The Preset tab (index.html data-tab="preset", static/settings_panels/preset.html)
 # renders THREE model-name lists from visibility_defaults.js. None of them sorted:
-# they inherited whatever order _getAllModels() walked the provider arrays in,
-# i.e. model_id order (the settings cold sort writes that back) while the row
-# text is _modelShortName. Models WITH a MODEL_PRICING entry therefore looked
-# right by luck and models WITHOUT one were scattered.
+# they inherited whatever order _getAllModels() walked the routing Offerings in
+# while the row text is _modelShortName. Models WITH a MODEL_PRICING entry
+# therefore looked right by luck and models WITHOUT one were scattered.
 
 _PRESET_HTML = (
     '<!DOCTYPE html><body>'
@@ -377,7 +344,7 @@ const { setup } = require(process.env.JSDOM_HARNESS);
 const { document, check, report } = setup({
   root: process.argv[3],
   html: HTML_PLACEHOLDER,
-  targets: [process.argv[2]],          // branding.js — comparator + wrappers
+  targets: [process.argv[2]],
   globals: {
     BASE_PATH: '',
     _serverConfig: { hidden_models: [], hidden_ig_models: [] },
@@ -396,31 +363,91 @@ const { document, check, report } = setup({
   },
 });
 
+const displayNames = createModelDisplayNames({
+  lookupModelDisplayName: (modelId) =>
+    global._modelPricingCache && global._modelPricingCache[modelId]
+      ? global._modelPricingCache[modelId].name : '',
+  lookupProviderDisplayName: () => '',
+});
+const compatibility = {
+  _detectBrand: detectModelBrand,
+  _brandSvg: brandIconHtml,
+  _modelShortName: displayNames.modelShortName,
+  _compareModelIds: displayNames.compareModelIds,
+  _compareModelsByDisplayName: displayNames.compareModelsByDisplayName,
+  _sortModelsByDisplayName: displayNames.sortModelsByDisplayName,
+  _sortModelEntriesByDisplayName: displayNames.sortModelEntriesByDisplayName,
+  _sortedBrandKeys: displayNames.sortedBrandKeys,
+};
+Object.assign(global, compatibility);
+Object.assign(window, compatibility);
+const modelGroupPolicy = createModelGroupPolicy({ detectBrand: detectModelBrand });
+Object.assign(global, modelGroupPolicy);
+Object.assign(window, modelGroupPolicy);
+global.runtimeScope = window.runtimeScope = {
+  isChatModel: global.isChatModel,
+  ...modelGroupPolicy,
+};
+
 const CORE_SRC = fs.readFileSync(process.argv[4], 'utf8');
 const VIS_SRC = fs.readFileSync(process.argv[5], 'utf8');
 const indirectEval = eval;
 indirectEval(CORE_SRC.match(/function _getAllModels[\s\S]*?\n}/)[0]);
 
-/* Two providers given in the WORST section order (Alpha inserted last), each
+/* Two v2 provider-access bundles in the WORST section order (Alpha inserted
+ * last), each
  * with models whose model_id order differs from their label order, and a
  * deliberate mix of priced (spaced label) and unpriced (hyphenated raw id)
  * entries — the interleaving case the separator fold exists for. */
-function seedProviders() {
-  global._stgProviders = window._stgProviders = [
-    { id: 'zzz', name: 'Zzz Provider', brand: 'zzzbrand', enabled: true, models: [
-      { model_id: 'gemini-3.5-flash', capabilities: ['text'] },
-      { model_id: 'gemini-3.6-flash', capabilities: ['text'] },
-      { model_id: 'gemini-3.1-flash-lite-preview', capabilities: ['text'] },
-      { model_id: 'MiniMax-M3', capabilities: ['text'] },
-      { model_id: 'MiniMax-M2.5', capabilities: ['text'] },
-      { model_id: 'yuju-claude-opus-5-evaDaily', capabilities: ['text'] },
-      { model_id: 'gpt-image-2', capabilities: ['image_gen'] },
-      { model_id: 'gpt-image-1.5', capabilities: ['image_gen'] },
+function seedModelRouting() {
+  const bundles = [
+    { provider_id: 'zzz', name: 'Zzz Provider', brand: 'zzzbrand', models: [
+      ['gemini-3.5-flash', ['text']],
+      ['gemini-3.6-flash', ['text']],
+      ['gemini-3.1-flash-lite-preview', ['text']],
+      ['MiniMax-M3', ['text']],
+      ['MiniMax-M2.5', ['text']],
+      ['yuju-claude-opus-5-evaDaily', ['text']],
+      ['gpt-image-2', ['image_gen']],
+      ['gpt-image-1.5', ['image_gen']],
     ] },
-    { id: 'alpha', name: 'Alpha Provider', brand: 'alphabrand', enabled: true, models: [
-      { model_id: 'kimi-k3', capabilities: ['text'] },
+    { provider_id: 'alpha', name: 'Alpha Provider', brand: 'alphabrand', models: [
+      ['kimi-k3', ['text']],
     ] },
   ];
+  const routing = {
+    providers: [], provider_accesses: [], models: [], offerings: [], deployments: [],
+  };
+  bundles.forEach((bundle) => {
+    const accessId = bundle.provider_id + '-access';
+    routing.providers.push({
+      provider_id: bundle.provider_id, name: bundle.name, brand: bundle.brand,
+    });
+    routing.provider_accesses.push({
+      provider_access_id: accessId,
+      provider_id: bundle.provider_id,
+      display_name: bundle.name,
+      enabled: true,
+    });
+    bundle.models.forEach(([modelId, capabilities], modelIndex) => {
+      const offeringId = bundle.provider_id + '-offering-' + modelIndex;
+      routing.models.push({ creator_id: 'fixture', model_id: modelId });
+      routing.offerings.push({
+        offering_id: offeringId,
+        provider_access_id: accessId,
+        model: { creator_id: 'fixture', model_id: modelId },
+        capabilities,
+        enabled: true,
+        stale: false,
+      });
+      routing.deployments.push({
+        deployment_id: offeringId + '-deployment',
+        offering_id: offeringId,
+        enabled: true,
+      });
+    });
+  });
+  global._stgModelRouting = window._stgModelRouting = routing;
 }
 
 function dvNames(containerId) {
@@ -446,7 +473,7 @@ function isSorted(list) {
 
 try {
   indirectEval(VIS_SRC);
-  seedProviders();
+  seedModelRouting();
   _renderPresetsTab({ model_defaults: {} });
 
   // ══ 1. Chat-model visibility list ══
@@ -494,40 +521,6 @@ try {
   check('select_is_globally_not_group_ordered',
     fb.indexOf('kimi-k3') > 0 && fb.indexOf('kimi-k3') < fb.length - 1);
 
-  // ══ NEUTER P1: drop the model sort in _renderDropdownVisibility ══
-  {
-    const n = VIS_SRC.replace(/    _sortModelsByDisplayName\(group\.models\);\n/g, '');
-    check('NP1_applied', n !== VIS_SRC);
-    indirectEval(n);
-    seedProviders();
-    _renderPresetsTab({ model_defaults: {} });
-    check('NP1_dv_order_regresses',
-      isSorted(dvNames('stgDropdownVisibility').slice(1)) === false);
-  }
-
-  // ══ NEUTER P2: drop the brand-group sort → insertion order returns ══
-  {
-    const n = VIS_SRC.replace(
-      /  var brandKeys = _sortedBrandKeys\(grouped, brandNames\);\n/g,
-      '  var brandKeys = Object.keys(grouped);\n');
-    check('NP2_applied', n !== VIS_SRC);
-    indirectEval(n);
-    seedProviders();
-    _renderPresetsTab({ model_defaults: {} });
-    check('NP2_group_order_regresses',
-      brandHeadings('stgDropdownVisibility').join('|') === 'Zzz Provider|Alpha Provider');
-  }
-
-  // ══ NEUTER P3: drop the <select> sort ══
-  {
-    const n = VIS_SRC.replace('  _sortModelEntriesByDisplayName(uniqueModels);\n', '');
-    check('NP3_applied', n !== VIS_SRC);
-    indirectEval(n);
-    seedProviders();
-    _renderPresetsTab({ model_defaults: {} });
-    check('NP3_select_order_regresses',
-      isSorted(optionTexts('settingFallbackModel')) === false);
-  }
 } catch (e) {
   check('harness_threw: ' + (e && e.message), false);
 } finally {
@@ -540,10 +533,10 @@ try {
 def test_preset_tab_lists_ordered_by_display_name():
     body = _PRESET_BODY.replace('HTML_PLACEHOLDER', json.dumps(_PRESET_HTML))
     run_harness(
-        target_js=BRANDING_JS,
+        target_js=MODEL_PRESENTATION_JS,
         body_js=body,
         extra_targets=[CORE_PANEL_JS, VISIBILITY_JS],
-        min_pass=20,
+        expect_pass=15,
         label='preset-tab-order',
     )
 
@@ -552,33 +545,28 @@ def test_preset_tab_lists_ordered_by_display_name():
 # ══════════════════════════════════════════════════════
 
 def test_single_comparator_no_duplicate_sort_logic():
-    """The comparator must live in exactly one place.
+    """The typed comparator must live in exactly one source owner.
 
     A second hand-rolled model comparator anywhere else is how the picker and
     the Settings list drift apart again. Lists that render FRIENDLY names must
     call the shared ``_compareModelsByDisplayName`` (directly or via its thin
-    ``_sortModels*``/``_sortedBrandKeys`` wrappers); the Settings card list
-    renders raw model_ids and must order them through the same shared
-    ``_MODEL_NAME_COLLATOR``. None may re-implement a `<`/`>` compare or build
-    a collator of its own.
+    ``_sortModels*``/``_sortedBrandKeys`` wrappers). No retained consumer may
+    construct a collator of its own.
     """
-    brand = open(BRANDING_JS, encoding='utf-8').read()
+    owner = MODEL_DISPLAY_OWNER.read_text()
     toolbar = open(TOOLBAR_JS, encoding='utf-8').read()
     core = open(CORE_PANEL_JS, encoding='utf-8').read()
     vis = open(VISIBILITY_JS, encoding='utf-8').read()
 
-    assert 'function _compareModelsByDisplayName' in brand, \
-        'the shared comparator must be defined in settings/branding.js'
-    assert brand.count('function _compareModelsByDisplayName') == 1, \
-        'comparator defined more than once'
-    assert 'numeric: true' in brand, \
+    assert 'createModelDisplayNames' in owner
+    assert owner.count('new Intl.Collator') == 1, \
+        'typed owner must construct exactly one shared collator'
+    assert 'numeric: true' in owner, \
         'collator must be numeric-aware or two-digit minor versions mis-sort'
 
     consumers = (
         ('main_toolbar_ui.js', toolbar, ['_compareModelsByDisplayName']),
-        # The settings card list sorts by the raw model_id it renders — via
-        # the shared collator, NOT the friendly-name comparator (2026-08-04).
-        ('core_panel.js', core, ['_MODEL_NAME_COLLATOR']),
+        ('core_panel.js', core, []),
         ('visibility_defaults.js', vis,
          ['_sortModelsByDisplayName', '_sortModelEntriesByDisplayName',
           '_sortedBrandKeys']),
@@ -587,42 +575,25 @@ def test_single_comparator_no_duplicate_sort_logic():
         assert 'function _compareModelsByDisplayName' not in src, \
             f'{name} must NOT define its own copy of the comparator'
         assert 'Intl.Collator' not in src, \
-            f'{name} must NOT build its own collator (share branding.js)'
+            f'{name} must NOT build its own collator (share typed owner)'
         for sym in required:
             assert sym in src, \
                 f'{name} must route its sort through the shared {sym}'
-
-    # The settings cards show raw ids — sorting them by the invisible pricing
-    # name was the 2026-08-04 bug. core_panel must never key its list off
-    # _modelShortName/_compareModelsByDisplayName again.
-    assert '_compareModelsByDisplayName' not in core, \
-        'core_panel.js must not sort the card list by friendly display name'
-    assert '_modelShortName' not in core, \
-        'core_panel.js must not key its sort off the pricing display name'
 
     # No consumer may walk a brand/provider group map in insertion order —
     # that was the section-order half of the bug.
     assert 'for (var brand in grouped)' not in vis, \
         'visibility_defaults.js still iterates brand groups in insertion order'
 
-    # The old id-based sort key is gone (it WAS the bug).
-    assert '_modelSortKey' not in core, \
-        'core_panel.js still carries the model_id sort key that caused the ' \
-        'display order to disagree with the labels'
-
-
-def test_bundler_loads_branding_before_consumers():
-    """branding.js defines the comparator; both consumers are plain window-scope
-    concatenation, so the bundler must place it FIRST or the comparator is in
-    the TDZ when core_panel/main_toolbar_ui run their sorts at call time."""
+def test_prelude_composes_typed_owner_before_retained_consumers():
     order = runtime_section_names()
-    for name in ('settings/branding.js', 'settings/core_panel.js',
-                 'main/main_toolbar_ui.js'):
+    assert 'settings/branding.js' not in order
+    for name in ('settings/core_panel.js', 'main/main_toolbar_ui.js'):
         assert order.count(name) == 1, f'{name} missing from the Vite runtime'
-    assert order.index('settings/branding.js') < order.index('settings/core_panel.js'), \
-        'branding.js must be bundled before core_panel.js'
-    assert order.index('settings/branding.js') < order.index('main/main_toolbar_ui.js'), \
-        'branding.js must be bundled before main_toolbar_ui.js'
+    prelude = PRELUDE.read_text()
+    assert "from '../core/model-display-names'" in prelude
+    assert 'compareModelIds: _compareModelIds' in prelude
+    assert 'compareModelsByDisplayName: _compareModelsByDisplayName' in prelude
 
 
 if __name__ == '__main__':

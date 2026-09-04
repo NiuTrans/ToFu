@@ -20,7 +20,7 @@ Measured truth in the task log (task 695e4b39):
 
 Fix (pt_914bb7308c294b02):
   A. Every discarded call (missing name / internal artefact / malformed name /
-     phantom empty-args duplicate) is converted to a REJECTED round + a
+     malformed arguments or carrier shape) is converted to a REJECTED round + a
      model-facing receipt that rides the same pipeline lane as hallucinated
      tools — the model always gets a ``role:'tool'`` answer, in original
      tool-call order, explicitly defusing the "limit" confabulation.
@@ -150,22 +150,171 @@ class TestDiscardReceipt(unittest.TestCase):
                          'malformed')
         self.assertIn('DID NOT RUN', parsed[0][6])
 
-    def test_phantom_empty_args_duplicate_gets_receipt(self):
-        """Valid name + empty args + a same-named sibling WITH real args:
-        the phantom used to be skipped silently too."""
+    def test_distinct_same_name_empty_args_call_reaches_normal_validation(self):
+        """Similarity alone cannot turn a provider occurrence into a phantom."""
         task = _make_task()
         parsed, _ = parse_tool_calls(
             _assistant([_tc('list_dir', '{"path": "."}', 'call_real'),
                         _tc('list_dir', '', 'call_phantom')]), task,
             round_num=0, tool_round_num=0, project_enabled=False)
         self.assertEqual(len(parsed), 2)
-        real, phantom = parsed[0], parsed[1]
+        real, no_args = parsed[0], parsed[1]
         self.assertIsNone(real[6], 'the real sibling must parse cleanly')
         self.assertNotEqual(real[5].get('status'), 'rejected')
-        self.assertIsNotNone(phantom[6])
-        self.assertIn('DID NOT RUN', phantom[6])
-        self.assertEqual(phantom[5].get('_rejected', {}).get('kind'),
-                         'phantom_empty_args')
+        self.assertIsNone(no_args[6])
+        self.assertEqual(no_args[3], {})
+        self.assertNotEqual(no_args[5].get('status'), 'rejected')
+
+    def test_malformed_call_shapes_are_isolated_per_occurrence(self):
+        task = _make_task()
+        assistant = _assistant([
+            None,
+            {'id': 17, 'function': ['not', 'an', 'object']},
+            {'id': 'bad-name', 'function': {
+                'name': {'not': 'a string'}, 'arguments': '{}'}},
+            _tc('list_dir', '{"path": "."}', 'valid'),
+        ])
+
+        parsed, _ = parse_tool_calls(
+            assistant, task, round_num=0, tool_round_num=0,
+            project_enabled=False)
+
+        self.assertEqual(len(parsed), 4)
+        self.assertTrue(all(item[6] for item in parsed[:3]))
+        self.assertTrue(all(
+            item[5].get('_rejected', {}).get('kind')
+            == 'malformed_tool_call_shape'
+            for item in parsed[:3]))
+        self.assertIsNone(parsed[3][6])
+        self.assertEqual(parsed[3][1], 'list_dir')
+        self.assertTrue(all(isinstance(tc, dict)
+                            for tc in assistant['tool_calls']))
+
+    def test_single_tool_call_object_is_repaired_to_an_array(self):
+        task = _make_task()
+        assistant = {
+            'role': 'assistant', 'content': '',
+            'tool_calls': _tc('list_dir', '{"path": "."}', 'single'),
+        }
+
+        parsed, _ = parse_tool_calls(
+            assistant, task, round_num=0, tool_round_num=0,
+            project_enabled=False)
+
+        self.assertEqual(len(parsed), 1)
+        self.assertIsNone(parsed[0][6])
+        self.assertEqual(len(assistant['tool_calls']), 1)
+
+    def test_non_json_arguments_type_is_rejected_not_coerced_to_empty(self):
+        task = _make_task()
+        assistant = _assistant([{
+            'id': 'bad-args',
+            'type': 'function',
+            'function': {'name': 'list_dir', 'arguments': ['.']},
+        }])
+
+        parsed, _ = parse_tool_calls(
+            assistant, task, round_num=0, tool_round_num=0,
+            project_enabled=False)
+
+        self.assertEqual(len(parsed), 1)
+        self.assertIn('must be a JSON object or a JSON string', parsed[0][6])
+        self.assertEqual(
+            parsed[0][5].get('_rejected', {}).get('kind'),
+            'invalid_tool_arguments')
+
+    def test_invalid_caller_never_inherits_direct_root_authority(self):
+        callers = [
+            'program',
+            {},
+            {'type': 'unknown'},
+            {'type': 'multi_agent'},
+            {'type': 'multi_agent', 'agent_name': 17},
+        ]
+        for caller in callers:
+            with self.subTest(caller=caller):
+                task = _make_task()
+                call = _tc('list_dir', '{"path": "."}', 'attributed')
+                call['caller'] = caller
+
+                parsed, _ = parse_tool_calls(
+                    _assistant([call]), task, round_num=0, tool_round_num=0,
+                    project_enabled=False)
+
+                self.assertEqual(len(parsed), 1)
+                self.assertIsNotNone(parsed[0][6])
+                self.assertEqual(
+                    parsed[0][5].get('_rejected', {}).get('kind'),
+                    'invalid_tool_caller')
+
+    def test_valid_multi_agent_caller_remains_attributed(self):
+        task = _make_task()
+        call = _tc('list_dir', '{"path": "."}', 'worker-read')
+        call['caller'] = {
+            'type': 'multi_agent', 'agent_name': ' /root/reviewer ',
+        }
+
+        parsed, _ = parse_tool_calls(
+            _assistant([call]), task, round_num=0, tool_round_num=0,
+            project_enabled=False)
+
+        self.assertIsNone(parsed[0][6])
+        self.assertEqual(parsed[0][0]['caller']['agent_name'], '/root/reviewer')
+
+    def test_caller_metadata_cannot_expand_authority_envelope(self):
+        task = _make_task()
+        call = _tc('list_dir', '{"path": "."}', 'worker-read')
+        call['caller'] = {
+            'type': 'multi_agent', 'agent_name': '/root/reviewer',
+            'untrusted_metadata': 'x' * 10_000,
+        }
+
+        parsed, _ = parse_tool_calls(
+            _assistant([call]), task, round_num=0, tool_round_num=0,
+            project_enabled=False)
+
+        self.assertEqual(parsed[0][0]['caller'], {
+            'type': 'multi_agent', 'agent_name': '/root/reviewer',
+        })
+
+    def test_invalid_caller_diagnostic_is_bounded(self):
+        task = _make_task()
+        call = _tc('list_dir', '{"path": "."}', 'bad-caller')
+        call['caller'] = {'type': 'x' * 10_000}
+
+        parsed, _ = parse_tool_calls(
+            _assistant([call]), task, round_num=0, tool_round_num=0,
+            project_enabled=False)
+
+        rejection = parsed[0][5]['_rejected']
+        self.assertLessEqual(len(rejection['reason']), 120)
+        self.assertLess(len(parsed[0][6]), 1_000)
+
+    def test_non_string_assistant_sidecars_do_not_crash_tool_parse(self):
+        task = _make_task()
+        assistant = _assistant([
+            _tc('list_dir', '{"path": "."}', 'valid-sidecars'),
+        ])
+        assistant.update({
+            'content': [{'type': 'text', 'text': 'unexpected shape'}],
+            'reasoning_content': {'unexpected': 'shape'},
+            'thinking_signature': ['unexpected'],
+            '_responses_items': {'unexpected': 'shape'},
+            '_anthropic_content_blocks': 'unexpected',
+        })
+
+        parsed, _ = parse_tool_calls(
+            assistant, task, round_num=0, tool_round_num=0,
+            project_enabled=False)
+
+        self.assertEqual(len(parsed), 1)
+        self.assertIsNone(parsed[0][6])
+        row = parsed[0][5]
+        self.assertNotIn('assistantContent', row)
+        self.assertNotIn('thinking', row)
+        self.assertNotIn('thinkingSignature', row)
+        self.assertNotIn('_responsesItems', row)
+        self.assertNotIn('_anthropicContentBlocks', row)
 
     # ── THE invariant: no input call ever vanishes ──
 
@@ -178,7 +327,7 @@ class TestDiscardReceipt(unittest.TestCase):
                  _tc('antml:thinking', '{}', 'c2'),            # internal
                  _tc('list_dir">.</parameter>', '{}', 'c3'),   # malformed
                  _tc('list_dir', '{"path": "."}', 'c4'),       # real
-                 _tc('list_dir', '', 'c5')]                    # phantom
+                 _tc('list_dir', '', 'c5')]                    # valid no-args occurrence
         parsed, _ = parse_tool_calls(_assistant(batch), task,
                                      round_num=0, tool_round_num=0,
                                      project_enabled=False)

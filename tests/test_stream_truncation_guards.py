@@ -658,6 +658,7 @@ class TestPartialContentLosslessRetry(unittest.TestCase):
                          {'role': 'assistant', 'content': prefix})
         self.assertEqual(messages[-1]['role'], 'user')
         self.assertIn('LOSSLESS STREAM CONTINUATION', messages[-1]['content'])
+        self.assertTrue(messages[-1].get('_isMeta'))
         phase = [e for e in task['events'] if e.get('type') == 'phase'][-1]
         self.assertEqual(phase.get('continuationMode'), 'continuation_nudge')
         self.assertEqual(task['content'], prefix)

@@ -125,6 +125,12 @@ def test_db_baseline_used_when_memory_empty():
         assert 'turn_boundary_rebill' in res, (
             f'must bucket turn_boundary_rebill, not no_break: {res}')
         assert classify_verdict(res) == 'turn_boundary_rebill', classify_verdict(res)
+        # Structured sibling fields for the parameterized frontend rendering —
+        # the string cause is retained; these numbers let the zh/en UI
+        # interpolate instead of substring-matching dynamic digits.
+        assert res.get('prev_read') == 262_000, f'prev_read must be structured: {res}'
+        assert res.get('read') == 79_000, f'read must be structured: {res}'
+        assert isinstance(res.get('gap_s'), float), f'gap_s must be a float: {res}'
         st = _cur_state(conv)
         assert st is not None and st.total_breaks == 1, (
             f'the boundary re-bill must count in total_breaks: '

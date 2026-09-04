@@ -746,9 +746,9 @@ def model_relay_guard(*, is_byo: bool = False):
     backstop that also refuses a stale pre-flag key still holding ``chat``.
 
     Allowed through even when model relay is off:
-      * ``is_byo=True`` — the caller pinned their OWN endpoint
-        (``model="name@prov_xxx"`` / inline provider block). That's
-        exactly the path a BYO-only deployment wants to encourage.
+      * ``is_byo=True`` — every candidate in the request-scoped v2 route
+        group belongs to an owner-scoped ProviderAccess. No operator/public
+        credential can be selected during failover.
       * admin / operator keys — the operator running their own instance
         is not a tenant; they keep full access to their pool.
 
@@ -768,49 +768,39 @@ def model_relay_guard(*, is_byo: bool = False):
               path=request.path)
     return api_forbidden(
         'This relay does not provide model access (BYO-only mode). '
-        'Register your own model endpoint via POST /api/v1/providers and '
-        'invoke it through /api/v1/agent/run, or with '
-        'model="<name>@<prov_id>" on the chat endpoint.',
+        'Configure an owner-scoped ProviderAccess via /api/v1/providers '
+        'and select a structured model through the v2 routing authority.',
         error_kind='model_relay_disabled')
 
 
-def guard_model_relay_or_dispose(handle):
-    """One-shot BYO-only backstop for the four completion surfaces.
+def guard_model_relay_or_dispose(route_group):
+    """Backstop all completion surfaces and dispose a denied v2 route group.
 
     Collapses the per-route boilerplate ::
 
-        denied = model_relay_guard(is_byo=handle is not None)
+        denied = model_relay_guard(is_byo=route_is_owner_scoped)
         if denied is not None:
             return denied
 
-    into a single call. Pass the resolved ephemeral-slot ``handle``
-    (``None`` when the request targets the global pool). Returns the
-    rejection Response, or ``None`` to proceed.
-
-    Note on the name: a rejection can ONLY occur when ``handle is None``
-    — a present handle means the caller pinned their own endpoint
-    (``is_byo=True``), which the guard always allows. So there is never
-    a live slot to dispose at the point of rejection; the ``_or_dispose``
-    suffix documents the contract (rejection leaves no leaked slot)
-    rather than performing a disposal. The defensive branch below makes
-    that invariant explicit and self-heals if a future refactor ever
-    makes a handle reachable on the reject path.
+    A mixed owner/public failover set is not BYO-only: allowing the primary
+    owner candidate while retaining an operator candidate would make the
+    policy disappear on retry. Denial disposes every slot immediately.
     """
-    denied = model_relay_guard(is_byo=handle is not None)
+    candidates = list(getattr(route_group, 'candidates', ()) or ())
+    owner_scoped = bool(candidates) and all(
+        str(getattr(candidate, 'provider', {}).get('scope') or '') == 'owner'
+        for candidate in candidates
+    )
+    denied = model_relay_guard(is_byo=owner_scoped)
     if denied is None:
         return None
-    if handle is not None:
-        # Invariant: unreachable today (handle ⇒ is_byo ⇒ allowed). Kept
-        # as a self-healing safety net so a future change that lets a
-        # handle survive to a rejection can't leak the slot.
-        logger.error('[ModelRelay] guard rejected WITH a live slot '
-                     '(handle=%s) — invariant broken; disposing',
-                     getattr(handle, 'handle_id', '?'))
+    if route_group is not None:
         try:
-            from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
-            dispose_ephemeral_slot(handle)
+            from lib.model_routing import dispose_routed_slot_group
+            dispose_routed_slot_group(route_group)
         except Exception as e:
-            logger.warning('[ModelRelay] slot dispose on reject failed: %s', e)
+            logger.warning(
+                '[ModelRelay] route-group dispose on reject failed: %s', e)
     return denied
 
 

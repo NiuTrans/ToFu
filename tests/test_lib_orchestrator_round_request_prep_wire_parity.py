@@ -28,6 +28,8 @@ from __future__ import annotations
 import importlib
 import pathlib
 
+import pytest
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
@@ -67,7 +69,10 @@ def test_prep_helper_signature():
     for name in ('task', 'rs', 'messages', 'tool_list'):
         assert name in params, f'{name} must be a parameter'
     for name in ('round_num', 'tid', 'thinking_depth',
-                 'temperature', 'max_tokens', 'response_format'):
+                 'temperature', 'max_tokens', 'response_format',
+                 'admitted_input_tokens', 'admitted_tool_schema_tokens',
+                 'admitted_tool_schema_fingerprint',
+                 'reusable_text_token_counts_by_identity'):
         assert name in params, f'{name} must be a parameter'
         assert params[name].kind == inspect.Parameter.KEYWORD_ONLY, (
             f'{name} must be keyword-only')
@@ -130,17 +135,15 @@ def test_run_py_has_no_tool_round_gate():
 # 5. leaf carries the pivotal semantics (order + late binding + attach)
 # ---------------------------------------------------------------------------
 def test_leaf_preserves_step_ordering():
-    """sort_tool_results MUST run before the snapshot emission, which
-    MUST run before build_body — the snapshot reflects the real
-    outbound ordering, and the body is built from the sorted messages."""
+    """Sort, build once, then snapshot the canonical body messages."""
     src = LEAF_PY.read_text()
     i_sort = src.index('sort_tool_results(')
     i_snap = src.index('emit_messages_snapshot_event(')
     i_body = src.index('orchestrator_ports.build_request_body(')
-    assert i_sort < i_snap < i_body, (
-        'leaf must order sort_tool_results → emit_messages_snapshot_event '
-        '→ orchestrator_ports.build_request_body (snapshot sees the sorted wire ordering; body is '
-        'built from the sorted messages)')
+    assert i_sort < i_body < i_snap, (
+        'leaf must order sort_tool_results → build_request_body → '
+        'emit_messages_snapshot_event so the snapshot reuses canonical body '
+        'messages instead of sanitizing the prompt twice')
 
 
 def test_leaf_builds_body_through_the_explicit_port_owner():
@@ -172,3 +175,110 @@ def test_leaf_returns_two_tuple():
     src = LEAF_PY.read_text()
     assert 'return _tools_this_round, body' in src, (
         'leaf must `return _tools_this_round, body`')
+
+
+def test_leaf_passes_call_local_admission_count_to_body_builder(monkeypatch):
+    from types import SimpleNamespace
+
+    import lib.tasks_pkg.orchestrator._round_request_prep as prep
+    import lib.context_telemetry as context_telemetry
+
+    captured = {}
+    captured_telemetry = {}
+    captured_snapshots = []
+    monkeypatch.setattr(prep, 'sort_tool_results', lambda *a, **k: None)
+    monkeypatch.setattr(
+        prep, 'emit_messages_snapshot_event',
+        lambda *args, **kwargs: captured_snapshots.append((args, kwargs)))
+    monkeypatch.setattr(
+        context_telemetry,
+        'capture_round_context',
+        lambda *args, **kwargs: captured_telemetry.update(kwargs),
+    )
+
+    def build_body(model, messages, **kwargs):
+        captured.update(kwargs)
+        return {
+            'model': model,
+            'messages': list(messages),
+            'tools': kwargs.get('tools'),
+        }
+
+    monkeypatch.setattr(
+        prep.orchestrator_ports, 'build_request_body', build_body)
+    state = SimpleNamespace(
+        model='gpt-5.6-sol', preset='medium', thinking_enabled=True)
+    task = {'id': 'admission-reuse', 'convId': 'conv-reuse', 'config': {}}
+
+    tools = [{'type': 'function', 'function': {'name': 'read_files'}}]
+    _, body = prep.build_round_request(
+        task,
+        state,
+        [{'role': 'user', 'content': 'hello'}],
+        tools,
+        round_num=0,
+        tid='admission',
+        thinking_depth='medium',
+        temperature=1.0,
+        max_tokens=4096,
+        response_format=None,
+        admitted_input_tokens=111_000,
+        admitted_tool_schema_tokens=18_000,
+        admitted_tool_schema_fingerprint='a' * 64,
+        reusable_text_token_counts_by_identity={123: 456},
+    )
+
+    assert captured['precomputed_input_tokens'] == 111_000
+    assert captured_snapshots[0][1]['prepared_messages'] is body['messages']
+    from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
+    assert body[ADMITTED_INPUT_TOKENS_KEY] == 111_000
+    assert captured_telemetry['precomputed_tool_schema_tokens'] == 18_000
+    assert captured_telemetry[
+        'reusable_text_token_counts_by_identity'] == {123: 456}
+    evidence = body[context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY]
+    assert context_telemetry.reusable_tool_schema_token_count(
+        evidence,
+        list(tools),
+        model=state.model,
+    ) == 18_000
+    assert context_telemetry.tool_schema_fingerprint_from_evidence(
+        evidence) == 'a' * 64
+
+
+def test_body_build_failure_emits_fallback_snapshot_then_reraises(monkeypatch):
+    from types import SimpleNamespace
+
+    import lib.tasks_pkg.orchestrator._round_request_prep as prep
+
+    snapshots = []
+    monkeypatch.setattr(prep, 'sort_tool_results', lambda *a, **k: None)
+    monkeypatch.setattr(
+        prep, 'emit_messages_snapshot_event',
+        lambda *args, **kwargs: snapshots.append((args, kwargs)),
+    )
+    failure = RuntimeError('body construction failed')
+    monkeypatch.setattr(
+        prep.orchestrator_ports,
+        'build_request_body',
+        lambda *a, **k: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        prep.build_round_request(
+            {'id': 'failure-task', 'convId': 'failure-conv'},
+            SimpleNamespace(
+                model='gpt-5.6-sol', preset='medium',
+                thinking_enabled=False),
+            [{'role': 'user', 'content': 'diagnose me'}],
+            [],
+            round_num=0,
+            tid='failure',
+            thinking_depth='medium',
+            temperature=1.0,
+            max_tokens=4096,
+            response_format=None,
+        )
+
+    assert raised.value is failure
+    assert len(snapshots) == 1
+    assert 'prepared_messages' not in snapshots[0][1]

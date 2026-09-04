@@ -1,7 +1,7 @@
 """jsdom test for the Request Inspector drawer (P2).
 
-Design: docs/DEBUG_PANEL_REDESIGN.md (owner-ratified form A). Drives the
-REAL shipped static/js/core/debug_panel.js + core/request_inspector.js
+Design: docs/FRONTEND_ARCHITECTURE.md (Backend and browser boundary).
+Drives the REAL shipped debug_panel.js + request_inspector.js
 under jsdom:
 
   1. toggleDebug() now opens the RIGHT-SIDE DRAWER (body.ri-open +
@@ -9,8 +9,9 @@ under jsdom:
   2. Task rows render from Api.tasks.byConv (SERVER-authoritative), with
      plain-language status / action / expired state (no request-count jargon).
   3. Selecting a task folds request rows (R1/R2) + attempts + the coverage
-     chip for endpoint-driven tasks; state mirrors render SEPARATELY
-     (never mixed into the request list).
+     chip for endpoint-driven tasks; each round row names the tools that
+     round invoked (the chat turn-block glanceability contract); state
+     mirrors NEVER enter the round list (per-round payload fetch only).
   4. Selecting a round renders the detail via showMessagesInDebug (the ONE
      renderer — no second JSON viewer) from the on-demand payload fetch.
   5. LIVE ACCELERATOR: a round already in _debugRequests (SSE-fed) renders
@@ -70,34 +71,24 @@ win.escapeHtml = global.escapeHtml = (s) =>
 win.Icon = global.Icon = (name, size) => `<svg data-icon="${name}" width="${size||14}"></svg>`;
 const _I18N = {
   'ri.title': 'Run details',
-  'ri.states': 'Tool-result records',
-  'ri.stateNote': 'for troubleshooting only',
   'ri.empty': 'No tasks recorded',
   'ri.loading': 'Loading…',
   'ri.expired': 'Event log expired',
+  'ri.expiredHint': 'Detailed records are kept for about 30 days',
   'ri.coveragePartial': 'endpoint partial',
   'ri.selectTask': 'Select a run to see what it did',
   'ri.detailTitle': 'Turn details',
-  'ri.selectRound': 'Expand Technical details and select a turn.',
+  'ri.selectRound': 'Select a turn to see its full request and tool state.',
   'ri.viewProcess': 'View what happened',
-  'ri.summaryLabel': 'Run summary',
   'ri.statusRunning': 'Task in progress',
   'ri.statusDone': 'Task completed',
   'ri.statusFailed': 'Task did not complete',
   'ri.statusStopped': 'Task stopped',
   'ri.statusUnknown': 'Status unknown',
-  'ri.operationCountOne': 'Completed 1 operation',
-  'ri.operationCount': 'Completed {n} operations',
-  'ri.operationCountApproxOne': 'Completed about 1 operation',
-  'ri.operationCountApprox': 'Completed about {n} operations',
-  'ri.noOperations': 'No tool operations were run',
-  'ri.operationUnavailable': 'Operation count unavailable',
-  'ri.operationHelp': 'Counts real tool actions. System logs are not counted.',
   'ri.taskLabel': 'Task {id}',
-  'ri.technicalDetails': 'View technical details',
-  'ri.modelTurns': '{n} model turns',
+  'ri.technicalDetails': 'Technical details',
+  'ri.roundTotal': '{n} request rounds',
   'ri.roundNumber': 'Turn {n}',
-  'ri.roundMeta': '{messages} messages · ~{tokens} tokens',
   'ri.availableTools': '{n} tools available',
 };
 win.t = global.t = (k, vars) => {
@@ -129,18 +120,15 @@ win.Api = global.Api = {
       CALLS.getRequests++;
       if (taskId === 'task-OLD') return {
         taskId, eventsAvailable: false, requestCount: 0,
-        operationCount: 0, operationCountAvailable: false,
-        operationCountApproximate: false,
-        requests: [], states: [], coverage: 'full',
+        requests: [], coverage: 'full',
       };
       return {
         taskId, eventsAvailable: true, coverage: 'partial', requestCount: 2,
-        operationCount: 2, operationCountApproximate: false,
-        operationCountAvailable: true,
         requests: [
           { roundNum: 1, ts: 1753400001000, model: 'm-x',
             params: { maxTokens: 1000 }, messageCount: 3, toolsCount: 2,
-            approxTokens: 1200, label: 'Round 1 请求前 · 3条', legacy: false,
+            toolNames: ['web_search', 'read_files'],
+            label: 'Round 1 请求前 · 3条', legacy: false,
             attempts: [
               { tag: 'R1', model: 'm-x', tokensIn: 500, tokensOut: 100,
                 traceId: 'tr-1', streamElapsedMs: 2100, cacheRead: 0,
@@ -151,12 +139,9 @@ win.Api = global.Api = {
             ] },
           { roundNum: 2, ts: 1753400004000, model: 'm-x',
             params: { maxTokens: 1000 }, messageCount: 5, toolsCount: 2,
-            approxTokens: 2400, label: 'Round 2 请求前 · 5条', legacy: false,
+            toolNames: [],
+            label: 'Round 2 请求前 · 5条', legacy: false,
             attempts: [] },
-        ],
-        states: [
-          { roundNum: 'final', label: '最终回复后 · 6条', messageCount: 6,
-            ts: 1753400005000, legacy: false },
         ],
       };
     },
@@ -190,7 +175,7 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   check('byconv_called', CALLS.byConv === 1);
   check('detail_empty_state_is_actionable',
     document.getElementById('debugTitle').textContent === 'Turn details' &&
-    document.getElementById('debugContent').textContent.indexOf('Expand Technical details') !== -1);
+    document.getElementById('debugContent').textContent.indexOf('Select a turn') !== -1);
 
   /* ── 2. Task rows (server-authoritative) ── */
   const taskEls = document.querySelectorAll('#riTaskList .ri-task');
@@ -201,22 +186,36 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
     taskEls.length && taskEls[0].textContent.indexOf('View what happened') !== -1);
   check('expired_task_marked',
     taskEls.length === 2 && taskEls[1].innerHTML.indexOf('Event log expired') !== -1);
+  /* ORDER REGRESSION (grouping redesign): tasks that resolve to no turn
+   * fall into one unresolved bucket — it must stay newest-first like the
+   * old flat list, and must not invent "run N" badges (those mean retries
+   * of ONE reply). */
+  check('unresolved_bucket_newest_first',
+    taskEls.length === 2 && taskEls[0].dataset.taskId === 'task-AAA' &&
+    taskEls[1].dataset.taskId === 'task-OLD');
+  check('no_run_badges_without_resolved_turn',
+    !document.querySelector('#riTaskList .ri-run-badge'));
 
-  /* ── 3. Select task → request rows + attempts + coverage chip + states ── */
+  /* ── 3. Select task → rounds w/ tool chips + attempts + coverage chip ── */
   taskEls[0].onclick();
   await new Promise(r => setTimeout(r, 10));
   check('getrequests_called', CALLS.getRequests === 1);
-  const summary = document.querySelector('#riRoundList .ri-summary');
-  check('human_summary_is_primary', !!summary &&
-    summary.querySelector('.ri-summary-count').textContent === 'Completed 2 operations' &&
-    summary.querySelector('.ri-summary-help').textContent.indexOf('System logs are not counted') !== -1);
+  check('summary_card_retired',
+    !document.querySelector('#riRoundList .ri-summary'));
   const technical = document.querySelector('#riRoundList .ri-technical');
-  check('technical_details_start_collapsed', !!technical && !technical.open &&
-    technical.querySelector('summary').textContent.indexOf('2 model turns') !== -1);
+  check('technical_details_open_by_default', !!technical && technical.open &&
+    technical.querySelector('summary').textContent.indexOf('Technical details') !== -1 &&
+    technical.querySelector('summary').textContent.indexOf('2 request rounds') !== -1);
   const roundEls = document.querySelectorAll('#riRoundList .ri-round');
   check('round_rows_rendered', roundEls.length === 2);
-  check('available_tools_are_not_executed_tools', roundEls.length &&
-    roundEls[0].textContent.indexOf('2 tools available') !== -1);
+  const chips1 = roundEls.length ? roundEls[0].querySelectorAll('.ri-tool-chip') : [];
+  check('tool_chips_like_turn_blocks', chips1.length === 2 &&
+    chips1[0].textContent === 'web_search' && chips1[1].textContent === 'read_files');
+  check('round_without_tools_renders_no_chips', roundEls.length === 2 &&
+    !roundEls[1].querySelector('.ri-round-tools'));
+  check('no_message_token_meta_jargon', roundEls.length === 2 &&
+    roundEls[0].textContent.indexOf('messages') === -1 &&
+    roundEls[0].textContent.indexOf('~') === -1);
   check('round1_two_attempts',
     roundEls.length &&
     roundEls[0].querySelectorAll('.ri-attempt').length === 2);
@@ -224,9 +223,9 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
     roundEls.length && roundEls[0].innerHTML.indexOf('R1-FALLBACK') !== -1);
   check('coverage_chip_partial',
     !!document.querySelector('#riRoundList .ri-coverage-chip'));
-  const stateRows = document.querySelectorAll('#riRoundList .ri-state-row');
-  check('states_separate', stateRows.length === 1 &&
-    stateRows[0].textContent.indexOf('最终回复后') !== -1);
+  check('states_block_retired',
+    document.querySelectorAll('#riRoundList .ri-state-row').length === 0 &&
+    document.getElementById('riRoundList').textContent.indexOf('最终回复后') === -1);
 
   /* ── 4. Select round → detail via the ONE renderer, server payload ── */
   roundEls[1].onclick();
@@ -265,13 +264,13 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
     tA.rounds['1']._stripped === true &&
     tA.rounds['1'].messageCount === 1);
 
-  /* ── 7. Expired logs must say unavailable, never invent zero work ── */
+  /* ── 7. Expired logs say so honestly, never invent zero work ── */
   taskEls[1].onclick();
   await new Promise(r => setTimeout(r, 10));
-  const expiredSummary = document.querySelector('#riRoundList .ri-summary-count');
-  check('expired_count_is_unavailable', !!expiredSummary &&
-    expiredSummary.textContent === 'Operation count unavailable' &&
-    expiredSummary.textContent.indexOf('No tool operations') === -1);
+  const expiredNote = document.querySelector('#riRoundList .ri-empty');
+  check('expired_note_honest', !!expiredNote &&
+    expiredNote.textContent.indexOf('kept for about 30 days') !== -1 &&
+    !document.querySelector('#riRoundList .ri-summary'));
 
   /* ── 8. closeDebug hides the drawer ── */
   closeDebug();
@@ -308,8 +307,8 @@ def _run(ri_path=None, expect_fail=None):
         return output
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'request-inspector drawer failures:\n' + output
-    assert output.count('PASS') >= 17, (
-        f'expected >=17 PASS lines, got:\n{output}')
+    assert output.count('PASS') >= 25, (
+        f'expected >=25 PASS lines, got:\n{output}')
     return output
 
 

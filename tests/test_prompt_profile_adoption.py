@@ -6,6 +6,7 @@ import hashlib
 
 import pytest
 
+import lib.context_telemetry as context_telemetry
 from lib.benchmark_contract import BenchmarkContractError, build_task_record_v2
 from lib.context_telemetry import (
     PROMPT_PROFILE_EVIDENCE_VERSION,
@@ -123,6 +124,41 @@ def test_kimi_lean_candidate_has_stable_hash_and_at_least_84pct_reduction():
     assert len({hashlib.sha256(value.encode()).hexdigest()
                 for value in variants.values()}) == len(variants)
 
+    discovery_lean = build_static_prompt(
+        **kwargs, profile='lean', tool_search_available=True)
+    assert 'Hidden built-in tools may include' in discovery_lean
+    assert count_text(discovery_lean, model='kimi-k3') <= 450
+
+
+def test_composer_gates_hidden_capability_guidance_on_live_search_catalog():
+    def platform_content(task: dict) -> str:
+        blocks = collect_context_blocks(
+            [{'role': 'user', 'content': 'make something'}],
+            ComposeRequest(
+                model='gpt-5.6-sol', task=task, has_real_tools=True,
+                tool_names=frozenset({'read_files'}),
+            ),
+        )
+        return next(
+            block.content for block in blocks if block.id == 'platform_static')
+
+    searchable_task = {
+        'config': {'responses': {'promptProfile': 'lean'}},
+        '_toolSearchMode': 'local',
+        '_toolSearchableCount': 8,
+        '_toolSearchCatalogSize': 24,
+    }
+    assert 'Hidden built-in tools may include' in platform_content(
+        searchable_task)
+
+    disabled_task = dict(searchable_task, _toolSearchMode='off')
+    assert 'Hidden built-in tools may include' not in platform_content(
+        disabled_task)
+
+    undersized_task = dict(searchable_task, _toolSearchCatalogSize=11)
+    assert 'Hidden built-in tools may include' not in platform_content(
+        undersized_task)
+
 
 def test_composer_stamps_requested_effective_hash_and_round_evidence():
     task = {'config': {'responses': {'promptProfile': 'lean'}}}
@@ -161,6 +197,108 @@ def test_composer_stamps_requested_effective_hash_and_round_evidence():
     )
     assert snapshot['promptProfile'] == evidence
     assert snapshot['promptProfile'] is not evidence
+
+
+def test_round_telemetry_reuses_only_unchanged_string_identities(monkeypatch):
+    unchanged_content = 'unchanged private tool result ' * 30
+    rewritten_content = ''.join([
+        'rewritten private tool result ',
+        'with a distinct immutable identity',
+    ])
+    fallback_messages = []
+    monkeypatch.setattr(
+        context_telemetry,
+        'tool_schema_tokens',
+        lambda *args, **kwargs: pytest.fail(
+            'validated admission schema count must be reused'),
+    )
+    monkeypatch.setattr(
+        context_telemetry,
+        '_content_tokens',
+        lambda message, **kwargs: fallback_messages.append(message) or 17,
+    )
+    messages = [
+        {'role': 'tool', 'content': unchanged_content},
+        {'role': 'tool', 'content': rewritten_content},
+    ]
+    task = {}
+
+    snapshot = context_telemetry.capture_round_context(
+        task,
+        messages,
+        [{'type': 'function'}],
+        round_num=0,
+        model='gpt-5.6-sol',
+        precomputed_tool_schema_tokens=321,
+        reusable_text_token_counts_by_identity={
+            id(unchanged_content): 123,
+            id(rewritten_content): -1,
+        },
+    )
+
+    assert snapshot['toolSchemaTokens'] == 321
+    assert snapshot['modelToolResultTokens'] == 140
+    assert fallback_messages == [messages[1]]
+    assert task['_contextTelemetryRounds'] == [snapshot]
+    assert id(unchanged_content) not in snapshot.values()
+
+
+def test_nonempty_tool_surface_recounts_an_untrusted_zero_admission_value(
+    monkeypatch,
+):
+    schema_calls = []
+    monkeypatch.setattr(
+        context_telemetry,
+        'tool_schema_tokens',
+        lambda tools, **kwargs: schema_calls.append(tools) or 55,
+    )
+
+    snapshot = context_telemetry.capture_round_context(
+        {},
+        [{'role': 'user', 'content': 'hello'}],
+        [{'type': 'function'}],
+        round_num=0,
+        model='gpt-5.6-sol',
+        precomputed_tool_schema_tokens=0,
+    )
+
+    assert snapshot['toolSchemaTokens'] == 55
+    assert schema_calls == [[{'type': 'function'}]]
+
+
+def test_schema_token_evidence_requires_same_ordered_objects_and_model():
+    first = {'type': 'function', 'function': {'name': 'read_files'}}
+    second = {'type': 'function', 'function': {'name': 'grep_search'}}
+    source = [first, second]
+    evidence = context_telemetry.build_tool_schema_evidence(
+        source,
+        1_234,
+        model='gpt-5.6-sol',
+        source_fingerprint='a' * 64,
+    )
+
+    assert context_telemetry.reusable_tool_schema_metrics(
+        evidence, list(source), model='gpt-5.6-sol') == (
+            1_234, 'a' * 64)
+    assert context_telemetry.reusable_tool_schema_token_count(
+        evidence, [second, first], model='gpt-5.6-sol') is None
+    assert context_telemetry.reusable_tool_schema_token_count(
+        evidence, [dict(first), second], model='gpt-5.6-sol') is None
+    assert context_telemetry.reusable_tool_schema_token_count(
+        evidence, list(source), model='claude-opus-4.8') is None
+    assert context_telemetry.reusable_tool_schema_token_count(
+        {'model': 'gpt-5.6-sol', 'token_count': 1},
+        list(source),
+        model='gpt-5.6-sol',
+    ) is None
+    assert context_telemetry.record_tool_schema_fingerprint(
+        evidence, [dict(first), second], 'b' * 64) is False
+    assert context_telemetry.record_tool_schema_fingerprint(
+        evidence, list(source), 'not-a-sha256') is False
+    assert context_telemetry.record_tool_schema_fingerprint(
+        evidence, list(source), 'b' * 64) is True
+    assert context_telemetry.tool_schema_fingerprint_from_evidence(
+        evidence) == 'b' * 64
 
 
 def test_replace_mode_records_that_platform_profile_was_not_applied():

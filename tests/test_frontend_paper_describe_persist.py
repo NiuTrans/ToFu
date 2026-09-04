@@ -7,7 +7,8 @@ recommend feature shipped):
   1. **Draft persistence.** The landing "describe it" textarea lost its text
      the moment you left paper mode and came back — ``_showPaperLanding`` rebuilt
      an EMPTY ``<textarea>`` every entry. Fix: a module-level ``_paperDescribeDraft``
-     seeded into the textarea body on render + saved on ``oninput``. This test
+     seeded into the textarea body on render + saved through the safe action
+     registry's input handler. This test
      DRIVES the REAL ``_showPaperLanding`` under jsdom: seed a draft, re-render
      (simulating leave→return), assert the textarea now contains the draft.
 
@@ -30,10 +31,12 @@ import subprocess
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper-reader.js')
+PAPER_JS = os.path.join(
+    ROOT, 'frontend', 'src', 'runtime', 'sections', 'paper-reader.js')
 SESSION_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'session.ts')
 CSS = os.path.join(ROOT, 'static', 'styles.css')
+pytestmark = pytest.mark.unit
 
 
 def _node_deps_available():
@@ -49,11 +52,13 @@ def _node_deps_available():
 _HARNESS = r"""
 const fs = require('fs'), path = require('path');
 const ROOT = process.argv[2];
+const PAPER_JS = process.argv[3];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body><div id="paperPdfViewer"></div></body>',
                       { url: 'http://localhost/' });
 global.window = dom.window;
 global.document = dom.window.document;
+global.runtimeScope = dom.window;
 // Minimal deps _showPaperLanding touches.
 global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -71,7 +76,7 @@ global.localStorage = _lsShim;
 try { Object.defineProperty(dom.window, 'localStorage', { value: _lsShim, configurable: true }); } catch (e) {}
 global.debugLog = () => {};
 
-const src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper-reader.js'), 'utf8');
+const src = fs.readFileSync(PAPER_JS, 'utf8');
 // Indirect eval → defs land on globalThis (mirrors the plain-<script> bundle).
 (0, eval)(src);
 
@@ -84,14 +89,12 @@ globalThis._paperDescribeDraft = '';
 globalThis._showPaperLanding();
 out.fresh_empty = (textareaEl() && textareaEl().value === '');
 
-// 2. User has typed something → the saved module draft holds it. (We set the
-//    global directly rather than dispatching a jsdom 'input' event: indirect
-//    eval binds `var _paperDescribeDraft` to Node's globalThis while a jsdom
-//    inline handler runs against the jsdom window — two different globals in
-//    Node, though identical in the browser. The oninput SAVE wiring is asserted
-//    separately as a source contract; here we test the RESTORE, which is the bug.)
+// 2. User types something. Drive the REAL safe-action target through the same
+//    window service that data-tofu-action-input resolves in production.
 const DRAFT = 'neurips26 关于扩散的最佳论文 <special> & "quotes"';
-globalThis._paperDescribeDraft = DRAFT;
+const draftInput = textareaEl();
+draftInput.value = DRAFT;
+window._setPaperDescribeDraft(draftInput);
 
 // 3. Leave & return → _showPaperLanding rebuilds the DOM. The NEW textarea
 //    must be seeded with the saved draft (the actual bug: it came back empty).
@@ -113,7 +116,7 @@ def _run_harness():
         harness = f.name
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT],
+        proc = subprocess.run(['node', harness, ROOT, PAPER_JS],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -146,7 +149,12 @@ def _paper_src():
 def test_draft_state_and_wiring_present():
     src = _paper_src()
     assert re.search(r'var\s+_paperDescribeDraft\s*=', src), '_paperDescribeDraft state var missing'
-    assert 'oninput="_paperDescribeDraft=this.value"' in src, 'oninput save wiring missing'
+    assert 'data-tofu-action-input="_setPaperDescribeDraft(this)"' in src, \
+        'safe input-action save wiring missing'
+    assert 'runtimeScope._setPaperDescribeDraft = _setPaperDescribeDraft;' in src, \
+        'draft setter is not published to the action registry runtime'
+    assert '_paperDescribeDraft=this.value' not in src, \
+        'unsupported direct assignment leaked back into the action grammar'
     assert 'escapeHtml(_paperDescribeDraft)' in src, 'draft not seeded into the textarea body'
 
 

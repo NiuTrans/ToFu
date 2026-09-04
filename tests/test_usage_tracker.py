@@ -1,6 +1,7 @@
 """tests/test_usage_tracker.py — usage tracker unit tests."""
 
 import datetime
+import json
 import os
 import tempfile
 import unittest
@@ -110,6 +111,63 @@ class UsageTrackerTest(unittest.TestCase):
         record('k_neg', n_tokens=-100)
         view = usage_for_key('k_neg', days=1)
         self.assertEqual(view['days'][0]['tokens'], 0)
+
+    def test_key_and_model_fanout_aggregate_into_bounded_buckets(self):
+        from lib import usage_tracker as ut
+        from lib.usage_tracker import record
+        with patch.object(ut, '_MAX_KEYS_PER_DAY', 3), \
+                patch.object(ut, '_MAX_MODELS_PER_KEY', 3):
+            record('k_a', n_tokens=1, model='m_a')
+            record('k_a', n_tokens=2, model='m_b')
+            record('k_a', n_tokens=4, model='m_c')
+            record('k_b', n_tokens=8, model='m_a')
+            record('k_c', n_tokens=16, model='m_a')
+
+            bucket = ut._state[ut._today()]
+            self.assertEqual(set(bucket), {'k_a', 'k_b', '_overflow'})
+            self.assertEqual(bucket['_overflow']['tokens'], 16)
+            self.assertEqual(
+                bucket['k_a']['by_model'],
+                {'m_a': 1, 'm_b': 2, '_other': 4},
+            )
+
+    def test_loaded_state_is_bounded_and_repaired(self):
+        from lib import usage_tracker as ut
+        today = ut._today()
+        raw = {
+            'version': 1,
+            'days': {
+                today: {
+                    'k_a': {
+                        'requests': 1,
+                        'tokens': 3,
+                        'by_model': {'m_a': 1, 'm_b': 2},
+                    },
+                    'k_b': {
+                        'requests': 2,
+                        'tokens': 5,
+                        'by_model': {'m_c': 5},
+                    },
+                },
+                'not-a-day': {'ignored': {'requests': 999}},
+            },
+        }
+        with open(ut._STORE_PATH, 'w', encoding='utf-8') as handle:
+            json.dump(raw, handle)
+
+        with patch.object(ut, '_MAX_KEYS_PER_DAY', 2), \
+                patch.object(ut, '_MAX_MODELS_PER_KEY', 2):
+            ut._ensure_loaded()
+            bucket = ut._state[today]
+            self.assertEqual(set(bucket), {'k_a', '_overflow'})
+            self.assertEqual(bucket['_overflow']['tokens'], 5)
+            self.assertEqual(
+                bucket['k_a']['by_model'], {'m_a': 1, '_other': 2})
+
+            with open(ut._STORE_PATH, encoding='utf-8') as handle:
+                repaired = json.load(handle)
+            self.assertEqual(repaired['days'], ut._state)
+            self.assertNotIn('not-a-day', repaired['days'])
 
 
 if __name__ == '__main__':

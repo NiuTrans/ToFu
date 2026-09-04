@@ -28,13 +28,7 @@ from lib.orchestration.application_service_ports import (
 from lib.orchestration.definition_selection_contract import (
     definition_selection_values,
 )
-from lib.orchestration.runtime_mutation_service import (
-    OrchestrationRuntimeMutationService,
-)
 from lib.orchestration.runtime_ports import OrchestrationRuntimePort
-from lib.orchestration.runtime_start_service import (
-    OrchestrationRuntimeStartService,
-)
 
 
 @dataclass(frozen=True)
@@ -60,6 +54,10 @@ class OrchestrationApplicationServices:
         return self.human_gate_service()
 
     def runtime_starts(self) -> RuntimeStartServicePort:
+        from lib.orchestration.runtime_start_service import (
+            OrchestrationRuntimeStartService,
+        )
+
         return OrchestrationRuntimeStartService(
             self.runtime,
             definition_service=self.definitions,
@@ -70,6 +68,10 @@ class OrchestrationApplicationServices:
         self,
         owner_user_id: int,
     ) -> RuntimeMutationServicePort:
+        from lib.orchestration.runtime_mutation_service import (
+            OrchestrationRuntimeMutationService,
+        )
+
         return OrchestrationRuntimeMutationService(
             self.runtime, owner_user_id)
 

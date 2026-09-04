@@ -1,5 +1,5 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v5.4.1)
+ * Tofu Browser Bridge — Background Service Worker (v5.4.2)
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -411,6 +411,14 @@ async function _mintKeyViaTab(tabId) {
  *      a tab every 5 minutes. A tab that lands on an SSO login wall fails
  *      the mint and is closed (hidden) or left open (foreground — the user
  *      signs in there and the next ladder run completes the re-pair). */
+// A tab hosting the Tofu client itself. Own-server tabs are never
+// navigation targets (replacing one would yank the chat out from under the
+// user) and never working-tab candidates — the server skips the isClient
+// rows cmdListTabs flags.
+function _isOwnServerTab(tab) {
+  return !!(tab && tab.url && SERVER_URL && tab.url.startsWith(SERVER_URL));
+}
+
 async function attemptAutoRepair(opts) {
   opts = opts || {};
   if (_repairInFlight || !SERVER_URL) return false;
@@ -418,8 +426,7 @@ async function attemptAutoRepair(opts) {
   try {
     let tabs = [];
     try { tabs = await chrome.tabs.query({}); } catch (e) { /* tabs unavailable */ }
-    const mine = tabs.filter((t) => t.id != null && t.url &&
-                              t.url.startsWith(SERVER_URL));
+    const mine = tabs.filter((t) => t.id != null && _isOwnServerTab(t));
     for (const t of mine) {
       try {
         if (await _mintKeyViaTab(t.id)) return true;
@@ -814,6 +821,7 @@ async function cmdListTabs(params) {
     index: t.index,
     status: t.status,
     pinned: t.pinned,
+    isClient: _isOwnServerTab(t),
   }));
 }
 
@@ -3530,6 +3538,21 @@ async function cmdNavigate(params) {
   const url = params.url;
   if (!tabId) throw new Error('No tabId specified');
   if (!url) throw new Error('No url specified');
+
+  const target = await chrome.tabs.get(tabId);
+  if (_isOwnServerTab(target)) {
+    // The Tofu client tab is never navigated — open the destination in a
+    // new foreground tab (same capture-before-navigation flow) and tell the
+    // server, which re-binds the working tab to the new id.
+    const created = await cmdCreateTab({
+      url, active: true,
+      waitForLoad: params.waitForLoad,
+      timeoutMs: params.timeoutMs,
+    });
+    created.redirectedToNewTab = true;
+    created.protectedTabId = tabId;
+    return created;
+  }
 
   let captureId = null;
   try {

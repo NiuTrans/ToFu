@@ -7,7 +7,7 @@ Auth resolution order:
 
 Subcommands:
 
-    tofu chat "prompt..." [--model M] [--stream] [--config k=v ...]
+    tofu chat "prompt..." --creator C --model M [--stream] [--config k=v ...]
     tofu capabilities
     tofu keys list
     tofu keys create --name N --scope S [--scope S2 ...] [--rpm 60]
@@ -88,8 +88,9 @@ def cmd_chat(args):
     messages = [{'role': 'user', 'content': args.prompt}]
     if args.system:
         messages.insert(0, {'role': 'system', 'content': args.system})
+    model = {'creator_id': args.creator, 'model_id': args.model}
     if args.stream:
-        for ev in cli.stream(messages=messages, model=args.model,
+        for ev in cli.stream(messages=messages, model=model,
                               config=cfg or None):
             choice = (ev.get('choices') or [{}])[0]
             delta = choice.get('delta') or {}
@@ -101,7 +102,7 @@ def cmd_chat(args):
                 sys.stdout.write('\n')
                 sys.stdout.flush()
     else:
-        resp = cli.chat(messages=messages, model=args.model,
+        resp = cli.chat(messages=messages, model=model,
                          config=cfg or None,
                          max_tokens=args.max_tokens,
                          temperature=args.temperature)
@@ -266,7 +267,10 @@ def build_parser() -> argparse.ArgumentParser:
     # chat
     pchat = sub.add_parser('chat', help='Run a chat completion')
     pchat.add_argument('prompt')
-    pchat.add_argument('--model', default='')
+    pchat.add_argument('--creator', required=True,
+                       help='canonical model creator_id')
+    pchat.add_argument('--model', required=True,
+                       help='canonical model_id')
     pchat.add_argument('--system', default='')
     pchat.add_argument('--max-tokens', type=int, default=32768)
     pchat.add_argument('--temperature', type=float, default=1.0)

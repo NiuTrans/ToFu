@@ -15,10 +15,7 @@ from lib.chat.turn_builder import (
     translate_user_text_to_english,
     build_tool_history_round,
     build_user_msg_from_payload,
-    clear_send_translate_status,
-    get_send_translate_status,
     scan_continue_checkpoint,
-    set_send_translate_status,
 )
 
 __all__ = [
@@ -28,8 +25,5 @@ __all__ = [
     'translate_user_text_to_english',
     'build_tool_history_round',
     'build_user_msg_from_payload',
-    'clear_send_translate_status',
-    'get_send_translate_status',
     'scan_continue_checkpoint',
-    'set_send_translate_status',
 ]

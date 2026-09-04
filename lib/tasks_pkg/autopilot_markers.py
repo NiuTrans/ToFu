@@ -61,7 +61,8 @@ def arm_autopilot(conv_id: str, *, user_id: int) -> dict:
     live_tasks = [
         task
         for task in chat_task_runtime.snapshot_owned(user_id=int(user_id))
-        if task.get('convId') == conv_id and task.get('status') == 'running'
+        if (task.get('convId') == conv_id
+            and task.get('status') in ('pending', 'running'))
     ]
     flow_blocked = any(
         not task.get('_vu_subtask')
@@ -85,7 +86,7 @@ def arm_autopilot(conv_id: str, *, user_id: int) -> dict:
             if chat_task_runtime.update_fields(
                 task_id,
                 fields={'config': updated_config},
-                only_if_status='running',
+                only_if_status=('pending', 'running'),
             ):
                 armed_ids.append(task_id)
 

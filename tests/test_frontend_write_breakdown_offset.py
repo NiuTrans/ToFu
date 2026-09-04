@@ -10,15 +10,15 @@ and the tool panel's "批次N" are offset by exactly one — a user cross-checki
 "第3轮 write" against "批次3" will NEVER match, and the mismatch used to be
 buried in a tooltip.
 
-Defect A fix (static/js/ui/finish_info.js + static/js/i18n.js):
+Defect A fix (retained ``ui/finish_info_rich.js`` + locale catalog):
   1. The main-row tool-results term reads "上一轮工具结果 {v}" (was the
      ambiguous "工具结果 {v}"), stating the offset in words.
   2. The term carries an explicit batch reference "（工具批次{n}流入）" where
      n = display-round-index i (round label i+1 → inflow batch label i), so
      the two panels can be cross-checked directly.
 
-This harness loads the REAL shipped ``i18n.js`` (for the actual translations)
-and ``finish_info.js`` under jsdom, drives ``_buildCostPopover`` with the
+This harness loads the retained zh locale catalog (for the actual translations)
+and runtime sections under jsdom, drives ``_buildCostPopover`` with the
 round-2 / round-3 shapes from the reported conversation, and asserts the
 offset is visible. A NEUTER negative control removes the batch-ref call and
 proves the guard fails without it (teeth).
@@ -37,9 +37,11 @@ from tests._runtime_sections import orchestration_legacy_test_root as _legacy_te
 
 pytestmark = pytest.mark.unit
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+ZH_LOCALE = os.path.join(
+    ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json',
+)
 
 
 def _node_deps_available() -> bool:
@@ -69,9 +71,6 @@ const win = dom.window;
 global.window = win;
 global.document = win.document;
 global.console = console;
-// i18n.js reads localStorage at load time; expose jsdom's.
-global.localStorage = win.localStorage;
-
 // finish_info.js references these at load / call time.
 win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
 win.debugLog = global.debugLog = () => {};
@@ -79,8 +78,15 @@ win.Icon = global.Icon = () => '';
 win.calcCostCny = global.calcCostCny = () => null;
 win.formatCny = global.formatCny = (v) => '¥' + v;
 
-// Load the REAL i18n so t() returns the shipped translations (default zh).
-eval(fs.readFileSync(I18N, 'utf8'));
+// Load the retained locale authority so t() returns production zh strings.
+const locale = JSON.parse(fs.readFileSync(I18N, 'utf8'));
+function t(key, vars) {
+  let value = Object.hasOwn(locale, key) ? String(locale[key]) : key;
+  for (const [name, replacement] of Object.entries(vars || {})) {
+    value = value.split('{' + name + '}').join(String(replacement));
+  }
+  return value;
+}
 win.t = global.t = t;
 
 let finishSrc = fs.readFileSync(FINISH, 'utf8');
@@ -155,24 +161,15 @@ console.log(out.join('\n'));
 
 
 def _run(neuter: bool) -> str:
-    harness = os.path.join(HERE, '_wb_offset_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness,
-             os.path.join(JS_DIR, 'i18n.js'),                    # argv[2]
-             os.path.join(JS_DIR, 'ui', 'finish_info.js'),      # argv[3]
-             os.path.join(JS_DIR, 'ui', 'finish_info_rich.js'), # argv[4]
-             ROOT,                                              # argv[5]
-             '1' if neuter else '0'],                           # argv[6]
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+    proc = subprocess.run(
+        ['node', '-e', _HARNESS, 'write-breakdown-harness',
+         ZH_LOCALE,                                          # argv[2]
+         os.path.join(JS_DIR, 'ui', 'finish_info.js'),       # argv[3]
+         os.path.join(JS_DIR, 'ui', 'finish_info_rich.js'),  # argv[4]
+         ROOT,                                               # argv[5]
+         '1' if neuter else '0'],                            # argv[6]
+        capture_output=True, text=True, timeout=60,
+    )
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     return output

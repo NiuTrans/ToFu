@@ -5,7 +5,8 @@ manual ``data.get('field') or default`` patterns across routes/.
 
 Public API
 ----------
-  parse_body(force=False)                              → dict (always)
+  parse_body(force=False, strict=False)                → dict (always)
+  async_parse_body(force=False, strict=False)          → dict (always)
   require_str(body, field, *, strip=True, max_len=None, allow_empty=False)
   optional_str(body, field, *, default='', strip=True, max_len=None)
   query_str(args, field, *, default='', strip=True)
@@ -23,7 +24,7 @@ All ``require_*`` raise ``BadRequest('field required')`` on missing.
 on type-mismatch (``"field must be a string"``, etc.).
 
 The route layer's ``@safe_route`` decorator (``lib.api_response``) and
-the global ``BadRequest`` errorhandler in ``server.py`` convert
+the global exception boundary in ``lib.http_error_handlers`` convert
 ``BadRequest`` into a 400 response automatically.
 
 Design philosophy
@@ -40,7 +41,7 @@ import os
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import BadRequest as WerkzeugBadRequest, HTTPException
 
 # Encoded tokens that betray a still-percent-encoded value: a path separator
 # (%2f '/', %5c '\') or a bare percent (%25) that a proxy left behind.
@@ -125,7 +126,7 @@ class BadRequest(ValueError):
 
 # ── Body parsing ───────────────────────────────────────────────
 
-def parse_body(*, force: bool = False) -> dict:
+def parse_body(*, force: bool = False, strict: bool = False) -> dict:
     """Parse the current request's JSON body into a dict.
 
     Always returns a dict. Empty body → empty dict. Non-dict body
@@ -135,6 +136,11 @@ def parse_body(*, force: bool = False) -> dict:
     ----------
     force : bool
         If True, parse even when ``Content-Type`` is not ``application/json``.
+    strict : bool
+        If True, malformed JSON raises :class:`BadRequest` and unexpected
+        parser failures propagate.  The default preserves the legacy
+        optional-body behavior.  Mutations with meaningful defaults should
+        opt in so a broken body cannot silently execute the default action.
 
     Notes
     -----
@@ -145,7 +151,12 @@ def parse_body(*, force: bool = False) -> dict:
     from lib.quart_sync import request_json
     from lib.log import get_logger
     try:
-        data = request_json(force=force, silent=True)
+        data = request_json(force=force, silent=not strict)
+    except WerkzeugBadRequest as error:
+        # Quart deliberately hides malformed JSON behind ``None`` in silent
+        # mode.  Strict callers need it distinguished from an absent body:
+        # defaulting a malformed mutation request can launch the wrong action.
+        raise BadRequest('Request body contains malformed JSON') from error
     except HTTPException:
         # Size/time policy exceptions are HTTP boundary decisions, not
         # malformed optional JSON.  Swallowing them turns an intentional 413
@@ -158,6 +169,8 @@ def parse_body(*, force: bool = False) -> dict:
         get_logger(__name__).debug(
             '[request_parser] parse_body get_json raised %s: %s',
             type(e).__name__, e)
+        if strict:
+            raise
         return {}
     if data is None:
         return {}
@@ -166,7 +179,8 @@ def parse_body(*, force: bool = False) -> dict:
     return data
 
 
-async def async_parse_body(*, force: bool = False) -> dict:
+async def async_parse_body(*, force: bool = False,
+                           strict: bool = False) -> dict:
     """Async-native version of :func:`parse_body` for ``async def`` handlers.
 
     A native-async handler runs ON the event loop, where the sync
@@ -175,18 +189,24 @@ async def async_parse_body(*, force: bool = False) -> dict:
     loop``. This awaits Quart's genuinely-async ``request.get_json()`` directly.
 
     Same contract as ``parse_body``: always returns a dict; empty body → {};
-    top-level non-dict JSON → raises ``BadRequest``.
+    top-level non-dict JSON → raises ``BadRequest``.  ``strict=True`` also
+    distinguishes malformed JSON from an absent body and propagates unexpected
+    parser failures.
     """
     from quart import request
     from lib.log import get_logger
     try:
-        data = await request.get_json(force=force, silent=True)
+        data = await request.get_json(force=force, silent=not strict)
+    except WerkzeugBadRequest as error:
+        raise BadRequest('Request body contains malformed JSON') from error
     except HTTPException:
         raise
     except Exception as e:
         get_logger(__name__).debug(
             '[request_parser] async_parse_body get_json raised %s: %s',
             type(e).__name__, e)
+        if strict:
+            raise
         return {}
     if data is None:
         return {}
@@ -197,7 +217,7 @@ async def async_parse_body(*, force: bool = False) -> dict:
 
 # ── String accessors ───────────────────────────────────────────
 
-def require_str(body: dict, field: str, *,
+def require_str(body: Mapping[str, Any], field: str, *,
                 strip: bool = True, max_len: Optional[int] = None,
                 allow_empty: bool = False) -> str:
     """Extract a required string field. Raises BadRequest if missing/empty."""
@@ -218,7 +238,7 @@ def require_str(body: dict, field: str, *,
     return val
 
 
-def optional_str(body: dict, field: str, *,
+def optional_str(body: Mapping[str, Any], field: str, *,
                  default: str = '', strip: bool = True,
                  max_len: Optional[int] = None) -> str:
     """Extract an optional string field. Returns default if missing/None."""
@@ -267,7 +287,7 @@ def _coerce_int(val: Any, field: str) -> int:
     raise BadRequest(f'{field} must be an integer', field=field)
 
 
-def require_int(body: dict, field: str, *,
+def require_int(body: Mapping[str, Any], field: str, *,
                 min: Optional[int] = None,
                 max: Optional[int] = None) -> int:
     """Extract a required int field. Coerces stringified ints."""
@@ -281,7 +301,7 @@ def require_int(body: dict, field: str, *,
     return n
 
 
-def optional_int(body: dict, field: str, *,
+def optional_int(body: Mapping[str, Any], field: str, *,
                  default: Optional[int] = None,
                  min: Optional[int] = None,
                  max: Optional[int] = None) -> Optional[int]:
@@ -314,13 +334,14 @@ def _coerce_bool(val: Any, field: str) -> bool:
     raise BadRequest(f'{field} must be a boolean', field=field)
 
 
-def require_bool(body: dict, field: str) -> bool:
+def require_bool(body: Mapping[str, Any], field: str) -> bool:
     if field not in body or body[field] is None:
         raise BadRequest(f'{field} is required', field=field)
     return _coerce_bool(body[field], field)
 
 
-def optional_bool(body: dict, field: str, *, default: bool = False) -> bool:
+def optional_bool(body: Mapping[str, Any], field: str, *,
+                  default: bool = False) -> bool:
     val = body.get(field)
     if val is None:
         return default
@@ -345,7 +366,7 @@ def _check_list(val: Any, field: str, *, item_type: Optional[type],
     return val
 
 
-def require_list(body: dict, field: str, *,
+def require_list(body: Mapping[str, Any], field: str, *,
                  item_type: Optional[type] = None,
                  max_len: Optional[int] = None) -> list:
     if field not in body or body[field] is None:
@@ -354,7 +375,7 @@ def require_list(body: dict, field: str, *,
                         item_type=item_type, max_len=max_len)
 
 
-def optional_list(body: dict, field: str, *,
+def optional_list(body: Mapping[str, Any], field: str, *,
                   default: Optional[list] = None,
                   item_type: Optional[type] = None,
                   max_len: Optional[int] = None) -> list:
@@ -366,7 +387,7 @@ def optional_list(body: dict, field: str, *,
 
 # ── Dict accessors ─────────────────────────────────────────────
 
-def require_dict(body: dict, field: str) -> dict:
+def require_dict(body: Mapping[str, Any], field: str) -> dict:
     if field not in body or body[field] is None:
         raise BadRequest(f'{field} is required', field=field)
     val = body[field]
@@ -375,7 +396,7 @@ def require_dict(body: dict, field: str) -> dict:
     return val
 
 
-def optional_dict(body: dict, field: str, *,
+def optional_dict(body: Mapping[str, Any], field: str, *,
                   default: Optional[dict] = None) -> dict:
     val = body.get(field)
     if val is None:

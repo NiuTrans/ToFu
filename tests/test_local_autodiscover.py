@@ -3,8 +3,8 @@
 
 The autodiscover worker (lib/llm_dispatch/autodiscover_local.py) probes the
 canonical loopback ports (Ollama 11434 / vLLM 8000 / SGLang 30000) after
-startup and periodically, and registers any endpoint serving models as a
-normal brand='local' provider in server_config.json.
+startup and periodically, and registers any endpoint serving models as an
+owner-scoped model-routing v2 ProviderAccess.
 
 Owner-ratified semantics:
 
@@ -29,6 +29,15 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.llm_dispatch import autodiscover_local as ad
+from lib.model_routing import (
+    InMemoryModelRoutingRepository,
+    OwnerBoundary,
+    delete_local_provider,
+    empty_document,
+    upsert_local_provider,
+)
+
+pytestmark = pytest.mark.unit
 
 
 def _models(*ids):
@@ -38,20 +47,39 @@ def _models(*ids):
 
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
-    """Isolate config/state paths + stub the dispatcher rebuild."""
-    cfg_path = tmp_path / 'server_config.json'
+    """Isolate owner authority/state and stub the dispatcher rebuild."""
     state_path = tmp_path / 'local_autodiscover.json'
-    cfg_path.write_text(json.dumps({'providers': []}))
-    monkeypatch.setattr('lib._SERVER_CONFIG_PATH', str(cfg_path))
+    repository = InMemoryModelRoutingRepository()
+    boundary = OwnerBoundary.create(1)
+    repository.compare_and_swap(
+        boundary, empty_document(), expected_revision=0)
+    monkeypatch.setattr(ad, '_runtime_context', lambda: (boundary, repository))
     monkeypatch.setattr(ad, '_STATE_PATH', str(state_path))
     monkeypatch.setattr(ad, '_rebuild_slots', lambda: None)
     monkeypatch.delenv('TOFU_LOCAL_AUTODISCOVER', raising=False)
     monkeypatch.delenv('OLLAMA_HOST', raising=False)
-    return {'cfg': cfg_path, 'state': state_path}
+    return {'repository': repository, 'boundary': boundary, 'state': state_path}
 
 
-def _read_cfg(sandbox):
-    return json.loads(sandbox['cfg'].read_text())
+def _read_document(sandbox):
+    return sandbox['repository'].get(sandbox['boundary']).document
+
+
+def _provider_document(sandbox, provider_id):
+    document = _read_document(sandbox)
+    provider = next(
+        row for row in document['providers']
+        if row['provider_id'] == provider_id)
+    access = next(
+        row for row in document['provider_accesses']
+        if row['provider_id'] == provider_id)
+    connection = next(
+        row for row in document['connections']
+        if row['provider_access_id'] == access['provider_access_id'])
+    offerings = [
+        row for row in document['offerings']
+        if row['provider_access_id'] == access['provider_access_id']]
+    return document, provider, connection, offerings
 
 
 def _fake_net(open_ports, served):
@@ -91,11 +119,11 @@ class TestAutodiscover:
                                         {'127.0.0.1:11434': ['llama3.1']})
         stats = ad.sweep_once(port_open=port_open, discover=discover)
         assert len(stats['added']) == 1
-        prov = _read_cfg(sandbox)['providers'][0]
-        assert prov['brand'] == 'local' and prov['engine'] == 'ollama'
-        assert prov['base_url'] == 'http://127.0.0.1:11434/v1'
-        assert prov['endpoint_models'] == {'http://127.0.0.1:11434/v1': ['llama3.1']}
-        assert [m['model_id'] for m in prov['models']] == ['llama3.1']
+        _document, provider, connection, offerings = _provider_document(
+            sandbox, 'auto_ollama_11434')
+        assert provider['brand'] == 'local' and provider['scope'] == 'owner'
+        assert connection['base_url'] == 'http://127.0.0.1:11434/v1'
+        assert [row['pending_model_id'] for row in offerings] == ['llama3.1']
 
     def test_closed_ports_are_silent_and_free(self, sandbox, caplog):
         port_open, discover = _fake_net(set(), {})
@@ -112,32 +140,40 @@ class TestAutodiscover:
         ad.sweep_once(port_open=port_open, discover=discover)
         stats = ad.sweep_once(port_open=port_open, discover=discover)
         assert stats['added'] == []
-        assert len(_read_cfg(sandbox)['providers']) == 1
+        assert len(_read_document(sandbox)['providers']) == 1
 
     def test_user_configured_port_is_skipped(self, sandbox):
         # Pre-existing provider on the same port (localhost spelling variant).
-        cfg = json.loads(sandbox['cfg'].read_text())
-        cfg['providers'].append({'id': 'mine', 'brand': 'local',
-                                 'base_url': 'http://localhost:11434/v1',
-                                 'endpoints': ['http://localhost:11434/v1']})
-        sandbox['cfg'].write_text(json.dumps(cfg))
+        upsert_local_provider(
+            sandbox['repository'],
+            sandbox['boundary'],
+            provider_id='mine',
+            display_name='Mine',
+            base_url='http://localhost:11434/v1',
+            models=_models('mine-model'),
+        )
         port_open, discover = _fake_net({'127.0.0.1:11434'},
                                         {'127.0.0.1:11434': ['llama3.1']})
         stats = ad.sweep_once(port_open=port_open, discover=discover)
         assert stats['added'] == []
-        assert len(_read_cfg(sandbox)['providers']) == 1
+        assert len(_read_document(sandbox)['providers']) == 1
 
     def test_deleted_provider_never_resurrects(self, sandbox):
         port_open, discover = _fake_net({'127.0.0.1:11434'},
                                         {'127.0.0.1:11434': ['llama3.1']})
         ad.sweep_once(port_open=port_open, discover=discover)
         # User deletes the provider in Settings.
-        sandbox['cfg'].write_text(json.dumps({'providers': []}))
+        delete_local_provider(
+            sandbox['repository'],
+            sandbox['boundary'],
+            provider_id='auto_ollama_11434',
+        )
         stats = ad.sweep_once(port_open=port_open, discover=discover)
         assert stats['added'] == []
-        assert _read_cfg(sandbox)['providers'] == []
+        assert _read_document(sandbox)['providers'] == []
         state = json.loads(sandbox['state'].read_text())
-        assert '127.0.0.1:11434' in state['dismissed']
+        owner_state = state['owners'][':1']
+        assert '127.0.0.1:11434' in owner_state['dismissed']
 
     def test_engine_up_but_zero_models_not_added_nor_dismissed(self, sandbox):
         port_open, discover = _fake_net({'127.0.0.1:11434'},
@@ -206,7 +242,7 @@ class TestAutodiscover:
                                         {'127.0.0.1:11434': ['llama3.1']})
         stats = ad.sweep_once(port_open=port_open, discover=discover)
         assert stats.get('disabled') is True
-        assert _read_cfg(sandbox)['providers'] == []
+        assert _read_document(sandbox)['providers'] == []
 
     def test_ollama_host_env_adds_candidate(self, sandbox, monkeypatch):
         monkeypatch.setenv('OLLAMA_HOST', 'http://192.168.1.5:11434')
@@ -214,8 +250,9 @@ class TestAutodiscover:
                                         {'192.168.1.5:11434': ['mistral']})
         stats = ad.sweep_once(port_open=port_open, discover=discover)
         assert len(stats['added']) == 1
-        prov = _read_cfg(sandbox)['providers'][0]
-        assert prov['base_url'] == 'http://192.168.1.5:11434/v1'
+        _document, _provider, connection, _offerings = _provider_document(
+            sandbox, 'auto_ollama_11434')
+        assert connection['base_url'] == 'http://192.168.1.5:11434/v1'
 
     def test_neuter_coverage_skip_duplicates_provider(self, sandbox):
         """NEUTER: without the covered-port skip the sweep re-adds the same
@@ -225,28 +262,10 @@ class TestAutodiscover:
         ad.sweep_once(port_open=port_open, discover=discover)
         # Neutered sweep: drop the coverage/dismissed checks by scanning with
         # an empty coverage set (simulating the removed guard).
-        import lib as _lib
-        cfg = _lib._load_server_config()
-        prov = cfg['providers'][0]
-        assert _read_cfg(sandbox)['providers']
-        # If the skip were gone, _persist_provider would still dedupe by id,
-        # so the REAL user-visible duplication guard is the covered set —
-        # assert the covered set detects the port (the property the neuter
-        # would break):
-        assert '127.0.0.1:11434' in ad._covered_port_keys([prov])
+        document = _read_document(sandbox)
+        assert document['providers']
+        assert '127.0.0.1:11434' in ad._covered_port_keys(document)
 
-    def test_frontend_preset_port_parity(self):
-        """Backend WELL_KNOWN_ENGINES mirrors the frontend _LOCAL_ENGINE_PRESETS
-        ports so the UI shows the auto card under the same engine badge."""
-        from tests._runtime_sections import runtime_section
-        src = runtime_section('settings/local_endpoints.js')
-        import re
-        for row in ad.WELL_KNOWN_ENGINES:
-            assert str(row['port']) in src, row
-            assert re.search(r"engine:\s*'%s'" % row['engine'], src), row
-
-
-@pytest.mark.unit
 def test_background_poll_backs_off_empty_http_but_keeps_tcp_topology_checks(
         poll_sandbox, caplog):
     import logging

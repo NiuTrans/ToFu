@@ -49,8 +49,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESEARCH_VIEW_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'research-view.ts')
-RESEARCH_RUNTIME_TS = os.path.join(
-    ROOT, 'frontend', 'src', 'features', 'paper', 'research-runtime.ts')
 ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 pytestmark = pytest.mark.unit
 
@@ -284,10 +282,13 @@ const RESULT = {
   threshold: 4.0, gate_reached: 'accepted',
 };
 
-const calls = { lookup: [], events: [] };
+const calls = { lookup: [], events: [], start: [] };
 global.Api = {
   tasks: {
-    start: async () => ({ ok: true, taskId: 'research_t1' }),
+    start: async (kind, payload) => {
+      calls.start.push([kind, payload]);
+      return ({ ok: true, taskId: 'research_t1' });
+    },
     events: async (_taskId, cursor) => { calls.events.push(cursor); return ({
       ok: true, id: 'research_t1', status: 'done', done: true,
       cursor: { requested: cursor, next: 0, reset: false }, events: [],
@@ -364,6 +365,11 @@ def test_accepted_idea_title_and_mechanism_reach_the_dom():
     assert out['calls']['events'] == [0], (
         'live research must read the bounded cursor replay endpoint, not fetch '
         'the complete task snapshot on every poll')
+    assert out['calls']['start'] == [[
+        'research', {
+            'direction': 'long-context KV-cache compression', 'lang': 'zh',
+        },
+    ]], 'research start must carry the active UI language to the backend'
 
 
 @requires_node
@@ -416,28 +422,24 @@ def test_panel_rebuilds_from_the_store_with_no_live_job():
         'the panel did not rebuild from persisted data after a refresh')
 
 
-# ═══ 3. Anti-orphan pins (the shape this epic produced three times) ═══
+@requires_node
+def test_completed_workbench_exposes_pipeline_decision_and_reproducibility_ledger():
+    """The complete page is an operating surface, not an attractive idea list.
 
-def test_the_lookup_client_has_a_real_js_caller():
-    """``Api.research.lookup`` shipped with ZERO JS callers — the same
-    written-exported-never-called shape as survey_lang_key and
-    load_research_artifacts before it."""
-    from tests._source_scan import strip_comments
-    src = strip_comments(
-        open(RESEARCH_RUNTIME_TS,
-             encoding='utf-8').read(), lang='python')  # // lines are not '#'
-    assert 'researchApi().lookup' in src, (
-        'no JS calls Api.research.lookup — the durable read path is still '
-        'unreachable from the product')
-
-
-def test_the_list_endpoint_has_a_real_caller():
-    from tests._source_scan import strip_comments
-    src = strip_comments(
-        open(os.path.join(ROOT, 'routes/api_v1/research.py'),
-             encoding='utf-8').read(), lang='python')
-    assert 'list_research_directions' in src, \
-        'the list route does not call the store function'
+    A finished run must expose where it is in the five-stage method, what was
+    delivered, the review decision, and the durable evidence/resource ledger.
+    """
+    out = _run_render()
+    html = out.get('html') or ''
+    text = out.get('text') or ''
+    assert 'rs-pipeline-steps' in html and 'paper.research.publish' in text, (
+        'the five-stage research trajectory is not visible on the page')
+    assert 'rs-deliverables' in html, (
+        'the finished run has no at-a-glance deliverable/decision packet')
+    assert 'rs-ledger' in html and 'paper.research.ledgerTitle' in text, (
+        'the reproducibility ledger is not reachable from the run')
+    assert 'data-tofu-action="_copyResearchArtifact(\'idea\',0,this)"' in html, (
+        'an accepted hypothesis cannot be copied into an experiment workflow')
 
 
 if __name__ == '__main__':

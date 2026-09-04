@@ -50,6 +50,39 @@ def _ctx(**overrides):
     return ToolContext(**base)
 
 
+def test_large_contribution_scans_existing_authority_once(monkeypatch):
+    """Catalog de-duplication must stay linear as dynamic catalogs grow."""
+    import lib.tools.registry._spec as spec_module
+
+    class _CountingCatalog(list):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    schemas = [
+        {'type': 'function', 'function': {
+            'name': f'_bounded_dynamic_{index}',
+            'description': 'bounded dynamic tool',
+            'parameters': {'type': 'object', 'properties': {}},
+        }}
+        for index in range(128)
+    ]
+    spec = ToolSpec(
+        key='_bounded_dynamic', build=lambda _context: schemas,
+        provides=frozenset(_names(schemas)),
+    )
+    monkeypatch.setattr(spec_module, '_TOOL_SPECS', [spec])
+    ctx = _ctx()
+    ctx.executable_tool_catalog = _CountingCatalog([schemas[0]])
+
+    assemble_tool_list(ctx)
+
+    assert ctx.executable_tool_catalog.iterations == 1
+    assert _names(ctx.executable_tool_catalog) == _names(schemas)
+
+
 class TestOrdering(unittest.TestCase):
     def test_full_project_ordering_is_cache_stable(self):
         tl, hr = assemble_tool_list(_ctx(
@@ -105,6 +138,15 @@ class TestOrdering(unittest.TestCase):
             'search_tools', 'execute_tools',
         } <= projected_names)
 
+    def test_v2_artifact_recovery_tools_are_eager_and_directly_callable(self):
+        """A result may not advertise a continuation tool hidden by search."""
+        ctx = _ctx(cfg={'tools': {'resultEnvelope': 'v2'}})
+        assembled, _ = assemble_tool_list(ctx)
+        names = set(_names(assembled))
+        for name in ('read_tool_artifact', 'search_tool_artifact'):
+            self.assertIn(name, names)
+            self.assertEqual(ctx.discovery_policy_by_name[name], 'eager')
+
 
 class TestResultMetadataSeam(unittest.TestCase):
     def test_project_metadata_is_built_by_the_owning_spec(self):
@@ -149,6 +191,14 @@ class TestPhaseSemantics(unittest.TestCase):
                 self.assertEqual(documents[name].get('name'), name)
                 self.assertIsInstance(
                     documents[name].get('arguments_schema'), dict)
+
+    def test_read_files_declares_source_recovery(self):
+        ctx = _ctx(project_path='/tmp/x', project_enabled=True)
+        assemble_tool_list(ctx)
+        self.assertEqual(
+            ctx.tool_contract_documents_by_name['read_files'][
+                'resultRecovery'],
+            'source')
 
     def test_available_scope_keeps_hidden_tool_executable_not_on_wire(self):
         ctx = _ctx()
@@ -276,33 +326,21 @@ class TestMemoryExecutionDefaults(unittest.TestCase):
         }]))
         self.assertIn('list_conversations', _names(tl))
 
-    def test_charter_tools_register_in_project_mode(self):
-        # Charter tools (Pillar #2) ride the same project-mode gate as the
-        # conv-ref tools — present in project mode, absent otherwise.
+    def test_project_mode_registers_only_automatic_integration_tools(self):
+        """Project Brain is runtime-driven, not a model tool surface."""
         ctx_proj = _ctx(project_path='/tmp/x', project_enabled=True)
         assemble_tool_list(ctx_proj)
         names = _names(ctx_proj.executable_tool_catalog)
-        self.assertIn('project_charter_read', names)
-        self.assertIn('project_charter_propose', names)
-        # Drift note: this test used to assert project_charter_commit WAS in
-        # the list (the 2026-07-12 self-commit de-gating). That contract was
-        # deliberately REVERSED 2026-07-30 (owner-directed): a charter always
-        # requires human review, so the model-facing set is read + propose
-        # ONLY (lib/tools/conversation.py::CHARTER_TOOLS). The commit schema
-        # is kept as a module symbol so execute_charter_tool can REFUSE a
-        # legacy/hallucinated call with an explanation rather than an opaque
-        # unknown-tool error — pin both halves of that contract.
-        self.assertNotIn('project_charter_commit', names)
-        import lib.tools.conversation as _conv_tools
-        self.assertIn('project_charter_commit', _conv_tools.CHARTER_TOOL_NAMES)
-        self.assertEqual(
-            _conv_tools.CHARTER_COMMIT_TOOL['function']['name'],
-            'project_charter_commit')
-        # No project → no charter tools (a charter is per-project).
-        tl_none, _ = assemble_tool_list(_ctx())
-        self.assertNotIn('project_charter_read', _names(tl_none))
-        self.assertNotIn('project_charter_propose', _names(tl_none))
-        self.assertNotIn('project_charter_commit', _names(tl_none))
+        self.assertIn('integration_checkpoint', names)
+        self.assertIn('integration_submit', names)
+        retired = {
+            'project_charter_read', 'project_charter_propose',
+            'project_board_read', 'project_board_post', 'project_board_claim',
+            'project_board_complete', 'project_board_block',
+            'project_peer_status', 'project_feed_read', 'project_message',
+            'project_intervene', 'integration_status',
+        }
+        self.assertTrue(retired.isdisjoint(names))
 
     def test_conv_ref_not_triggered_by_assistant_prose(self):
         # REGRESSION: a conversation *about* the feature, where the assistant
@@ -317,51 +355,25 @@ class TestMemoryExecutionDefaults(unittest.TestCase):
 
 
 class TestProjectBrainSurface(unittest.TestCase):
-    """The 2026-08-19 brain-surface restructure (owner-directed):
+    """The project model surface contains execution integration only."""
 
-    * The brain READ tools (charter/board/peer-status/feed) are EAGER and
-      resident on every plain project turn — the per-turn injections name
-      them, and a keyword-triggered searchable family meant the model never
-      learned the cross-conversation mechanism existed.
-    * The brain ADVISORY-WRITE tools are searchable: off the resident wire,
-      still in the executable catalog and discoverable via Tool Search.
-    * create_project is removed from the model-facing catalog entirely: the
-      absolute-path-write auto-register made the schema near-dead weight, and
-      a half-designed scaffold tool should not keep occupying the surface.
-    """
+    _RETIRED = ('project_charter_read', 'project_charter_propose',
+                'project_board_read', 'project_board_post',
+                'project_board_claim', 'project_board_complete',
+                'project_board_block', 'project_peer_status',
+                'project_feed_read', 'project_message', 'project_intervene',
+                'integration_status')
 
-    _READ = ('project_charter_read', 'project_board_read',
-             'project_peer_status', 'project_feed_read')
-    _WRITE = ('project_charter_propose', 'project_board_post',
-              'project_board_claim', 'project_board_complete',
-              'project_board_block', 'project_message', 'project_intervene')
-
-    def test_brain_reads_eager_on_plain_project_turn(self):
-        # A plain coding request (no coordination keywords) must still see
-        # the read surface — visibility must not depend on routing luck.
+    def test_project_brain_tool_schema_budget_is_zero(self):
         ctx = _ctx(project_path='/tmp/x', project_enabled=True,
                    messages=[{'role': 'user', 'content': 'fix the login bug'}])
-        tl, _ = assemble_tool_list(ctx)
-        names = _names(tl)
-        for n in self._READ:
-            self.assertIn(n, names)
-            self.assertEqual(ctx.discovery_policy_by_name[n], 'eager')
-        # conv_ref rides the same project gate: the sibling digest names
-        # list_conversations/get_conversation on every project turn, so the
-        # schemas must be resident, not deferred (the phantom-tool gap the
-        # project-mode branch was added to close).
-        for n in ('list_conversations', 'get_conversation'):
-            self.assertIn(n, names)
-            self.assertEqual(ctx.discovery_policy_by_name[n], 'eager')
-
-    def test_brain_writes_searchable_but_executable(self):
-        ctx = _ctx(project_path='/tmp/x', project_enabled=True,
-                   messages=[{'role': 'user', 'content': 'fix the login bug'}])
-        tl, _ = assemble_tool_list(ctx)
+        assemble_tool_list(ctx)
         catalog = _names(ctx.executable_tool_catalog)
-        for n in self._WRITE:
-            self.assertIn(n, catalog)
-            self.assertEqual(ctx.discovery_policy_by_name[n], 'searchable')
+        for name in self._RETIRED:
+            self.assertNotIn(name, catalog)
+            self.assertNotIn(name, ctx.discovery_policy_by_name)
+        self.assertIn('integration_checkpoint', catalog)
+        self.assertIn('integration_submit', catalog)
 
     def test_create_project_removed_from_model_catalog(self):
         # Neither the resident project wire nor the searchable/executable
@@ -384,20 +396,8 @@ class TestProjectBrainSurface(unittest.TestCase):
         ctx = _ctx()
         assemble_tool_list(ctx)
         catalog = _names(ctx.executable_tool_catalog)
-        for n in self._READ + self._WRITE:
+        for n in self._RETIRED:
             self.assertNotIn(n, catalog)
-
-    def test_read_schemas_point_at_write_tools(self):
-        # The discovery loop closes in the schema text itself: each resident
-        # read tool names the advisory-write tools that act on its surface.
-        from lib.tools.conversation import BRAIN_READ_TOOLS
-        descs = {t['function']['name']: t['function']['description']
-                 for t in BRAIN_READ_TOOLS}
-        self.assertIn('project_board_claim', descs['project_board_read'])
-        self.assertIn('project_charter_propose',
-                      descs['project_charter_read'])
-        self.assertIn('project_message', descs['project_peer_status'])
-        self.assertIn('project_message', descs['project_feed_read'])
 
 
 class TestLegacyShim(unittest.TestCase):
@@ -561,8 +561,10 @@ class TestConcurrencyFlagSync(unittest.TestCase):
         # Idempotent read tools (base set + spec-declared).
         self.assertIn('web_search', _IDEMPOTENT_TOOLS)
         self.assertIn('grep_search', _IDEMPOTENT_TOOLS)
-        # Base-set-only browser internals still present.
-        self.assertIn('browser_read_page', _IDEMPOTENT_TOOLS)
+        # Live browser observers are read-only but their results mutate under
+        # identical arguments, so they are not in the cache partition.
+        self.assertNotIn('browser_read_page', _IDEMPOTENT_TOOLS)
+        self.assertNotIn('browser_list_tabs', _IDEMPOTENT_TOOLS)
 
 
 if __name__ == '__main__':

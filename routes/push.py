@@ -8,6 +8,7 @@ Protocol:
     {action: 'subscribe', channel: 'chat', taskId: '<id>'}
     {action: 'unsubscribe', channel: 'chat', taskId: '<id>'}
     {action: 'abort', channel: 'chat', taskId: '<id>'}
+    {action: 'ping', t: 123, buildProbe: true}
     {jsonrpc: '2.0', id: '<id>', method: 'project.browse', params: {...}}
     {jsonrpc: '2.0', method: '$/cancelRequest', params: {id: '<id>'}}
 
@@ -17,6 +18,7 @@ Protocol:
     {channel: 'paper', taskId: '<id>', type: 'progress', ...}
     {channel: 'translate', taskId: '<id>', type: 'done', translated: '...'}
     {channel: 'system', type: 'ping'}
+    {channel: 'system', type: 'pong', t: 123, buildId: 'main-<hash>.js'}
 """
 
 import asyncio
@@ -280,7 +282,13 @@ async def push_ws():
     set_principal(getattr(_ctx, 'key_id', '') or '', _user_id)
 
     client = PushClient(user_id=_user_id, req_id=_rid)
-    hub.register(client)
+    if not hub.register(client):
+        client.disconnect()
+        from quart import abort
+        logger.warning(
+            '[Push] WS rejected (reason=capacity, user=%s, rid=%s)',
+            _user_id, _rid)
+        abort(429)
     rpc_session = ControlRpcSession(
         client, user_id=_user_id, request_id=_rid)
     from lib.observability import connection_close, connection_open
@@ -386,7 +394,28 @@ def _handle_client_frame(client: PushClient, raw) -> None:
         # queue behind MBs of event frames — under loop congestion that delay
         # outlives the client's ping watchdog and it force-closes a HEALTHY
         # socket ().
-        client.enqueue_control({'channel': 'system', 'type': 'pong', 't': raw.get('t')})
+        pong = {'channel': 'system', 'type': 'pong', 't': raw.get('t')}
+        # Build identity rides only explicitly requested pongs. This preserves
+        # the cheap pure-echo fast path for ordinary 4s liveness probes while
+        # replacing the browser's separate 5-minute /api/health request.
+        if raw.get('buildProbe') is True:
+            from lib.vite_assets import (
+                get_vite_build_id,
+                request_vite_build_id_refresh,
+            )
+
+            try:
+                build_id = get_vite_build_id('main')
+                # Refresh detection is explicitly background-only. The pong
+                # always carries the last startup/runtime-validated snapshot
+                # immediately; a slow or wedged mount cannot delay liveness.
+                request_vite_build_id_refresh()
+            except Exception as exc:  # optional metadata must never drop pong
+                logger.debug('[Push] build probe unavailable: %s', exc)
+                build_id = ''
+            if build_id:
+                pong['buildId'] = build_id
+        client.enqueue_control(pong)
 
 
 def _handle_abort(task_id: str, *, user_id: int | str, req_id: str = ''):
@@ -403,23 +432,23 @@ def _handle_abort(task_id: str, *, user_id: int | str, req_id: str = ''):
     asked — otherwise the user's id gets them only the connect/disconnect
     pair and nothing in between.
     """
-    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.tasks_pkg.manager.cancellation import cancel_task
     try:
         owner_user_id = int(user_id)
+        if owner_user_id < 1:
+            raise ValueError('owner must be positive')
     except (TypeError, ValueError):
         outcome = 'forbidden'
-        task = None
     else:
-        task = chat_task_runtime.get_owned(task_id, user_id=owner_user_id)
-        if task is None:
-            outcome = 'missing'
-        else:
-            chat_task_runtime.abort_owned(task_id, user_id=owner_user_id)
-            chat_task_runtime.update_fields(
-                task_id,
-                fields={'aborted': True},
-            )
+        receipt = cancel_task(
+            task_id, user_id=owner_user_id, source='push_chat_abort')
+        if receipt['found']:
             outcome = 'aborted'
+        else:
+            from lib.tasks_pkg.manager import plant_abort_tombstone
+            tombstoned = plant_abort_tombstone(
+                task_id, source='push_chat_abort', user_id=owner_user_id)
+            outcome = 'signalled' if tombstoned else 'missing'
     if outcome == 'missing':
         logger.info('[Push] Client abort for unknown task %s (rid=%s)',
                     task_id[:8], req_id)
@@ -427,6 +456,10 @@ def _handle_abort(task_id: str, *, user_id: int | str, req_id: str = ''):
     if outcome == 'forbidden':
         logger.warning('[Push] Client abort refused for foreign task %s '
                        '(user=%s, rid=%s)', task_id[:8], user_id, req_id)
+        return
+    if outcome == 'signalled':
+        logger.info('[Push] Client abort tombstoned registry-missing task %s '
+                    '(rid=%s)', task_id[:8], req_id)
         return
     logger.info('[Push] Client abort for task %s (rid=%s)',
                 task_id[:8], req_id)

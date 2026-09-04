@@ -177,11 +177,13 @@ def test_api_js_exists():
     assert os.path.isfile(NATIVE_TRANSPORT)
     source = runtime_section('api.js')
     assert 'const Api = {' in source and 'global.Api = Api' in source
+    assert 'const Api = runtimeScope.Api;' in source
 
 
 def test_vite_transport_is_the_only_native_fetch_owner():
-    """Typed modules cannot grow a second, unobserved HTTP chokepoint."""
+    """Backend HTTP has one owner; hashed locale data has one asset loader."""
     actual = {}
+    fetch_owner_sources = {}
     for root, _dirs, files in os.walk(FRONTEND_DIR):
         for name in files:
             if not name.endswith('.ts'):
@@ -191,15 +193,21 @@ def test_vite_transport_is_the_only_native_fetch_owner():
                 source = _strip_comments(fh.read())
             count = len(re.findall(r'\bfetch\s*\(', source))
             if count:
-                actual[os.path.relpath(path, FRONTEND_DIR).replace(os.sep, '/')] = count
-    assert actual == {'api/transport.ts': 1}, (
-        'native modules must route backend calls through api/transport.ts; '
-        f'raw fetch owners were {actual}'
+                relative_path = os.path.relpath(
+                    path, FRONTEND_DIR).replace(os.sep, '/')
+                actual[relative_path] = count
+                fetch_owner_sources[relative_path] = source
+    assert actual == {'api/transport.ts': 1, 'i18n/index.ts': 1}, (
+        'native backend calls must use api/transport.ts and static locale data '
+        f'must use only i18n/index.ts; fetch owners were {actual}'
     )
     with open(NATIVE_TRANSPORT, encoding='utf-8') as fh:
         transport = _strip_comments(fh.read())
     assert "headers['X-Request-ID']" in transport
     assert "headers['X-Tofu-Affinity-Key']" in transport
+    locale_loader = fetch_owner_sources['i18n/index.ts']
+    assert 'fetch(localeUrls[language]' in locale_loader
+    assert '/api/' not in locale_loader
 
 
 def test_no_new_files_call_api_directly():

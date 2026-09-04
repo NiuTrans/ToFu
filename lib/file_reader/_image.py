@@ -87,8 +87,9 @@ def _read_image(path: str, ext: str, file_size: int) -> dict | str:
 # ~1 MB and the LLM body-builder further downscales it to Claude's pixel
 # ceiling, so fine detail in a big schematic/diagram is unreadable. The
 # ``inspect_image`` tool re-renders a *region* of the ORIGINAL on-disk
-# bytes at full source resolution (crop → rotate → fit), recovering the
-# detail the initial downscale discarded. The result rides the same
+# bytes at full source resolution (EXIF orientation → explicit rotate →
+# crop-or-centre-zoom → fit), recovering the detail the initial downscale
+# discarded. The result rides the same
 # ``__screenshot__`` protocol as a normal image read, so dispatch /
 # compaction / rendering / billing all handle it unchanged.
 
@@ -155,19 +156,24 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
 
     This is the transform half of image inspection — decoupled from where the
     bytes came from (disk file, disk-backed ``/api/images/`` upload, DB base64,
-    remote download). Applies, in order: rotate → crop → zoom (centre) →
-    optional grid overlay → fit-to-budget, then encodes to a ``__screenshot__``
+    remote download). Applies, in order: embedded EXIF orientation → explicit
+    rotate → one region selector (crop when present, otherwise centre zoom) →
+    fit-to-budget → optional grid overlay, then encodes to a ``__screenshot__``
     protocol dict so the caller routes it through the native image_url path.
 
     Args:
         raw: The original (pre-downscale) image bytes.
         source_name: Display name used in logs and the text fallback.
-        crop: Optional ``[x0, y0, x1, y1]`` box. Values in ``[0, 1]`` are
-            treated as fractions of width/height; values > 1 are absolute
-            pixels. ``None`` keeps the full frame.
-        rotate: Clockwise rotation in degrees — one of 0, 90, 180, 270.
+        crop: Optional ``[x0, y0, x1, y1]`` box. Each value in ``[0, 1]`` is
+            interpreted as a fraction of its own axis; each value > 1 is an
+            absolute pixel coordinate in the EXIF-normalized frame after
+            ``rotate``. Mixed fractional/pixel boxes are supported. When present,
+            this exact region takes precedence over ``zoom``.
+        rotate: Clockwise rotation in degrees — one of 0, 90, 180, 270. Applied
+            after the image's embedded EXIF display orientation.
         zoom: Optional float > 1 — centre-crop by this factor (e.g. 2.0
-            keeps the middle quarter). Applied after ``crop``.
+            keeps the middle quarter). A convenience alternative used only when
+            ``crop`` is absent; it never narrows an explicit crop a second time.
         grid: When True, overlay a labelled coordinate grid (tenths of the
             view) so the model can pick the next crop precisely.
 
@@ -183,7 +189,7 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
                 f'(max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)')
 
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageOps
     except ImportError as e:
         logger.debug('[FileReader] Pillow import failed, using fallback: %s', e)
         return ('Error: image inspection requires Pillow (PIL), which is not '
@@ -191,8 +197,15 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
 
     filename = source_name
     try:
-        img = Image.open(io.BytesIO(raw))
-        img.load()
+        encoded_image = Image.open(io.BytesIO(raw))
+        encoded_image.load()
+        encoded_src_w, encoded_src_h = encoded_image.size
+        # Browsers and native image viewers honor EXIF orientation. Normalize
+        # those pixels before any model-supplied coordinates so crop/grid refer
+        # to the same frame the user and model saw in the original image.
+        img = ImageOps.exif_transpose(encoded_image)
+        if img is not encoded_image:
+            encoded_image.close()
     except Exception as e:
         logger.error('[FileReader] inspect_image failed to open %s: %s',
                      filename, e, exc_info=True)
@@ -200,7 +213,7 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
 
     src_w, src_h = img.size
 
-    # ── 1. Rotate ──────────────────────────────────────────────────
+    # ── 1. Explicit rotate, after embedded display orientation ─────
     try:
         rotate = int(rotate or 0) % 360
     except (TypeError, ValueError) as e:
@@ -214,6 +227,8 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
 
     w, h = img.size
 
+    applied_crop_box = None
+
     # ── 2. Crop ────────────────────────────────────────────────────
     if crop is not None:
         if not (isinstance(crop, (list, tuple)) and len(crop) == 4):
@@ -224,21 +239,27 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
         except (TypeError, ValueError) as e:
             logger.debug('[FileReader] inspect_image bad crop %r (%s)', crop, e)
             return 'Error: crop values must be numbers.'
-        # Fractional (all within 0..1) → scale to pixels.
-        if max(x0, y0, x1, y1) <= 1.0:
-            x0, x1 = x0 * w, x1 * w
-            y0, y1 = y0 * h, y1 * h
+        # Unit selection is per coordinate, exactly as the public schema says.
+        # A mixed box such as [0.5, 0, 1, 400] uses fractional x coordinates
+        # and a pixel y endpoint; classifying the whole box from its maximum
+        # silently collapsed that valid request into a one-pixel-wide strip.
+        x0 = x0 * w if 0.0 <= x0 <= 1.0 else x0
+        x1 = x1 * w if 0.0 <= x1 <= 1.0 else x1
+        y0 = y0 * h if 0.0 <= y0 <= 1.0 else y0
+        y1 = y1 * h if 0.0 <= y1 <= 1.0 else y1
         x0, x1 = sorted((x0, x1))
         y0, y1 = sorted((y0, y1))
         x0 = max(0, min(int(round(x0)), w - 1))
         y0 = max(0, min(int(round(y0)), h - 1))
         x1 = max(x0 + 1, min(int(round(x1)), w))
         y1 = max(y0 + 1, min(int(round(y1)), h))
-        img = img.crop((x0, y0, x1, y1))
+        applied_crop_box = [x0, y0, x1, y1]
+        img = img.crop(tuple(applied_crop_box))
         w, h = img.size
 
-    # ── 3. Zoom (centre crop) ──────────────────────────────────────
-    if zoom is not None:
+    # ── 3. Centre zoom — an alternative selector, never a second crop ──
+    zoom_applied = False
+    if crop is None and zoom is not None:
         try:
             zoom = float(zoom)
         except (TypeError, ValueError) as e:
@@ -250,6 +271,7 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
             top = (h - ch) // 2
             img = img.crop((left, top, left + cw, top + ch))
             w, h = img.size
+            zoom_applied = True
 
     # ── 4. Fit to the per-view pixel budget ────────────────────────
     fitted = False
@@ -304,7 +326,7 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
         ops.append(f'rotated {rotate}°')
     if crop is not None:
         ops.append('cropped')
-    if zoom and zoom > 1.0:
+    if zoom_applied:
         ops.append(f'zoom {zoom:g}×')
     if grid:
         ops.append('grid overlay')
@@ -325,6 +347,11 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
         'inspectOps': op_desc,
         'viewSize': [w, h],
         'sourceSize': [src_w, src_h],
+
+        # Encoded dimensions are diagnostic only; sourceSize is deliberately
+        # the EXIF-normalized visible frame used by crop coordinates.
+        'encodedSourceSize': [encoded_src_w, encoded_src_h],
+        'cropBox': applied_crop_box,
         '_text_fallback': (
             f'Inspected view of {filename} ({op_desc}). '
             f'Source {src_w}×{src_h}px → view {w}×{h}px. '
@@ -337,9 +364,13 @@ def _compress_image(raw: bytes, max_kb: int = 1024) -> tuple:
     """Compress image to JPEG, return (bytes, mime, was_compressed)."""
     import io
 
-    from PIL import Image
+    from PIL import Image, ImageOps
 
-    img = Image.open(io.BytesIO(raw))
+    encoded_image = Image.open(io.BytesIO(raw))
+    encoded_image.load()
+    img = ImageOps.exif_transpose(encoded_image)
+    if img is not encoded_image:
+        encoded_image.close()
     if img.mode in ('RGBA', 'LA', 'P'):
         bg = Image.new('RGB', img.size, (255, 255, 255))
         if img.mode == 'P':

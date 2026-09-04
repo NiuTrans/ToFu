@@ -1,26 +1,18 @@
 """Guards for Epic-E pt_3879f00e sub-10 — defer (almost) the ENTIRE
-settings/ subpackage (~400KB), the line-closer slice, with the
-branding.js boundary fix.
+settings/ subpackage (~400KB), the line-closer slice.
 
 Census (2026-08-01/02, grep-verified): the settings family renders ONLY
-inside the user-triggered Settings modal. Every programmatic
-openSettings/switchSettingsTab caller outside the family is
-typeof-guarded (onboarding.js:271-272, main_toolbar_ui.js:382/536,
-skills_install.js:69-72) — gate+stub composition (sub-9 pattern): the
-gate passes on the feature-loader stub, which loads the bundle and
-dispatches. index.html's settings gear is a static onclick covered by
-the same stubs. core_panel.js's bare populate chain
+inside the user-triggered Settings modal. Programmatic
+openSettings/switchSettingsTab callers outside the family resolve through the
+feature bridge. index.html's settings gear is a static action covered by the
+same registry. core_panel.js's bare populate chain
 (_populateMcpTab/_loadOAuthStatus/_renderProvidersTab/…) is
 INTRA-BUNDLE once core_panel.js itself moves.
 
-THE BOUNDARY (this suite's centerpiece): settings/branding.js is NOT
-settings-only. main.js:88 + main.js:349 call _modelShortName() BARE on
-the boot/model-switch path (_applyModelUI) — deferring branding breaks
-the boot model paint with ReferenceError. It therefore STAYS in core;
-its brand helpers are consumed by the deferred family in the safe
-deferred→core direction (visibility_defaults ×12, local_endpoints,
-template_actions), and finish_info.js's cold finish-bar calls stay
-always-satisfied. settings.js (the slim var head) also STAYS:
+Brand/name presentation now belongs to typed core modules imported by the
+runtime prelude. Retained bare helper calls resolve to module-private aliases,
+so there is no settings-owned boot boundary left. settings.js (the slim var
+head) still STAYS:
 _serverConfig/_keyStatsCache/_keyStatsLoading are read by
 main_input_handling.js.
 
@@ -31,6 +23,7 @@ closeSettings, saveSettings, switchSettingsTab.
 from __future__ import annotations
 
 import pathlib
+import json
 import re
 
 import pytest
@@ -44,31 +37,26 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 FEATURE_LOADER = ROOT / 'frontend' / 'src' / 'main.ts'
 INDEX_HTML = ROOT / 'index.html'
 MAIN_JS = pathlib.Path(runtime_section_path('main.js'))
+PRELUDE = ROOT / 'frontend/src/runtime/sections/_prelude.js'
 I18N = ROOT / 'frontend' / 'src' / 'i18n' / 'index.ts'
 ONBOARDING = pathlib.Path(runtime_section_path('onboarding.js'))
 MCP_HTML = ROOT / 'static' / 'settings_panels' / 'mcp.html'
 OAUTH_HTML = ROOT / 'static' / 'settings_panels' / 'oauth.html'
 
 FAMILY = (
-    'settings/provider_templates.js', 'settings/auto_setup.js',
-    'settings/local_endpoints.js', 'settings/section_requires.js',
-    'settings/core_panel.js', 'settings/provider_faces.js',
-    'settings/provider_render.js', 'settings/key_stats.js',
-    'settings/balance.js', 'settings/template_actions.js',
-    'settings/model_edit.js', 'settings/visibility_defaults.js',
+    'settings/section_requires.js',
+    'settings/core_panel.js',
+    'settings/provider_render.js', 'settings/visibility_defaults.js',
     'settings/other_tabs.js', 'settings/speech.js',
     'settings/auth_sources.js', 'settings/private_hosts.js',
     'settings/save_export.js', 'settings/system_prompt_editor.js',
     'settings/oauth.js', 'settings/mcp.js', 'settings/devices.js',
 )
 ENTRY_STUBS = ('openSettings', 'closeSettings',
-               'saveSettings', 'switchSettingsTab')
+               'saveSettings', 'switchSettingsTab', '_oauthLogin')
 
 NATIVE_OWNERS = {
-    'settings/auto_setup.js': 'frontend/src/features/settings/auto-setup.ts',
     'settings/section_requires.js': 'frontend/src/features/settings/section-requires.ts',
-    'settings/key_stats.js': 'frontend/src/features/settings/key-stats.ts',
-    'settings/balance.js': 'frontend/src/features/settings/balance.ts',
     'settings/speech.js': 'frontend/src/features/settings/speech.ts',
     'settings/auth_sources.js': 'frontend/src/features/settings/auth-sources.ts',
     'settings/private_hosts.js': 'frontend/src/features/settings/private-hosts.ts',
@@ -81,7 +69,7 @@ def _manifest():
 
 
 # ---------------------------------------------------------------------------
-# 1. the family moves; branding.js + the settings.js head STAY
+# 1. the family moves; typed brand owners replace branding.js
 # ---------------------------------------------------------------------------
 def test_family_deferred_not_core():
     bundle, _deferred, _ep, _crit = _manifest()
@@ -94,32 +82,36 @@ def test_family_deferred_not_core():
             assert bundle.count(name) == 1, f'{name} must occur once in the Vite runtime'
 
 
-def test_branding_stays_core_boot_breaker():
-    bundle, deferred, _ep, _crit = _manifest()
-    assert 'settings/branding.js' in bundle, (
-        'settings/branding.js must STAY in _BUNDLE_FILES — main.js:88/349 '
-        'call _modelShortName() BARE on the boot/model-switch path; '
-        'deferring it breaks the boot model paint with ReferenceError')
-    assert 'settings/branding.js' not in deferred
+def test_typed_brand_owners_replace_retained_boot_breaker():
+    bundle, _deferred, _ep, _crit = _manifest()
+    assert 'settings/branding.js' not in bundle
+    prelude = PRELUDE.read_text()
+    assert "from '../core/model-brand-detection'" in prelude
+    assert "from '../core/model-brand-icons'" in prelude
+    assert "from '../core/model-display-names'" in prelude
 
 
-def test_branding_boot_callers_are_bare():
-    """Pin the evidence: if main.js ever gates these two calls, this pin
-    says the gate is fine too — but branding in core must stay either way
-    (the deferred family's 14 helper call sites go deferred→core)."""
+def test_branding_boot_callers_use_composed_alias():
+    """Retained boot callers remain wired through the prelude alias."""
     src = MAIN_JS.read_text()
     calls = [m.start() for m in re.finditer(r'_modelShortName\(', src)]
     assert len(calls) >= 2, (
-        'main.js must keep its _modelShortName call sites — the boundary '
-        'evidence for branding.js staying core')
+        'main.js must keep its _modelShortName call sites during migration')
+    assert 'modelShortName: _modelShortName' in PRELUDE.read_text()
 
 
-def test_settings_head_stays():
-    bundle, deferred, _ep, _crit = _manifest()
-    assert 'settings.js' in bundle, (
-        'the settings.js slim head must STAY in core — '
-        '_serverConfig/_keyStatsCache/_keyStatsLoading are read by '
-        'main_input_handling.js')
+def test_settings_head_moves_with_its_live_ports():
+    manifest = json.loads((
+        ROOT / 'frontend/src/runtime/sections/manifest.json'
+    ).read_text(encoding='utf-8'))
+    main = {row['source'] for row in manifest['sections']}
+    settings = next(
+        bundle for bundle in manifest['lazyBundles']
+        if bundle['name'] == 'settings-presenters'
+    )
+    lazy = {row['source'] for row in settings['sections']}
+    assert 'settings.js' not in main
+    assert {'settings.js', 'settings/mcp.js'} <= lazy
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +136,9 @@ def test_entry_stubs_in_loader_table():
 # ---------------------------------------------------------------------------
 def test_programmatic_openers_stay_gated():
     ob = ONBOARDING.read_text()
-    assert re.search(r"typeof openSettings \S+ 'function'", ob) and \
-           re.search(r"typeof switchSettingsTab \S+ 'function'", ob), (
+    assert "typeof runtimeScope.openSettings !== 'function'" in ob and \
+           "typeof runtimeScope.switchSettingsTab === 'function'" in ob and \
+           "typeof runtimeScope._oauthLogin === 'function'" in ob, (
         'onboarding.js must keep openSettings/switchSettingsTab gated')
 
 
@@ -158,6 +151,7 @@ def test_i18n_hooks_stay_gated():
     owners = '\n'.join((ROOT / path).read_text() for path in (
         'frontend/src/features/settings.ts',
         'frontend/src/features/skills.ts',
+        'frontend/src/features/skills/panel.ts',
         'frontend/src/features/memory/panel.ts',
     ))
     for name in ('_renderMcpCatalog', '_renderProvidersTab',

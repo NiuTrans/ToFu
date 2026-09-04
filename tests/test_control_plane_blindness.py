@@ -1,5 +1,6 @@
 """Owner-scoped abort tombstones for registry-lost conversation tasks.\n\nA worker may outlive its in-memory registry entry. Abort routes therefore\npersist an owner-scoped signal that the worker consumes at its next check.\n"""
-
+import threading
+import time
 
 import pytest
 
@@ -110,6 +111,43 @@ class TestAbortTombstone:
         assert reg.make_task_abort_check(
             {'id': 'b', '_userId': 1, 'aborted': False})() is False
 
+    def test_provider_abort_probe_is_nonblocking_and_singleflight(
+            self, monkeypatch, clean_tombstones):
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        probe_calls = []
+
+        def _slow_probe(task_id, *, user_id):
+            probe_calls.append((task_id, user_id))
+            probe_started.set()
+            assert release_probe.wait(1.0)
+            return True
+
+        monkeypatch.setattr(reg, '_db_abort_tombstoned', _slow_probe)
+        check = reg.make_task_abort_check(
+            {'id': 't-provider', '_userId': 9, 'aborted': False},
+            nonblocking_storage=True,
+        )
+
+        try:
+            started = time.perf_counter()
+            assert check() is False
+            assert time.perf_counter() - started < 0.08
+            assert probe_started.wait(0.5)
+
+            # Repeated transport polls never create a second storage waiter.
+            for _ in range(20):
+                assert check() is False
+            assert probe_calls == [('t-provider', 9)]
+
+            release_probe.set()
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not check():
+                time.sleep(0.005)
+            assert check() is True
+        finally:
+            release_probe.set()
+
     def test_end_to_end_vanished_task(self, monkeypatch, clean_tombstones):
         """create → vanish from registry → plant → worker's check sees it."""
         fake = _FakeStorageClient(running_ids=['t-vanished'])
@@ -164,5 +202,5 @@ class TestEndpointWiring:
     def test_stream_wires_tombstone_abort_check(self):
         import lib.tasks_pkg.manager._stream as stream_mod
         src = open(stream_mod.__file__, encoding='utf-8').read()
-        assert 'make_task_abort_check' in src
+        assert 'make_provider_abort_check' in src
         assert 'abort_check=_abort_check' in src

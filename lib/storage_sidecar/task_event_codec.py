@@ -7,11 +7,13 @@ occasional MiB-scale message snapshots. Small and incompressible payloads keep
 their legacy canonical JSON bytes. Payloads of at least 64 KiB get one zlib
 level-1 attempt and use the private envelope only when it is smaller.
 
-Entry points are :func:`encode_task_event_payload` and
-:func:`decode_task_event_payload`. The decoded form remains bounded by the
-storage RPC's 64 MiB frame ceiling; corrupt and unknown envelopes fail closed.
-The codec has no backend or transaction dependency, so SQLite BLOB and
-PostgreSQL BYTEA rows share byte-identical behavior.
+Entry points are :func:`encode_task_event_payload`,
+:func:`task_event_decoded_size`, and :func:`decode_task_event_payload`. The
+decoded form remains bounded by the storage RPC's 64 MiB frame ceiling; corrupt
+and unknown envelopes fail closed. The size preflight reads the validated
+length header without allocating the decoded body, so maintenance can enforce a
+smaller memory budget. The codec has no backend or transaction dependency, so
+SQLite BLOB and PostgreSQL BYTEA rows share byte-identical behavior.
 """
 
 from __future__ import annotations
@@ -65,9 +67,8 @@ def encode_task_event_payload(raw: bytes) -> bytes:
     return encoded if len(encoded) < len(raw) else raw
 
 
-def decode_task_event_payload(value: Any) -> bytes:
-    """Decode legacy JSON or one bounded v1 task-event envelope."""
-    encoded = _payload_bytes(value)
+def _decoded_size_from_encoded(encoded: bytes) -> int:
+    """Validate an encoded payload and return its exact decoded byte size."""
     if len(encoded) > MAX_STORED_TASK_EVENT_BYTES:
         raise StorageError(
             "database_integrity", "Stored task event exceeds its byte budget"
@@ -78,7 +79,7 @@ def decode_task_event_payload(value: Any) -> bytes:
                 "database_integrity",
                 "Stored task event uses an unsupported codec",
             )
-        return encoded
+        return len(encoded)
 
     header_start = len(COMPRESSED_TASK_EVENT_MAGIC)
     payload_start = header_start + _DECODED_LENGTH.size
@@ -97,6 +98,22 @@ def decode_task_event_payload(value: Any) -> bytes:
             "database_integrity",
             "Stored compressed task-event length is invalid",
         )
+    return decoded_length
+
+
+def task_event_decoded_size(value: Any) -> int:
+    """Return decoded bytes without decompressing a valid stored payload."""
+    return _decoded_size_from_encoded(_payload_bytes(value))
+
+
+def decode_task_event_payload(value: Any) -> bytes:
+    """Decode legacy JSON or one bounded v1 task-event envelope."""
+    encoded = _payload_bytes(value)
+    decoded_length = _decoded_size_from_encoded(encoded)
+    if not encoded.startswith(COMPRESSED_TASK_EVENT_MAGIC):
+        return encoded
+
+    payload_start = len(COMPRESSED_TASK_EVENT_MAGIC) + _DECODED_LENGTH.size
 
     decompressor = zlib.decompressobj()
     try:
@@ -127,4 +144,5 @@ __all__ = [
     "TASK_EVENT_COMPRESSION_MIN_BYTES",
     "decode_task_event_payload",
     "encode_task_event_payload",
+    "task_event_decoded_size",
 ]

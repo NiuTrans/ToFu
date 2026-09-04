@@ -31,6 +31,19 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+_MISSING_MODULE = object()
+
+
+@pytest.fixture(autouse=True)
+def _restore_dispatch_module_after_stub():
+    """Keep the manual dispatcher stubs from contaminating later test files."""
+    original = sys.modules.get('lib.llm_dispatch', _MISSING_MODULE)
+    yield
+    if original is _MISSING_MODULE:
+        sys.modules.pop('lib.llm_dispatch', None)
+    else:
+        sys.modules['lib.llm_dispatch'] = original
+
 
 def _derive_expected_from_bootstrap() -> frozenset[str]:
     """Compute the ground-truth set of cheap+thinking model ids from bootstrap."""

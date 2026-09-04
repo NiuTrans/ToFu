@@ -11,70 +11,70 @@ ASK_HUMAN_TOOL = {
     "function": {
         "name": "ask_human",
         "description": (
-            "Ask the user a question and wait for their response. "
-            "Use this when you genuinely need clarification, confirmation, or "
-            "additional information from the user before proceeding. "
-            "You can ask a free-text question or present multiple-choice options.\n\n"
-            "**Do NOT use this when you can decide from existing context.** Asking the "
-            "user for things they expect you to figure out yourself is a frustration "
-            "signal. Before asking, check: (1) does the conversation already contain "
-            "the answer? (2) can a quick read_files / grep_search resolve the "
-            "ambiguity? (3) is there a sensible default and the user can correct it "
-            "after seeing the result? Reserve ask_human for genuinely irreversible "
-            "decisions (which file to delete, which API key to use), strong "
-            "preference forks (UI palette, file naming), or missing facts that the "
-            "tools cannot recover (the user's intent, an offline credential)."
+            "Pause and ask the user one question. Use only when work cannot safely "
+            "continue without an irreversible decision, subjective preference/product "
+            "intent, or a fact unavailable from the conversation, files, and tools. "
+            "First inspect context, use a quick read/grep when useful, and take a "
+            "sensible reversible default when the user can correct the result. Do not "
+            "ask for something you can decide. Supports free text or choices."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "question": {
                     "type": "string",
+                    "maxLength": 32768,
                     "description": (
-                        "The question to ask the user. Be clear and specific. "
-                        "Provide enough context so the user can answer effectively. "
-                        "Rendered as MARKDOWN, so an image reference like "
-                        "`![alt](/api/images/<name>.png)` is displayed inline — this "
-                        "is how you show something the user must LOOK AT or SCAN "
-                        "(e.g. a scan-to-login QR code) while this call blocks "
-                        "waiting for them. Build that question body with "
-                        "`lib.qr.qr_login_question(url)`, which writes the QR PNG "
-                        "and returns the markdown; do NOT paste base64 image data "
-                        "into this field."
+                        "Clear, specific MARKDOWN with enough context. To show or scan "
+                        "an image, embed `![alt](/api/images/name.png)`; for a login QR "
+                        "use `lib.qr.qr_login_question(url)`, never base64."
                     ),
                 },
                 "response_type": {
                     "type": "string",
                     "enum": ["free_text", "choice"],
                     "description": (
-                        "How the user should respond: "
-                        "'free_text' for open-ended answers, "
-                        "'choice' for selecting from predefined options."
+                        "free_text for open answers; choice requires options."
                     ),
                 },
                 "options": {
                     "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
                     "items": {
                         "type": "object",
                         "properties": {
                             "label": {
                                 "type": "string",
-                                "description": "Short label for the option (displayed on the button).",
+                                "maxLength": 1024,
+                                "description": "Short button label.",
                             },
                             "description": {
                                 "type": "string",
-                                "description": "Optional longer description explaining the option.",
+                                "maxLength": 8192,
+                                "description": "Optional explanation.",
                             },
                         },
                         "required": ["label"],
                     },
-                    "description": (
-                        "List of options for 'choice' response_type. "
-                        "Each option has a 'label' (required) and optional 'description'."
-                    ),
+                    "description": "1-16 choices for choice mode.",
                 },
             },
             "required": ["question", "response_type"],
+            "anyOf": [
+                {
+                    "properties": {
+                        "response_type": {"const": "free_text"},
+                    },
+                },
+                {
+                    "properties": {
+                        "response_type": {"const": "choice"},
+                        "options": {"minItems": 1},
+                    },
+                    "required": ["options"],
+                },
+            ],
         },
     },
 }

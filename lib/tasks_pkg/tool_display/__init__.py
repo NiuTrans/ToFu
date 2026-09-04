@@ -38,6 +38,7 @@ from lib.tasks_pkg.tool_display._renderers import (  # noqa: E402,F401
     _tool_display_project,
     _tool_display_scheduler,
     _tool_display_search_settings,
+    _tool_display_server_download,
     _tool_display_swarm,
     _tool_display_todo,
     _tool_display_web_search,

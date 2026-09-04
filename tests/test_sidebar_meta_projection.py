@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from lib.conversations.catalog import ConversationMetadataPage  # noqa: E402
 from routes.conversations import _metadata  # noqa: E402
 
 
@@ -51,6 +52,7 @@ class TestSidecarConversationMetaProjection:
             'conv-1',
             settings={
                 'folderId': 'fld-1',
+                'clonedFrom': 'conv-0',
                 'lastMsgRole': 'assistant',
                 'lastFinishReason': 'stop',
                 'lastMsgError': False,
@@ -73,6 +75,7 @@ class TestSidecarConversationMetaProjection:
         assert meta['id'] == 'conv-1'
         assert meta['settings'] == {
             'folderId': 'fld-1',
+            'clonedFrom': 'conv-0',
             'lastMsgRole': 'assistant',
             'lastFinishReason': 'stop',
             'lastMsgError': False,
@@ -116,9 +119,26 @@ class _FakeSidecarClient:
             return None
         raise AssertionError(f'unexpected operation: {operation}')
 
-    def list_metadata(self, **payload):
+    def list_metadata_page(self, **payload):
         self.list_calls.append(payload)
-        return [dict(document['metadata']) for document in self.documents]
+        rows = [dict(document['metadata']) for document in self.documents]
+        folder_id = payload.get('folder_id')
+        if folder_id:
+            rows = [row for row in rows
+                    if (row.get('settings') or {}).get('folderId') == folder_id]
+        total_count = len(rows)
+        before = payload.get('before_updated_at')
+        if before is not None:
+            before_id = payload.get('before_id') or ''
+            rows = [row for row in rows
+                    if (int(row.get('updated_at') or 0), row['id'])
+                    < (before, before_id)]
+        limit = payload['limit']
+        return ConversationMetadataPage(
+            items=rows[:limit],
+            total_count=total_count,
+            has_more=len(rows) > limit,
+        )
 
 
 @pytest.mark.api
@@ -134,8 +154,8 @@ class TestSidecarMetaRouteShape:
             _document('conv-2', title='Two', settings={'folderId': 'fld-1'}),
         ])
         monkeypatch.setattr(
-            'routes.conversations.list_conversation_metadata',
-            fake.list_metadata,
+            'routes.conversations.list_conversation_metadata_page',
+            fake.list_metadata_page,
         )
 
         resp = flask_client.get('/api/v1/conversations?meta=1')
@@ -163,8 +183,8 @@ class TestSidecarMetaRouteShape:
     def test_meta_route_truncates_title(self, flask_client, monkeypatch):
         fake = _FakeSidecarClient([_document('conv-1', title='x' * 500)])
         monkeypatch.setattr(
-            'routes.conversations.list_conversation_metadata',
-            fake.list_metadata,
+            'routes.conversations.list_conversation_metadata_page',
+            fake.list_metadata_page,
         )
 
         resp = flask_client.get('/api/v1/conversations?meta=1')
@@ -177,8 +197,8 @@ class TestSidecarMetaRouteShape:
         fake = _FakeSidecarClient(
             [_document(f'conv-{i}', title=f'C{i}') for i in range(5)])
         monkeypatch.setattr(
-            'routes.conversations.list_conversation_metadata',
-            fake.list_metadata,
+            'routes.conversations.list_conversation_metadata_page',
+            fake.list_metadata_page,
         )
 
         resp = flask_client.get('/api/v1/conversations?meta=1&limit=2')
@@ -188,6 +208,6 @@ class TestSidecarMetaRouteShape:
         # still travels so the browser never mistakes a page for a deletion.
         assert len(data['items']) == 2
         assert resp.headers.get('X-Total-Count') == '5'
-        assert not fake.count_calls, (
-            'metadata listing already supplies the authoritative total; a '
-            'second count query would add a race and an extra round trip')
+        assert len(fake.list_calls) == 1, (
+            'page rows and the authoritative total must share one semantic '
+            'storage round trip')

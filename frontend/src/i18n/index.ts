@@ -3,6 +3,8 @@ import type {
   I18nKey,
   Translator,
 } from './contract.generated';
+import enCatalogUrl from './generated/en.generated.json?url';
+import zhCatalogUrl from './generated/zh.generated.json?url';
 
 export type {
   I18nArgs,
@@ -16,12 +18,27 @@ export type UiLanguage = 'zh' | 'en';
 type Messages = Readonly<Record<string, string>>;
 type TranslationParams = Readonly<Record<string, unknown>>;
 
-const localeLoaders: Record<UiLanguage, () => Promise<{ default: Messages }>> = {
-  zh: () => import('./locales/zh.json'),
-  en: () => import('./locales/en.json'),
-};
+const localeUrls: Readonly<Record<UiLanguage, string>> = Object.freeze({
+  zh: zhCatalogUrl,
+  en: enCatalogUrl,
+});
 
 const loaded = new Map<UiLanguage, Messages>();
+// At most two entries can exist. Coalescing preserves the module-loader
+// behavior that concurrent boot/switch requests share one network read.
+const loading = new Map<UiLanguage, Promise<Messages>>();
+
+function decodeMessages(language: UiLanguage, value: unknown): Messages {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid ${language} locale catalog root`);
+  }
+  for (const [key, message] of Object.entries(value)) {
+    if (!key || typeof message !== 'string') {
+      throw new Error(`Invalid ${language} locale catalog entry: ${key}`);
+    }
+  }
+  return value as Messages;
+}
 const missing = new Set<string>();
 
 function preferredLanguage(): UiLanguage {
@@ -55,12 +72,28 @@ function syncLanguageCookie(language: UiLanguage): void {
 async function loadLanguage(language: UiLanguage): Promise<Messages> {
   const current = loaded.get(language);
   if (current) return current;
-  const messages = (await localeLoaders[language]()).default;
-  loaded.set(language, messages);
-  return messages;
+  const pending = loading.get(language);
+  if (pending) return pending;
+  const request = fetch(localeUrls[language], {
+    cache: 'force-cache',
+    credentials: 'same-origin',
+  }).then(async (response) => {
+    if (!response.ok) {
+      throw new Error(`Locale catalog request failed (${language}): ${response.status}`);
+    }
+    const messages = decodeMessages(language, await response.json());
+    loaded.set(language, messages);
+    return messages;
+  });
+  loading.set(language, request);
+  try {
+    return await request;
+  } finally {
+    if (loading.get(language) === request) loading.delete(language);
+  }
 }
 
-/** Load the preferred locale chunk before the application announces readiness. */
+/** Load the preferred locale data before the application announces readiness. */
 export async function ready(): Promise<void> {
   await loadLanguage(_i18nLang);
   syncLanguageCookie(_i18nLang);

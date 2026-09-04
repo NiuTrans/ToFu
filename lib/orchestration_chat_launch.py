@@ -186,6 +186,13 @@ class OrchestrationChatFlowLaunchSpec:
                 'parent_task': task,
                 'all_tools': list(self.tools),
                 'model': self.model,
+                # Goal mode is presented as the selected conversation model,
+                # so every internal Worker/VU leaf stays pinned to it. Other
+                # Studio flows explicitly author tiers and retain routing.
+                'model_routing_policy': (
+                    'selected' if self.projection == 'autopilot'
+                    else 'role_tier'
+                ),
                 'project_path': self.project_path,
                 'system_prompt_base': self.system_prompt_base,
                 'thinking_enabled': self.thinking_enabled,

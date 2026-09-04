@@ -116,29 +116,27 @@ def _patch_harvest(*, parse=None, text=_FAKE_TEXT, pages=7):
     # inside the function) — patch it at the source module.
     import lib.paper.arxiv as _ax
     orig_title = _ax.fetch_arxiv_title
+    orig_title_batch = _ax.fetch_arxiv_titles_batch
     _ax.fetch_arxiv_title = lambda aid: f'Title of {aid}'
+    _ax.fetch_arxiv_titles_batch = lambda ids: {
+        aid: f'Title of {aid}' for aid in ids}
 
     def restore():
         h._download_pdf_bytes = orig_dl
         h.parse_pdf = orig_parse
         _ax.fetch_arxiv_title = orig_title
+        _ax.fetch_arxiv_titles_batch = orig_title_batch
     return counter, restore
 
 
 def _count_rows_for_arxiv(arxiv_id, user_id=1):
     from lib.paper.library_repository import PaperLibraryRepository
-    return sum(
-        entry.arxiv_id == arxiv_id
-        for entry in PaperLibraryRepository(user_id).list_entries()
-    )
+    return len(PaperLibraryRepository(user_id).by_arxiv_ids([arxiv_id]))
 
 
 def _phash_row_for_arxiv(arxiv_id, user_id=1):
     from lib.paper.library_repository import PaperLibraryRepository
-    rows = [
-        entry for entry in PaperLibraryRepository(user_id).list_entries()
-        if entry.arxiv_id == arxiv_id
-    ]
+    rows = PaperLibraryRepository(user_id).by_arxiv_ids([arxiv_id])
     return max(rows, key=lambda entry: entry.updated_at).paper_hash if rows else ''
 
 
@@ -170,10 +168,7 @@ def _seed_library_row(
 
 def _parser_version_for_arxiv(arxiv_id, user_id=1):
     from lib.paper.library_repository import PaperLibraryRepository
-    rows = [
-        entry for entry in PaperLibraryRepository(user_id).list_entries()
-        if entry.arxiv_id == arxiv_id
-    ]
+    rows = PaperLibraryRepository(user_id).by_arxiv_ids([arxiv_id])
     return (
         max(rows, key=lambda entry: entry.updated_at).parser_version
         if rows else None
@@ -269,6 +264,25 @@ def test_empty_parsed_text_is_not_a_cache_hit_NEUTER():
     finally:
         restore()
     _ok('a row with empty parsed_text is not a cache hit (harvest fills it)')
+
+
+def test_discovery_title_hint_skips_single_paper_title_recovery():
+    import lib.paper.arxiv as arxiv
+    import lib.paper.harvest as harvest
+
+    counter, restore = _patch_harvest()
+    arxiv.fetch_arxiv_title = lambda aid: (_ for _ in ()).throw(
+        AssertionError('a discovery title hint must skip title recovery'))
+    try:
+        result = harvest.harvest_arxiv_id(
+            f'2610.{int(time.time()) % 100000:05d}', user_id=1,
+            title_hint='  Discovery title  ' + ('x' * 1_000))
+        assert result.status == 'parsed'
+        assert result.title.startswith('Discovery title')
+        assert len(result.title) == 500
+        assert counter.calls == 1
+    finally:
+        restore()
 
 
 # ── Test 3: batch second-run zero reparse ─────────────────────────────────

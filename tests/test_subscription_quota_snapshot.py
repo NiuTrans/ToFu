@@ -25,6 +25,7 @@ def test_parse_real_codex_header_shape_case_insensitively():
     snapshot = parse_codex_quota_headers({
         'X-Codex-Primary-Used-Percent': '4',
         'x-codex-primary-window-minutes': '10080',
+        'X-Codex-Primary-Reset-At': '1704069000',
         'X-Codex-Secondary-Used-Percent': '12.5',
         'x-codex-secondary-window-minutes': '300',
     }, now=1000)
@@ -37,6 +38,7 @@ def test_parse_real_codex_header_shape_case_insensitively():
             'used_percent': 4.0,
             'remaining_percent': 96.0,
             'window_minutes': 10080,
+            'resets_at': 1704069000,
         },
         'secondary': {
             'used_percent': 12.5,
@@ -101,6 +103,41 @@ def test_direct_oauth_and_adapter_snapshots_do_not_cross_accounts():
     adapter = latest_subscription_quota(cache_key='adapter:agent-1', now=1010)
     assert direct['primary']['remaining_percent'] == 93.0
     assert adapter['primary']['remaining_percent'] == 20.0
+
+
+def test_quota_identity_cache_is_bounded_and_long_keys_are_stable():
+    from lib.subscription_quota import (
+        _MAX_QUOTA_IDENTITIES,
+        _latest_snapshots,
+    )
+
+    long_key = 'adapter:' + ('x' * 400)
+    for index in range(_MAX_QUOTA_IDENTITIES + 5):
+        record_codex_quota({
+            'x-codex-primary-used-percent': str(index % 100),
+        }, {}, now=index, cache_key=f'adapter:{index}')
+    record_codex_quota({
+        'x-codex-primary-used-percent': '7',
+    }, {}, now=999, cache_key=long_key)
+
+    assert len(_latest_snapshots) == _MAX_QUOTA_IDENTITIES
+    assert latest_subscription_quota(
+        cache_key=long_key, now=1000)['age_seconds'] == 1
+
+
+def test_header_dimensions_are_bounded():
+    snapshot = parse_codex_quota_headers({
+        'x-codex-primary-used-percent': '2',
+        'x-codex-primary-window-minutes': '1e300',
+        'x-codex-primary-resets-at': '1e300',
+        'x-codex-plan-type': 'p' * 1000,
+    }, now=1)
+
+    assert snapshot['primary'] == {
+        'used_percent': 2.0,
+        'remaining_percent': 98.0,
+    }
+    assert len(snapshot['plan_type']) == 64
 
 
 def test_oauth_status_exposes_only_authenticated_direct_snapshot():

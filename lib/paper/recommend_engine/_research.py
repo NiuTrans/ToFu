@@ -11,10 +11,12 @@ in-progress year as the future. The final turn returns strict JSON.
 
 import hashlib
 
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 from lib.llm.json_extract import extract_first_json_object
+from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
+from lib.paper.agent_usage import PaperAgentUsageMeter
 
 from ..prompts import date_anchor_clause
 from ..tools import (
@@ -140,6 +142,7 @@ def _research_and_interpret(description, max_results, *, abort=None,
         {'role': 'user', 'content': description},
     ]
     abort_signal = AbortSignal.from_callback(abort)
+    _agent_usage = PaperAgentUsageMeter.for_stage('recommend')
     user_question = description[:300]
     paper_tools, paper_contracts = freeze_paper_tool_epoch(
         build_research_tool_schemas(), owner_user_id=user_id)
@@ -203,7 +206,9 @@ def _research_and_interpret(description, max_results, *, abort=None,
         force_vertical=_RESEARCH_VERTICAL,
         contract_documents_for_round=contracts_by_round.get)
 
-    run_agent_loop(
+    run_guarded_paper_agent_loop(
+        context='Paper Recommend agent',
+        usage_meter=_agent_usage,
         abort=abort_signal,
         round_tools=paper_tools,
         dispatch=_dispatch,
@@ -216,4 +221,7 @@ def _research_and_interpret(description, max_results, *, abort=None,
     content = _round['content']
     if not content and isinstance(_last['msg'], dict):
         content = _last['msg'].get('content') or ''
-    return _parse_llm_json(content)
+    parsed = _parse_llm_json(content)
+    if isinstance(parsed, dict):
+        parsed['_agentUsageV1'] = _agent_usage.snapshot()
+    return parsed

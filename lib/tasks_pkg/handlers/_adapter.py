@@ -91,6 +91,27 @@ def simple_call(
     tool_content = executor(fn_name, fn_args, **(executor_kwargs or {}))
     elapsed = time.time() - t0
 
+
+    # MCP ImageContent is carried out-of-band on a string subclass. Persist it
+    # before finalization so the same authoritative Turn event contains image
+    # references while tool text and existing handler contracts stay unchanged.
+    if source.startswith('MCP') and getattr(tool_content, 'image_contents', None):
+        try:
+            from lib.tasks_pkg.mcp_result_media import capture_mcp_result_images
+
+            source_tool = str(fn_args.get('name') or fn_name)
+            capture_mcp_result_images(
+                task,
+                tool_content,
+                source_tool=source_tool,
+                tool_call_id=tc_id,
+            )
+        except Exception as e:
+            logger.warning(
+                '[Task %s] [%s] MCP image capture failed for %s: %s',
+                tid, tag, fn_name, e, exc_info=True,
+            )
+
     _content_len = len(tool_content) if isinstance(tool_content, str) else len(str(tool_content))
     # Several executors (MCP bridge, desktop agent, swarm tools) signal failure
     # by RETURNING an error string rather than raising — so the bare "completed"

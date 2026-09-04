@@ -35,6 +35,21 @@ import unittest
 
 import pytest
 
+from tests.support.model_routing import (
+    allow_native_test_endpoint,
+    install_native_test_model_route,
+    native_test_model,
+)
+
+
+pytestmark = pytest.mark.api
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _native_test_endpoint_policy():
+    with allow_native_test_endpoint():
+        yield
+
 
 # ── Once-only global fixture ────────────────────────────────────────
 
@@ -74,6 +89,7 @@ def _setup_once():
                 'agents:memory', 'agents:image', 'agents:browser',
                 'agents:translate', 'webhooks'],
         rate_limit_rpm=120, rate_limit_tpd=0)
+    install_native_test_model_route(owner_user_id=1)
     return _STATE
 
 
@@ -251,7 +267,8 @@ class E2EHeadlessApiTest(unittest.TestCase):
             self.assertEqual(spec['openapi'], '3.1.0')
             # Components include all schemas
             schemas = spec['components']['schemas']
-            for s in ('ErrorEnvelope', 'TypedErrorEnvelope', 'ChatMessage', 'ChatCompletionRequest',
+            for s in ('ErrorEnvelope', 'TypedErrorEnvelope', 'ChatMessage',
+                       'ChatCompletionRequest', 'NativeChatCompletionRequest',
                        'ChatCompletionResponse', 'TofuConfig', 'TaskState',
                        'ApiKey'):
                 self.assertIn(s, schemas, f'missing schema: {s}')
@@ -360,7 +377,8 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/v1/messages',
                 headers={'x-api-key': self.user, 'Content-Type': 'application/json'},
                 json={
-                    'model': 'test', 'max_tokens': 100,
+                    'model': native_test_model()['model_id'],
+                    'max_tokens': 100,
                     'messages': [{'role': 'user', 'content': 'Hi'}],
                 })
             # If the header was respected, status is 200 (stub). If
@@ -379,7 +397,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/api/v1/chat/completions',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'test-model',
+                    'model': native_test_model(),
                     'messages': [{'role': 'user', 'content': 'PING_42'}],
                     'timeout_s': 5,
                 })
@@ -388,7 +406,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
             body = await r.get_json()
             # Body merges OpenAI shape into top-level (api_ok pattern)
             self.assertEqual(body['object'], 'chat.completion')
-            self.assertEqual(body['model'], 'test-model')
+            self.assertEqual(body['model'], 'stub-model')
             # Stub echoes the user prompt → confirms our messages
             # actually reached the orchestrator.
             self.assertIn('PING_42', body['choices'][0]['message']['content'])
@@ -409,7 +427,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/api/v1/chat/completions',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'm', 'stream': True,
+                    'model': native_test_model(), 'stream': True,
                     'messages': [{'role': 'user', 'content': 'STREAM_TOKEN'}],
                     'timeout_s': 5,
                 })
@@ -458,8 +476,9 @@ class E2EHeadlessApiTest(unittest.TestCase):
     def test_idempotency_replays(self):
         async def go():
             c = self._client()
-            payload = {'messages': [{'role': 'user', 'content': 'idem'}],
-                        'timeout_s': 5}
+            payload = {'model': native_test_model(),
+                       'messages': [{'role': 'user', 'content': 'idem'}],
+                       'timeout_s': 5}
             r1 = await c.post('/api/v1/chat/completions',
                                headers=_hdr(self.user, {'Idempotency-Key': 'idem-1'}),
                                json=payload)
@@ -482,8 +501,9 @@ class E2EHeadlessApiTest(unittest.TestCase):
 
         async def go():
             c = self._client()
-            payload = {'messages': [{'role': 'user', 'content': 'isolated'}],
-                        'timeout_s': 5}
+            payload = {'model': native_test_model(),
+                       'messages': [{'role': 'user', 'content': 'isolated'}],
+                       'timeout_s': 5}
             r1 = await c.post('/api/v1/chat/completions',
                                headers=_hdr(self.user, {'Idempotency-Key': 'shared'}),
                                json=payload)
@@ -554,7 +574,8 @@ class E2EHeadlessApiTest(unittest.TestCase):
             c = self._client()
             r = await c.post('/api/v1/chat/completions',
                               headers=_hdr(self.user),
-                              json={'messages': [{'role': 'user', 'content': 'X'}],
+                              json={'model': native_test_model(),
+                                    'messages': [{'role': 'user', 'content': 'X'}],
                                     'timeout_s': 5})
             self.assertEqual(r.status_code, 200)
             tid = (await r.get_json())['task_id']
@@ -598,7 +619,8 @@ class E2EHeadlessApiTest(unittest.TestCase):
             for i in range(3):
                 r = await c.post('/api/v1/chat/completions',
                                   headers=_hdr(self.user),
-                                  json={'messages': [{'role': 'user',
+                                  json={'model': native_test_model(),
+                                        'messages': [{'role': 'user',
                                                        'content': f'usage-{i}'}],
                                          'timeout_s': 5})
                 self.assertEqual(r.status_code, 200)
@@ -629,7 +651,8 @@ class E2EHeadlessApiTest(unittest.TestCase):
             await self._client().post(
                 '/api/v1/chat/completions',
                 headers=_hdr(self.user),
-                json={'messages': [{'role': 'user', 'content': 'metric'}],
+                json={'model': native_test_model(),
+                      'messages': [{'role': 'user', 'content': 'metric'}],
                       'timeout_s': 5})
             r = await self._client().get('/metrics', headers=_hdr(self.admin))
             self.assertEqual(r.status_code, 200)
@@ -660,7 +683,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/v1/chat/completions',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'gpt-fake',
+                    'model': native_test_model()['model_id'],
                     'messages': [{'role': 'user', 'content': 'OPENAI_PING'}],
                     'temperature': 0.7,
                     'max_tokens': 100,
@@ -685,7 +708,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/v1/chat/completions',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'm',
+                    'model': native_test_model()['model_id'],
                     'messages': [{'role': 'user', 'content': 'OPENAI_STREAM'}],
                     'stream': True,
                 })
@@ -726,7 +749,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/v1/messages',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'claude-fake',
+                    'model': native_test_model()['model_id'],
                     'max_tokens': 100,
                     'system': 'Be brief.',
                     'messages': [{'role': 'user', 'content': 'ANTHROPIC_PING'}],
@@ -736,7 +759,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
             body = await r.get_json()
             self.assertEqual(body['type'], 'message')
             self.assertEqual(body['role'], 'assistant')
-            self.assertEqual(body['model'], 'claude-fake')
+            self.assertEqual(body['model'], native_test_model()['model_id'])
             # Content blocks
             self.assertIsInstance(body['content'], list)
             text_block = next((b for b in body['content']
@@ -758,7 +781,8 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/v1/messages',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'm', 'max_tokens': 100,
+                    'model': native_test_model()['model_id'],
+                    'max_tokens': 100,
                     'messages': [{'role': 'user', 'content': 'ANTHRO_STREAM'}],
                     'stream': True,
                 })
@@ -778,7 +802,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
                 '/v1/messages/count_tokens',
                 headers=_hdr(self.user),
                 json={
-                    'model': 'm',
+                    'model': native_test_model()['model_id'],
                     'messages': [{'role': 'user', 'content': 'count me'}],
                 })
             self.assertEqual(r.status_code, 200)
@@ -891,6 +915,29 @@ class E2EHeadlessApiTest(unittest.TestCase):
             self.assertEqual(r.status_code, 400)
         _run(go())
 
+    def test_webhook_event_types_are_structurally_bounded(self):
+        async def go():
+            client = self._client()
+            too_many = await client.post(
+                '/api/v1/webhooks',
+                headers=_hdr(self.user),
+                json={
+                    'url': 'https://example.com/hook',
+                    'event_types': [f'event-{index}' for index in range(33)],
+                },
+            )
+            too_long = await client.post(
+                '/api/v1/webhooks',
+                headers=_hdr(self.user),
+                json={
+                    'url': 'https://example.com/hook',
+                    'event_types': ['x' * 81],
+                },
+            )
+            self.assertEqual(too_many.status_code, 400)
+            self.assertEqual(too_long.status_code, 400)
+        _run(go())
+
     # ── 12. Memory agent ───────────────────────────────────────────
 
     def test_memory_search(self):
@@ -946,7 +993,8 @@ class E2EHeadlessApiTest(unittest.TestCase):
             # 2. chat (native)
             r = await c.post('/api/v1/chat/completions',
                               headers=_hdr(self.user),
-                              json={'messages': [{'role': 'user', 'content': 'x'}],
+                              json={'model': native_test_model(),
+                                    'messages': [{'role': 'user', 'content': 'x'}],
                                     'timeout_s': 5})
             tid = (await r.get_json())['task_id']
             # 3. task lookup
@@ -955,13 +1003,14 @@ class E2EHeadlessApiTest(unittest.TestCase):
             # 4. openai compat
             r = await c.post('/v1/chat/completions',
                               headers=_hdr(self.user),
-                              json={'model': 'm',
+                              json={'model': native_test_model()['model_id'],
                                     'messages': [{'role': 'user', 'content': 'y'}]})
             self.assertEqual(r.status_code, 200)
             # 5. anthropic compat
             r = await c.post('/v1/messages',
                               headers=_hdr(self.user),
-                              json={'model': 'm', 'max_tokens': 50,
+                              json={'model': native_test_model()['model_id'],
+                                    'max_tokens': 50,
                                     'messages': [{'role': 'user', 'content': 'z'}]})
             self.assertEqual(r.status_code, 200)
             # 6. usage now reflects all three

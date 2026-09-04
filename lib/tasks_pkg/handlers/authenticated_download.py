@@ -1,6 +1,6 @@
 """Safe fallback for model-authored cookie-bearing shell file downloads.
 
-The canonical capability is ``download_url_to_server``.  This adapter only
+The canonical capability is ``browser_download_url_to_server``. This adapter only
 recognizes a narrow legacy model behavior before ``run_command`` spawns: a
 single GET-like curl/wget file download carrying cookies.  It discards the
 cookie material, reuses the task's explicit browser identity, and invokes the
@@ -54,7 +54,7 @@ def maybe_redirect_authenticated_download(
             f'$ {display_command}\n'
             'The command was blocked before subprocess spawn: browser cookie '
             f'material may not be replayed through shell HTTP. Reason: {reason}.\n'
-            'Call download_url_to_server({"url":"<exact file URL>"}) instead; '
+            'Call browser_download_url_to_server({"url":"<exact file URL>"}) instead; '
             'it automatically selects server HTTP or the logged-in browser.\n'
             '[exit code: 2]'
         )
@@ -85,12 +85,12 @@ def maybe_redirect_authenticated_download(
             'message': result.get('error_msg') or 'Download failed.',
             'retryable': bool(result.get('retryable')),
             'nextAction': result.get('next_action') or (
-                'Use download_url_to_server; do not retry with cookie replay.'),
+                'Use browser_download_url_to_server; do not retry with cookie replay.'),
         }
         tool_content = (
             f'$ {display_command}\n'
             'The cookie-bearing shell command was not executed. Its file '
-            'acquisition was automatically routed to download_url_to_server, '
+            'acquisition was automatically routed to browser_download_url_to_server, '
             'which failed with:\n'
             f'{json.dumps(error, ensure_ascii=False, sort_keys=True)}\n'
             '[exit code: 1]'

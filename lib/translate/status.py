@@ -34,6 +34,7 @@ def _format_status_message(event):
         'wrong_language': 'Output in wrong language, retrying with another model',
         'wrong_language_final': 'Output in wrong language after retries',
         'mt_fallback': 'MT provider failed, using LLM',
+        'server_busy': 'Translation queue is busy, sending original text',
         'timed_out': 'Translation timed out, sending original text',
     }
     base = labels.get(kind, kind.replace('_', ' '))

@@ -1,5 +1,4 @@
-"""Characterization (regression) tests for the tool-round RENDER layer in
-``static/js/ui/tool_rounds.js``.
+"""Tool-round presentation owner and retained-adapter behavior contracts.
 
 WHY
 ---
@@ -12,12 +11,13 @@ the frontend (2283L) and had NO direct test. A regression there (a renderer
 emitting the wrong CSS class / dropping a badge / mis-grouping a parallel
 batch) would ship silently because the SSE-state test never inspects HTML.
 
-This harness is the missing TWIN: it drives real ``rounds`` arrays (the exact
-shape the SSE dispatcher produces) through the PUBLIC entry
+The exact typed tool-result owner contract covers compaction, write/edit diff,
+batch summary, escaping, immutability, and bounded result-viewer policy without
+a DOM. A narrower retained harness still drives real ``rounds`` arrays (the
+exact shape the SSE dispatcher produces) through the PUBLIC entry
 ``renderToolRoundsHTML(rounds, isStreaming)`` and asserts the resulting DOM
-structure for every tool family + status. It locks the render contract so the
-eventual decomposition of ``tool_rounds.js`` (next monolith target) has a
-no-regression safety net for the shared typed Turn presentation path.
+structure for the remaining tool families and statuses. The separate
+wire-parity battery locks dispatcher integration byte-for-byte.
 
 Runs the REAL shipped JS under jsdom via the shared harness; the swarm panel
 builder lives in ui/streaming_swarm_panel.js, so that file is loaded first
@@ -28,12 +28,310 @@ concatenates it before tool_rounds.js.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOL_RESULT_OWNER = (
+    ROOT / 'frontend/src/conversation/presentation/tool-result-presentation.ts'
+)
+TOOL_RESULT_OWNER_JS = Path(native_module_path(
+    '.native/tool-result-presentation-contract.js',
+    TOOL_RESULT_OWNER,
+))
+
+
+_OWNER_HARNESS = r"""
+eval(process.env.OWNER_SOURCE);
+
+const checks = [];
+function check(name, condition) {
+  checks.push((condition ? 'PASS ' : 'FAIL ') + name);
+}
+
+const messages = {
+  'tool.backendResult': 'Backend result',
+  'tool.resultStats': '{lines} lines · {chars} chars',
+  'tool.resultTruncated': 'Result too long — showing first {n} chars',
+};
+function translate(key, params) {
+  let value = messages[key] || key;
+  if (!params || typeof params !== 'object') return value;
+  return value.replace(/\{([A-Za-z0-9_]+)\}/g, (token, name) => (
+    Object.prototype.hasOwnProperty.call(params, name)
+      ? String(params[name]) : token
+  ));
+}
+const writeGateRefusal = {
+  resolveRefusal: (_round, metadata) => metadata && metadata.refusal || null,
+  renderNoticeHtml: (refusal) => refusal
+    ? '<aside data-gate="' + String(refusal.kind) + '">gate notice</aside>'
+    : '',
+};
+const presentation = createToolResultPresentation({
+  translate,
+  writeGateRefusal,
+});
+const header = Object.freeze({
+  iconHtml: '<i data-slot="icon"></i>',
+  queryHtml: '<b>Projected query</b>',
+  rootPillHtml: '<span data-slot="root"></span>',
+  badgeHtml: '<span data-slot="badge"></span>',
+  repairedBadgeHtml: '<span data-slot="repaired"></span>',
+  rightControlsHtml: '<span data-slot="controls"></span>',
+  toolDisplayLabel: 'Project',
+});
+
+check('immutable_narrow_public_port',
+  Object.isFrozen(presentation)
+  && Object.keys(presentation).length === 3
+  && typeof presentation.renderCompactionLabelHtml === 'function'
+  && typeof presentation.renderWriteResultHtml === 'function'
+  && typeof presentation.renderGenericResultHtml === 'function');
+
+const compaction = presentation.renderCompactionLabelHtml({
+  compactionLayer: 'L1', compactedFromChars: 112000, compactedToChars: 800,
+});
+check('compaction_layer_and_token_reduction_are_explicit',
+  compaction.includes('COMPACTED L1')
+  && compaction.includes('28k→200')
+  && compaction.includes('Aged out of the hot tail'));
+check('all_authoritative_compaction_layers_have_copy',
+  presentation.renderCompactionLabelHtml({ compactionLayer: 'L0' })
+    .includes('never entered context')
+  && presentation.renderCompactionLabelHtml({ compactionLayer: 'L3' })
+    .includes('LLM-generated summary'));
+const hostileCompaction = presentation.renderCompactionLabelHtml({
+  compactionLayer: 'L1" onclick="injected',
+});
+check('future_or_hostile_compaction_layer_is_visible_but_safe',
+  hostileCompaction.includes('COMPACTED L1&quot; onclick=&quot;injected')
+  && !hostileCompaction.includes('class="ptool-compaction-label ptool-compaction-l1"'));
+
+const frozenWrite = Object.freeze({
+  roundNum: 7,
+  toolName: 'write_file',
+  toolArgs: JSON.stringify({ content: '<script>\nsecond' }),
+});
+const frozenWriteMetadata = Object.freeze({
+  refusal: Object.freeze({ kind: 'stale' }),
+});
+const writeBefore = JSON.stringify([frozenWrite, frozenWriteMetadata, header]);
+const writeHtml = presentation.renderWriteResultHtml(
+  frozenWrite, frozenWriteMetadata, header,
+);
+check('write_file_is_a_collapsible_added_line_diff',
+  writeHtml.includes('ptool-batch-done-block')
+  && writeHtml.match(/bdiff-add/g).length === 2);
+check('write_file_escapes_content_and_preserves_trusted_header_slots',
+  writeHtml.includes('&lt;script&gt;') && !writeHtml.includes('<script>')
+  && writeHtml.includes('<i data-slot="icon"></i>')
+  && writeHtml.includes('<b>Projected query</b>'));
+check('write_file_places_typed_gate_notice',
+  writeHtml.includes('<aside data-gate="stale">gate notice</aside>'));
+check('presentation_does_not_mutate_projection_or_header',
+  JSON.stringify([frozenWrite, frozenWriteMetadata, header]) === writeBefore);
+
+const diffHtml = presentation.renderWriteResultHtml({
+  roundNum: 8,
+  toolName: 'apply_diff',
+  toolArgs: { search: 'keep\nold', replace: 'keep\nnew' },
+}, {}, header);
+check('single_diff_uses_lcs_context_delete_and_add_rows',
+  diffHtml.includes('bdiff-ctx')
+  && diffHtml.includes('bdiff-del')
+  && diffHtml.includes('bdiff-add'));
+const insertBeforeHtml = presentation.renderWriteResultHtml({
+  roundNum: 9,
+  toolName: 'insert_content',
+  toolArgs: { anchor: 'anchor', content: 'before', position: 'before' },
+}, {}, header);
+const insertAfterHtml = presentation.renderWriteResultHtml({
+  roundNum: 10,
+  toolName: 'insert_content',
+  toolArgs: { anchor: 'anchor', content: 'after', position: 'after' },
+}, {}, header);
+check('insert_content_preserves_direction',
+  insertBeforeHtml.indexOf('before') < insertBeforeHtml.indexOf('anchor')
+  && insertAfterHtml.indexOf('anchor') < insertAfterHtml.indexOf('after'));
+
+const batchHtml = presentation.renderWriteResultHtml({
+  roundNum: 11,
+  toolName: 'edit_file',
+  toolArgs: { edits: [
+    { operation: 'replace', search: 'old', content: 'new' },
+    { operation: 'insert_after', anchor: 'x', content: 'y' },
+  ] },
+}, {
+  refusal: { kind: 'partial_stale' },
+  editSummaries: [
+    {
+      path: 'src/a.py', description: 'src/a.py: replace <unsafe>',
+      status: 'ok', operation: 'replace',
+    },
+    {
+      path: 'lib/b.py', description: 'b.py: skipped',
+      status: 'fail', operation: 'insert_after',
+    },
+  ],
+}, header);
+check('batch_edit_renders_each_status_and_gate_notice',
+  batchHtml.match(/ptool-batch-done-edit/g).length === 2
+  && batchHtml.includes('ptool-batch-ok')
+  && batchHtml.includes('ptool-batch-fail')
+  && batchHtml.includes('data-gate="partial_stale"'));
+check('multi_file_rows_show_safe_basenames_not_redundant_prefixes',
+  batchHtml.includes('title="src/a.py">a.py</span>')
+  && batchHtml.includes('title="lib/b.py">b.py</span>')
+  && batchHtml.includes('replace &lt;unsafe&gt;')
+  && !batchHtml.includes('src/a.py: replace'));
+check('batch_operations_use_designed_enum_pills',
+  batchHtml.includes('ptool-op--replace')
+  && batchHtml.includes('>replace</span>')
+  && batchHtml.includes('ptool-op--insert')
+  && batchHtml.includes('>insert_after</span>'));
+const failedSegment = batchHtml.slice(batchHtml.indexOf('ptool-batch-fail'));
+check('failed_batch_edit_does_not_invent_a_diff',
+  failedSegment && !failedSegment.includes('bdiff-block'));
+
+const legacyInsertHtml = presentation.renderWriteResultHtml({
+  roundNum: 12,
+  toolName: 'insert_contents',
+  toolArgs: { edits: [
+    { anchor: 'a', content: 'b', position: 'after' },
+    { anchor: 'c', content: 'd', position: 'before' },
+  ] },
+}, { editSummaries: [
+  { path: 'x.py', status: 'ok' },
+  { path: 'x.py', status: 'ok' },
+] }, header);
+const legacyReplaceHtml = presentation.renderWriteResultHtml({
+  roundNum: 13,
+  toolName: 'apply_diffs',
+  toolArgs: { edits: [
+    { search: 'a', replace: 'b' },
+    { search: 'c', replace: 'd' },
+  ] },
+}, { editSummaries: [
+  { path: 'x.py', status: 'ok' },
+  { path: 'x.py', status: 'ok' },
+] }, header);
+check('legacy_batch_tools_derive_operation_pills',
+  legacyInsertHtml.includes('>insert_after</span>')
+  && legacyInsertHtml.includes('>insert_before</span>')
+  && legacyReplaceHtml.match(/ptool-op--replace/g).length === 2);
+check('unified_edit_accepts_one_summary_but_legacy_batch_requires_many',
+  presentation.renderWriteResultHtml({
+    roundNum: 14, toolName: 'edit_file',
+    toolArgs: { edits: [{ search: 'a', content: 'b', operation: 'replace' }] },
+  }, { editSummaries: [{ path: 'x.py', status: 'ok', operation: 'replace' }] }, header)
+    .includes('ptool-batch-done-edit')
+  && presentation.renderWriteResultHtml({
+    roundNum: 15, toolName: 'apply_diffs',
+    toolArgs: { edits: [{ search: 'a', replace: 'b' }] },
+  }, { editSummaries: [{ path: 'x.py', status: 'ok' }] }, header) === '');
+check('leaked_edit_metadata_cannot_reclassify_another_tool',
+  presentation.renderWriteResultHtml({
+    roundNum: 16, toolName: 'run_command', toolArgs: '{}',
+  }, { editSummaries: [{}, {}] }, header) === '');
+check('malformed_or_irrelevant_write_inputs_fail_closed',
+  presentation.renderWriteResultHtml(null, null, header) === ''
+  && presentation.renderWriteResultHtml({
+    toolName: 'write_file', toolArgs: '{broken',
+  }, {}, header) === '');
+
+const genericHtml = presentation.renderGenericResultHtml({
+  roundNum: 17,
+  toolName: 'read_files',
+  status: 'done',
+  toolContent: '<div>\nsecond',
+  compactionLayer: 'L0',
+}, {}, header);
+check('generic_result_preserves_every_explicit_header_slot',
+  genericHtml.includes('ptool-result-block')
+  && genericHtml.includes('data-slot="icon"')
+  && genericHtml.includes('data-slot="root"')
+  && genericHtml.includes('data-slot="repaired"')
+  && genericHtml.includes('data-slot="badge"')
+  && genericHtml.includes('data-slot="controls"')
+  && genericHtml.includes('COMPACTED L0'));
+check('generic_result_escapes_content_and_localizes_typed_stats',
+  genericHtml.includes('&lt;div&gt;') && !genericHtml.includes('<div>')
+  && genericHtml.includes('project · 2 lines · 12 chars'));
+const jsonHtml = presentation.renderGenericResultHtml({
+  roundNum: 18, toolName: 'mcp__compile', status: 'done',
+  toolContent: '{"ok":true,"pages":2}',
+}, {}, header);
+check('json_result_is_pretty_printed_and_safely_escaped',
+  jsonHtml.includes('json · 4 lines')
+  && jsonHtml.includes('{\n  &quot;ok&quot;: true,\n  &quot;pages&quot;: 2\n}'));
+const structuredTruthHtml = presentation.renderGenericResultHtml({
+  roundNum: 19, toolName: 'mcp__history', status: 'done',
+  toolContent: { contractVersion: 'tofu.tool-result/v2',
+    summary: 'OBJECT_BACKEND_TRUTH' },
+}, { output: 'UNRELATED_METADATA_OUTPUT' }, header);
+check('structured_tool_content_is_serialized_from_the_round',
+  structuredTruthHtml.includes('OBJECT_BACKEND_TRUTH')
+  && structuredTruthHtml.includes('data-tool-result-authority="toolContent"')
+  && !structuredTruthHtml.includes('UNRELATED_METADATA_OUTPUT'));
+const roundResultTruthHtml = presentation.renderGenericResultHtml({
+  roundNum: 19, toolName: 'legacy_tool', status: 'done',
+  result: { content: 'ROUND_RESULT_BACKEND_TRUTH' },
+}, { output: 'UNRELATED_LEGACY_METADATA' }, header);
+check('round_result_is_the_only_legacy_authority',
+  roundResultTruthHtml.includes('ROUND_RESULT_BACKEND_TRUTH')
+  && roundResultTruthHtml.includes('data-tool-result-authority="roundResult"')
+  && !roundResultTruthHtml.includes('UNRELATED_LEGACY_METADATA'));
+check('present_but_empty_tool_content_never_falls_through_to_metadata',
+  presentation.renderGenericResultHtml({
+    roundNum: 19, toolName: 'read_files', status: 'done', toolContent: ' ',
+  }, { output: 'UNRELATED_EMPTY_FALLBACK' }, header) === '');
+const truncatedHtml = presentation.renderGenericResultHtml({
+  roundNum: 20, toolName: 'read_files', status: 'done',
+  toolContent: 'x'.repeat(130000),
+}, {}, header);
+const truncatedCode = truncatedHtml.match(/<code>(x+)<\/code>/);
+check('generic_result_has_a_visible_120k_character_bound',
+  truncatedHtml.includes('ptool-result-trunc')
+  && truncatedHtml.includes('120,000')
+  && truncatedCode && truncatedCode[1].length === 120000);
+check('in_flight_and_empty_results_do_not_open_a_viewer',
+  presentation.renderGenericResultHtml({
+    status: 'searching', toolContent: 'partial',
+  }, {}, header) === ''
+  && presentation.renderGenericResultHtml({
+    status: 'done', toolContent: '   ',
+  }, {}, header) === '');
+
+const largeOld = Array.from({ length: 151 }, (_, i) => 'old-' + i).join('\n');
+const largeNew = Array.from({ length: 151 }, (_, i) => 'new-' + i).join('\n');
+check('large_diff_uses_bounded_before_after_fallback',
+  presentation.renderWriteResultHtml({
+    roundNum: 21, toolName: 'apply_diff',
+    toolArgs: { search: largeOld, replace: largeNew },
+  }, {}, header).includes('bdiff-sep'));
+const hostileRoundIdHtml = presentation.renderGenericResultHtml({
+  roundNum: '1" onmouseover="injected',
+  toolName: 'read_files', status: 'done', toolContent: 'safe',
+}, {}, header);
+check('round_identity_attribute_is_escaped',
+  hostileRoundIdHtml.includes('data-rn="1&quot; onmouseover=&quot;injected"')
+  && !hostileRoundIdHtml.includes('data-rn="1" onmouseover="injected"'));
+check('invalid_compaction_and_generic_inputs_fail_closed',
+  presentation.renderCompactionLabelHtml(null) === ''
+  && presentation.renderCompactionLabelHtml({ compactionLayer: 1 }) === ''
+  && presentation.renderGenericResultHtml(null, null, header) === '');
+
+console.log(checks.join('\n'));
+"""
 
 
 _BODY = r"""
@@ -100,7 +398,8 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
 {
   const html = renderToolRoundsHTML([
     { roundNum: 1, toolName: 'search_web', status: 'rejected',
-      _rejected: { attempted: 'search_web', suggestions: ['web_search'] },
+      _rejected: { kind: 'hallucinated', attempted: 'search_web',
+        suggestions: ['web_search'] },
       results: [] },
   ], false);
   const d = frag(html);
@@ -146,6 +445,15 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
   check('batch_size_attr', turns[0].getAttribute('data-batch-size') === '3');
   check('parallel_head_present', !!d.querySelector('.ptool-turn-head'));
   check('three_lines_in_turn', d.querySelectorAll('.ptool-line').length === 3);
+  check('routine_parallel_batch_auto_collapsed',
+    turns[0].classList.contains('collapsed')
+    && d.querySelector('.ptool-turn-head').getAttribute('aria-expanded') === 'false');
+  document.body.appendChild(d);
+  d.querySelector('.ptool-turn-head').dispatchEvent(new Event('click', { bubbles: true }));
+  check('routine_parallel_batch_reader_can_expand',
+    !turns[0].classList.contains('collapsed')
+    && d.querySelector('.ptool-turn-head').getAttribute('aria-expanded') === 'true');
+  d.remove();
 }
 
 // ── 7. solo turns get NO parallel header (each its own ptool-turn, size 1) ──
@@ -157,6 +465,59 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
   const d = frag(html);
   check('two_solo_turns', d.querySelectorAll('.ptool-turn').length === 2);
   check('no_parallel_head_for_solo', d.querySelector('.ptool-turn-head') === null);
+}
+
+// ── 7b. attention hierarchy: noisy observation-only panels fold; anything
+// active, failed, interactive, or semantically important stays exposed. ──
+{
+  const routine = Array.from({ length: 4 }, (_, i) => ({
+    roundNum: i + 1, llmRound: i, toolCallId: 'routine-' + i,
+    toolName: 'read_files', attentionKind: 'routine', status: 'done',
+    query: 'read ' + i, results: [{}],
+  }));
+  const routineDom = frag(renderToolRoundsHTML(routine, false));
+  const panel = routineDom.querySelector('.ptool-panel');
+  check('routine_panel_auto_collapsed', panel.classList.contains('collapsed'));
+  check('routine_panel_disclosure_state',
+    panel.getAttribute('data-attention') === 'routine'
+    && panel.querySelector('.ptool-panel-header').getAttribute('aria-expanded') === 'false'
+    && !!panel.querySelector('.ptool-panel-routine'));
+  document.body.appendChild(routineDom);
+  const routineHeader = panel.querySelector('.ptool-panel-header');
+  routineHeader.dispatchEvent(new Event('click', { bubbles: true }));
+  check('routine_panel_reader_can_expand',
+    !panel.classList.contains('collapsed')
+    && routineHeader.getAttribute('aria-expanded') === 'true');
+  routineHeader.dispatchEvent(new Event('click', { bubbles: true }));
+  check('routine_panel_reader_can_collapse_again',
+    panel.classList.contains('collapsed')
+    && routineHeader.getAttribute('aria-expanded') === 'false');
+  routineDom.remove();
+
+  const writeDom = frag(renderToolRoundsHTML([
+    ...routine,
+    { roundNum: 5, llmRound: 4, toolCallId: 'write-1',
+      toolName: 'write_file', attentionKind: 'important', status: 'done',
+      query: 'write result', results: [{}] },
+  ], false));
+  check('important_panel_stays_exposed',
+    !writeDom.querySelector('.ptool-panel').classList.contains('collapsed'));
+
+  const errorDom = frag(renderToolRoundsHTML([
+    ...routine,
+    { roundNum: 5, llmRound: 4, toolCallId: 'error-1',
+      toolName: 'read_files', attentionKind: 'routine', status: 'error',
+      query: 'failed read', toolContent: 'boom' },
+  ], false));
+  check('error_panel_stays_exposed',
+    !errorDom.querySelector('.ptool-panel').classList.contains('collapsed')
+    && errorDom.querySelector('.ptool-panel').getAttribute('data-attention') === 'error');
+
+  check('unknown_legacy_tool_fails_visible',
+    toolRoundAttention({ toolName: 'future_mutator', status: 'done' }) === 'important');
+  check('live_state_overrides_routine_semantics',
+    toolRoundAttention({ toolName: 'read_files', attentionKind: 'routine',
+      status: 'searching' }) === 'active');
 }
 
 // ── 8. truncation: >100 inactive rounds → ptool-truncated marker + only 50 shown ──
@@ -285,21 +646,14 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
 }
 
 // ── 11. browser family classification (2026-08-05 'Read ?' incident) ──
-// The v2 action tools were missing from _isRoundBrowser: they fell to the
+// The v2 action tools were once missing from the browser presentation family:
 // generic lightning icon, a name-mangled label, and a spurious "✓ done"
 // badge. Pin the whole family + the family glyph + the badge carve-out.
 {
   const v2 = ['browser_click', 'browser_type', 'browser_press_key',
     'browser_menu_click', 'browser_fill_form'];
   check('browser_family_v2_actions',
-    v2.every((n) => _isRoundBrowser({ toolName: n })));
-  const legacy = ['browser_read_tab', 'browser_keyboard', 'browser_hover',
-    'browser_wait', 'browser_summarize_page', 'browser_get_app_state',
-    'browser_get_interactive_elements', 'browser_hover_and_click',
-    'browser_right_click_menu'];
-  check('browser_family_legacy_kept',
-    legacy.every((n) => _isRoundBrowser({ toolName: n })));
-
+    v2.every((n) => isBrowserToolRound({ toolName: n })));
   // A done browser_click renders the CLICK glyph, not the generic lightning.
   const clickHtml = renderToolRoundsHTML([
     { roundNum: 1, toolName: 'browser_click', status: 'done',
@@ -408,159 +762,89 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
   check('todo_non_todo_round_kept', html.includes('Read config'));
 }
 
-// ── 15. batch-edit rows carry per-edit operation pills ──
-// The header summarizes ops as text ("(2 edits: replace, …)"); each sub-row
-// must carry a DESIGNED indicator: an icon + enum-label pill, amber for
-// replace, green for pure insertions. Data source is the server-stamped
-// editSummaries[].operation (index-aligned by construction), with the
-// legacy batch tools deriving the op from the tool itself.
+// ── 14b. rejected checklist protocol remains model/debug-only ──
 {
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'edit_file', status: 'done',
-      query: 'Edit a.py (2 edits: replace, insert_after)',
-      toolArgs: JSON.stringify({ edits: [
-        { path: 'a.py', operation: 'replace', anchor: 'old', content: 'new' },
-        { path: 'a.py', operation: 'insert_after', anchor: 'x', content: 'y' },
-      ] }),
-      results: [{ toolName: 'edit_file', badge: '2/2 edits', writeOk: true,
-        editOperations: ['replace', 'insert_after'],
-        editSummaries: [
-          { path: 'a.py', description: '', status: 'ok', detail: '', operation: 'replace' },
-          { path: 'a.py', description: '', status: 'ok', detail: '', operation: 'insert_after' },
-        ] }] },
-  ], false);
+  const accepted = {
+    roundNum: 1, llmRound: 1, toolName: 'todo_write', status: 'done',
+    toolCallId: 'todo-accepted', query: 'Checklist revision 1',
+    results: [{ toolName: 'todo_write', source: 'Checklist', badge: '0/2',
+      todoRevision: 1, todoUpdateCount: 1, todos: [
+        { id: 'spec', content: 'Add regression', status: 'in_progress' },
+        { id: 'verify', content: 'Run tests', status: 'pending' },
+      ] }],
+  };
+  const rejected = {
+    ...accepted, roundNum: 2, llmRound: 2, toolCallId: 'todo-rejected',
+    results: [{ ...accepted.results[0], todoRejected: true,
+      todoRejectReason: 'sync cannot remove unfinished items (verify); use replan with a reason' }],
+  };
+  const html = renderToolRoundsHTML([accepted, rejected], false);
   const d = frag(html);
-  const pills = d.querySelectorAll('.ptool-op');
-  check('op_pill_per_row', pills.length === 2);
-  check('op_pill_replace_kind', !!d.querySelector('.ptool-op--replace'));
-  check('op_pill_insert_kind', !!d.querySelector('.ptool-op--insert'));
-  check('op_pill_enum_labels', html.includes('>replace</span>') &&
-    html.includes('>insert_after</span>'));
-  check('op_pill_has_icon', d.querySelector('.ptool-op svg') !== null);
-  check('op_pill_title_attr', !!d.querySelector('[title="operation: insert_after"]'));
+  check('todo_rejection_still_projects_one_authoritative_card',
+    d.querySelectorAll('.ptool-todo-block').length === 1);
+  check('todo_rejection_reason_is_not_human_visible',
+    !html.includes('sync cannot remove unfinished')
+    && !html.includes('use replan with a reason'));
+  check('todo_rejection_has_neutral_human_outcome',
+    html.includes('todo.unchanged'));
+  check('todo_rejection_does_not_inflate_revision_count',
+    !d.querySelector('.ptool-todo-revisions')
+    && !d.querySelector('.ptool-todo-history'));
 }
 
-// ── 15b. legacy batch tools derive the pill from the tool itself ──
+// A specialized search card keeps its existing one-click disclosure. It may
+// format the same settled result, but must not grow a second nested raw-result
+// disclosure (the UI regression reported after the authority fix).
 {
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'insert_contents', status: 'done',
-      query: 'Insert into a.py (2 insertions)',
-      toolArgs: JSON.stringify({ edits: [
-        { path: 'a.py', anchor: 'x', content: 'y', position: 'after' },
-        { path: 'a.py', anchor: 'z', content: 'w', position: 'before' },
-      ] }),
-      results: [{ toolName: 'insert_contents', badge: '2/2 inserted', writeOk: true,
-        editSummaries: [
-          { path: 'a.py', description: '', status: 'ok', detail: '' },
-          { path: 'a.py', description: '', status: 'ok', detail: '' },
-        ] }] },
-    { roundNum: 2, toolName: 'apply_diffs', status: 'done',
-      query: 'Patch b.py (2 edits)',
-      toolArgs: JSON.stringify({ edits: [
-        { path: 'b.py', search: 's1', replace: 'r1' },
-        { path: 'b.py', search: 's2', replace: 'r2' },
-      ] }),
-      results: [{ toolName: 'apply_diffs', badge: '2/2 edits', writeOk: true,
-        editSummaries: [
-          { path: 'b.py', description: '', status: 'ok', detail: '' },
-          { path: 'b.py', description: '', status: 'ok', detail: '' },
-        ] }] },
-  ], false);
+  const html = renderToolRoundsHTML([{
+    roundNum: 99, toolCallId: 'truth-search', toolName: 'web_search',
+    status: 'done', query: 'human-friendly result',
+    toolContent: JSON.stringify({ title: 'Human-friendly search card',
+      url: 'https://example.com' }),
+    results: [{ title: 'Human-friendly search card', url: 'https://example.com' }],
+  }], false);
   const d = frag(html);
-  check('legacy_insert_directions', html.includes('>insert_after</span>') &&
-    html.includes('>insert_before</span>'));
-  check('legacy_apply_diffs_replace_pill',
-    d.querySelectorAll('.ptool-op--replace').length === 2);
-  check('legacy_no_pill_spillover',
-    d.querySelectorAll('.ptool-op').length === 4);
-}
-
-// ── 16. generic result viewer — settled rounds with toolContent expand ──
-// read_files / grep_search / find_files / list_dir / browser reads / MCP
-// tools used to fall through to a bare .ptool-line with the ENTIRE result
-// invisible. The catch-all viewer renders any done round with a non-empty
-// toolContent as a native <details>: standard row as summary, verbatim
-// monospace result pane (stats + copy header) as body.
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'read_files', status: 'done',
-      query: 'Read server.py',
-      toolContent: 'File: server.py (lines 1-3 of 3)\nimport os\n<div>html</div>\nprint("hi")',
-      results: [{ toolName: 'read_files', badge: '3L' }] },
-  ], false);
-  const d = frag(html);
-  check('result_block_present', !!d.querySelector('details.ptool-result-block'));
-  check('result_summary_row', !!d.querySelector('.ptool-result-block > summary.ptool-line'));
-  check('result_content_visible', html.includes('import os'));
-  check('result_html_escaped', html.includes('&lt;div&gt;html&lt;/div&gt;')
-    && !html.includes('<div>html</div>'));
-  check('result_pre_code', !!d.querySelector('.ptool-result-pre code'));
-  check('result_copy_btn', !!d.querySelector('.ptool-result-block .copy-btn'));
-  check('result_header_stats', !!d.querySelector('.ptool-result-block .code-header'));
-  check('result_badge_kept', html.includes('3L'));
-}
-
-// ── 16b. grep_search done round → expandable result, badge preserved ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'grep_search', status: 'done',
-      query: '/foo/ in *.py',
-      toolContent: 'a.py:12: foo()\nb.py:30: foo(x)',
-      results: [{ toolName: 'grep_search', badge: '2 matches' }] },
-  ], false);
-  const d = frag(html);
-  check('grep_result_block', !!d.querySelector('.ptool-result-block'));
-  check('grep_matches_visible', html.includes('a.py:12: foo()')
-    && html.includes('b.py:30: foo(x)'));
-  check('grep_badge_kept', html.includes('2 matches'));
-}
-
-// ── 16c. done round with EMPTY toolContent → bare line, no viewer ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'list_dir', status: 'done',
-      query: 'List .', toolContent: '   ' },
-  ], false);
-  const d = frag(html);
-  check('empty_content_no_block', !d.querySelector('.ptool-result-block'));
-  check('empty_content_bare_line', !!d.querySelector('.ptool-line'));
-}
-
-// ── 16d. JSON toolContent is pretty-printed for readability ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'mcp__overleaf__compile', status: 'done',
-      query: 'Compile project', toolContent: '{"ok":true,"pages":2}' },
-  ], false);
-  check('json_pretty_printed', html.includes('{\n  "ok": true,\n  "pages": 2\n}'));
-}
-
-// ── 16e. over-long results are soft-capped with a stated truncation note ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'read_files', status: 'done',
-      query: 'Read huge.log', toolContent: 'x'.repeat(130000) },
-  ], false);
-  const d = frag(html);
-  check('trunc_note_shown', !!d.querySelector('.ptool-result-trunc'));
-  check('trunc_cap_enforced', d.querySelector('.ptool-result-pre code')
-    .textContent.length === 120000);
-}
-
-// ── 16f. in-flight (searching) rounds never get the result viewer ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'read_files', status: 'searching',
-      query: 'Reading…', toolContent: 'partial buffer' },
-  ], true);
-  check('searching_no_result_block', !frag(html).querySelector('.ptool-result-block'));
+  check('specialized_slot_stays_single_disclosure',
+    d.querySelectorAll('.ptool-results-block').length === 1
+    && d.querySelectorAll('.ptool-results-header[aria-expanded]').length === 1
+    && !html.includes('conversation-tool__authoritative-result')
+    && html.includes('Human-friendly search card'));
 }
 
 report();
 """
 
 
-def test_tool_rounds_render_characterization():
+def test_tool_result_owner_and_retained_round_adapter():
+    source = TOOL_RESULT_OWNER.read_text(encoding='utf-8')
+    assert 'runtimeScope' not in source
+    assert 'globalThis' not in source
+    assert 'window.' not in source
+    assert 'document.' not in source
+    if shutil.which('node') is None:
+        pytest.skip('node is required for the typed tool-result contract')
+    owner_process = subprocess.run(
+        [shutil.which('node'), '-e', _OWNER_HARNESS],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            **os.environ,
+            'OWNER_SOURCE': TOOL_RESULT_OWNER_JS.read_text(encoding='utf-8'),
+        },
+    )
+    assert owner_process.returncode == 0, owner_process.stderr
+    owner_failures = [
+        line for line in owner_process.stdout.splitlines()
+        if line.startswith('FAIL ')
+    ]
+    assert not owner_failures, owner_process.stdout
+    owner_passes = [
+        line for line in owner_process.stdout.splitlines()
+        if line.startswith('PASS ')
+    ]
+    assert len(owner_passes) == 29, owner_process.stdout
+
     run_harness(
         target_js=os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),
         body_js=_BODY,
@@ -568,6 +852,6 @@ def test_tool_rounds_render_characterization():
             os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),
             os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'),
         ],
-        min_pass=78,
+        expect_pass=86,
         label='tool_rounds render',
     )

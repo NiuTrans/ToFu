@@ -10,7 +10,9 @@ an HTTP status for the route layer.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 
 from lib.http_client import http_post
 from lib.log import audit_log, get_logger
@@ -42,6 +44,63 @@ class SynthesizeResult:
     model: str
     provider_id: str
     voice: str
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesisSession:
+    """One owner-scoped v2 route group shared by a bounded synthesis batch."""
+
+    pin_id: str
+
+    def synthesize(self, text: str, *, voice: str | None = None,
+                   fmt: str | None = None,
+                   speed: float | None = None) -> SynthesizeResult:
+        """Run one call inside this session's hard provider-group pin."""
+        from lib import tts as _facade
+        from lib.llm_dispatch.provider_pin import provider_pin
+
+        with provider_pin(self.pin_id):
+            return _facade.synthesize(
+                text, voice=voice, fmt=fmt, speed=speed)
+
+
+@contextmanager
+def synthesis_session(
+    owner_user_id: int,
+    tenant_id: str | None = None,
+    *,
+    prefer_model: str = '',
+    preferred_provider_id: str = '',
+) -> Iterator[SynthesisSession]:
+    """Mint one bounded owner route for a complete podcast/video TTS batch.
+
+    A session is deliberately reusable across worker threads: each call enters
+    the same thread-local hard pin, while disposal happens only after the
+    caller's bounded fan-out has joined. This avoids a repository read and up
+    to dozens of ephemeral slots for every narration chunk.
+    """
+    import lib.model_routing as routing
+
+    route_group = None
+    try:
+        _model, route_group = routing.mint_capability_slot_group(
+            routing.ModelRoutingRepository(),
+            routing.OwnerBoundary.create(owner_user_id, tenant_id),
+            TTS_CAP,
+            prefer_model=prefer_model,
+            preferred_provider_id=preferred_provider_id,
+            required_protocols=routing.OPENAI_COMPATIBLE_PROTOCOLS,
+            owner_tag=f'tts:{owner_user_id}',
+            # A long narration shares this group. Eight ordered failover
+            # candidates are ample and cap its resident dispatcher footprint.
+            max_candidates=8,
+        )
+    except routing.ModelRoutingError as exc:
+        raise TTSError(str(exc), status=503) from exc
+    try:
+        yield SynthesisSession(route_group.pin_id)
+    finally:
+        routing.dispose_routed_slot_group(route_group)
 
 
 # ── MIME sniffing ────────────────────────────────────────────────────────
@@ -90,7 +149,9 @@ def _post_speech(slot, text: str, *, voice: str, fmt: str,
     if not base:
         raise TTSError('No base URL configured for tts slot', status=503)
     url = f'{base}/audio/speech'
-    headers = {'Authorization': f'Bearer {slot.api_key}'}
+    headers = {}
+    if slot.api_key:
+        headers['Authorization'] = f'Bearer {slot.api_key}'
     if slot.extra_headers:
         headers.update(slot.extra_headers)
     payload: dict = {'model': slot.model, 'input': text, 'voice': voice}
@@ -116,7 +177,11 @@ def _post_speech(slot, text: str, *, voice: str, fmt: str,
 
 
 def synthesize(text: str, *, voice: str | None = None,
-               fmt: str | None = None, speed: float | None = None) -> SynthesizeResult:
+               fmt: str | None = None, speed: float | None = None,
+               owner_user_id: int | None = None,
+               tenant_id: str | None = None,
+               prefer_model: str = '',
+               preferred_provider_id: str = '') -> SynthesizeResult:
     """Synthesize ``text`` to audio via a configured tts slot.
 
     Args:
@@ -137,6 +202,15 @@ def synthesize(text: str, *, voice: str | None = None,
     text = (text or '').strip()
     if not text:
         raise TTSError('Empty synthesis input', status=400)
+    if owner_user_id is not None:
+        with synthesis_session(
+            owner_user_id,
+            tenant_id,
+            prefer_model=prefer_model,
+            preferred_provider_id=preferred_provider_id,
+        ) as session:
+            return session.synthesize(
+                text, voice=voice, fmt=fmt, speed=speed)
     # Resolve swappable dependencies through the PACKAGE so test monkeypatches
     # on ``lib.tts.<name>`` take effect (facade parity with transcription).
     from lib import tts as _facade
@@ -163,14 +237,17 @@ def synthesize(text: str, *, voice: str | None = None,
                            slot.key_name, slot.model, e.detail)
             continue
         mime = _sniff_mime(data, use_fmt)
+        logical_model = getattr(slot, 'logical_model', '') or slot.model
+        public_provider_id = (getattr(slot, 'routing_provider_id', '')
+                              or slot.provider_id or 'default')
         audit_log('tts_synthesize', model=slot.model,
-                  provider_id=slot.provider_id or 'default',
+                  provider_id=public_provider_id,
                   voice=use_voice, fmt=use_fmt, chars=len(text), bytes=len(data))
         logger.info('[TTS] synthesized %d chars via %s:%s voice=%s fmt=%s → '
                     '%d bytes (%s)', len(text), slot.key_name, slot.model,
                     use_voice, use_fmt, len(data), mime)
         return SynthesizeResult(
-            audio_bytes=data, mime=mime, model=slot.model,
-            provider_id=slot.provider_id or 'default', voice=use_voice)
+            audio_bytes=data, mime=mime, model=logical_model,
+            provider_id=public_provider_id, voice=use_voice)
 
     raise last_err or TTSError('All tts slots failed', status=502)

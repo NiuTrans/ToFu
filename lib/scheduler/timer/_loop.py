@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from lib.log import get_logger
+from lib.scheduler.contract import TimerCapacityError, timer_live_capacity
 
 from ._crud import (
     _get_timer_row,
@@ -169,7 +170,7 @@ def _execute_continuation(timer: dict[str, Any]) -> str | None:
 #  Background poll loop
 # ═════════════════════════════════════════════════════════════════════════════
 
-def start_timer_loop(timer_id: str, *, user_id: int) -> None:
+def start_timer_loop(timer_id: str, *, user_id: int) -> bool:
     """Start a background daemon thread that polls the timer at its interval.
 
     The thread self-terminates after:
@@ -300,12 +301,27 @@ def start_timer_loop(timer_id: str, *, user_id: int) -> None:
         with _timers_lock:
             _active_timers.pop(tid, None)
 
-    # Register and start
+    # Register and start. Durable admission is owner-atomic; this second
+    # process-wide check covers several owners/replicas converging on one
+    # worker and races between create and start.
     t = threading.Thread(target=_loop, daemon=True, name=f'timer-poll-{timer_id}')
     with _timers_lock:
+        if timer_id in _active_timers:
+            return False
+        capacity = timer_live_capacity()
+        if len(_active_timers) >= capacity:
+            raise TimerCapacityError(
+                f'Live timer capacity reached ({capacity})')
         _active_timers[timer_id] = t
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        with _timers_lock:
+            if _active_timers.get(timer_id) is t:
+                _active_timers.pop(timer_id, None)
+        raise
     logger.info('[Timer:%s] Background poll thread started', timer_id)
+    return True
 
 
 # ═════════════════════════════════════════════════════════════════════════════

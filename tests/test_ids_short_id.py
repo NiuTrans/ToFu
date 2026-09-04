@@ -88,8 +88,6 @@ def test_migrated_sites_have_no_raw_idiom():
     migrated = [
         'lib/billing/ledger.py', 'lib/billing/wallet.py', 'lib/billing/users.py',
         'lib/billing/payments/_common.py',
-        'lib/conversations/project_watch.py', 'lib/conversations/project_charter.py',
-        'lib/conversations/project_board.py',
         'lib/optimizer/storage.py', 'lib/memory/user_profile/_pending.py',
         'lib/pdf_parser/vlm/_tasks.py', 'lib/daily_report/conversations.py',
         'lib/agent_core/task_runtime.py',

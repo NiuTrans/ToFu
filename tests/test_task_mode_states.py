@@ -38,6 +38,7 @@ import pytest
 from lib.orchestration.run_status import run_status_contract
 from tests._runtime_sections import (
     native_module_graph,
+    native_module_path,
     runtime_section_path,
 )
 
@@ -1000,9 +1001,11 @@ def test_api_task_reads_preserve_http_status_and_encode_filters():
     node = shutil.which('node')
     if not node:
         pytest.skip('node unavailable')
-    api_sources = [runtime_section_path(name) for name in (
+    api_sources = [native_module_path(
+        '.native/http-result-for-task-mode.js',
+        'frontend/src/core/http-result.ts',
+    )] + [runtime_section_path(name) for name in (
         'api.js',
-        'api/http-result.js',
         'api/orchestration-http-contract.generated.js',
         'api/orchestration-response-contracts.js',
         'api/orchestration-client-methods.js',

@@ -77,6 +77,57 @@ if (typeof filt === 'function') {
 report();
 """
 
+_SNAPSHOT_HINT_BODY = r"""
+const { setup } = require(process.env.JSDOM_HARNESS);
+let listCalls = 0;
+const applied = [];
+let nextListPromise = null;
+const { window, check, report } = setup({
+  root: process.argv[3],
+  targets: [process.argv[2]],
+  globals: {
+    Api: { artifacts: { forConv: async () => {
+      listCalls += 1;
+      if (nextListPromise) return nextListPromise;
+      return { artifacts: [] };
+    } } },
+    ConversationSurfacePresentation: {
+      setArtifacts(conversationId, byTurn) {
+        applied.push([conversationId, byTurn.size]);
+      },
+    },
+  },
+});
+
+(async () => {
+  await window.Artifacts.hydrateConversation({ id: 'empty-conv' }, false);
+  check('negative_hint_skips_list', listCalls === 0);
+  check('negative_hint_commits_empty_model',
+        JSON.stringify(applied) === JSON.stringify([['empty-conv', 0]]));
+
+  await window.Artifacts.hydrateConversation({ id: 'legacy-conv' });
+  check('missing_hint_keeps_legacy_fetch', listCalls === 1);
+  check('legacy_empty_response_commits_model',
+        JSON.stringify(applied.at(-1)) === JSON.stringify(['legacy-conv', 0]));
+
+  let releaseStaleList;
+  nextListPromise = new Promise((resolve) => { releaseStaleList = resolve; });
+  const raceConversation = { id: 'race-conv' };
+  const staleList = window.Artifacts.hydrateConversation(raceConversation, true);
+  await Promise.resolve();
+  await window.Artifacts.hydrateConversation(raceConversation, false);
+  releaseStaleList({ artifacts: [] });
+  await staleList;
+  check('race_issued_one_list', listCalls === 2);
+  check('newer_negative_hint_invalidates_stale_list',
+        applied.filter(([conversationId]) => conversationId === 'race-conv').length === 1);
+  report();
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+
 
 def test_artifacts_filter_shows_empty_state():
     run_harness(
@@ -84,4 +135,13 @@ def test_artifacts_filter_shows_empty_state():
         body_js=_BODY,
         min_pass=7,
         label='artifacts filter',
+    )
+
+
+def test_snapshot_negative_hint_skips_empty_artifact_list_request():
+    run_harness(
+        target_js=runtime_section_path('artifacts.js'),
+        body_js=_SNAPSHOT_HINT_BODY,
+        expect_pass=6,
+        label='artifact snapshot hint',
     )

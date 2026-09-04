@@ -101,7 +101,9 @@ def _patch_parse(routes_paper):
     """Monkeypatch the parse + figure-extraction so the test is hermetic (no
     real PDF engine). Returns a restore() callable."""
     import lib.pdf_parser.core as pdf_core
+    import lib.pdf_parser.pool as pdf_pool
     orig_parse = pdf_core.parse_pdf
+    orig_pool_parse = pdf_pool.parse_pdf_pooled
     orig_fig = routes_paper.extract_paper_figures
 
     def _fake_parse(pdf_bytes, **kw):
@@ -111,12 +113,14 @@ def _patch_parse(routes_paper):
         return []
 
     pdf_core.parse_pdf = _fake_parse
+    pdf_pool.parse_pdf_pooled = _fake_parse
     routes_paper.extract_paper_figures = _fake_fig
     # routes.paper_pkg._library imported the name at module load → patch that binding too.
     routes_paper.__dict__['extract_paper_figures'] = _fake_fig
 
     def restore():
         pdf_core.parse_pdf = orig_parse
+        pdf_pool.parse_pdf_pooled = orig_pool_parse
         routes_paper.extract_paper_figures = orig_fig
     return restore
 
@@ -312,7 +316,7 @@ def test_ghost_row_reaped_from_listing_with_NC():
 
             # ── NC: disable the reap → ghost reappears ──
             orig = rp._is_ghost_library_row
-            rp._is_ghost_library_row = lambda p: False
+            rp._is_ghost_library_row = lambda p, **_kwargs: False
             try:
                 ids_nc = await _list_ids(client)
                 assert ghost in ids_nc, \
@@ -362,7 +366,10 @@ def test_saved_recommendation_row_survives_reaper_with_NC():
 
             # ── NC: revert to the old empty-pdf==ghost rule → rec disappears ──
             orig = rp._is_ghost_library_row
-            rp._is_ghost_library_row = lambda p: not (p.get('pdfFilename') or '').strip()
+            rp._is_ghost_library_row = (
+                lambda p, **_kwargs:
+                not (p.get('pdfFilename') or '').strip()
+            )
             try:
                 ids_nc = await _list_ids(client)
                 assert rec not in ids_nc, \

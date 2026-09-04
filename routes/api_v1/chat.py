@@ -26,19 +26,26 @@ import time
 from quart import Blueprint
 
 from lib.agent_core.admission import (
-    await_terminal, controller, on_terminal, register_waiter,
+    await_terminal, controller, register_waiter,
     unregister_waiter, wait_for_event,
+)
+from lib.agent_core.execution_session import (
+    ExecutionPhase,
+    bind_admission_lease,
+    bind_billing_reservation,
+    bind_model_route,
+    execution_session_for_task,
 )
 from lib.agent_core.principal import principal_key
 from lib.agent_core.sse_limit import limiter as sse_limiter
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    api_bad_request, api_error, api_internal_error, api_ok,
     sse_response,
 )
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
-from lib.byo_resolve import resolve_model_and_provider
+from lib.model_routing import ModelRoutingError
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
@@ -59,6 +66,11 @@ from .auth import (
     guard_model_relay_or_dispose,
     request_user_id,
     require_scope,
+)
+from routes.model_routing_adapter import (
+    dispose_routed_slot_group,
+    mint_native_request_route,
+    routing_error_fields,
 )
 
 logger = get_logger(__name__)
@@ -400,7 +412,7 @@ async def _stream_generator(task, model: str, requested_id: str,
     tags=['chat'],
     scope='chat',
     request_body={'required': True, 'content': {'application/json': {
-        'schema': {'$ref': '#/components/schemas/ChatCompletionRequest'},
+        'schema': {'$ref': '#/components/schemas/NativeChatCompletionRequest'},
     }}},
     responses={
         '200': {'description': 'OK',
@@ -425,47 +437,31 @@ async def chat_completions():
         return api_bad_request('messages is empty', field='messages')
 
     stream = optional_bool(body, 'stream', default=False)
-    model = optional_str(body, 'model', default='', max_len=200)
     cfg = optional_dict(body, 'config') or {}
 
-    # ── Unified BYO provider resolution ──
-    # Every API surface crosses lib.byo_resolve, so suffix ownership,
-    # inline-provider validation, slot minting, and error semantics cannot
-    # drift between native and compatibility routes.
-    _byo_handle = None
-    if model:
-        _auth_for_byo = current_auth()
-        if _auth_for_byo is None or _auth_for_byo.owner_user_id is None:
-            return api_bad_request(
-                'caller has no repository owner identity', field='model')
-        model, _byo_handle, _byo_provider, _byo_error, _byo_status = (
-            resolve_model_and_provider(
-                model,
-                body.get('provider'),
-                _auth_for_byo.owner_user_id,
-                tenant_id=_auth_for_byo.tenant_id,
-            )
+    # Native requests use a structured v2 ModelRef. Provider choice is a
+    # routing preference, never a model-name suffix or inline BYO state.
+    _route_group = None
+    _auth_for_route = current_auth()
+    if _auth_for_route is None or _auth_for_route.owner_user_id is None:
+        return api_bad_request(
+            'caller has no repository owner identity', field='model')
+    try:
+        model, _model_selection, _route_group = mint_native_request_route(
+            body,
+            owner_user_id=_auth_for_route.owner_user_id,
+            tenant_id=_auth_for_route.tenant_id,
+            owner_tag=f'native-chat:{owner_user_id}',
         )
-        if _byo_error:
-            return (
-                api_not_found(_byo_error)
-                if _byo_status == 404
-                else api_bad_request(_byo_error, field='model')
-            )
-
-    # ── BYO-only relay backstop ──
-    # On a model_relay_enabled=false deployment, refuse requests that
-    # would consume the OPERATOR's slot pool. BYO requests + admin keys
-    # pass; a tenant pool request is rejected even if a stale key still
-    # carries ``chat`` (scope strip at mint time is the primary control;
-    # this is defense-in-depth). Disposes the slot on rejection.
-    _relay_denied = guard_model_relay_or_dispose(_byo_handle)
-    if _relay_denied is not None:
-        return _relay_denied
+    except ModelRoutingError as exc:
+        return api_bad_request(str(exc), **routing_error_fields(exc))
+    relay_denial = guard_model_relay_or_dispose(_route_group)
+    if relay_denial is not None:
+        return relay_denial
 
     # Field mapping (body → cfg) is the shared kernel — the same code the
     # in-process façade (tofu.chat) uses, so the two surfaces can never
-    # drift on how knobs land in cfg. Billing + BYO (above/below) stay
+    # drift on how knobs land in cfg. Billing + route ownership stay
     # HTTP-only and are NOT part of the kernel.
     from lib.tasks_pkg.entry import build_chat_config
     cfg = build_chat_config(
@@ -539,11 +535,20 @@ async def chat_completions():
         task['_translate_usage'] = _translate_usage
     if auth and auth.key_id:
         task['_api_key_id'] = auth.key_id
-    # ── Hard provider isolation ── bind the task to the BYO endpoint's
-    # slot so no dispatch can leak onto operator keys. See
+    # Bind the task to this request-scoped v2 route group so no dispatch can
+    # escape the authorized ProviderAccess candidates. See
     # lib/llm_dispatch/provider_pin.py.
-    if _byo_handle is not None:
-        task['_pinned_provider_id'] = _byo_handle.slot.provider_id
+    task['_pinned_provider_id'] = _route_group.pin_id
+    task['_requested_model_ref'] = (
+        _model_selection.model.public_dict()
+        if _model_selection.model is not None
+        else _model_selection.provider_offering.public_dict()
+    )
+    execution_session = execution_session_for_task(task)
+    bind_model_route(
+        execution_session,
+        lambda: dispose_routed_slot_group(_route_group),
+    )
 
     # ── Billing: pre-flight reserve (multi-user mode only) ──
     # Estimate the cost of the request based on prompt size + the
@@ -565,6 +570,8 @@ async def chat_completions():
                 prompt_tokens=estimate_prompt_tokens(messages),
                 max_completion_tokens=est_completion)
         except InsufficientFunds as e:
+            execution_session.settle(
+                ExecutionPhase.FAILED, cause='billing_reservation_refused')
             return api_error(
                 f'Insufficient credits. '
                 f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
@@ -574,6 +581,20 @@ async def chat_completions():
                 balance_micro=e.balance_micro,
                 needed_micro=e.needed_micro)
 
+    if billing_user_id:
+        bind_billing_reservation(
+            execution_session,
+            reservation_micro=reservation_micro,
+            settle=lambda: settle_task(
+                task, user_id=billing_user_id,
+                model=cfg.get('model', '') or '', raise_on_error=True,
+            ),
+            release=lambda: release_reservation(
+                task, user_id=billing_user_id,
+                reservation_micro=reservation_micro, raise_on_error=True,
+            ),
+        )
+
     # Reserve a long-lived stream slot only after every preflight that can
     # fail. From here onward every non-streaming-return path releases it, and
     # the generator owns the normal disconnect/terminal release.
@@ -581,20 +602,17 @@ async def chat_completions():
     if stream:
         sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
         if sse_rejection is not None:
-            if _byo_handle is not None:
-                from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
-                dispose_ephemeral_slot(_byo_handle)
+            execution_session.settle(
+                ExecutionPhase.FAILED, cause='sse_admission_refused')
             return sse_rejection
 
     # ── Admission control: refuse with 503 when at capacity ───────
-    if not controller.try_acquire():
+    admission_lease = controller.acquire()
+    if admission_lease is None:
         if sse_slot_token:
             sse_limiter.release(sse_slot_token)
-        if _byo_handle is not None:
-            from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
-            dispose_ephemeral_slot(_byo_handle)
-        release_reservation(task, user_id=billing_user_id,
-                            reservation_micro=reservation_micro)
+        execution_session.settle(
+            ExecutionPhase.FAILED, cause='task_admission_refused')
         logger.warning('[api_v1.chat] admission refused (in_flight=%d/%d) '
                        'key=%s model=%s', controller.in_flight,
                        controller.capacity,
@@ -602,42 +620,10 @@ async def chat_completions():
                        cfg.get('model', '?'))
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
-
-    # Release the admission slot + dispose the BYO ephemeral slot + SETTLE
-    # BILLING exactly once, the moment the task reaches a terminal state.
-    # Event-driven (fired from manager.append_event) — no per-request
-    # polling thread. Binding settlement HERE (not to the HTTP request
-    # lifecycle) is the root-cause fix for the reservation-leak paths: a
-    # blocking-timeout that outran the client, a mid-stream client
-    # disconnect, and an in-process reaper finalize all reach terminal via
-    # this callback, so the reservation is settled against ACTUAL usage
-    # rather than stranded until the 30-min janitor. settle_task is
-    # idempotent on ref_id=task_id, so the happy-path settle below (and the
-    # stream generator's own _settle_streaming_billing) is a harmless no-op
-    # second call.
-    _released = {'done': False}
-    _model_for_settle = cfg.get('model', '') or ''
-
-    def _on_done(_tid, _handle=_byo_handle):
-        if _released['done']:
-            return
-        _released['done'] = True
-        controller.release()
-        try:
-            settle_task(task, user_id=billing_user_id, model=_model_for_settle)
-        except Exception as ex:
-            logger.error('[api_v1.chat] terminal settle failed task=%s: %s',
-                         _tid[:8], ex, exc_info=True)
-        if _handle is not None:
-            from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
-            try:
-                dispose_ephemeral_slot(_handle)
-            except Exception as ex:
-                logger.error('[api_v1.chat] ephemeral dispose failed '
-                             'handle=%s task=%s: %s', _handle.handle_id,
-                             _tid[:8], ex, exc_info=True)
-
-    on_terminal(task['id'], _on_done)
+    bind_admission_lease(
+        execution_session,
+        lambda: controller.release(admission_lease),
+    )
     register_waiter(task['id'])
 
     try:
@@ -645,13 +631,11 @@ async def chat_completions():
     except Exception as e:
         if sse_slot_token:
             sse_limiter.release(sse_slot_token)
-        # spawn failed → release slot + dispose synchronously, drop waiter.
-        _on_done(task['id'])
+        # Spawn failure has not dispatched; the shared settlement releases the
+        # billing hold, route group, and this exact admission lease in order.
+        execution_session.settle(
+            ExecutionPhase.FAILED, cause='task_spawn_failed')
         unregister_waiter(task['id'])
-        # Release any credit reservation immediately so the user isn't
-        # waiting on the janitor.
-        release_reservation(task, user_id=billing_user_id,
-                            reservation_micro=reservation_micro)
         logger.exception('[api_v1.chat] spawn_task failed task=%s',
                          task['id'][:8])
         return api_internal_error(e, context='api_v1.chat',

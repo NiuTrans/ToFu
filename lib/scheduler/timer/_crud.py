@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from lib.log import get_logger
+from lib.scheduler.contract import timer_live_capacity
 
 from ._state import _active_timers, _cmd_outputs_lock, _last_cmd_outputs, _timers_lock
 
@@ -56,12 +57,20 @@ def _resume_max_age_seconds(timer: dict[str, Any]) -> float:
 
 
 def _resume_concurrency_cap() -> int:
-    """Max number of timers a single server boot will re-spawn (0 = unlimited)."""
+    """Max timers one boot re-spawns, never above the live hard budget.
+
+    ``TOFU_TIMER_RESUME_CAP=0`` keeps its historical "no narrower boot cap"
+    meaning, but it cannot disable the process-wide live resource ceiling.
+    """
     try:
-        return int(_os.environ.get('TOFU_TIMER_RESUME_CAP', '20'))
+        configured = int(_os.environ.get('TOFU_TIMER_RESUME_CAP', '20'))
     except (TypeError, ValueError) as e:
         logger.debug('[Timer] TOFU_TIMER_RESUME_CAP parse failed, using default: %s', e)
-        return 20
+        configured = 20
+    live_capacity = timer_live_capacity()
+    if configured <= 0:
+        return live_capacity
+    return min(configured, live_capacity)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

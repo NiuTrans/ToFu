@@ -596,6 +596,178 @@ def test_real_ids_are_preserved_verbatim():
     assert [m['content'] for m in tool_msgs] == ['R1', 'R2']
 
 
+def test_equal_payloads_at_distinct_positions_execute_independently():
+    calls = [
+        {'id': 'twin-a', 'function': {
+            'name': 'run_command', 'arguments': '{"command":"pwd"}'}},
+        {'id': 'twin-b', 'function': {
+            'name': 'run_command', 'arguments': '{"command":"pwd"}'}},
+    ]
+    h = _IdCollisionAgent(calls, ['FIRST-RESULT', 'SECOND-RESULT'])
+    executed = []
+    real_exec = h.agent._execute_single_tool
+
+    def count_exec(tc, round_num):
+        executed.append(tc['id'])
+        return real_exec(tc, round_num)
+
+    h.agent._execute_single_tool = count_exec
+    h.agent._execute_tool_calls(calls, round_num=1)
+
+    tool_msgs = [m for m in h.agent.messages if m.get('role') == 'tool']
+    assert sorted(executed) == ['twin-a', 'twin-b']
+    assert [m['tool_call_id'] for m in tool_msgs] == ['twin-a', 'twin-b']
+    assert [m['content'] for m in tool_msgs] == ['FIRST-RESULT', 'SECOND-RESULT']
+
+
+def test_same_tool_with_different_arguments_still_executes_twice():
+    calls = [
+        {'id': 'a', 'function': {
+            'name': 'run_command', 'arguments': '{"command":"pwd"}'}},
+        {'id': 'b', 'function': {
+            'name': 'run_command', 'arguments': '{"command":"git status"}'}},
+    ]
+    h = _IdCollisionAgent(calls, ['PWD', 'STATUS'])
+    executed = []
+    real_exec = h.agent._execute_single_tool
+
+    def count_exec(tc, round_num):
+        executed.append(tc['id'])
+        return real_exec(tc, round_num)
+
+    h.agent._execute_single_tool = count_exec
+    h.agent._execute_tool_calls(calls, round_num=1)
+
+    assert sorted(executed) == ['a', 'b']
+    assert [m['content'] for m in h.agent.messages if m.get('role') == 'tool'] \
+        == ['PWD', 'STATUS']
+
+
+def test_duplicate_truthy_ids_are_repaired_on_calls_and_results():
+    calls = [
+        {'id': 'dup', 'function': {
+            'name': 'run_command', 'arguments': '{"command":"pwd"}'}},
+        {'id': 'dup', 'function': {
+            'name': 'run_command', 'arguments': '{"command":"git status"}'}},
+    ]
+    h = _IdCollisionAgent(calls, ['PWD', 'STATUS'])
+
+    h.agent._execute_tool_calls(calls, round_num=3)
+
+    call_ids = [call['id'] for call in calls]
+    result_ids = [
+        message['tool_call_id'] for message in h.agent.messages
+        if message.get('role') == 'tool'
+    ]
+    assert call_ids[0] == 'dup'
+    assert len(set(call_ids)) == 2
+    assert result_ids == call_ids
+
+
+def test_recycled_id_from_an_earlier_round_is_repaired_at_the_source():
+    first = [{'id': 'positional_0', 'function': {
+        'name': 'run_command', 'arguments': '{"command":"pwd"}'}}]
+    second = [{'id': 'positional_0', 'function': {
+        'name': 'run_command', 'arguments': '{"command":"git status"}'}}]
+    h = _IdCollisionAgent(first, ['PWD'])
+
+    h.agent._execute_tool_calls(first, round_num=1)
+    h.tool_calls = second
+    h._outputs = ['STATUS']
+    h.agent._execute_tool_calls(second, round_num=2)
+
+    result_ids = [
+        message['tool_call_id'] for message in h.agent.messages
+        if message.get('role') == 'tool'
+    ]
+    assert first[0]['id'] == 'positional_0'
+    assert second[0]['id'] != 'positional_0'
+    assert len(set(result_ids)) == 2
+
+
+def test_non_object_swarm_call_is_removed_before_protocol_settlement():
+    calls = ['corrupt-provider-entry']
+    h = _IdCollisionAgent(calls, [])
+
+    note = h.agent._execute_tool_calls(calls, round_num=1)
+
+    assert calls == []
+    assert note == {'nonretryable_failure_signatures': []}
+    assert not [m for m in h.agent.messages if m.get('role') == 'tool']
+
+
+def test_invalid_attributed_swarm_call_is_rejected_without_hiding_sibling():
+    calls = [
+        {
+            'id': 'invalid-owner', 'caller': {'type': 'multi_agent'},
+            'function': {'name': 'run_command', 'arguments': '{}'},
+        },
+        {
+            'id': 'valid-root',
+            'function': {'name': 'run_command', 'arguments': '{}'},
+        },
+    ]
+    h = _IdCollisionAgent(calls, ['MUST-NOT-RUN', 'VALID-RESULT'])
+    executed = []
+    real_exec = h.agent._execute_single_tool
+
+    def count_exec(tc, round_num):
+        executed.append(tc['id'])
+        return real_exec(tc, round_num)
+
+    h.agent._execute_single_tool = count_exec
+    h.agent._execute_tool_calls(calls, round_num=1)
+
+    tool_messages = [
+        message for message in h.agent.messages
+        if message.get('role') == 'tool'
+    ]
+    assert executed == ['valid-root']
+    assert 'DID NOT RUN' in tool_messages[0]['content']
+    assert tool_messages[1]['content'] == 'VALID-RESULT'
+    assert tool_messages[0]['caller'] == {'type': 'multi_agent'}
+
+
+def test_valid_swarm_caller_is_normalized_and_paired_on_result():
+    calls = [{
+        'id': 'worker-read',
+        'caller': {'type': 'multi_agent', 'agent_name': ' /worker '},
+        'function': {'name': 'read_files', 'arguments': '{}'},
+    }]
+    h = _IdCollisionAgent(calls, ['BODY'])
+
+    h.agent._execute_tool_calls(calls, round_num=1)
+
+    expected = {'type': 'multi_agent', 'agent_name': '/worker'}
+    assert calls[0]['caller'] == expected
+    tool_message = next(
+        message for message in h.agent.messages
+        if message.get('role') == 'tool')
+    assert tool_message['caller'] == expected
+    assert tool_message['content'] == 'BODY'
+
+
+def test_program_caller_cannot_bypass_local_swarm_program_boundary():
+    calls = [{
+        'id': 'program-child',
+        'caller': {'type': 'program', 'caller_id': 'unbound-program'},
+        'function': {'name': 'run_command', 'arguments': '{}'},
+    }]
+    h = _IdCollisionAgent(calls, ['MUST-NOT-RUN'])
+    executed = []
+    h.agent._execute_single_tool = (
+        lambda tc, round_num: executed.append(tc['id']) or 'executed')
+
+    h.agent._execute_tool_calls(calls, round_num=1)
+
+    assert executed == []
+    tool_message = next(
+        message for message in h.agent.messages
+        if message.get('role') == 'tool')
+    assert 'DID NOT RUN' in tool_message['content']
+    assert 'execute_program' in tool_message['content']
+
+
 def test_a_raising_tool_does_not_lose_its_siblings_results():
     """One tool raising must not corrupt the addressing of the others."""
     calls = [_tc_no_id('ok1'), _tc_no_id('boom'), _tc_no_id('ok2')]
@@ -1081,3 +1253,53 @@ def test_panel_maps_the_stalled_status_end_to_end():
         'i18n key swarm.phase.stalledSilent missing (carries the seconds)'
     assert re.search(r'[Ss]tall', catalogs['en'].get('swarm.phase.stalled', '')), \
         'i18n key swarm.phase.stalled missing (en)'
+
+
+def test_unwrap_recovers_agents_from_the_sparse_summary_items_projection():
+    """Reload-path regression (conv mtgvz7gyrf3pg2): the persisted spawn
+    toolContent is the sparse {summary, items} model projection WITHOUT
+    contractVersion (lib/tools/result_envelope.py _model_projection drops
+    the marker intentionally). The marker-gated unwrap recovered zero
+    agents, so the reloaded panel rendered 子智能体明细未被持久化 even
+    though the handle was on disk. Executes the REAL runtime function."""
+    import json
+    import subprocess
+
+    from tests._runtime_sections import runtime_section_path
+
+    path = runtime_section_path('ui/streaming_swarm_panel.js')
+    with open(path, encoding='utf-8') as f:
+        src = f.read()
+    fn_src = src[src.index('function _swarmUnwrapResultPayload'):
+                 src.index('function _swarmResultsByAgent')]
+
+    harness = fn_src + r'''
+const handle = {agents: [{id: "fdca8160", role: "analyst"}],
+                status: "async_launched"};
+const out = {
+  // The exact persisted shape that regressed (sparse, no marker).
+  sparse: _swarmUnwrapResultPayload(
+    {items: [handle], summary: "Launched 1 agent(s) in the background."}),
+  // The full V2 envelope and the bare handle must keep unwrapping.
+  v2: _swarmUnwrapResultPayload({contractVersion: "tofu.tool-result/v2",
+    status: "ok", items: [handle], summary: "Launched 1 agent(s)."}),
+  bare: _swarmUnwrapResultPayload(handle),
+  // Negative controls: foreign envelope contracts and bare payloads with an
+  // unrelated items field are NOT unwrapped.
+  foreign: _swarmUnwrapResultPayload(
+    {contractVersion: "other/v1", items: [handle]}),
+  unrelated: _swarmUnwrapResultPayload({items: ["a", "b"]}),
+};
+console.log(JSON.stringify(out));
+'''
+    proc = subprocess.run(
+        ['node', '-e', harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    for shape in ('sparse', 'v2', 'bare'):
+        assert out[shape].get('agents', [{}])[0].get('id') == 'fdca8160', \
+            f'{shape} shape no longer unwraps to the spawn handle'
+    assert 'agents' not in out['foreign'], \
+        'a foreign envelope contract must not be unwrapped'
+    assert 'agents' not in out['unrelated'], \
+        'a bare payload with an unrelated items field must not be unwrapped'

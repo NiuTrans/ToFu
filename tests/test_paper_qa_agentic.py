@@ -3,8 +3,9 @@
 
 Verifies the three hard requirements from the objective:
 
-  (a) A question about a REPORT-ONLY claim is answered using the injected
-      report — the report text reaches the model (legacy Q&A never showed it).
+  (a) A question about a REPORT-ONLY claim is answered using the selected
+      report context — the relevant text reaches the model (legacy Q&A never
+      showed it).
   (b) A question needing external info actually triggers web_search/fetch_url
       (the loop runs tools, not just a single stateless completion).
   (c) A LONG paper does not silently lose its tail — section-aware selection
@@ -93,6 +94,29 @@ def test_select_retrieves_relevant_tail_section():
     _ok('select_relevant_sections retrieves the relevant TAIL of a long paper')
 
 
+def test_select_retrieves_relevant_chinese_tail_section():
+    """CJK questions must not degrade to stable document-head ordering."""
+    from lib.paper.qa_context import (
+        split_into_sections,
+        select_relevant_sections,
+    )
+    filler = '\n\n'.join(
+        '# 背景材料 %d\n%s' % (index, '通用背景描述不包含关键结论。' * 350)
+        for index in range(12)
+    )
+    tail = '# 可复现性\n训练使用随机种子 1337，内部代号是斑马鱼。'
+    sections = split_into_sections(filler + '\n\n' + tail)
+    selected = select_relevant_sections(
+        '随机种子是什么？斑马鱼代号在哪一节？',
+        sections,
+        budget_chars=8_000,
+    )
+    rendered = '\n'.join(section['text'] for section in selected)
+    assert '随机种子 1337' in rendered
+    assert len(selected) < len(sections)
+    _ok('select_relevant_sections retrieves a relevant Chinese tail section')
+
+
 def test_build_qa_messages_injects_report():
     from lib.paper.qa_context import build_qa_messages
     report = ('# Paper X\n## Limitations\nThe method degrades on out-of-domain '
@@ -105,7 +129,7 @@ def test_build_qa_messages_injects_report():
     assert 'GENERATED ANALYSIS REPORT' in sys_msg
     assert 'degrades on out-of-domain' in sys_msg, 'report body not injected'
     assert msgs[-1]['role'] == 'user'
-    _ok('build_qa_messages injects the full generated report into context')
+    _ok('build_qa_messages injects the relevant generated report context')
 
 
 def test_build_qa_messages_long_paper_keeps_tail():
@@ -121,6 +145,60 @@ def test_build_qa_messages_long_paper_keeps_tail():
     assert diag['n_sections_selected'] < diag['n_sections_total'], \
         'budget should have dropped irrelevant filler'
     _ok('build_qa_messages keeps a relevant tail section of a long paper')
+
+
+def test_build_qa_messages_shares_source_budget_and_bounds_history():
+    """Tool rounds get finite context without losing relevant source tails."""
+    from lib.paper.contracts import (
+        PAPER_QA_HISTORY_MAX_CHARS,
+        PAPER_QA_SOURCE_CONTEXT_MAX_CHARS,
+    )
+    from lib.paper.qa_context import build_qa_messages
+
+    paper = '\n\n'.join(
+        f'# Paper section {index}\n' + ('paper filler words ' * 350)
+        for index in range(11)
+    ) + '\n\n# Paper appendix\nThe platypus mechanism uses seed 4242.'
+    report = '\n\n'.join(
+        f'# Report section {index}\n' + ('report filler words ' * 350)
+        for index in range(11)
+    ) + '\n\n# Report limitations\nThe capybara limitation is report-only.'
+    history = [
+        {
+            'role': 'assistant' if index % 2 else 'user',
+            'content': f'history-{index}-' + ('h' * 20_000),
+        }
+        for index in range(10)
+    ]
+    history[-1]['content'] += 'LATEST-HISTORY-TAIL'
+    history.append({'role': 'assistant', 'content': ['malformed']})
+
+    messages, diag = build_qa_messages(
+        'Compare platypus seed 4242 with the capybara limitation.',
+        paper,
+        report,
+        history=history,
+    )
+    system_message = messages[0]['content']
+    assert 'platypus mechanism uses seed 4242' in system_message
+    assert 'capybara limitation is report-only' in system_message
+    assert (
+        diag['paper_source_chars'] + diag['report_source_chars']
+        <= PAPER_QA_SOURCE_CONTEXT_MAX_CHARS
+    )
+    assert (
+        diag['paper_source_budget_chars']
+        + diag['report_source_budget_chars']
+        <= PAPER_QA_SOURCE_CONTEXT_MAX_CHARS
+    )
+    assert diag['history_chars'] <= PAPER_QA_HISTORY_MAX_CHARS
+    assert diag['history_truncated'] is True
+    assert diag['history_messages'] <= 10
+    assert 'LATEST-HISTORY-TAIL' in '\n'.join(
+        message['content'] for message in messages[1:-1]
+    )
+    assert all(isinstance(message['content'], str) for message in messages)
+    _ok('build_qa_messages shares source budget and bounds malformed history')
 
 
 # ─── End-to-end through the Q&A engine (mocked dispatch) ─────────
@@ -166,6 +244,10 @@ def test_engine_answers_report_only_question_from_injected_report():
         answer = task['full_text']
         assert 'English' in answer
         assert len(task['tool_rounds']) == 0, 'should NOT need tools for a report question'
+        usage = task['agentUsageV1']
+        assert usage['stage'] == 'qa' and usage['agent_dispatches'] == 1
+        done = [event for event in task['events'] if event.get('type') == 'done']
+        assert done[-1]['agentUsageV1']['agent_dispatch_budget'] == 8
         # Prove the report actually reached the model.
         first_sys = cap['messages_seen'][0][0]['content']
         assert 'degrades on out-of-domain' in first_sys
@@ -240,6 +322,61 @@ def test_engine_discards_interim_draft_with_tool_call():
     _ok('engine discards interim draft emitted alongside a tool call')
 
 
+def test_engine_repeated_identical_tool_call_halts_as_error():
+    """A wedged model cannot spend indefinitely or publish partial output."""
+    import lib.paper.qa_engine as qe
+    from lib.paper.qa_runtime import _new_qa_task
+
+    original_dispatch = qe.dispatch_stream
+    original_tool = qe.execute_paper_tool
+    plan = [
+        (
+            '',
+            [{
+                'id': f'repeat-{index}',
+                'function': {
+                    'name': 'web_search',
+                    'arguments': '{"query":"identical query"}',
+                },
+            }],
+        )
+        for index in range(8)
+    ]
+    _patch_dispatch(plan)
+    executed = []
+
+    def _fake_tool(name, *_args, **_kwargs):
+        executed.append(name)
+        return ('same result', [], None, None, None)
+
+    qe.execute_paper_tool = _fake_tool
+    try:
+        task = _new_qa_task(
+            'qa_no_progress',
+            'abcdef0000000000000000000000ab02',
+            'en',
+            None,
+            question='repeat forever',
+            user_id=TEST_OWNER_USER_ID,
+        )
+        qe._run_qa_task(task, [
+            {'role': 'system', 'content': 's'},
+            {'role': 'user', 'content': 'repeat forever'},
+        ])
+
+        assert task['status'] == 'error'
+        assert len(executed) == 3
+        assert 'no_progress' in str(task.get('error'))
+        event_types = [event.get('type') for event in task['events']]
+        assert 'error' in event_types
+        assert 'done' not in event_types
+    finally:
+        qe.dispatch_stream = original_dispatch
+        qe.execute_paper_tool = original_tool
+
+    _ok('repeated identical Q&A tools halt as error before a fourth execution')
+
+
 def test_engine_abort_is_never_projected_as_done():
     """A pre-dispatch abort settles once as aborted with no done event."""
     import lib.paper.qa_engine as qe
@@ -291,18 +428,55 @@ def test_qa_http_endpoints_wired():
     import asyncio
     import lib.paper.qa_engine as qe
     from lib.paper.qa_runtime import _qa_runtime
+    import routes.paper_pkg._qa_translate as qa_routes
 
     # Mock dispatch so the spawned task answers instantly without network.
     orig = qe.dispatch_stream
+    orig_source_resolver = qa_routes._resolve_stored_qa_source
     def _fake(messages, on_content=None, **kw):
         if on_content:
             on_content('Answer from the paper.')
         return ({'role': 'assistant', 'content': 'Answer from the paper.', 'tool_calls': []},
                 'stop', {'_dispatch': {}})
     qe.dispatch_stream = _fake
+    qa_routes._resolve_stored_qa_source = lambda *_args: None
 
     async def _t():
         async with app.test_client() as client:
+            from lib.paper.contracts import (
+                PAPER_QA_MAX_QUESTION_CHARS,
+                PAPER_QA_MAX_SOURCE_CHARS,
+            )
+
+            oversized = await client.post('/api/v1/paper/qa/start', json={
+                'question': 'q' * (PAPER_QA_MAX_QUESTION_CHARS + 1),
+                'paper_text': '# Intro\nEnough source text for route validation. ' * 4,
+            })
+            assert oversized.status_code == 400
+            oversized_source = await client.post(
+                '/api/v1/paper/qa/start',
+                json={
+                    'question': 'What is the result?',
+                    'paper_text': 'x' * (PAPER_QA_MAX_SOURCE_CHARS + 1),
+                },
+            )
+            assert oversized_source.status_code == 413
+            malformed_source = await client.post(
+                '/api/v1/paper/qa/start',
+                json={'question': 'What is the result?', 'paper_text': {}},
+            )
+            assert malformed_source.status_code == 400
+            missing_stored_source = await client.post(
+                '/api/v1/paper/qa/start',
+                json={
+                    'question': 'What is the result?',
+                    'paper_hash': 'f' * 64,
+                },
+            )
+            assert missing_stored_source.status_code == 400
+            missing_body = await missing_stored_source.get_json()
+            assert missing_body['error_code'] == 'paper_source_required'
+
             # start
             r = await client.post('/api/v1/paper/qa/start', json={
                 'question': 'What is the main result?',
@@ -343,6 +517,7 @@ def test_qa_http_endpoints_wired():
         asyncio.run(_t())
     finally:
         qe.dispatch_stream = orig
+        qa_routes._resolve_stored_qa_source = orig_source_resolver
     _ok('HTTP qa/start spawns task, qa/poll returns done+answer, 404s on unknown')
 
 
@@ -355,11 +530,14 @@ def main():
         test_split_fallback_no_headings,
         test_select_keeps_all_when_under_budget,
         test_select_retrieves_relevant_tail_section,
+        test_select_retrieves_relevant_chinese_tail_section,
         test_build_qa_messages_injects_report,
         test_build_qa_messages_long_paper_keeps_tail,
+        test_build_qa_messages_shares_source_budget_and_bounds_history,
         test_engine_answers_report_only_question_from_injected_report,
         test_engine_triggers_web_search_for_external_question,
         test_engine_discards_interim_draft_with_tool_call,
+        test_engine_repeated_identical_tool_call_halts_as_error,
         test_qa_http_endpoints_wired,
     ]
     for fn in tests:

@@ -1,4 +1,4 @@
-"""Owner-scoped BYO model-provider repository.
+"""Legacy owner-scoped BYO repository retained for one-way v2 migration.
 
 The Storage Sidecar is the sole provider authority.  Rows are keyed by an
 explicit numeric repository owner plus the tenant evolution seam; bearer-key
@@ -6,13 +6,14 @@ IDs are credentials, never ownership identities.  Upstream API keys are stored
 only as authenticated ciphertext and are decrypted only by :func:`get_provider`
 for an outbound request.
 
-Entry points
-------------
+Migration/compatibility entry points
+------------------------------------
 ``list_providers`` and ``get_public`` return redacted HTTP-safe documents.
 ``get_provider`` returns the internal document with plaintext ``api_key``.
 ``create_provider`` / ``update_provider`` / ``delete_provider`` are atomic
-Sidecar commands. ``resolve_model_string`` resolves ``model@prov_id`` within an
-owner boundary.
+Sidecar commands. ``resolve_model_string`` implements the retired
+``model@prov_id`` grammar only for legacy migration tests and consumers; native
+HTTP routes use :mod:`lib.model_routing` exclusively.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from typing import Optional
 
 from lib.identity import require_user_id
 from lib.log import audit_log, get_logger
+from lib.provider_headers import sanitise_extra_headers
 from lib.secret_envelope import open_secret, seal_secret, secret_hint
 from lib.storage.service import get_storage_client
 
@@ -44,18 +46,6 @@ __all__ = [
     "update_provider",
 ]
 
-_FORBIDDEN_EXTRA_HEADERS = frozenset({
-    "authorization",
-    "x-api-key",
-    "cookie",
-    "set-cookie",
-    "host",
-    "content-length",
-    "transfer-encoding",
-    "proxy-authorization",
-})
-_MAX_EXTRA_HEADERS = 16
-_MAX_HEADER_VALUE_LEN = 2048
 _MAX_MODELS_PER_PROVIDER = 64
 _MAX_API_KEY_BYTES = 8192
 _SECRET_PURPOSE = "byo-provider-api-key"
@@ -84,37 +74,6 @@ def _boundary(owner_user_id: int, tenant_id: str | None) -> dict[str, object]:
             owner_user_id, context="BYO provider owner"),
         "tenant_id": str(tenant_id or "").strip(),
     }
-
-
-def sanitise_extra_headers(raw) -> tuple[dict, Optional[str]]:
-    """Validate caller headers before any provider row can be persisted."""
-    if raw is None or raw == {}:
-        return {}, None
-    if not isinstance(raw, dict):
-        return {}, "`extra_headers` must be an object"
-    if len(raw) > _MAX_EXTRA_HEADERS:
-        return {}, (
-            f"`extra_headers` has too many entries (max {_MAX_EXTRA_HEADERS})")
-    clean: dict[str, str] = {}
-    for name, value in raw.items():
-        if not isinstance(name, str) or not name.strip():
-            return clean, "`extra_headers` keys must be non-empty strings"
-        normalized_name = name.strip()
-        if normalized_name.lower() in _FORBIDDEN_EXTRA_HEADERS:
-            return clean, (
-                f"`extra_headers[{name!r}]` is reserved; forbidden names: "
-                f"{sorted(_FORBIDDEN_EXTRA_HEADERS)}")
-        if not isinstance(value, (str, int, float, bool)):
-            return clean, (
-                f"`extra_headers[{name!r}]` must be a scalar "
-                "(string/number/bool)")
-        normalized_value = str(value)
-        if len(normalized_value) > _MAX_HEADER_VALUE_LEN:
-            return clean, (
-                f"`extra_headers[{name!r}]` value too long "
-                f"(max {_MAX_HEADER_VALUE_LEN})")
-        clean[normalized_name] = normalized_value
-    return clean, None
 
 
 def _validate_models(models) -> list[dict]:

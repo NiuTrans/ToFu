@@ -9,6 +9,7 @@ sub-agents from their checkpointed message history. Called once from
 from __future__ import annotations
 
 from lib import agent_inbox
+from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.swarm.integration._logs import _resolve_output_dir
 from lib.swarm.integration._state import (
@@ -83,9 +84,22 @@ def _rehydrate_one(sess: dict) -> bool:
         return False
 
     config = sess.get('config') or {}
-    if 'user_id' not in config:
-        logger.error('[Swarm:%s] persisted session has no owner — refusing '
-                     'unscoped rehydration', swarm_key)
+    try:
+        owner_user_id = require_user_id(
+            config.get('user_id') if isinstance(config, dict) else None,
+            context='durable swarm owner')
+    except ValueError:
+        from lib.swarm import persistence
+        quarantined = persistence.quarantine_ownerless_session(swarm_key)
+        if quarantined:
+            logger.error(
+                '[Swarm:%s] persisted session has no valid owner — '
+                'quarantined from startup recovery; durable evidence retained',
+                swarm_key)
+        else:
+            logger.error(
+                '[Swarm:%s] persisted session has no valid owner — refusing '
+                'unscoped rehydration; quarantine was not confirmed', swarm_key)
         return False
     conv_id = sess.get('conv_id', '') or ''
     task_id = sess.get('task_id', '') or swarm_key
@@ -100,7 +114,7 @@ def _rehydrate_one(sess: dict) -> bool:
                 from lib.agent_core.push import push_event
                 push_event(
                     'swarm', push_conv_id, ev,
-                    user_id=config['user_id'],
+                    user_id=owner_user_id,
                 )
             except Exception as e:
                 logger.debug('[Swarm:%s] rehydrate push mirror failed: %s', swarm_key, e)
@@ -111,7 +125,7 @@ def _rehydrate_one(sess: dict) -> bool:
     # ``_maybe_autocontinue`` still drives a rehydrated session's settle path.
     def _on_settled(
         k=swarm_key,
-        owner=config['user_id'],
+        owner=owner_user_id,
         source=task_id,
     ):
         import lib.swarm.integration as _pkg
@@ -120,7 +134,7 @@ def _rehydrate_one(sess: dict) -> bool:
     session = MasterOrchestrator(
         task_id=task_id,
         conv_id=conv_id,
-        user_id=config['user_id'],
+        user_id=owner_user_id,
         specs=specs,
         project_path=config.get('project_path', '') or '',
         model=config.get('model', '') or '',

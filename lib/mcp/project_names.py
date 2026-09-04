@@ -68,10 +68,19 @@ _lock = threading.Lock()
 _DEFAULT_OVERLEAF_BASE = 'https://www.overleaf.com'
 _overleaf_base: str = ''
 
+# Xuecheng base URL used to synthesize a doc link when only the contentId is
+# known. Defaults to the internal KM host the xuecheng-mcp registry entry
+# targets; learned/overridden at runtime from any tool result that embeds a
+# ``<scheme>://<host>/collabpage|page/<id>`` URL, so a different deployment
+# links correctly too.
+_DEFAULT_XUECHENG_BASE = 'https://km.internal.example.com'
+_xuecheng_base: str = ''
+
 # Matches a full Overleaf project URL so we can learn the deployment's base.
 _OVERLEAF_URL_RE = re.compile(r'(https?://[^\s/]+)/project/([0-9a-f]{24})')
-# Matches a full Xuecheng doc URL so we can record the deep link per doc.
-_KM_FULL_URL_RE = re.compile(r'(https?://[^\s/]+/(?:collabpage|page)/(\d{6,15}))')
+# Matches a full Xuecheng doc URL: group(0) is the whole URL, group(1) the
+# deployment base, group(2) the contentId.
+_KM_FULL_URL_RE = re.compile(r'(https?://[^\s/]+)/(?:collabpage|page)/(\d{6,15})')
 
 # 24-char lowercase hex MongoDB ObjectID
 _PID_RE = re.compile(r'\b([0-9a-f]{24})\b')
@@ -160,30 +169,36 @@ def get_project_url(project_id: str) -> str:
 
 
 def get_doc_url(content_id) -> str:
-    """Return a clickable Xuecheng URL for ``content_id``, or '' if unknown.
+    """Return a clickable Xuecheng URL for ``content_id``.
 
-    Unlike Overleaf there is no single canonical base we can assume for a
-    self-hosted Xuecheng, so a doc URL is returned ONLY when one was
-    harvested from a prior tool result (read_doc / search / create_document).
+    Prefers a URL harvested verbatim from a tool result (so the exact path a
+    deployment used is honored); falls back to synthesizing
+    ``<base>/collabpage/<id>`` from the learned-or-default Xuecheng base URL.
+    Returns '' only when ``content_id`` is not a numeric contentId.
     """
     if content_id is None:
         return ''
     cid = str(content_id).strip()
-    if not cid:
+    if not _DOC_ID_RE.fullmatch(cid):
         return ''
     with _lock:
-        return _doc_url_cache.get(cid, '')
+        cached = _doc_url_cache.get(cid)
+        base = _xuecheng_base or _DEFAULT_XUECHENG_BASE
+    if cached:
+        return cached
+    return f"{base.rstrip('/')}/collabpage/{cid}"
 
 
 def clear_cache() -> None:
     """Empty all caches — intended for tests."""
-    global _overleaf_base
+    global _overleaf_base, _xuecheng_base
     with _lock:
         _cache.clear()
         _doc_cache.clear()
         _proj_url_cache.clear()
         _doc_url_cache.clear()
         _overleaf_base = ''
+        _xuecheng_base = ''
 
 
 # ── Ingestion from tool results ──────────────────────────────────────
@@ -336,7 +351,7 @@ def ingest_tool_result(fn_name: str, fn_args: dict | None, tool_content) -> int:
     #    ``…/collabpage/<id>`` URL — record it per id AND learn the deployment
     #    base (lets self-hosted Overleaf instances link correctly).
     if isinstance(tool_content, str) and tool_content:
-        global _overleaf_base
+        global _overleaf_base, _xuecheng_base
         for m in _OVERLEAF_URL_RE.finditer(tool_content):
             base, pid = m.group(1), m.group(2).lower()
             with _lock:
@@ -346,11 +361,13 @@ def ingest_tool_result(fn_name: str, fn_args: dict | None, tool_content) -> int:
                     _proj_url_cache.pop(next(iter(_proj_url_cache)), None)
                 _proj_url_cache[pid] = m.group(0)
         for m in _KM_FULL_URL_RE.finditer(tool_content):
-            full, cid = m.group(1), m.group(2)
+            base, cid = m.group(1), m.group(2)
             with _lock:
+                if not _xuecheng_base:
+                    _xuecheng_base = base
                 if len(_doc_url_cache) >= _MAX_ENTRIES and cid not in _doc_url_cache:
                     _doc_url_cache.pop(next(iter(_doc_url_cache)), None)
-                _doc_url_cache[cid] = full
+                _doc_url_cache[cid] = m.group(0)
 
     if learned:
         logger.debug('[McpNames] %s learned %d names', fn_name, learned)

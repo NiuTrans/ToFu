@@ -31,6 +31,7 @@ class ProductionStartupSteps:
     validate_storage_boundary: Callback
     init_database: Callback
     start_storage: Callback
+    bootstrap_model_routing: Callback
     validate_imports: Callback
     start_workers: Callback
 
@@ -101,11 +102,13 @@ def _start_network_integrations(
 
     feishu_ok = False
     try:
-        from lib.feishu._state import ENABLED as FEISHU_ENABLED
-        from lib.feishu.startup import start_bot as start_feishu_bot
+        # GUI-saved credentials (server_config.json) are applied before the
+        # enable check so a bot configured without env vars still starts.
+        from lib.feishu.startup import (
+            start_bot_from_saved_config as start_feishu_bot,
+        )
 
-        if FEISHU_ENABLED:
-            feishu_ok = bool(start_feishu_bot())
+        feishu_ok = bool(start_feishu_bot())
     except Exception as exc:
         logger.warning('Feishu Bot failed: %s', exc)
     return mcp_config, feishu_ok
@@ -230,7 +233,7 @@ def register_production_lifecycle(
         # The launcher can therefore render a determinate bar from completed
         # phases instead of animating an indeterminate spinner while a single
         # slow callback is running.
-        required_phase_count = 8
+        required_phase_count = 9
         phase_total = required_phase_count if announce_ready is not None else required_phase_count - 1
 
         async def _phase(index: int, label: str, callback: Callback,
@@ -284,6 +287,16 @@ def register_production_lifecycle(
                         'skipping remaining startup phases.')
                     state['status'] = 'interrupted'
                     return
+
+                # The authority switch must finish before imports instantiate
+                # the dispatcher or workers accept tasks. Migration is
+                # revision-idempotent and never writes back to legacy config.
+                await _phase(
+                    next_phase,
+                    'Model-routing v2 authority',
+                    steps.bootstrap_model_routing,
+                )
+                next_phase += 1
 
                 await _phase(next_phase, 'Critical imports', steps.validate_imports)
                 next_phase += 1

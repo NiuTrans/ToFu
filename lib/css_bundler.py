@@ -219,29 +219,9 @@ def _link_tag_for(stem):
     return f'<link rel="stylesheet" href="static/{stem}.css?v={_hash_for(stem)}">'
 
 
-def get_styles_filename():
-    """Current minified filename for styles.css (``styles-<hash>.css``) or None."""
-    return _filename_for('styles')
-
-
-def get_styles_hash():
-    """Content-hash for styles.css (back-compat helper)."""
-    return _hash_for('styles')
-
-
 def get_styles_link_tag():
     """`<link>` tag pointing at the hashed minified styles.css."""
     return _link_tag_for('styles')
-
-
-def get_settings_filename():
-    """Current minified filename for settings.css (``settings-<hash>.css``) or None."""
-    return _filename_for('settings')
-
-
-def get_settings_hash():
-    """Content-hash for settings.css."""
-    return _hash_for('settings')
 
 
 def get_settings_link_tag():

@@ -109,7 +109,6 @@ def _append_conversation_autopilot_turns(
             create_turn_pair,
             get_turn,
         )
-
         owner_user_id = _owner_user_id(task)
         parent_turn = get_turn(
             conv_id, parent_turn_id, user_id=owner_user_id
@@ -201,6 +200,7 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
     from lib.tasks_pkg.manager import create_task, discard_task
     from lib.tasks_pkg.spawn import spawn_task
     from lib.turn_lifecycle import (
+        attempt_dispatch_lock,
         bind_task,
         build_api_messages,
         claim_attempt_start,
@@ -238,7 +238,11 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
     try:
         document = get_storage_client().query(
             "conversation.get",
-            {"conv_id": conv_id, "user_id": owner_user_id},
+            {
+                "conv_id": conv_id,
+                "user_id": owner_user_id,
+                "derive_messages": False,
+            },
         )
         live_settings = dict(
             ((document or {}).get("metadata") or {}).get("settings") or {}
@@ -270,46 +274,53 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
         )
         fail_start(attempt_id, error, user_id=owner_user_id)
         return None
-    if not claim_attempt_start(attempt_id, user_id=owner_user_id):
-        logger.info(
-            "[Autopilot] Successor attempt was already claimed attempt=%s",
-            attempt_id[:8],
-        )
-        return None
+    def claim_bind_and_spawn() -> dict | None:
+        if not claim_attempt_start(attempt_id, user_id=owner_user_id):
+            logger.info(
+                "[Autopilot] Successor attempt was already claimed attempt=%s",
+                attempt_id[:8],
+            )
+            return None
 
-    new_task = None
-    try:
-        new_task = create_task(
-            conv_id,
-            api_messages,
-            config,
-            user_id=owner_user_id,
-            supersede=False,
-        )
-        new_task["_autopilotParent"] = task.get("id")
-        bound = bind_task(
-            attempt_id, new_task["id"], user_id=owner_user_id
-        )
-        if bound is None:
-            raise RuntimeError("successor attempt bind was rejected")
-        spawn_task(new_task)
-    except Exception as exc:
-        if new_task is not None:
-            discard_task(new_task["id"])
-        error = make_envelope(
-            "internal",
-            detail="Autopilot failed to start the successor executor.",
-            model=config.get("model", ""),
-            context="autopilot",
-            source="autopilot",
-            raw=str(exc),
-        )
-        fail_start(attempt_id, error, user_id=owner_user_id)
-        logger.error(
-            "[Autopilot] Successor start failed attempt=%s",
-            attempt_id[:8],
-            exc_info=True,
-        )
+        new_task = None
+        try:
+            new_task = create_task(
+                conv_id,
+                api_messages,
+                config,
+                user_id=owner_user_id,
+                supersede=False,
+            )
+            new_task["_autopilotParent"] = task.get("id")
+            bound = bind_task(
+                attempt_id, new_task["id"], user_id=owner_user_id
+            )
+            if bound is None:
+                raise RuntimeError("successor attempt bind was rejected")
+            spawn_task(new_task)
+        except Exception as exc:
+            if new_task is not None:
+                discard_task(new_task["id"])
+            error = make_envelope(
+                "internal",
+                detail="Autopilot failed to start the successor executor.",
+                model=config.get("model", ""),
+                context="autopilot",
+                source="autopilot",
+                raw=str(exc),
+            )
+            fail_start(attempt_id, error, user_id=owner_user_id)
+            logger.error(
+                "[Autopilot] Successor start failed attempt=%s",
+                attempt_id[:8],
+                exc_info=True,
+            )
+            return None
+        return new_task
+
+    with attempt_dispatch_lock(attempt_id):
+        new_task = claim_bind_and_spawn()
+    if new_task is None:
         return None
 
     new_task_id = new_task["id"]

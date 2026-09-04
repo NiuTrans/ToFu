@@ -11,14 +11,12 @@
  * always-visible project-bar render+interact cluster (_updateProjectUI /
  * toggleProjectBarReadOnly / toggleAutoApply / clearProject).
  *
- * The DEFERRED sibling project.js (panel UI: folder modal, browser, recent
- * list, apply-code, drop zones, approval/stdin/HG submit handlers) calls
- * these at RUNTIME via window scope — core always loads first. In the other
- * direction, the two bare calls into the panel (saveRecentProject /
- * closeProjectModal / the _mpFolders reset) are typeof-guarded here.
+ * The demand-loaded sibling project.js owns the workspace modal, browser,
+ * and folder-drop UI. Coding approvals/stdin/apply-code remain in the small
+ * retained execution-interactions.js section. Core state is exposed to the
+ * modal through an explicit live port; reverse cleanup uses an optional owner
+ * object and never loads the modal merely because a project was cleared.
  */
-
-let _scanPollTimer = null;
 
 function toggleAutoApply() {
   autoApplyWrites = !autoApplyWrites;
@@ -73,13 +71,29 @@ function _saveConvProjectPath(path, extraPaths, readOnlyPaths) {
     } else {
       conv.readOnlyPaths = [];
     }
-    saveConversations(conv.id);
+    reconcileConversationCatalogMetadata(conv.id);
     persistConversationSettings(conv);
   }
 }
 
 function _getConvProjectPath(conv) {
   return (conv && conv.projectPath) || "";
+}
+
+// Turn reconciliation requests a background refresh independently of whether
+// the Project workspace presenter has ever been opened.
+async function rescanProject() {
+  if (!projectState.active) return;
+  try {
+    const resp = await Api.project.rescan();
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok) {
+      _applyProjectData(data);
+      debugLog("Project refreshed", "success");
+    }
+  } catch (e) {
+    debugLog("Rescan failed: " + e.message, "warn");
+  }
 }
 
 /* RWA P4b-2a:伪路径约定 — conv.projectPath = 'remote:<agent_id>:<root>'
@@ -94,7 +108,6 @@ function _isRemotePath(p) {
 /* 伪路径会话的项目栏合成态:不调 setPaths(服务器无法扫描),
    只渲染 active bar + 徽章,身份仍保留完整伪路径。 */
 function _applyRemoteProjectState(conv, pseudo) {
-  _stopScanPoll();
   projectState = {
     active: true,
     path: pseudo,
@@ -113,12 +126,8 @@ function _applyRemoteProjectState(conv, pseudo) {
 }
 
 function _clearProjectStateLocal() {
-  // Reset local projectState without touching server — used when switching to a conv with no project
-  // BUG FIX: Stop background polls BEFORE clearing state.
-  // Without this, _doScanPoll keeps fetching the old project
-  // from the server and _applyProjectData resurrects projectState.active=true,
-  // making it impossible to clear the project bar (e.g. on "New Chat").
-  _stopScanPoll();
+  // Reset local projectState without touching server when the next
+  // conversation has no project. Project exploration no longer owns a poll.
   projectState = {
     active: false,
     path: "",
@@ -175,7 +184,9 @@ async function _restoreConvProject(conv) {
     //   showing on a chatui-only conversation. setPaths([chatui], []) prunes
     //   every global extra not in THIS conversation's saved set, making the
     //   conversation the single source of truth for the project bar.
-    const resp = await Api.project.setPaths(allPaths, savedReadOnly);
+    const resp = await Api.project.setPaths(
+      allPaths, savedReadOnly, [savedPath],
+    );
     const data = resp ? await resp.json().catch(() => ({})) : {};
     /* Stale-switch guard — BEFORE any paint or persist. A slow setPaths
      * response belongs to the conv that ISSUED it; after a rapid A→B switch
@@ -186,9 +197,8 @@ async function _restoreConvProject(conv) {
     if (activeConvId !== conv.id || !conversations.some(x => x && x.id === conv.id)) return;
     if (resp && resp.ok) {
       _applyProjectData(data);
-      // BUG FIX: Update recent projects on restore so new projects appear
-      //   in the recent list and last_used stays current.
-      if (typeof saveRecentProject === 'function') saveRecentProject(data.path);  // deferred panel module (Epic-E sub-7)
+      // setPaths touched the restored primary in the same successful request,
+      // so recent history cannot be committed for an invalid project.
       /* FIX: Sync conv.projectPath from the server response.
        * _restoreConvProject only reads conv.projectPath — it never writes it
        * back after a successful /api/project/set.  If conv.projectPath was
@@ -206,7 +216,7 @@ async function _restoreConvProject(conv) {
        * change, NOT new conversation activity.  Passing conv.id bumps
        * updatedAt = Date.now(), making the conversation jump to the top
        * of the sidebar just because its saved project path was invalid. */
-      saveConversations(null);
+      reconcileConversationCatalogMetadata(null);
       /* A project-less chat is never Studio — the bar was already cleared
        * by the pre-fetch _clearProjectStateLocal, so the dial must not keep
        * claiming Studio. Demote AND persist (guarded above: only when THIS
@@ -230,17 +240,19 @@ async function _restoreConvProject(conv) {
 let _projectBarFolders = [];
 
 async function clearProject() {
-  _stopScanPoll();
   await Api.project.clear().catch(e => debugLog(`[clearProject] ${e.message}`, 'warn'));
   _saveConvProjectPath("");
-  if (typeof _mpFolders !== 'undefined') { _mpFolders = []; _mpReadOnly = new Set(); }  // modal state lives in the deferred panel (Epic-E sub-7)
   projectState = {
     active: false, path: "", fileCount: 0, dirCount: 0, totalSize: 0,
     languages: {}, scanning: false, scanProgress: "", scanDetail: "",
     scannedAt: 0, extraRoots: [], readOnly: false,
   };
   _updateProjectUI();
-  if (typeof closeProjectModal === 'function') closeProjectModal();  // deferred panel module (Epic-E sub-7)
+  const projectModalPresentation = runtimeScope.ProjectModalPresentation;
+  if (projectModalPresentation
+      && typeof projectModalPresentation.resetAfterProjectClear === 'function') {
+    projectModalPresentation.resetAfterProjectClear();
+  }
   /* A project-less chat is never Studio — fall back to Pro (unless the user
    * is deliberately in Air). Keeps the dial truthful. */
   if (typeof onProjectCleared === 'function') onProjectCleared();
@@ -277,19 +289,6 @@ function _applyProjectData(data) {
   }
   _updateProjectUI();
 }
-
-function _startScanPoll() {
-  // No-op: scanning was removed — project relies on tools for exploration
-}
-
-function _stopScanPoll() {
-  if (_scanPollTimer) {
-    clearInterval(_scanPollTimer);
-    _scanPollTimer = null;
-  }
-}
-
-
 
 function _updateProjectUI() {
   /* Every projectState mutation funnels through here to repaint the
@@ -542,7 +541,7 @@ async function loadProjectStatus() {
           debugLog("Saved project path no longer valid, clearing", "warn");
           if (conv) {
             conv.projectPath = "";
-            saveConversations(conv.id);
+            reconcileConversationCatalogMetadata(conv.id);
           }
           _clearProjectStateLocal();
           /* A project-less chat is never Studio — demote the dial AND

@@ -3,9 +3,9 @@
 Why this exists (owner-reported symptom): a paper-media / production panel
 shows ``已用 0:03`` for a job the backend has been running for ten minutes,
 because the frontend mints its own ``Date.now()`` stopwatch and re-mints it on
-every refresh / tab switch. The chat stream already solved this — the backend
-surfaces the task's real start and the client rewinds its clock to it
-(``_seedStreamTimerStart``). Production capabilities could not do the same
+every refresh / tab switch. The backend now surfaces the task's real start and
+the typed client clock owner adopts that server authority. Production
+capabilities could not do the same
 because **no poll response carried a start timestamp at all**.
 
 Two independent facts are pinned here, because fixing only the first leaves a
@@ -70,10 +70,10 @@ def test_poll_reports_created_at_for_running_task():
 # ── 1b. THE UNIT GUARD ─────────────────────────────────────────
 #
 # The highest-value assertion in this file. Feeding epoch SECONDS into the
-# frontend's `_seedStreamTimerStart` (which takes `serverStartMs`) is NOT a
-# visible failure: its min-guard accepts the value happily, and the UI then
-# renders an elapsed of ~50 years. That is strictly worse than the 0:00 bug
-# we set out to fix, because 0:00 at least LOOKS wrong.
+# frontend's millisecond clock boundary is NOT an immediately visible failure:
+# a monotonic min-guard can accept the value and the UI then renders an elapsed
+# of ~50 years. That is strictly worse than the 0:00 bug we set out to fix,
+# because 0:00 at least LOOKS wrong.
 
 _MS_FLOOR = 1e12  # any epoch-ms after 2001-09; epoch-SECONDS is ~1.7e9
 

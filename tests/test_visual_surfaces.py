@@ -170,14 +170,18 @@ def test_settings_tabs_open_without_js_errors(page):
 def test_modal_panel_opens_without_js_errors(page, label, opener, selector):
     """Each modal panel opens cleanly AND actually appears in the DOM."""
     if label == 'orchestration':
-        page.route(
-            '**/api/v1/features',
-            lambda route: route.fulfill(
-                status=200,
-                content_type='application/json',
-                body='{"debug_mode":true}',
-            ),
-        )
+        # Feature flags ride the /api/v1/server-config boot response
+        # (loadFeatureFlags(data.feature_flags)); the dedicated
+        # /api/v1/features endpoint is only a fallback for an invalid
+        # piggyback, so mocking it alone never reaches the loader.
+        def _force_debug_flags(route):
+            response = route.fetch()
+            body = response.json()
+            body['feature_flags'] = {
+                'debug_mode': True, 'optimizer_enabled': True}
+            route.fulfill(response=response, json=body)
+
+        page.route('**/api/v1/server-config**', _force_debug_flags)
         page.reload()
     _wait_ready(page)
     _drain(page)

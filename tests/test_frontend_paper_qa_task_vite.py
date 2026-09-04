@@ -59,21 +59,36 @@ global._paperQAHistory = [{ role: 'user', content: 'Earlier question' }];
 global._paperQAStreaming = false;
 global._paperQAAbort = null;
 global._paperQAAbortRequested = false;
-global._paperParsedText = 'paper body';
+global._paperParsedText = '';
 global._activePaperId = 'paper-1';
-global._paperHash = 'hash-1';
+global._paperHash = 'a'.repeat(32);
 global._i18nLang = 'zh';
 global._paperReportModel = 'model-1';
 global._paperFileName = 'Paper title';
 global._saveCount = 0;
-global._saveActivePaperState = () => { global._saveCount += 1; };
-global._ensurePaperText = async () => true;
+global._saveScope = '';
+global._saveActivePaperState = (scope) => {
+  global._saveCount += 1;
+  global._saveScope = scope;
+};
+global._ensureCalls = 0;
+global._ensurePaperText = async () => {
+  global._ensureCalls += 1;
+  global._paperParsedText = 'recovered paper body';
+  return true;
+};
 
-let startBody = null;
+let startBodies = [];
+let qaStartImpl = async (body) => ({
+  ok: true, task_id: 'qa-1', paper_hash: body.paper_hash,
+});
 const pollCursors = [];
 global.Api = {
   paper: {
-    qaStart: async (body) => { startBody = body; return { ok: true, task_id: 'qa-1' }; },
+    qaStart: async (body) => {
+      startBodies.push(body);
+      return qaStartImpl(body);
+    },
     qaPoll: async (_taskId, cursor) => {
       pollCursors.push(cursor);
       // Push seq=0 arrives first. The overlapping poll page must reject it
@@ -101,11 +116,13 @@ const check = (name, value) => checks.push((value ? 'PASS ' : 'FAIL ') + name);
 
 (async () => {
   await _sendPaperQuestion();
+  const startBody = startBodies[0];
   const assistant = _paperQAHistory[_paperQAHistory.length - 1];
-  check('request_identity', startBody.paper_hash === 'hash-1'
+  check('request_identity', startBody.paper_hash === 'a'.repeat(32)
     && startBody.lang === 'zh' && startBody.model === 'model-1');
-  check('request_question_and_text', startBody.question === 'How does it work?'
-    && startBody.paper_text === 'paper body' && startBody.title === 'Paper title');
+  check('hash_only_avoids_source_recovery', startBody.question === 'How does it work?'
+    && !Object.hasOwn(startBody, 'paper_text') && _ensureCalls === 0
+    && startBody.title === 'Paper title');
   check('history_excludes_new_question', startBody.history.length === 1
     && startBody.history[0].content === 'Earlier question');
   check('push_poll_exactly_once', assistant.content === 'AB');
@@ -113,7 +130,70 @@ const check = (name, value) => checks.push((value ? 'PASS ' : 'FAIL ') + name);
   check('incremental_cursor', pollCursors.length === 1 && pollCursors[0] === 0);
   check('subscription_released', subscriptions.length === 0);
   check('finalized_once', _paperQAStreaming === false && _saveCount === 1
+    && _saveScope === 'qa'
     && input.value === '');
+
+  // Only the explicit source-miss contract may trigger one body fallback.
+  input.value = 'Why retry?';
+  global._paperHash = 'b'.repeat(32);
+  global._paperParsedText = '';
+  startBodies = [];
+  let retryAttempts = 0;
+  qaStartImpl = async (body) => {
+    retryAttempts += 1;
+    if (retryAttempts === 1) {
+      throw {
+        status: 400,
+        code: 'paper_source_required',
+        body: { error_code: 'paper_source_required' },
+      };
+    }
+    return { ok: true, task_id: 'qa-2', paper_hash: body.paper_hash };
+  };
+  await _sendPaperQuestion();
+  check('explicit_source_miss_retries_once', retryAttempts === 2
+    && !Object.hasOwn(startBodies[0], 'paper_text')
+    && startBodies[1].paper_text === 'recovered paper body'
+    && _ensureCalls === 1);
+
+  // Compatibility starts without an ingest identity retain the returned hash.
+  input.value = 'Mint identity';
+  global._paperHash = '';
+  global._paperParsedText = 'local compatibility source';
+  startBodies = [];
+  qaStartImpl = async () => ({
+    ok: true, task_id: 'qa-3', paper_hash: 'c'.repeat(32),
+  });
+  await _sendPaperQuestion();
+  check('returned_hash_becomes_live_identity',
+    startBodies.length === 1
+    && startBodies[0].paper_text === 'local compatibility source'
+    && !Object.hasOwn(startBodies[0], 'paper_hash')
+    && global._paperHash === 'c'.repeat(32));
+
+  // Ambiguous failures and a switched paper never duplicate paid starts.
+  input.value = 'Do not retry 5xx';
+  global._paperHash = 'd'.repeat(32);
+  global._paperParsedText = 'available fallback';
+  let ambiguousAttempts = 0;
+  qaStartImpl = async () => {
+    ambiguousAttempts += 1;
+    throw { status: 503, code: 'service_unavailable' };
+  };
+  await _sendPaperQuestion();
+  check('ambiguous_failure_is_one_shot', ambiguousAttempts === 1);
+
+  input.value = 'Do not retry stale paper';
+  global._activePaperId = 'paper-1';
+  global._paperHash = 'e'.repeat(32);
+  let staleAttempts = 0;
+  qaStartImpl = async () => {
+    staleAttempts += 1;
+    global._activePaperId = 'paper-2';
+    throw { status: 400, code: 'paper_source_required' };
+  };
+  await _sendPaperQuestion();
+  check('paper_switch_fences_retry', staleAttempts === 1);
   console.log(checks.join('\n'));
   process.exit(checks.some((line) => line.startsWith('FAIL')) ? 1 : 0);
 })().catch((error) => { console.error(error); process.exit(2); });
@@ -128,7 +208,7 @@ def _assert_contract(first: str, second: str) -> None:
     failures = [line for line in proc.stdout.splitlines()
                 if line.startswith('FAIL')]
     assert not failures, proc.stdout
-    assert proc.stdout.count('PASS') == 8
+    assert proc.stdout.count('PASS') == 12
 
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),

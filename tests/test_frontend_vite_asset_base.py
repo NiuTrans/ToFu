@@ -50,7 +50,7 @@ def test_entry_tag_behavior_keeps_asset_urls_relative(monkeypatch, tmp_path):
     monkeypatch.setattr(vite_assets, 'VITE_OUT_DIR', str(output))
     monkeypatch.setattr(vite_assets, 'VITE_MANIFEST', str(manifest_path))
     monkeypatch.setattr(
-        vite_assets, '_load_manifest', lambda _entries: manifest)
+        vite_assets, '_load_manifest', lambda _entries, **_options: manifest)
     vite_assets.clear_vite_asset_cache()
 
     tags = vite_assets.get_vite_asset_tags()

@@ -27,8 +27,6 @@ from lib.conversation_sync.generated_contract import (
 from lib.log import get_logger
 from lib.storage_projection import (
     project_event_usage_for_storage,
-    project_usage_container_for_storage,
-    sanitize_usage_for_persist,
 )
 from lib.task_event_contract import (
     STRUCTURAL_EVENT_TYPES,
@@ -86,6 +84,8 @@ _PRUNE_BATCH_ROWS = _env_int(
     'TOFU_EVENT_PRUNE_BATCH_ROWS', 25, 10, 10_000)
 _PRUNE_MAX_BATCHES = _env_int(
     'TOFU_EVENT_PRUNE_BATCHES', 16, 1, 64)
+_LEGACY_EVENT_RECOVERY_ROWS = _env_int(
+    'TOFU_EVENT_LEGACY_RECOVERY_ROWS', 100, 1, 100)
 _TASK_EVENT_PRUNE_INTERVAL_S = _env_seconds(
     'TOFU_TASK_EVENT_PRUNE_INTERVAL', 300, 30)
 _MAINTENANCE_INTERVAL_S = _env_seconds(
@@ -207,17 +207,49 @@ def stop_sidecar_batcher(timeout: float = 3.0) -> bool:
     return bool(stopped)
 
 
-def _usage_without_wire_diagnostics(usage):
-    return sanitize_usage_for_persist(usage)
-
-
-def _project_usage_container_for_storage(container):
-    return project_usage_container_for_storage(container)
-
-
 def _project_usage_diagnostics_for_storage(event):
     """Remove transient wire diagnostics from every persisted usage shape."""
     return project_event_usage_for_storage(event)
+
+
+def project_persistent_event(task_id, event):
+    """Return the canonical storage-only form of one live task event.
+
+    Both standalone ``event.append`` and the turn-native transaction carrier
+    must call this exact boundary.  The latter historically passed the live
+    ``messages_snapshot`` frame straight to the Sidecar, bypassing the
+    prefix/tools delta projector and restoring O(rounds²) disk growth.  The
+    caller keeps sending ``event`` unchanged to live subscribers.
+    """
+    projected = _project_usage_diagnostics_for_storage(event)
+    event_type = projected.get('type') if isinstance(projected, dict) else ''
+    if event_type == 'messages_snapshot':
+        try:
+            from lib.tasks_pkg.snapshot_delta import get_projector
+            projected = get_projector().project(str(task_id), projected)
+        except Exception as exc:
+            logger.warning(
+                '[EventLog] snapshot projection failed task=%s: %s; '
+                'persisting the full snapshot', str(task_id)[:8], exc)
+    elif event_type in TERMINAL_EVENT_TYPES:
+        # The previous snapshot can be large. Terminal projection is the
+        # earliest safe release point and keeps the bounded projector from
+        # retaining up to 64 completed-task contexts until FIFO eviction.
+        from lib.tasks_pkg.snapshot_delta import forget_projector_task
+        forget_projector_task(str(task_id))
+    return projected
+
+
+def reset_persistent_event_projection(task_id, event) -> None:
+    """Forget a snapshot baseline after a durability failure.
+
+    A following snapshot then stores a full baseline instead of referencing a
+    row whose commit is unknown, so cold replay degrades in bytes rather than
+    correctness.
+    """
+    if isinstance(event, dict) and event.get('type') == 'messages_snapshot':
+        from lib.tasks_pkg.snapshot_delta import forget_projector_task
+        forget_projector_task(str(task_id))
 
 
 def append_persistent_event(task_id, event_id, event):
@@ -235,15 +267,7 @@ def append_persistent_event(task_id, event_id, event):
     if not isinstance(event, dict):
         raise EventDurabilityError('durable task events must be objects')
 
-    projected = _project_usage_diagnostics_for_storage(event)
-    if projected.get('type') == 'messages_snapshot':
-        try:
-            from lib.tasks_pkg.snapshot_delta import get_projector
-            projected = get_projector().project(task_id, projected)
-        except Exception as exc:
-            logger.warning(
-                '[EventLog] snapshot projection failed task=%s: %s; '
-                'persisting the full snapshot', task_id[:8], exc)
+    projected = project_persistent_event(task_id, event)
 
     _invalidate_event_read_caches(task_id)
     try:
@@ -269,6 +293,7 @@ def append_persistent_event(task_id, event_id, event):
             _invalidate_event_read_caches(task_id)
             return result
         except Exception as retry_exc:
+            reset_persistent_event_projection(task_id, projected)
             raise EventDurabilityError(
                 f'event {event_id} for task {str(task_id)[:8]} was not durable'
             ) from retry_exc
@@ -286,7 +311,13 @@ def flush_pending(task_id=None) -> bool:
             f'event flush failed for task {str(task_id or "")[:8]}') from exc
 
 
-def read_events(task_id, since_event_id=None, limit=10_000):
+def read_events(
+    task_id,
+    since_event_id=None,
+    limit=10_000,
+    *,
+    raise_on_error=False,
+):
     """Read a bounded, ordered cold-replay page from the Sidecar authority."""
     if not task_id:
         return []
@@ -320,7 +351,37 @@ def read_events(task_id, since_event_id=None, limit=10_000):
     except Exception as exc:
         logger.warning(
             '[EventLog] cold replay failed task=%s: %s', str(task_id)[:8], exc)
+        if raise_on_error:
+            raise
         return []
+
+
+def read_event_bounds(task_id):
+    """Return exact count and absolute cursors for one durable event window."""
+    if not task_id:
+        return {
+            'retained_count': 0,
+            'base_cursor': 0,
+            'next_cursor': 0,
+        }
+    from lib.storage import get_storage_client
+    bounds = get_storage_client().query(
+        'event.bounds', {'task_id': str(task_id)}) or {}
+    retained_count = max(0, int(bounds.get('retained_count') or 0))
+    if retained_count == 0:
+        return {
+            'retained_count': 0,
+            'base_cursor': 0,
+            'next_cursor': 0,
+        }
+    base_cursor = max(0, int(bounds.get('base_cursor') or 0))
+    next_cursor = max(
+        base_cursor + 1, int(bounds.get('next_cursor') or 0))
+    return {
+        'retained_count': retained_count,
+        'base_cursor': base_cursor,
+        'next_cursor': next_cursor,
+    }
 
 
 def has_terminal_event(task_id) -> bool:
@@ -356,6 +417,7 @@ def _prune_sidecar_event_backlog(client, cutoff_ms, *, retention_class):
             'event.prune', {
                 'created_before_ms': int(cutoff_ms),
                 'limit': _PRUNE_BATCH_ROWS,
+                'legacy_recovery_limit': _LEGACY_EVENT_RECOVERY_ROWS,
                 'retention_class': retention_class,
             }, None, priority='maintenance', deadline=30)
         response = response or {}
@@ -688,9 +750,11 @@ __all__ = [
     'STRUCTURAL_TTL_MS',
     'EventDurabilityError',
     'append_persistent_event',
+    'project_persistent_event',
     'flush_pending',
     'has_terminal_event',
     'read_events',
+    'reset_persistent_event_projection',
     'start_storage_maintenance',
     'stop_sidecar_batcher',
     'stop_storage_maintenance',

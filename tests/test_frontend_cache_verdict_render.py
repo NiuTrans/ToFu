@@ -140,6 +140,18 @@ check('state_empty', _cacheBreakState({}) === '');
 // laundered to upstream/unproven.
 check('state_turn_boundary_rebill',
   _cacheBreakState({ turn_boundary_rebill: 'new-turn round-1 boundary re-bill: the previous turn left a warm ~262000-token cached prefix, but this turn read back only 79000 (collapsed toward the static floor) — the cached prefix was not reused across the turn boundary and was re-billed uncached.' }) === 'boundary');
+// 2026-08 inline-built verdict keys (detect_cache_break returns these keys
+// DIRECTLY, not via _resolve_break_cause) — they used to classify to '' (no
+// badge) and the structured codex_cache dict was DROPPED entirely. Each must
+// now land on the correct state, never '' (which reads as a benign no-badge).
+check('state_codex_cache_is_proven',
+  _cacheBreakState({ codex_cache: { status: 'implicit_breakpoint_fallback' } }) === 'proven');
+check('state_cache_write_unsettled_is_culprit',
+  _cacheBreakState({ cache_write_unsettled: 'x' }) === 'culprit');
+check('state_cache_mid_out_of_window_is_culprit',
+  _cacheBreakState({ cache_mid_out_of_window: 'x' }) === 'culprit');
+check('state_indeterminate_is_unproven',
+  _cacheBreakState({ indeterminate: 'x' }) === 'unproven');
 
 // ── 3. Culprit extraction (WHICH message broke cache) ──
 const _cb = { prefix_mutation: 'cached prefix bytes changed between turns (non-idempotent history edit) — the whole body was re-billed uncached [changed: user:ab12.content, tool_result(c1).tool_result]' };
@@ -285,6 +297,13 @@ check('boundary_state_class', html3.indexOf('cp-break-boundary') !== -1);
 check('boundary_not_upstream_badge', html3.indexOf('UPSTREAM-BADGE') === -1);
 check('boundary_shows_cause', html3.indexOf('boundary re-bill') !== -1);
 
+// A STRUCTURED codex_cache verdict (a dict, not a free-form string) MUST
+// surface — the old "unknown dict key" path silently DROPPED it. It maps to
+// the PROVEN badge (wire-proven provider behaviour, not our client change).
+const html4 = _buildCostPopover(_ctx({ codex_cache: { status: 'implicit_breakpoint_fallback', drop_tokens: 1024 } }));
+check('codex_has_proven_badge', html4.indexOf('PROVEN-BADGE') !== -1);
+check('codex_reason_surfaced', html4.indexOf('codexCacheFallback') !== -1);
+
 console.log(out.join('\n'));
 """
 
@@ -382,6 +401,30 @@ def _derive_backend_causes():
         ('ttl_expiry', cause(elapsed=400)),
         ('unproven_read', cause(cache_read=5000)),
         ('unproven_noprefix', cause(cache_read=0, prefix_mutated=False)),
+        # ── Inline-built verdicts ──
+        # detect_cache_break returns these keys DIRECTLY (not via
+        # _resolve_break_cause), so they are not derivable through R(). Their
+        # prose is FULLY STATIC (no dynamic numbers), so the strings are
+        # copied verbatim from _detect.py here. cache_write_unsettled /
+        # turn_boundary_rebill embed dynamic {gap}/{token} numbers and are
+        # deliberately excluded (substring translation can't match the digits).
+        ('inline_indeterminate_compaction',
+         'zero read-back on a substantial write, but no break gate could fire '
+         'because this round followed a compaction, which is structurally '
+         'exempt from every break predicate. The spend is real and counted '
+         'here; the CAUSE is unresolved — this round is NOT evidence of a '
+         'healthy cache.'),
+        ('inline_indeterminate_plain',
+         'zero read-back on a substantial write, but no break gate could fire. '
+         'The spend is real and counted here; the CAUSE is unresolved — this '
+         'round is NOT evidence of a healthy cache.'),
+        ('inline_mid_out_of_window',
+         "mid-history cache anchor drifted past Anthropic's ~20-block cache "
+         'lookback window behind the rolling tail — the tail could not extend '
+         'the prior cache entry, so the whole prefix past the mid anchor was '
+         're-billed uncached even though the body bytes were identical. A '
+         'client-side breakpoint-layout miss (the stepping-stone trail/step '
+         'params), NOT a server-side or gateway fault.'),
     ]
 
 
@@ -481,6 +524,137 @@ def test_nc_derived_drift_leaves_english():
     assert 'FAIL' in output, (
         'NC3 did not bite — neutering a phrase entry should leave English '
         'prose on at least one derived verdict:\n' + output)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Parameterized verdict rendering (turn_boundary_rebill +
+# cache_write_unsettled). The backend now attaches STRUCTURED fields
+# (prev_read/read/gap_s/cold_gap_s) beside the free-form string cause, and
+# _cacheBreakReason renders them through t(key, {params}) so the zh/en UI
+# interpolates numbers instead of substring-matching dynamic digits (which can
+# never match a static phrase table). This harness loads the REAL locale
+# catalogs and drives the shipped helper.
+# ═══════════════════════════════════════════════════════════════════
+
+ZH_LOCALE = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
+EN_LOCALE = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'en.json')
+
+_PARAM_HARNESS = r"""
+const fs = require('fs');
+const SRC_PATH = process.argv[2];
+const ZH = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const EN = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'));
+
+let src = fs.readFileSync(SRC_PATH, 'utf8');
+const _endMarker = 'return m ? m[1].trim() : \'\';\n}';
+const _endIdx = src.indexOf(_endMarker);
+if (_endIdx !== -1) src = src.slice(0, _endIdx + _endMarker.length);
+
+function makeT(catalog) {
+  return (k, o) => {
+    o = o || {};
+    const tmpl = catalog[k];
+    if (tmpl === undefined) return k;
+    let s = tmpl;
+    for (const kk of Object.keys(o)) s = s.split('{' + kk + '}').join(String(o[kk]));
+    return s;
+  };
+}
+
+global.escapeHtml = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+eval(src);
+
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+const boundaryCb = {
+  turn_boundary_rebill: 'LEGACY STRING',
+  prev_read: 262000, read: 79000, gap_s: 3.2,
+};
+const unsettledCb = {
+  cache_write_unsettled: 'LEGACY STRING',
+  prev_read: 262000, read: 0, gap_s: 8.4, cold_gap_s: 8.4,
+};
+const legacyBoundary = { turn_boundary_rebill:
+  'new-turn round-1 boundary re-bill: warm ~262000-token prefix read back only 79000' };
+const legacyUnsettled = { cache_write_unsettled:
+  'prefix not read back — arrived 8.4s after the previous cold write' };
+
+// ── zh: Chinese text + numbers interpolated, NOT the legacy string fallback ──
+let _i18nLang = 'zh';
+global.t = makeT(ZH);
+const zhBoundary = _cacheBreakReason(boundaryCb);
+const zhUnsettled = _cacheBreakReason(unsettledCb);
+check('zh_boundary_numbers',
+  zhBoundary.indexOf('262000') !== -1 && zhBoundary.indexOf('79000') !== -1
+  && zhBoundary.indexOf('3.2') !== -1);
+check('zh_boundary_not_legacy', zhBoundary.indexOf('LEGACY STRING') === -1);
+check('zh_boundary_is_chinese',
+  zhBoundary.indexOf('重新计费') !== -1 && zhBoundary.indexOf('缓存前缀') !== -1);
+check('zh_unsettled_numbers',
+  zhUnsettled.indexOf('8.4') !== -1 && zhUnsettled.indexOf('8.4') !== -1);
+check('zh_unsettled_not_legacy', zhUnsettled.indexOf('LEGACY STRING') === -1);
+check('zh_unsettled_is_chinese', zhUnsettled.indexOf('可见性窗口') !== -1);
+// Old-format fallback on zh must still render (not crash / not drop).
+check('zh_legacy_nonempty', _cacheBreakReason(legacyBoundary).length > 0);
+check('zh_legacy_unsettled_nonempty', _cacheBreakReason(legacyUnsettled).length > 0);
+
+// ── en: English text + numbers interpolated ──
+_i18nLang = 'en';
+global.t = makeT(EN);
+const enBoundary = _cacheBreakReason(boundaryCb);
+const enUnsettled = _cacheBreakReason(unsettledCb);
+check('en_boundary_numbers',
+  enBoundary.indexOf('262000') !== -1 && enBoundary.indexOf('79000') !== -1
+  && enBoundary.indexOf('3.2') !== -1);
+check('en_boundary_not_legacy', enBoundary.indexOf('LEGACY STRING') === -1);
+check('en_boundary_phrase', enBoundary.indexOf('boundary re-bill') !== -1);
+check('en_unsettled_numbers', enUnsettled.indexOf('8.4') !== -1);
+check('en_unsettled_not_legacy', enUnsettled.indexOf('LEGACY STRING') === -1);
+check('en_unsettled_phrase', enUnsettled.indexOf('write-visibility window') !== -1);
+// Backward-compat: legacy string-only rows render the verbatim cause, never go
+// through the parameterized branch (which would interpolate missing digits and
+// drop the sentence).
+check('en_legacy_boundary_verbatim',
+  _cacheBreakReason(legacyBoundary).indexOf('boundary re-bill') !== -1
+  && _cacheBreakReason(legacyBoundary).indexOf('262000') !== -1);
+check('en_legacy_unsettled_verbatim',
+  _cacheBreakReason(legacyUnsettled).indexOf('cold write') !== -1);
+
+console.log(out.join('\n'));
+"""
+
+
+def _run_param() -> str:
+    harness = os.path.join(HERE, '_cache_verdict_param_harness.js')
+    with open(harness, 'w') as f:
+        f.write(_PARAM_HARNESS)
+    try:
+        proc = subprocess.run(
+            ['node', harness, FINISH_INFO, ZH_LOCALE, EN_LOCALE],
+            capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        try:
+            os.remove(harness)
+        except OSError:
+            pass
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
+    return proc.stdout.strip()
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_parameterized_verdicts_render_localized_numbers():
+    """turn_boundary_rebill / cache_write_unsettled render via parameterized
+    i18n (zh Chinese + interpolated numbers, en English + numbers), and legacy
+    string-only rows still render verbatim without regressing."""
+    output = _run_param()
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'parameterized verdict render failures:\n' + output
+    assert output.count('PASS') >= 14, f'expected >=14 PASS, got:\n{output}'
+    print(output)
 
 
 if __name__ == '__main__':

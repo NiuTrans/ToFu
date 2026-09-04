@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 
 from lib.log import get_logger
 
@@ -48,6 +49,11 @@ TRANSCRIPT_CHAR_CAP = 30_000
 #: (frames/messages persist independently — the registry is only live status).
 RECORD_TTL_S = 7 * 86400
 
+# One directory scan never walks an attacker- or crash-amplified temp tree
+# without a bound. Repeated uploads/startups make forward progress if more
+# entries exist.
+SCRATCH_RECLAIM_SCAN_CAP = 512
+
 
 def video_analysis_enabled() -> bool:
     """Kill switch: ``TOFU_VIDEO_ANALYSIS=0`` disables the feature entirely."""
@@ -75,6 +81,50 @@ def video_max_duration_s() -> float:
     except (ValueError, TypeError) as e:
         logger.debug('[Video] bad TOFU_VIDEO_MAX_DURATION_S, using default: %s', e)
     return 900.0
+
+
+def video_scratch_ttl_s() -> float:
+    """TTL for reconstructible local decode state left by a killed process."""
+    minimum = max(3600.0, video_max_duration_s() * 2 + 600.0)
+    try:
+        configured = float(
+            os.environ.get('TOFU_VIDEO_SCRATCH_TTL_S', '') or 0)
+        if configured > 0:
+            return max(minimum, min(7 * 86400.0, configured))
+    except (TypeError, ValueError):
+        logger.debug('[Video] bad TOFU_VIDEO_SCRATCH_TTL_S; using default')
+    return max(minimum, 6 * 3600.0)
+
+
+def reclaim_stale_scratch(path: str, *, now_s: float | None = None) -> int:
+    """Remove a bounded batch of expired ``job_*`` scratch directories."""
+    import shutil
+
+    cutoff = float(time.time() if now_s is None else now_s) - video_scratch_ttl_s()
+    removed = 0
+    try:
+        with os.scandir(path) as entries:
+            for index, entry in enumerate(entries):
+                if index >= SCRATCH_RECLAIM_SCAN_CAP:
+                    break
+                if not entry.name.startswith('job_'):
+                    continue
+                try:
+                    if (entry.is_dir(follow_symlinks=False)
+                            and entry.stat(follow_symlinks=False).st_mtime < cutoff):
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                        removed += 1
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    logger.debug('[Video] stale scratch probe failed: %s', exc)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        logger.warning('[Video] scratch reclaim scan failed: %s', exc)
+    if removed:
+        logger.info('[Video] reclaimed %d stale scratch directories', removed)
+    return removed
 
 
 def frame_target_for_duration(duration_s: float) -> int:
@@ -116,4 +166,5 @@ def scratch_root() -> str:
     base = override or tempfile.gettempdir()
     path = os.path.join(base, 'tofu-video-analysis')
     os.makedirs(path, exist_ok=True)
+    reclaim_stale_scratch(path)
     return path

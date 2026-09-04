@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from lib.log import get_logger
+from lib.rate_limit_policy import rate_limit_memory_bucket_capacity
 
 logger = get_logger(__name__)
 
@@ -87,7 +89,9 @@ class RateDecision:
 # docs/ENTERPRISE_READINESS_AUDIT.md
 # ── Storage: per-key bucket pair, keyed by key_id ──
 _lock = threading.Lock()
-_state: dict[str, dict] = {}
+_state: OrderedDict[str, dict] = OrderedDict()
+_state_capacity = rate_limit_memory_bucket_capacity()
+_state_capacity_evictions = 0
 
 # ── Open-mode per-IP throttle ──
 # Open mode (esp. TOFU_OPEN_MODE_ALLOW_REMOTE=1) hands requests a synthetic
@@ -192,9 +196,13 @@ def _open_mode_rpm() -> int:
 
 def _state_for(key_id: str, rpm_limit: int, tpd_limit: int) -> dict:
     """Return / lazily create the bucket state for this key."""
+    global _state_capacity_evictions
     now = time.time()
     entry = _state.get(key_id)
     if entry is None:
+        while len(_state) >= _state_capacity:
+            _state.popitem(last=False)
+            _state_capacity_evictions += 1
         entry = {
             'rpm': _Bucket(
                 capacity=float(rpm_limit) if rpm_limit > 0 else 0.0,
@@ -211,6 +219,7 @@ def _state_for(key_id: str, rpm_limit: int, tpd_limit: int) -> dict:
         }
         _state[key_id] = entry
         return entry
+    _state.move_to_end(key_id)
     # Reconfigure if the limits changed (admin updated the key).
     rpm = entry['rpm']
     if rpm.capacity != rpm_limit:
@@ -354,7 +363,19 @@ def record_tokens(key_id: str, n_tokens: int, *, rpm_limit: int = 0,
             if tpd_limit <= 0 and rpm_limit <= 0:
                 return
             entry = _state_for(key_id, rpm_limit, tpd_limit)
+        else:
+            _state.move_to_end(key_id)
         entry['tpd'].consume_force(n_tokens, now)
+
+
+def api_rate_limit_stats() -> dict[str, int]:
+    """Return the payload-free resident API-key state envelope."""
+    with _lock:
+        return {
+            'entries': len(_state),
+            'capacity': _state_capacity,
+            'capacity_evictions': _state_capacity_evictions,
+        }
 
 
 def apply_headers(response, decision: RateDecision) -> None:
@@ -375,4 +396,4 @@ def apply_headers(response, decision: RateDecision) -> None:
 
 
 __all__ = ['RateDecision', 'check_request', 'check_open_mode_request',
-           'record_tokens', 'apply_headers']
+           'record_tokens', 'apply_headers', 'api_rate_limit_stats']

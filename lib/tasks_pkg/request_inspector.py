@@ -10,19 +10,31 @@ is therefore the authority for both live and finished tasks.
 Row shapes
 ==========
 ``fold_request_log(task_id)`` →
-    ``{taskId, requests, states, coverage, eventsAvailable, requestCount}``
+    ``{taskId, requests, coverage, eventsAvailable, requestCount}``
     Request row (metadata ONLY — never the payload):
-    ``{roundNum, ts, model, params, messageCount, toolsCount,
-       approxTokens, label, legacy, attempts}``
+    ``{roundNum, ts, model, params, messageCount, toolsCount, toolNames,
+       label, legacy, attempts}``
+    ``toolNames`` = the tools that round's response INVOKED, read from the
+    new-message tail of the next snapshot (the post-tool mirror of loop
+    round N carries roundNum=N+1, §3.1) — this is what lets the drawer's
+    round list read like the chat timeline's turn blocks. Display hint
+    only; never a count.
     Attempt row (joined from ``round_usage`` by roundNum):
     ``{tag, model, tokensIn, tokensOut, traceId, streamElapsedMs,
        cacheRead, cacheWrite, ts}``
-    State row: ``{roundNum, label, messageCount, ts, legacy}``
 ``get_request_payload(task_id, round_num)`` → full payload for ONE round
     (messages + tools + params + model) — the on-demand detail fetch.
-``list_conv_tasks(conv_id, user_id=…)`` → ``{convId, tasks}`` — Task rows for the
-    drawer (live registry + task_results, exact kind-counted tallies via
-    one json_extract GROUP BY — no payload bulk).
+    State mirrors (post-tool / final / fallback) are served ONLY through
+    this per-round endpoint (``kind='state'``); the fold's round list is
+    requests only.
+``list_conv_tasks(conv_id, user_id=…, limit=…, before=…)`` →
+    ``{convId, tasks, hasMore[, readError]}`` — Task rows for the drawer
+    (live registry + indexed durable attempts + legacy task_results, exact
+    kind-counted tallies via one storage summary — no payload bulk). ``before``
+    (exclusive createdAt-ms cursor) pages older persisted rows; live rows only
+    appear on the first page. ``readError:true`` marks a storage read FAILURE —
+    the UI must render load-failed+retry, never the "records cleaned up"
+    empty state, which is reserved for a successful-but-empty read.
 
 kind classification
 ===================
@@ -34,10 +46,9 @@ labels; see design §3.1).
 
 from __future__ import annotations
 
-import json
-
 from lib.log import get_logger
 from lib.orchestration_message_compat import is_flow_event_type
+from lib.tasks_pkg.snapshot_delta import DELTA_MARKER, shared_prefix_len
 
 logger = get_logger(__name__)
 
@@ -47,11 +58,22 @@ _WIRE_PROJECTION = 'tool_wire_projection'
 _STATE_ROUND_LABELS = ('final', 'fallback')
 # Legacy-only state markers (pre-contract snapshots carried no kind=).
 _LEGACY_STATE_LABEL_MARKERS = ('工具结果后', '最终回复后', 'Fallback')
-def _read_events(task_id: str) -> list:
-    """Return [{event_id, type, payload, ts_ms}] ordered by event_id.
+def _read_events(task_id: str, rebuild: bool = True) -> tuple[list, bool]:
+    """Return ([{event_id, type, payload, ts_ms}] ordered by event_id, ok).
+
+    ``ok`` is False when the storage read itself FAILED — callers must not
+    present that as "task expired / no records": an empty list with
+    ``ok=True`` is the only honest no-data signal.
 
     Separate from ``event_log.read_events`` (which omits ``ts_ms`` — the
     request-row schema carries ``ts``). Read-only; never throws.
+
+    ``rebuild`` selects the view: the FOLD only needs per-row metadata
+    (counts ride the delta markers) plus the new-message tails, so it reads
+    ``rebuild=False`` and never pays the full-payload reconstruction; the
+    per-round payload endpoint reads ``rebuild=True``. The rebuilt view is a
+    pure function of the same rows, so it is derived from a still-fresh
+    unrebuilt cache entry instead of a second storage read.
 
     CACHED (short TTL): the drawer's natural usage is "fold the task, then
     open round after round", and every ``get_request_payload`` call used to
@@ -65,13 +87,24 @@ def _read_events(task_id: str) -> list:
     next poll sees new rounds.
     """
     if not task_id:
-        return []
+        return [], True
     import time as _time
     now = _time.time()
-    hit = _EVENTS_CACHE.get(task_id)
+    key = (task_id, bool(rebuild))
+    hit = _EVENTS_CACHE.get(key)
     if hit is not None and (now - hit[0]) < _EVENTS_CACHE_TTL_S:
-        return hit[1]
-    rows = _read_events_uncached(task_id)
+        return hit[1], hit[2]
+    rows = None
+    ok = True
+    if rebuild:
+        base = _EVENTS_CACHE.get((task_id, False))
+        if (base is not None and (now - base[0]) < _EVENTS_CACHE_TTL_S
+                and base[2]):
+            # _rebuild_snapshot_rows copies every row it touches — the
+            # cached unrebuilt entry is never mutated.
+            rows = _rebuild_snapshot_rows(list(base[1]))
+    if rows is None:
+        rows, ok = _read_events_uncached(task_id, rebuild=rebuild)
     # Bound the cache: drop the oldest entry when full (a browsing session
     # touches a handful of tasks; this is not a hot-path structure).
     if len(_EVENTS_CACHE) >= _EVENTS_CACHE_MAX:
@@ -80,14 +113,14 @@ def _read_events(task_id: str) -> list:
             _EVENTS_CACHE.pop(oldest, None)
         except ValueError:
             _EVENTS_CACHE.clear()
-    _EVENTS_CACHE[task_id] = (now, rows)
-    return rows
+    _EVENTS_CACHE[key] = (now, rows, ok)
+    return rows, ok
 
 
-# task_id → (cached_at_epoch, rebuilt_event_rows)
-_EVENTS_CACHE: dict[str, tuple] = {}
+# (task_id, rebuild) → (cached_at_epoch, event_rows, read_ok)
+_EVENTS_CACHE: dict[tuple, tuple] = {}
 _EVENTS_CACHE_TTL_S = 3.0
-_EVENTS_CACHE_MAX = 8
+_EVENTS_CACHE_MAX = 16
 
 
 def invalidate_task_cache(task_id: str) -> None:
@@ -102,11 +135,12 @@ def invalidate_task_cache(task_id: str) -> None:
     DIFFERENT process.
     """
     if task_id:
-        _EVENTS_CACHE.pop(task_id, None)
+        _EVENTS_CACHE.pop((task_id, False), None)
+        _EVENTS_CACHE.pop((task_id, True), None)
 
 
-def _read_events_uncached(task_id: str) -> list:
-    """Uncached read + rebuild (see :func:`_read_events`).
+def _read_events_uncached(task_id: str, *, rebuild: bool) -> tuple[list, bool]:
+    """Uncached read (+ optional rebuild — see :func:`_read_events`).
 
     Reads ONLY the structural slice the inspector renders (snapshots, round
     usage, Flow markers) — NEVER the streaming noise (delta / phase /
@@ -115,8 +149,13 @@ def _read_events_uncached(task_id: str) -> list:
     task, the FIRST-10000-rows cap below cut every snapshot past round 6,
     and rounds 7+ all rendered "mirror expired". Structural rows are a few
     per round, so the same cap now spans thousands of rounds.
+
+    The filter is pushed into the storage query (``types`` /
+    ``type_prefixes``) so noise rows are never decoded or transferred; the
+    Python re-check below stays as the semantic guarantee.
     """
     try:
+        from lib.orchestration_message_compat import FLOW_EVENT_PREFIXES
         from lib.storage import get_storage_client
         from lib.task_event_contract import STRUCTURAL_EVENT_TYPES
 
@@ -124,10 +163,14 @@ def _read_events_uncached(task_id: str) -> list:
         after = -1
         scanned = 0
         client = get_storage_client()
+        type_filter = {
+            'types': sorted(STRUCTURAL_EVENT_TYPES),
+            'type_prefixes': list(FLOW_EVENT_PREFIXES),
+        }
         while True:
             rows = client.query(
                 'event.list', {'task_id': task_id, 'after_sequence': after,
-                               'limit': 1000}) or []
+                               'limit': 1000, **type_filter}) or []
             if not rows:
                 break
             scanned += len(rows)
@@ -148,11 +191,13 @@ def _read_events_uncached(task_id: str) -> list:
                     or len(structural) >= 10_000
                     or scanned >= 200_000):
                 break
-        return _rebuild_snapshot_rows(structural)
+        if rebuild:
+            structural = _rebuild_snapshot_rows(structural)
+        return structural, True
     except Exception as e:
         logger.warning('[RequestInspector] Sidecar event read failed task=%s: %s',
                        task_id[:8], e)
-        return []
+        return [], False
 
 
 def _rebuild_snapshot_rows(rows: list) -> list:
@@ -196,95 +241,103 @@ def _snapshot_kind(payload: dict) -> str:
     return 'request'
 
 
-def _msg_chars(msg: dict) -> int:
-    """Char count of one message (mirrors the frontend _debugMsgChars)."""
-    c = msg.get('content')
-    n = 0
-    if isinstance(c, str):
-        n = len(c)
-    elif isinstance(c, list):
-        for b in c:
-            if isinstance(b, dict):
-                if b.get('type') == 'text':
-                    n += len(b.get('text') or '')
-                elif b.get('type') == 'image_url':
-                    n += len((b.get('image_url') or {}).get('url') or '')
-    for tc in (msg.get('tool_calls') or []):
-        args = ((tc or {}).get('function') or {}).get('arguments')
-        if isinstance(args, str):
-            n += len(args)
-        elif args:
-            n += len(json.dumps(args))
-    return n
+def _snapshot_message_count(payload: dict) -> int:
+    """Total message count WITHOUT rebuilding: delta rows record it as
+    ``messageCount`` (§10); legacy full rows carry the array inline."""
+    count = payload.get('messageCount')
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return len(payload.get('messages') or [])
 
 
-def _est_tokens(messages: list) -> int:
-    """Rough token estimate (chars/3.5, diagnostic not billing — mirrors
-    the frontend _debugMsgTokens)."""
-    chars = sum(_msg_chars(m) for m in messages if isinstance(m, dict))
-    return max(1, round(chars / 3.5)) if chars else 0
+def _snapshot_tools_count(payload: dict) -> int:
+    """Tool-schema count WITHOUT rebuilding (same marker logic)."""
+    count = payload.get('toolsCount')
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return len(payload.get('tools') or [])
 
 
-def _operation_keys(messages: list, axis: str) -> tuple[set[str], bool]:
-    """Return unique tool-operation keys and whether every key is exact.
+def _snapshot_tail(payload: dict, full_prev: dict) -> list:
+    """Messages this snapshot ADDED — the tool-name extraction window.
 
-    Request/state snapshots are cumulative, so summing calls in every
-    snapshot wildly over-counts a long task. Stable tool-call ids let us fold
-    the snapshots into one set. Stable ids are task-global: the same historical
-    call can appear in planner, worker and state snapshots and must still count
-    once. Legacy/provider messages without ids fall back to their axis plus
-    message/block position; that remains useful but is marked approximate so
-    the UI does not invent precision.
-
-    Both OpenAI-shaped ``assistant.tool_calls`` / ``role=tool`` messages and
-    Anthropic-shaped ``tool_use`` / ``tool_result`` content blocks are read.
-    Result records share the call id and therefore never double-count the
-    matching call.
+    Delta rows carry the tail explicitly as ``newMessages`` (the §10
+    projector computes it against the per-(task, turn) chronological
+    baseline). Full rows (legacy, and every pre-delta test fixture) are
+    diffed positionally against the previous full snapshot of the same
+    turn, which is the same chronological semantics. A mixed
+    migrated history can over-report one row's tail (the full-row
+    baseline cannot see delta-only predecessors) — the names are a
+    display hint, never a count, so that is cosmetic.
     """
-    keys: set[str] = set()
-    exact = True
+    if DELTA_MARKER in payload:
+        return [m for m in (payload.get('newMessages') or [])
+                if isinstance(m, dict)]
+    messages = payload.get('messages')
+    if not isinstance(messages, list):
+        return []
+    turn = payload.get('turn') or ''
+    prev = full_prev.get(turn)
+    k = shared_prefix_len(prev, messages) if prev is not None else 0
+    full_prev[turn] = messages
+    return [m for m in messages[k:] if isinstance(m, dict)]
 
-    def add(call_id, fallback: str) -> None:
-        nonlocal exact
-        if call_id:
-            keys.add(f'id:{call_id}')
-        else:
-            exact = False
-            keys.add(f'legacy:{axis}:{fallback}')
 
-    for msg_idx, msg in enumerate(messages or []):
+def _tool_call_names(messages: list) -> list:
+    """Ordered unique tool names invoked by the given messages.
+
+    Both wire shapes are read: OpenAI ``assistant.tool_calls`` and
+    Anthropic ``tool_use`` content blocks. Names, not counts — the
+    drawer's round row answers "which tools ran in this round" the way
+    the chat timeline's turn blocks do.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(name) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            names.append(str(name))
+
+    for msg in messages:
         if not isinstance(msg, dict):
             continue
-        calls = msg.get('tool_calls')
-        if isinstance(calls, list):
-            for call_idx, call in enumerate(calls):
-                call = call if isinstance(call, dict) else {}
-                fn = call.get('function')
-                name = ((fn or {}).get('name') if isinstance(fn, dict)
-                        else call.get('name')) or ''
-                add(call.get('id') or call.get('call_id'),
-                    f'{msg_idx}:call:{call_idx}:{name}')
-
-        # OpenAI tool-result message. It may be the only surviving half after
-        # compaction, so it is also evidence that one operation happened.
-        if msg.get('role') in ('tool', 'function'):
-            add(msg.get('tool_call_id') or msg.get('call_id'),
-                f'{msg_idx}:result')
-
-        content = msg.get('content')
-        if not isinstance(content, list):
-            continue
-        for block_idx, block in enumerate(content):
-            if not isinstance(block, dict):
+        for call in msg.get('tool_calls') or []:
+            if not isinstance(call, dict):
                 continue
-            block_type = block.get('type')
-            if block_type == 'tool_use':
-                add(block.get('id') or block.get('tool_use_id'),
-                    f'{msg_idx}:use:{block_idx}:{block.get("name") or ""}')
-            elif block_type == 'tool_result':
-                add(block.get('tool_use_id') or block.get('id'),
-                    f'{msg_idx}:result-block:{block_idx}')
-    return keys, exact
+            fn = call.get('function')
+            add((fn or {}).get('name') if isinstance(fn, dict)
+                else call.get('name'))
+        content = msg.get('content')
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict)
+                        and block.get('type') == 'tool_use'):
+                    add(block.get('name'))
+    return names
+
+
+def _called_in_round(payload: dict, kind: str) -> int | None:
+    """Which REQUEST round invoked the tools in this snapshot's tail.
+
+    The post-tool mirror of loop round N carries roundNum=N+1 under the
+    current contract (§3.1), and a v1-delta request row repeats that same
+    growth, so new-contract rows attribute to roundNum-1. Pre-contract
+    legacy rows numbered their post-tool state with the round that just
+    ran ('Round N 工具结果后'), so a legacy STATE tail attributes to
+    roundNum itself. Non-integer round labels ('final' / 'fallback') never
+    attribute anywhere.
+    """
+    rn = payload.get('roundNum')
+    if isinstance(rn, bool):
+        return None
+    if isinstance(rn, str) and rn.isdigit():
+        rn = int(rn)
+    if not isinstance(rn, int):
+        return None
+    if kind == 'state' and 'kind' not in payload:
+        return rn
+    return rn - 1
 
 
 def fold_request_log(task_id: str) -> dict:
@@ -292,55 +345,61 @@ def fold_request_log(task_id: str) -> dict:
 
     Request rows are METADATA-ONLY (no ``messages``/``tools`` bulk) —
     payloads are served on demand via :func:`get_request_payload`.
+
+    The fold runs on the UNREBUILT read: counts ride the §10 delta
+    markers and the tool names come from each snapshot's stored
+    new-message tail, so listing the rounds of a 100+ round task never
+    pays the full-payload reconstruction (that stays on the per-round
+    payload endpoint, where the user actually asked for one round).
     """
-    events = _read_events(task_id)
+    events, read_ok = _read_events(task_id, rebuild=False)
     requests = []
-    states = []
     attempts: dict[str, list] = {}
     wire_projections: dict[tuple[str, str], dict] = {}
-    operation_keys: set[str] = set()
-    operation_count_exact = True
-    operation_count_available = False
+    tool_names: dict[tuple[str, int], list] = {}
+    full_prev: dict[str, list] = {}
     flow_seen = False
     for e in events:
         p = e['payload']
         et = e['type']
         if et == _SNAPSHOT:
-            operation_count_available = True
-            msgs = p.get('messages') or []
-            op_keys, exact = _operation_keys(msgs, p.get('turn') or 'main')
-            operation_keys.update(op_keys)
-            operation_count_exact = operation_count_exact and exact
-            if _snapshot_kind(p) == 'state':
-                states.append({
-                    'roundNum': p.get('roundNum'),
-                    'label': p.get('label') or '',
-                    'messageCount': len(msgs),
-                    'ts': e['ts_ms'],
-                    'legacy': 'kind' not in p,
-                })
-            else:
-                row = {
-                    'roundNum': p.get('roundNum'),
-                    'ts': e['ts_ms'],
-                    'model': p.get('model') or '',
-                    # Flow node turns tag their phase (P4) so same-numbered
-                    # planner/worker/critic rounds stay distinct rows.
-                    'turn': p.get('turn') or '',
-                    'params': p.get('params') or {},
-                    'messageCount': len(msgs),
-                    'toolsCount': len(p.get('tools') or []),
-                    'approxTokens': _est_tokens(msgs),
-                    'label': p.get('label') or '',
-                    'legacy': 'kind' not in p,
-                }
-                if p.get('agentId'):
-                    row['agentId'] = p['agentId']
-                    row['agentRole'] = p.get('agentRole') or ''
-                if p.get('degraded'):
-                    row['degraded'] = True
-                    row['degradedReason'] = p.get('degradedReason') or ''
-                requests.append(row)
+            kind = _snapshot_kind(p)
+            tail_names = _tool_call_names(_snapshot_tail(p, full_prev))
+            called = _called_in_round(p, kind)
+            if tail_names and called is not None and called >= 1:
+                key = (p.get('turn') or '', called)
+                bucket = tool_names.setdefault(key, [])
+                seen = set(bucket)
+                for name in tail_names:
+                    if name not in seen:
+                        seen.add(name)
+                        bucket.append(name)
+            if kind == 'state':
+                # State mirrors stay available per round via
+                # get_request_payload(kind='state'); the round LIST is
+                # requests only — mirroring every round twice was the
+                # drawer's worst source of noise.
+                continue
+            row = {
+                'roundNum': p.get('roundNum'),
+                'ts': e['ts_ms'],
+                'model': p.get('model') or '',
+                # Flow node turns tag their phase (P4) so same-numbered
+                # planner/worker/critic rounds stay distinct rows.
+                'turn': p.get('turn') or '',
+                'params': p.get('params') or {},
+                'messageCount': _snapshot_message_count(p),
+                'toolsCount': _snapshot_tools_count(p),
+                'label': p.get('label') or '',
+                'legacy': 'kind' not in p,
+            }
+            if p.get('agentId'):
+                row['agentId'] = p['agentId']
+                row['agentRole'] = p.get('agentRole') or ''
+            if p.get('degraded'):
+                row['degraded'] = True
+                row['degradedReason'] = p.get('degradedReason') or ''
+            requests.append(row)
         elif et == _ROUND_USAGE:
             u = p.get('usage') or {}
             try:
@@ -374,6 +433,12 @@ def fold_request_log(task_id: str) -> dict:
     for row in requests:
         row['attempts'] = attempts.get(
             (row['turn'], str(row['roundNum'])), [])
+        rn = row['roundNum']
+        if isinstance(rn, str) and rn.isdigit():
+            rn = int(rn)
+        row['toolNames'] = (
+            tool_names.get((row['turn'], rn)) or []
+            if isinstance(rn, int) and not isinstance(rn, bool) else [])
         wire = wire_projections.get(
             (row['turn'], str(row['roundNum'])))
         if wire:
@@ -390,13 +455,13 @@ def fold_request_log(task_id: str) -> dict:
     out = {
         'taskId': task_id,
         'requests': requests,
-        'states': states,
         'eventsAvailable': bool(events),
         'requestCount': len(requests),
-        'operationCount': len(operation_keys),
-        'operationCountAvailable': operation_count_available,
-        'operationCountApproximate': not operation_count_exact,
     }
+    if not read_ok:
+        # Read FAILURE, not an expired/empty log — the UI must offer retry
+        # instead of the "records cleaned up" empty state.
+        out['readError'] = True
     if flow_seen and not has_turn_tags:
         # Untagged Flow log: planner/worker/critic rounds share numbers
         # with no phase tag — rows exist but cannot be told apart.
@@ -408,7 +473,8 @@ def fold_request_log(task_id: str) -> dict:
 
 
 def get_request_payload(task_id: str, round_num, turn: str = '',
-                        kind: str = 'request') -> dict | None:
+                        kind: str = 'request',
+                        user_id: int | None = None) -> dict | None:
     """Full payload for ONE snapshot round (the on-demand detail fetch).
 
     ``turn`` (optional): Flow node phase tag ('planning'|'working'|
@@ -430,7 +496,8 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
         return None
     best = None
     wire_projection = None
-    for e in _read_events(task_id):
+    events, _read_ok = _read_events(task_id)
+    for e in events:
         p = e['payload']
         if e['type'] == _WIRE_PROJECTION:
             if str(p.get('roundNum')) != str(round_num):
@@ -483,42 +550,159 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
     if p.get('degraded'):
         out['degraded'] = True
         out['degradedReason'] = p.get('degradedReason') or ''
+    if user_id is not None and kind == 'request':
+        try:
+            from lib.storage import get_storage_client
+
+            archives = get_storage_client().query(
+                'raw_archive.list', {
+                    'user_id': int(user_id),
+                    'task_id': task_id,
+                    'round_num': int(round_num),
+                    'limit': 32,
+                }, deadline=30) or {}
+            out['rawArchives'] = list(archives.get('archives') or [])
+        except (TypeError, ValueError, OverflowError):
+            out['rawArchives'] = []
+        except Exception as exc:
+            logger.warning(
+                '[RequestInspector] raw archive list failed task=%s round=%s: %s',
+                task_id[:8], round_num, exc)
+            out['rawArchives'] = []
     return out
 
 
-def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 15) -> dict:
-    """Task rows for the drawer: live chat registry + persisted
-    task_results, newest first, each annotated with EXACT kind-counted
-    snapshot tallies (one json_extract GROUP BY — translates to PG jsonb
-    accessors via the dialect bridge, no payload bulk).
+def get_raw_archive_chunk(task_id: str, archive_id: str, part: str, *,
+                          user_id: int, offset: int = 0,
+                          limit: int = 256 * 1024) -> dict | None:
+    """Read one bounded owner/task-scoped request or response archive chunk."""
+    from lib.storage import get_storage_client
 
-    VU sub-tasks run with convId='' and are therefore NOT returned here;
-    they remain reachable per-task via the bubble anchor (P3).
+    result = get_storage_client().query(
+        'raw_archive.read', {
+            'user_id': int(user_id),
+            'task_id': task_id,
+            'archive_id': archive_id,
+            'part': part,
+            'offset': max(0, int(offset)),
+            'limit': max(1, min(1024 * 1024, int(limit))),
+        }, deadline=30)
+    return dict(result) if isinstance(result, dict) else None
+
+
+def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 30,
+                    before: int | None = None) -> dict:
+    """Task rows for the drawer: live registry + durable attempts + legacy
+    task_results, newest first, each annotated with exact structural tallies.
+
+    Attempt identity rows are the primary postmortem discovery authority. They
+    are owner-scoped and keyset-paged through a compact partial index, so a
+    global task-results work cap cannot make a retained timing trace invisible.
+    ``task_results`` remains a compatibility source for pre-TurnStore and VU
+    tasks that have no generation attempt.
+
+    ``before`` is an exclusive createdAt-ms cursor paging OLDER persisted
+    rows; live-registry rows only belong to the first page and are skipped
+    once a cursor is supplied (they are always the newest, so they can
+    never fall behind the cursor). ``hasMore`` tells the UI a further page
+    may exist. A storage read failure sets ``readError`` — an empty
+    ``tasks`` list is only honest when the reads succeeded.
+
+    VU sub-tasks run with convId='' and are therefore NOT returned from attempt
+    discovery here; they remain reachable per-task via the bubble anchor (P3).
     """
+    limit = min(max(1, int(limit or 30)), 100)
     rows: dict[str, dict] = {}
+    read_error = False
+    if before is None:
+        try:
+            from lib.tasks_pkg.manager.runtime import chat_task_runtime
+            live = [
+                task for task in chat_task_runtime.snapshot_owned(
+                    user_id=user_id)
+                if task.get('convId') == conv_id
+            ]
+            for t in live:
+                row = {
+                    'taskId': t['id'],
+                    'status': t.get('status') or 'running',
+                    'createdAt': int(t.get('created_at', 0) * 1000),
+                    'completedAt': None,
+                    'live': True,
+                }
+                # Display context the persisted rows get for free from the
+                # summary query: which reply bubble this run belongs to and
+                # what the user asked. Without these a RUNNING row renders
+                # as a bare id with no anchor ("task order makes no sense").
+                turn_id = t.get('turn_id')
+                if isinstance(turn_id, str) and turn_id:
+                    row['turnId'] = turn_id
+                msgs = t.get('messages')
+                if isinstance(msgs, list):
+                    for m in reversed(msgs):
+                        if not (isinstance(m, dict)
+                                and m.get('role') == 'user'):
+                            continue
+                        content = m.get('content')
+                        if isinstance(content, list):
+                            content = ' '.join(
+                                str(b.get('text') or '') for b in content
+                                if isinstance(b, dict)
+                                and b.get('type') == 'text')
+                        preview = str(content or '')[:80].strip()
+                        if preview:
+                            row['userPreview'] = preview
+                        break
+                rows[t['id']] = row
+        except Exception as e:
+            logger.debug('[RequestInspector] live registry read failed: %s', e)
+            read_error = True
+    persisted_ids: set[str] = set()
+    durable_has_more = False
     try:
-        from lib.tasks_pkg.manager.runtime import chat_task_runtime
-        live = [
-            task for task in chat_task_runtime.snapshot_owned(user_id=user_id)
-            if task.get('convId') == conv_id
-        ]
-        for t in live:
-            rows[t['id']] = {
-                'taskId': t['id'],
-                'status': t.get('status') or 'running',
-                'createdAt': int(t.get('created_at', 0) * 1000),
-                'completedAt': None,
-                'live': True,
+        from lib.storage import get_storage_client
+
+        trace_payload = {
+            'conversation_id': conv_id,
+            'user_id': user_id,
+            'limit': limit,
+        }
+        if before is not None:
+            trace_payload['before_created_at'] = int(before)
+        trace_page = get_storage_client().query(
+            'turn.timing_trace.list', trace_payload, deadline=30) or {}
+        durable_has_more = bool(trace_page.get('has_more'))
+        for record in trace_page.get('records') or []:
+            tid = str(record.get('task_id') or '')
+            if not tid or tid in rows:
+                continue
+            created_at = int(record.get('created_at') or 0)
+            rows[tid] = {
+                'taskId': tid,
+                'status': str(record.get('status') or ''),
+                'createdAt': created_at,
+                'completedAt': record.get('settled_at'),
+                'turnId': str(record.get('turn_id') or ''),
+                'live': False,
             }
+            persisted_ids.add(tid)
     except Exception as e:
-        logger.debug('[RequestInspector] live registry read failed: %s', e)
+        logger.warning('[RequestInspector] durable attempt discovery failed '
+                       'for conv=%s: %s', (conv_id or '')[:8], e)
+        read_error = True
+
+    # Fetch beyond one page so a ``before`` cursor can still fill ``limit``
+    # rows after filtering, and so ``hasMore`` is a real signal instead of
+    # a guess. Bounded: the summary row is metadata-only.
+    fetch_limit = min(1000, max(limit * 4, limit + 1, 60))
+    legacy_has_more = False
     try:
         from lib.storage import get_storage_client
 
         result = get_storage_client().query(
             'task_results.summary_list', {
                 'conv_id': conv_id,
-                'limit': min(max(1, int(limit)), 1000),
+                'limit': fetch_limit,
                 'user_id': user_id,
                 'scan_limit': 10_000,
                 'order_by': 'created_at_desc',
@@ -527,20 +711,27 @@ def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 15) -> dict:
             logger.warning(
                 '[RequestInspector] task summary scan hit its 10000-row '
                 'work cap for conv=%s', (conv_id or '')[:8])
-        for row in result.get('records') or []:
+        legacy_records = result.get('records') or []
+        legacy_has_more = len(legacy_records) >= fetch_limit
+        for row in legacy_records:
             tid = row.get('key')
             if tid in rows:
+                continue
+            created_at = int(row.get('created_at') or 0)
+            if before is not None and created_at >= int(before):
                 continue
             rows[tid] = {
                 'taskId': tid,
                 'status': row.get('status') or '',
-                'createdAt': int(row.get('created_at') or 0),
+                'createdAt': created_at,
                 'completedAt': row.get('completed_at'),
                 'live': False,
             }
+            persisted_ids.add(tid)
     except Exception as e:
         logger.warning('[RequestInspector] task_results read failed for '
                        'conv=%s: %s', (conv_id or '')[:8], e)
+        read_error = True
     tasks = sorted(rows.values(), key=lambda x: x['createdAt'] or 0,
                    reverse=True)[:limit]
     parent_ids = {t['taskId'] for t in tasks}
@@ -572,6 +763,13 @@ def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 15) -> dict:
                 }
                 tasks.append(child)
                 by_id[task_id] = child
+            # Children were appended AFTER the parent list was sorted, so
+            # without this pass every swarm agent clusters at the bottom
+            # regardless of when it actually ran. Re-sort the whole list
+            # by start time; the sort is stable, so a child that inherits
+            # its parent's timestamp still lands right after that parent.
+            tasks.sort(key=lambda x: (x['createdAt'] or 0, x['taskId']),
+                       reverse=True)
             for record in summary.get('records') or []:
                 task = by_id.get(str(record.get('task_id') or ''))
                 if task is None:
@@ -591,7 +789,21 @@ def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 15) -> dict:
         t['hasEvents'] = bool(
             t.get('hasEvents')
             or t['requestCount'] or t['stateCount'] or t['legacyCount'])
-    return {'convId': conv_id, 'tasks': tasks}
+    selected_persisted_ids = {
+        str(t.get('taskId') or '') for t in tasks if not t.get('live')
+    }
+    out = {
+        'convId': conv_id,
+        'tasks': tasks,
+        'hasMore': bool(
+            durable_has_more
+            or legacy_has_more
+            or len(persisted_ids) > len(selected_persisted_ids)
+        ),
+    }
+    if read_error:
+        out['readError'] = True
+    return out
 
 
 __all__ = ['fold_request_log', 'get_request_payload', 'list_conv_tasks',

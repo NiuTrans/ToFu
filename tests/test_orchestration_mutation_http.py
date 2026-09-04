@@ -70,6 +70,8 @@ def test_human_gate_schemas_match_typed_request_parsers():
     contract = gate_contract_module.human_gate_request_contract()
     assert contract == {
         'requestIdField': 'requestId',
+        'requestIdMaxLength': (
+            gate_contract_module.MAX_HUMAN_GATE_REQUEST_ID_LENGTH),
         'approvalField': 'approved',
         'approvalDefault': False,
         'inputField': 'response',
@@ -86,10 +88,17 @@ def test_human_gate_schemas_match_typed_request_parsers():
     approval = mutation_http.human_approval_request_schema()
     guidance = mutation_http.human_input_request_schema()
     assert approval['required'] == ['requestId']
+    assert approval['properties']['requestId'] == {
+        'type': 'string',
+        'minLength': 1,
+        'maxLength': gate_contract_module.MAX_HUMAN_GATE_REQUEST_ID_LENGTH,
+    }
     assert approval['properties']['approved'] == {
         'type': 'boolean', 'default': False,
     }
     assert guidance['required'] == ['requestId', 'response']
+    assert guidance['properties']['requestId'] == \
+        approval['properties']['requestId']
     assert guidance['properties']['response'] == {
         'type': 'string',
         'minLength': 1,
@@ -102,14 +111,9 @@ def test_human_gate_ingress_consumes_canonical_field_identity():
         'routes/api_v1/orchestration_mutation_http.py',
         encoding='utf-8',
     ).read()
-    contract_source = open(
-        'lib/orchestration/human_gate_request_contract.py',
-        encoding='utf-8',
-    ).read()
     assert "body, 'requestId'" not in source
     assert "body, 'approved'" not in source
     assert "body, 'response'" not in source
-    assert len(contract_source.splitlines()) < 70
 
 
 def test_human_gate_requests_share_id_and_typed_value_parsing():

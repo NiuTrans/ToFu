@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -97,6 +98,26 @@ def test_parallel_runtime_translates_abort_without_recording_failure():
         runtime.run('fanout', 'seed')
     assert not outcomes.failures
     assert [event['type'] for event in events] == ['parallel_start']
+
+
+def test_parallel_runtime_merges_in_graph_order_not_completion_order():
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+
+    def walk(entry, _context, *, stop_at):
+        assert stop_at == 'join'
+        if entry == 'slow':
+            slow_started.set()
+            assert release_slow.wait(timeout=1.0)
+        else:
+            assert slow_started.wait(timeout=1.0)
+            release_slow.set()
+        return entry
+
+    runtime, _events, _outcomes = _runtime(['slow', 'fast'], walk)
+
+    merged, _next_node = runtime.run('fanout', 'seed')
+    assert merged == 'seed\n\nslow\n\nfast'
 
 
 def test_parallel_runtime_keeps_empty_fanout_and_engine_boundary_small():

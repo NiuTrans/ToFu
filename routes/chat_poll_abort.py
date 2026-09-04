@@ -94,13 +94,11 @@ def chat_abort(task_id):
                                'planted — the live worker consumes it at its '
                                'next abort poll')
         return api_not_found('Not found')
-    task_owner_id = owner_user_id
-    was_already_aborted = task.get('aborted', False)
-    chat_task_runtime.abort_owned(task_id, user_id=owner_user_id)
-    chat_task_runtime.update_fields(
-        task_id,
-        fields={'aborted': True, '_abort_timestamp': time.time()},
-    )
+    from lib.tasks_pkg.manager.cancellation import cancel_task
+    receipt = cancel_task(
+        task_id, user_id=owner_user_id, source='api_chat_abort')
+    task = receipt['task']
+    was_already_aborted = receipt['alreadyCancelled']
     audit_log('api_chat_abort',
               key_id=(current_auth().key_id if current_auth() else ''),
               task_id=task_id)
@@ -118,24 +116,6 @@ def chat_abort(task_id):
         logger.info('[Chat] Task %s ABORT RECEIVED — conv=%s model=%s status=%s '
                     'elapsed=%.1fs content=%dchars thinking=%dchars',
                     task_id, _conv_id, _model, _status, _elapsed, _content_len, _thinking_len)
-    # ── Kill any running subprocess (run_command) ──
-    _sub_pid = task.get('_subprocess_pid')
-    if _sub_pid:
-        try:
-            import os as _os
-            import signal as _signal
-            _pgid = task.get('_subprocess_pgid')
-            if _pgid:
-                _os.killpg(_pgid, _signal.SIGTERM)
-                logger.info('[Chat] Task %s — sent SIGTERM to subprocess process group pgid=%d',
-                            task_id[:8], _pgid)
-            else:
-                _os.kill(_sub_pid, _signal.SIGTERM)
-                logger.info('[Chat] Task %s — sent SIGTERM to subprocess pid=%d',
-                            task_id[:8], _sub_pid)
-        except (OSError, ProcessLookupError) as e:
-            logger.debug('[Chat] Task %s — subprocess kill skipped: %s', task_id[:8], e)
-
     # ── User-Stop busy-projection broadcast ──
     # The busy projection (snapshot_running_by_conv → conv_has_work_in_flight)
     # already EXCLUDES an aborted task by design ("aborted always wins: the
@@ -156,7 +136,7 @@ def chat_abort(task_id):
     if _conv_id and _conv_id != '?':
         try:
             from lib.conversations.change_notifications import notify_conv_changed
-            notify_conv_changed(_conv_id, rev=None, user_id=task_owner_id)
+            notify_conv_changed(_conv_id, rev=None, user_id=owner_user_id)
         except Exception as _ne:
             logger.warning('[Chat] Task %s abort busy-notify failed: %s',
                            task_id[:8], _ne)

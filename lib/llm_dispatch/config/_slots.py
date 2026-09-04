@@ -191,6 +191,8 @@ DEFAULT_SLOT_CONFIGS = {
     'grok-3-mini':                   {'caps': {'text', 'thinking', 'cheap'},       'rpm': 60,  'latency': 2000, 'cost': 0.003},
 
     # ── Tencent Hunyuan ──
+    # hy4-preview (2026-08-28): 770B-A49B MoE, 1M context, high/no_think modes
+    'hy4-preview':                   {'caps': {'text', 'thinking'},                'rpm': 30,  'latency': 3000, 'cost': 0.003},
     'hy3-preview':                   {'caps': {'text', 'thinking', 'cheap'},       'rpm': 30,  'latency': 3000, 'cost': 0.002},
     'hunyuan-2.0-thinking-20251109': {'caps': {'text', 'thinking', 'cheap'},       'rpm': 30,  'latency': 3000, 'cost': 0.003},
     'hunyuan-2.0-instruct-20251111': {'caps': {'text', 'cheap'},                   'rpm': 30,  'latency': 2500, 'cost': 0.002},

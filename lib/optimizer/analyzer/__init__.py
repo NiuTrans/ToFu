@@ -39,7 +39,6 @@ logger = get_logger(__name__)
 from ._logs import (  # noqa: E402,F401
     _APP_LOG_TS_RE,
     _collect_app_log_signals,
-    _collect_error_log_excerpts,
     _parse_app_log_ts,
     _safe_tail_lines,
 )
@@ -52,6 +51,7 @@ from ._audit import (  # noqa: E402,F401
 from ._issues import (  # noqa: E402,F401
     _ERROR_SIGNATURES,
     _classify_error_signature,
+    _collect_error_log_excerpts,
     _collect_recurring_issues,
 )
 from ._signals import (  # noqa: E402,F401

@@ -26,6 +26,7 @@ Run::
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -61,6 +62,16 @@ _FLIPPED_EN = (
 def _isolate_store(monkeypatch, tmp_path):
     """Point the refusal store at a fresh tmp dir."""
     monkeypatch.setattr(refusal, '_REFUSAL_DIR', str(tmp_path / 'refusal'))
+
+
+def test_default_pytest_refusal_store_uses_session_owned_root(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(refusal, '_REFUSAL_DIR', refusal._DEFAULT_DIR)
+    monkeypatch.setenv('TOFU_PYTEST_RUN_ROOT', str(tmp_path))
+
+    effective = refusal._effective_dir()
+
+    assert os.path.commonpath((effective, str(tmp_path))) == str(tmp_path)
 
 
 def _patch_models(monkeypatch, replies):

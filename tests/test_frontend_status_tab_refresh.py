@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BRAIN_JS = REPO / "static" / "js" / "project-brain.js"
+BRAIN_JS = REPO / "frontend" / "src" / "runtime" / "sections" / "project-brain.js"
 
 
 def _extract_fn(src: str, name: str) -> str:

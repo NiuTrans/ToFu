@@ -19,6 +19,7 @@ from typing import Any
 
 FILE_READ_RESULT_ITEM_TYPE = "file_read/v1"
 TOOL_RESULT_PROJECTION_ITEMS_KEY = "_toolResultProjectionItems"
+TOOL_RESULT_PRODUCER_METADATA_KEY = "_toolResultProducerMetadata"
 
 _FILE_READ_SOURCE_PREVIEW_CHARS = 8_192
 _FILE_READ_PATH_CHARS = 384
@@ -191,6 +192,7 @@ def is_file_read_projection(items: Sequence[Any] | None) -> bool:
 
 __all__ = [
     "FILE_READ_RESULT_ITEM_TYPE",
+    "TOOL_RESULT_PRODUCER_METADATA_KEY",
     "TOOL_RESULT_PROJECTION_ITEMS_KEY",
     "file_read_result_projection_item",
     "is_file_read_projection",

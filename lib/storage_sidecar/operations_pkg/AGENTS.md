@@ -26,3 +26,14 @@ by application/route code.
 Run the exact Sidecar contract tests for the operation, including owner
 isolation, pre-limit filtering, idempotency, conflict, rollback, receipt, and
 backend parity. Add migration/index tests for schema changes.
+
+## Turn operation module layout
+
+`_turns.py` is a pure re-export facade; implementations live in semantic
+slices: `_turns_core.py` (identity/publication/search-row plumbing),
+`_turns_read.py` (get/list/delta/sync projections), `_turns_write.py`
+(create/update/compact), `_turns_lifecycle.py` (delete/recover/archive),
+`_turns_events.py` (attempt-event append/retention), `_turns_branch.py`
+(branch create/delete). New code goes to its semantic slice, never the
+facade; slices must keep the acyclic import direction
+core → events → read → lifecycle → write → branch.

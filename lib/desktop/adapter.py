@@ -17,23 +17,25 @@ This module owns:
   * loopback relay helpers (thin wrappers over egress with the loopback
     whitelist class, ALWAYS pinned to one agent — never the fallback
     chain: another machine hosts another adapter with another api-key);
-  * ensure/status/stop task orchestration and the managed
-    ``adapter_<id>`` provider in server_config.json (dispatcher sees a
-    plain OpenAI slot; the transport branch routes it by the ``adapter``
-    marker).
+  * ensure/status/stop task orchestration and the managed owner-scoped v2
+    ``adapter_<id>`` ProviderAccess. Its Connection carries the validated
+    ``adapter`` relay marker consumed by request-scoped dispatch.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 import time
 import uuid
 from urllib.parse import urlencode
 
 from lib.config_dir import config_path
+from lib.identity import require_user_id
 from lib.json_store import read_json, update_json_atomic
 from lib.log import get_logger
+from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
 
@@ -57,19 +59,64 @@ __all__ = [
     'provision_provider',
     'deprovision_provider',
     'fetch_models',
+    'AdapterEnsureCapacityError',
 ]
 
 DEFAULT_PORT = 8317
 _POLICY_NAME = 'subscription_adapter.json'
 _STATUS_CACHE_TTL_S = 10
 _ENSURE_TTL_S = 600  # first run downloads ~20 MB through the user's network
+_CACHE_MAX_ENTRIES = 64
+_ENSURE_TASK_TTL_S = 3600
+_ENSURE_TASK_MAX_ENTRIES = 128
 
-_ensure_tasks: dict = {}
+
+class AdapterEnsureCapacityError(RuntimeError):
+    """The finite process-wide adapter bring-up lane is occupied."""
+
+
+def _ensure_capacity() -> int:
+    """Reuse the launch-probed task budget with a hard two-download ceiling."""
+    from runtime_guards import resolve_resource_budget
+
+    return resolve_resource_budget('TOFU_MAX_INFLIGHT_TASKS', maximum=2)
+
+
+_ENSURE_CAPACITY = _ensure_capacity()
+_ensure_slots = threading.BoundedSemaphore(_ENSURE_CAPACITY)
+
+_ensure_tasks = TTLCache(
+    ttl=_ENSURE_TASK_TTL_S,
+    max_size=_ENSURE_TASK_MAX_ENTRIES,
+    name='desktop_adapter_ensure_tasks',
+)
 _ensure_lock = threading.Lock()
-_status_cache: dict = {}
-_status_lock = threading.Lock()
-_accounts_cache: dict = {}
-_accounts_lock = threading.Lock()
+_status_cache = TTLCache(
+    ttl=_STATUS_CACHE_TTL_S,
+    max_size=_CACHE_MAX_ENTRIES,
+    name='desktop_adapter_status',
+)
+_accounts_cache = TTLCache(
+    ttl=_STATUS_CACHE_TTL_S,
+    max_size=_CACHE_MAX_ENTRIES,
+    name='desktop_adapter_accounts',
+)
+
+
+def _owner_scope(user_id: object) -> str:
+    """Normalize the bridge owner once and reject ownerless device access."""
+    return str(require_user_id(user_id, context='subscription adapter owner'))
+
+
+def _owner_agent_key(agent_id: str, user_id: object) -> tuple[str, str]:
+    """Partition every reconstructible cache by authorization scope.
+
+    A cached response must not become an alternate authorization path after
+    an agent is re-paired to another owner.  Keeping the owner in the key also
+    leaves the future tenant boundary explicit without changing the current
+    globally unique agent-id contract.
+    """
+    return _owner_scope(user_id), str(agent_id)
 
 
 # ══════════════════════════════════════════════════════════
@@ -130,7 +177,7 @@ def adapter_policy_public(agent_id: str) -> dict:
 
 def relay_http(agent_id: str, port: int, path: str, *, method: str = 'GET',
                headers: dict = None, body: bytes = b'', timeout: float = 30,
-               user_id: str = ''):
+               user_id: object):
     """One-shot request to the agent-local adapter (EgressResponse)."""
     from lib.desktop import egress as _eg
     url = f'http://127.0.0.1:{int(port)}{path}'
@@ -140,8 +187,8 @@ def relay_http(agent_id: str, port: int, path: str, *, method: str = 'GET',
 
 
 def relay_stream(agent_id: str, port: int, path: str, *, method: str = 'POST',
-                 headers: dict = None, body: bytes = b'', user_id: str = '',
-                 log_prefix: str = ''):
+                 headers: dict = None, body: bytes = b'',
+                 log_prefix: str = '', user_id: object):
     """Streamed request to the agent-local adapter (EgressStreamReader)."""
     from lib.desktop import egress as _eg
     url = f'http://127.0.0.1:{int(port)}{path}'
@@ -156,7 +203,7 @@ def relay_stream(agent_id: str, port: int, path: str, *, method: str = 'POST',
 # ══════════════════════════════════════════════════════════
 
 def _management_request(agent_id: str, path: str, *, method: str = 'GET',
-                        payload: dict = None, user_id: str = '') -> dict:
+                        payload: dict = None, user_id: object) -> dict:
     if not path.startswith('/v0/management/'):
         raise ValueError('adapter management path is not allowed')
     policy = policy_for(agent_id)
@@ -200,21 +247,19 @@ def _account_provider(item: dict) -> str:
     return raw or 'other'
 
 
-def _invalidate_adapter_caches(agent_id: str) -> None:
-    with _status_lock:
-        _status_cache.pop(agent_id, None)
-    with _accounts_lock:
-        _accounts_cache.pop(agent_id, None)
+def _invalidate_adapter_caches(agent_id: str, user_id: object) -> None:
+    cache_key = _owner_agent_key(agent_id, user_id)
+    _status_cache.invalidate(cache_key)
+    _accounts_cache.invalidate(cache_key)
 
 
-def adapter_accounts(agent_id: str, user_id: str = '',
+def adapter_accounts(agent_id: str, *, user_id: object,
                      force: bool = False) -> list:
     """Return a sanitized account inventory from ``/auth-files``."""
-    now = time.monotonic()
-    with _accounts_lock:
-        cached = _accounts_cache.get(agent_id)
-        if not force and cached and now - cached[0] < _STATUS_CACHE_TTL_S:
-            return [dict(a) for a in cached[1]]
+    cache_key = _owner_agent_key(agent_id, user_id)
+    cached = None if force else _accounts_cache.get(cache_key)
+    if cached is not None:
+        return [dict(a) for a in cached]
     data = _management_request(agent_id, '/v0/management/auth-files',
                                user_id=user_id)
     out = []
@@ -235,8 +280,7 @@ def adapter_accounts(agent_id: str, user_id: str = '',
             'disabled': bool(item.get('disabled', False)),
             'unavailable': bool(item.get('unavailable', False)),
         })
-    with _accounts_lock:
-        _accounts_cache[agent_id] = (now, out)
+    _accounts_cache.set(cache_key, out)
     return [dict(a) for a in out]
 
 
@@ -246,8 +290,8 @@ _ADAPTER_OAUTH_PATHS = {
 }
 
 
-def start_adapter_oauth(agent_id: str, provider: str,
-                        user_id: str = '') -> dict:
+def start_adapter_oauth(agent_id: str, provider: str, *,
+                        user_id: object) -> dict:
     path = _ADAPTER_OAUTH_PATHS.get(provider)
     if not path:
         raise ValueError('unsupported adapter OAuth provider')
@@ -258,8 +302,8 @@ def start_adapter_oauth(agent_id: str, provider: str,
             'auth_url': data['url'], 'state': data['state']}
 
 
-def sync_provider(agent_id: str, agent_name: str = '',
-                  user_id: str = '') -> dict:
+def sync_provider(agent_id: str, agent_name: str = '', *,
+                  user_id: object) -> dict:
     """Refresh the managed adapter provider after account changes."""
     policy = policy_for(agent_id)
     if not policy:
@@ -269,35 +313,71 @@ def sync_provider(agent_id: str, agent_name: str = '',
         models = fetch_models(agent_id, port, policy['api_key'], user_id=user_id)
     except RuntimeError as e:
         if 'empty list' in str(e):
-            deprovision_provider(agent_id)
-            return {'provider_id': f'adapter_{agent_id[:8]}', 'models': 0}
+            deprovision_provider(agent_id, user_id=user_id)
+            return {'provider_id': _provider_id(agent_id), 'models': 0}
         raise
-    provision_provider(agent_id, agent_name, port, policy['api_key'], models)
-    return {'provider_id': f'adapter_{agent_id[:8]}', 'models': len(models)}
+    provision_provider(
+        agent_id, agent_name, port, policy['api_key'], models,
+        user_id=user_id)
+    return {'provider_id': _provider_id(agent_id), 'models': len(models)}
 
 
-def _adapter_provider_status(agent_id: str) -> dict:
-    from lib import _SERVER_CONFIG_PATH
-    pid = f'adapter_{agent_id[:8]}'
-    cfg = read_json(_SERVER_CONFIG_PATH, default={}) or {}
-    entry = next((p for p in (cfg.get('providers') or [])
-                  if p.get('id') == pid), None)
-    model_count = len((entry or {}).get('models') or [])
-    return {'provider_id': pid,
-            'provider_ready': bool(entry and entry.get('enabled', True)
-                                   and model_count),
-            'model_count': model_count}
+def _adapter_provider_status(
+        agent_id: str, *, user_id: object, repository=None) -> dict:
+    from lib.model_routing import ModelRoutingRepository
+
+    boundary = _adapter_owner_boundary(user_id)
+    repo = repository or ModelRoutingRepository()
+    pid = _provider_id(agent_id)
+    document = repo.get(boundary).document
+    access_ids = {
+        row['provider_access_id'] for row in document['provider_accesses']
+        if row['provider_id'] == pid and row['enabled']
+    }
+    connection_ids = {
+        row['connection_id'] for row in document['connections']
+        if row['provider_access_id'] in access_ids
+        and row['enabled']
+        and (row.get('adapter') or {}).get('agent_id') == agent_id
+    }
+    credential_ready = any(
+        row['provider_access_id'] in access_ids
+        and row['enabled']
+        and row['kind'] == 'api_key'
+        and bool(set(row['authorization']['connection_ids']) & connection_ids)
+        for row in document['credentials']
+    )
+    offerings = [
+        row for row in document['offerings']
+        if row['provider_access_id'] in access_ids and row['enabled']
+    ]
+    offering_ids = {row['offering_id'] for row in offerings}
+    model_count = len(offerings)
+    deployment_ready = any(
+        row['offering_id'] in offering_ids
+        and row['connection_id'] in connection_ids
+        and row['enabled']
+        and row['probe_status'] == 'passed'
+        for row in document['deployments']
+    )
+    return {
+        'provider_id': pid,
+        'provider_ready': bool(
+            access_ids and model_count and credential_ready
+            and deployment_ready),
+        'model_count': model_count,
+    }
 
 
-def adapter_oauth_status(agent_id: str, state: str, agent_name: str = '',
-                         user_id: str = '') -> dict:
+def adapter_oauth_status(agent_id: str, state: str, agent_name: str = '', *,
+                         user_id: object) -> dict:
     query = urlencode({'state': state})
     data = _management_request(
         agent_id, f'/v0/management/get-auth-status?{query}', user_id=user_id)
     status = str(data.get('status') or 'wait').lower()
     out = {'status': status, 'error': str(data.get('error') or '')[:300]}
     if status == 'ok':
-        _invalidate_adapter_caches(agent_id)
+        _invalidate_adapter_caches(agent_id, user_id)
         try:
             synced = sync_provider(agent_id, agent_name, user_id=user_id)
             out.update(synced)
@@ -320,7 +400,7 @@ def adapter_oauth_status(agent_id: str, state: str, agent_name: str = '',
 
 def submit_adapter_oauth_callback(agent_id: str, provider: str, state: str,
                                   *, code: str = '', redirect_url: str = '',
-                                  error: str = '', user_id: str = '') -> dict:
+                                  error: str = '', user_id: object) -> dict:
     canonical = {'claude': 'anthropic', 'codex': 'codex'}.get(provider)
     if not canonical:
         raise ValueError('unsupported adapter OAuth provider')
@@ -337,7 +417,7 @@ def submit_adapter_oauth_callback(agent_id: str, provider: str, state: str,
 
 
 def delete_adapter_account(agent_id: str, name: str, auth_index=None,
-                           agent_name: str = '', user_id: str = '') -> dict:
+                           agent_name: str = '', *, user_id: object) -> dict:
     accounts = adapter_accounts(agent_id, user_id=user_id, force=True)
     match = next((a for a in accounts if a.get('name') == name and
                   (auth_index is None or a.get('auth_index') == auth_index)), None)
@@ -349,12 +429,12 @@ def delete_adapter_account(agent_id: str, name: str, auth_index=None,
     _management_request(agent_id,
                         '/v0/management/auth-files?' + urlencode(query_data),
                         method='DELETE', user_id=user_id)
-    _invalidate_adapter_caches(agent_id)
+    _invalidate_adapter_caches(agent_id, user_id)
     remaining = adapter_accounts(agent_id, user_id=user_id, force=True)
     if not remaining:
-        deprovision_provider(agent_id)
+        deprovision_provider(agent_id, user_id=user_id)
         return {'deleted': True,
-                'provider_id': f'adapter_{agent_id[:8]}', 'models': 0}
+                'provider_id': _provider_id(agent_id), 'models': 0}
     synced = sync_provider(agent_id, agent_name, user_id=user_id)
     return {'deleted': True, **synced}
 
@@ -363,16 +443,15 @@ def delete_adapter_account(agent_id: str, name: str, auth_index=None,
 #  Status + ensure orchestration
 # ══════════════════════════════════════════════════════════
 
-def adapter_status(agent_id: str, agent_name: str = '',
-                   user_id: str = '') -> dict:
+def adapter_status(agent_id: str, agent_name: str = '', *,
+                   user_id: object) -> dict:
     """Live adapter state from the agent (10s cache — status polls must
     not stampede the bridge). ``{'ok': False, 'error': …}`` when the
     agent is unreachable; the agent's own status dict otherwise."""
-    now = time.monotonic()
-    with _status_lock:
-        cached = _status_cache.get(agent_id)
-        if cached and now - cached[0] < _STATUS_CACHE_TTL_S:
-            return dict(cached[1])
+    cache_key = _owner_agent_key(agent_id, user_id)
+    cached = _status_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
     from lib.desktop import send_desktop_command
     result, error = send_desktop_command(
         'adapter_status', {}, timeout=12, target_agent_id=agent_id,
@@ -392,18 +471,20 @@ def adapter_status(agent_id: str, agent_name: str = '',
                     counts[key if key in counts else 'other'] += 1
                 out['provider_counts'] = counts
                 try:
-                    provider_state = _adapter_provider_status(agent_id)
+                    provider_state = _adapter_provider_status(
+                        agent_id, user_id=user_id)
                     usable_accounts = [a for a in out['accounts']
                                        if not a.get('disabled')
                                        and not a.get('unavailable')]
                     if usable_accounts and not provider_state['provider_ready']:
                         sync_provider(agent_id, agent_name, user_id=user_id)
-                        provider_state = _adapter_provider_status(agent_id)
+                        provider_state = _adapter_provider_status(
+                            agent_id, user_id=user_id)
                     out.update(provider_state)
                 except Exception as e:
                     logger.debug('[Adapter] provider status unavailable for %s: %s',
                                  agent_id[:8], e)
-                    out.update({'provider_id': f'adapter_{agent_id[:8]}',
+                    out.update({'provider_id': _provider_id(agent_id),
                                 'provider_ready': False, 'model_count': 0})
                     out['catalog_error'] = str(e)[:300]
             except Exception as e:
@@ -412,29 +493,35 @@ def adapter_status(agent_id: str, agent_name: str = '',
                 out['accounts'] = []
                 out['provider_counts'] = {'claude': 0, 'codex': 0, 'other': 0}
                 out['accounts_error'] = str(e)[:300]
-    with _status_lock:
-        _status_cache[agent_id] = (now, out)
+    _status_cache.set(cache_key, out)
     return dict(out)
 
 
-def ensure_task_state(agent_id: str = '') -> dict:
+def ensure_task_state(agent_id: str, *, user_id: object) -> dict:
+    """Return one owner's bounded background-task snapshot for one agent."""
+    cache_key = _owner_agent_key(agent_id, user_id)
     with _ensure_lock:
-        if agent_id:
-            return dict(_ensure_tasks.get(agent_id) or {})
-        return {k: dict(v) for k, v in _ensure_tasks.items()}
+        return dict(_ensure_tasks.get(cache_key) or {})
 
 
-def ensure_adapter(agent_id: str, agent_name: str = '', user_id: str = '') -> dict:
+def ensure_adapter(agent_id: str, agent_name: str = '', *,
+                   user_id: object) -> dict:
     """Kick a background bring-up: policy → adapter_ensure (long TTL) →
     fetch models → provision the managed provider. Returns the task
     snapshot immediately ('ensuring'); poll :func:`ensure_task_state` /
     :func:`adapter_status` for completion."""
+    owner_scope = _owner_scope(user_id)
+    task_key = (owner_scope, str(agent_id))
     with _ensure_lock:
-        cur = _ensure_tasks.get(agent_id) or {}
+        cur = _ensure_tasks.get(task_key) or {}
         if cur.get('state') == 'ensuring':
             return dict(cur)
-        _ensure_tasks[agent_id] = {'state': 'ensuring', 'detail': '',
-                                   'started_at': time.time()}
+        if not _ensure_slots.acquire(blocking=False):
+            raise AdapterEnsureCapacityError(
+                'adapter ensure capacity is saturated; retry shortly')
+        _ensure_tasks.set(task_key, {
+            'state': 'ensuring', 'detail': '', 'started_at': time.time(),
+        })
 
     def _run():
         outcome = {'state': 'error', 'detail': ''}
@@ -450,7 +537,7 @@ def ensure_adapter(agent_id: str, agent_name: str = '', user_id: str = '') -> di
             from lib.desktop import send_desktop_command
             result, error = send_desktop_command(
                 'adapter_ensure', params, timeout=_ENSURE_TTL_S,
-                target_agent_id=agent_id, user_id=user_id,
+                target_agent_id=agent_id, user_id=owner_scope,
                 ttl=_ENSURE_TTL_S)
             if error or result is None:
                 outcome['detail'] = error or 'no result'
@@ -460,58 +547,80 @@ def ensure_adapter(agent_id: str, agent_name: str = '', user_id: str = '') -> di
                 port = int(result.get('port') or policy['port'])
                 try:
                     models = fetch_models(agent_id, port, policy['api_key'],
-                                          user_id=user_id)
+                                          user_id=owner_scope)
                 except RuntimeError as e:
                     # A brand-new adapter has no accounts yet. Starting it is
                     # still success: Settings must expose the login buttons.
                     if 'empty list' not in str(e):
                         raise
                     models = []
-                    deprovision_provider(agent_id)
+                    deprovision_provider(agent_id, user_id=owner_scope)
                 if models:
                     provision_provider(agent_id, agent_name, port,
-                                       policy['api_key'], models)
+                                       policy['api_key'], models,
+                                       user_id=owner_scope)
                 outcome = {'state': 'ready', 'detail': '',
                            'version': result.get('version', ''),
                            'port': port, 'models': len(models),
                            'accounts_needed': not bool(models),
-                           'provider_id': f'adapter_{agent_id[:8]}'}
+                           'provider_id': _provider_id(agent_id)}
         except Exception as e:
             logger.error('[Adapter] ensure failed for %s: %s',
                          agent_id[:8], e, exc_info=True)
             outcome['detail'] = str(e)[:300]
         with _ensure_lock:
-            _ensure_tasks[agent_id] = {**outcome, 'started_at':
-                                       _ensure_tasks[agent_id]['started_at'],
-                                       'finished_at': time.time()}
+            previous = _ensure_tasks.get(task_key) or {}
+            _ensure_tasks.set(task_key, {
+                **outcome,
+                'started_at': previous.get('started_at', time.time()),
+                'finished_at': time.time(),
+            })
         # A pre-start status poll may have cached ``running: false``. Drop it
         # as soon as bring-up finishes so the next UI poll reflects the agent
         # and its newly created account/catalog state immediately.
-        _invalidate_adapter_caches(agent_id)
+        _invalidate_adapter_caches(agent_id, owner_scope)
         logger.info('[Adapter] ensure %s → %s %s', agent_id[:8],
                     outcome['state'], outcome.get('detail') or '')
 
-    threading.Thread(target=_run, daemon=True,
-                     name=f'adapter-ensure-{agent_id[:8]}').start()
-    return ensure_task_state(agent_id)
+    def _run_with_slot():
+        try:
+            _run()
+        finally:
+            _ensure_slots.release()
+
+    worker = threading.Thread(
+        target=_run_with_slot,
+        daemon=True,
+        name=f'adapter-ensure-{agent_id[:8]}',
+    )
+    try:
+        worker.start()
+    except BaseException:
+        _ensure_tasks.invalidate(task_key)
+        _ensure_slots.release()
+        raise
+    return ensure_task_state(agent_id, user_id=owner_scope)
 
 
-def stop_adapter(agent_id: str, user_id: str = '') -> dict:
+def stop_adapter(agent_id: str, *, user_id: object) -> dict:
     """Stop the sidecar on the agent AND deprovision the managed provider
     (a stopped adapter must not keep serving slots)."""
+    owner_scope = _owner_scope(user_id)
     from lib.desktop import send_desktop_command
     result, error = send_desktop_command(
         'adapter_stop', {}, timeout=15, target_agent_id=agent_id,
-        user_id=user_id, ttl=30)
-    deprovision_provider(agent_id)
-    _invalidate_adapter_caches(agent_id)
-    if error:
-        return {'ok': False, 'error': error}
+        user_id=owner_scope, ttl=30)
+    _invalidate_adapter_caches(agent_id, owner_scope)
+    if error or result is None:
+        return {'ok': False, 'error': error or 'no result'}
+    # Only remove the managed provider after the owning agent confirmed the
+    # stop.  A bridge outage is not proof that the adapter stopped serving.
+    deprovision_provider(agent_id, user_id=owner_scope)
     return {'ok': True, **(result or {})}
 
 
 # ══════════════════════════════════════════════════════════
-#  Managed provider (server_config.json)
+#  Managed owner-scoped model-routing v2 provider
 # ══════════════════════════════════════════════════════════
 
 def is_adapter_provider(provider: dict) -> dict:
@@ -521,7 +630,7 @@ def is_adapter_provider(provider: dict) -> dict:
 
 
 def fetch_models(agent_id: str, port: int, api_key: str,
-                 user_id: str = '') -> list:
+                 *, user_id: object) -> list:
     """GET /v1/models through the loopback relay → [model_id, …]."""
     resp = relay_http(agent_id, port, '/v1/models',
                       headers={'Authorization': f'Bearer {api_key}'},
@@ -540,79 +649,148 @@ def fetch_models(agent_id: str, port: int, api_key: str,
     return ids
 
 
-def provision_provider(agent_id: str, agent_name: str, port: int,
-                       api_key: str, model_ids: list) -> bool:
-    """Add/refresh the managed ``adapter_<id>`` provider (idempotent)."""
-    from lib import _SERVER_CONFIG_PATH, reload_config
+def _provider_id(agent_id: str) -> str:
+    return f'adapter_{str(agent_id)[:8]}'
+
+
+def _adapter_owner_boundary(user_id: object):
+    from lib.model_routing import OwnerBoundary
+
+    return OwnerBoundary.create(require_user_id(
+        user_id, context='subscription adapter model-routing owner'))
+
+
+def _stable_resource_id(kind: str, provider_id: str, value: str = '') -> str:
+    digest = hashlib.sha256(
+        f'{provider_id}\0{value}'.encode('utf-8')).hexdigest()[:20]
+    return f'adapter-{kind}-{digest}'
+
+
+def _adapter_provider_bundle(
+        agent_id: str, agent_name: str, port: int,
+        model_ids: list) -> tuple[dict, str]:
+    from lib.llm_dispatch.discovery import _infer_capabilities
+    from lib.model_info import context_profile
+
+    pid = _provider_id(agent_id)
+    access_id = _stable_resource_id('access', pid)
+    connection_id = _stable_resource_id('connection', pid, str(port))
+    credential_id = _stable_resource_id('credential', pid)
+    normalized_models = sorted({
+        str(model_id or '').strip() for model_id in model_ids
+        if str(model_id or '').strip()
+    })
+    offerings = []
+    deployments = []
+    for priority, model_id in enumerate(normalized_models):
+        offering_id = _stable_resource_id('offering', pid, model_id)
+        window = context_profile(model_id, pid).get('window')
+        offerings.append({
+            'offering_id': offering_id,
+            'provider_access_id': access_id,
+            'identity_state': 'pending_identity',
+            'pending_model_id': model_id,
+            'enabled': True,
+            'stale': False,
+            'capabilities': sorted(_infer_capabilities(model_id)),
+            'context_window': (
+                int(window) if isinstance(window, int) and window > 0
+                else 32_768),
+            'priority': priority,
+        })
+        deployments.append({
+            'deployment_id': _stable_resource_id(
+                'deployment', pid, f'{port}\0{model_id}'),
+            'offering_id': offering_id,
+            'connection_id': connection_id,
+            'wire_model_id': model_id,
+            'enabled': True,
+            'identity_confidence': 'pending',
+            'probe_status': 'passed',
+            'priority': priority,
+        })
+    return ({
+        'providers': [{
+            'provider_id': pid,
+            'name': f'订阅适配器 · {agent_name or str(agent_id)[:8]}',
+            'scope': 'owner',
+            'brand': 'adapter',
+        }],
+        'provider_accesses': [{
+            'provider_access_id': access_id,
+            'provider_id': pid,
+            'display_name': f'订阅适配器 · {agent_name or str(agent_id)[:8]}',
+            'enabled': True,
+            'quota_policy': {},
+        }],
+        'connections': [{
+            'connection_id': connection_id,
+            'provider_access_id': access_id,
+            'base_url': f'http://127.0.0.1:{int(port)}/v1',
+            'protocol': 'openai',
+            'enabled': True,
+            'priority': 0,
+            'extra_headers': {},
+            'adapter': {'agent_id': str(agent_id), 'port': int(port)},
+        }],
+        'credentials': [{
+            'credential_id': credential_id,
+            'provider_access_id': access_id,
+            'kind': 'api_key',
+            'secret_reference': '',
+            'key_hint': '',
+            'enabled': True,
+            'authorization': {
+                'connection_ids': [connection_id],
+                'models': [],
+            },
+            'quota_policy': {},
+        }],
+        'offerings': offerings,
+        'deployments': deployments,
+    }, credential_id)
+
+
+def provision_provider(
+        agent_id: str, agent_name: str, port: int,
+        api_key: str, model_ids: list, *, user_id: object,
+        repository=None) -> bool:
+    """Add or refresh one owner-scoped adapter ProviderAccess."""
     from lib.llm_dispatch import reset_dispatcher
+    from lib.model_routing import ModelRoutingRepository
+    from lib.model_routing.managed_provider import replace_managed_provider
 
-    entry = {
-        'id': f'adapter_{agent_id[:8]}',
-        'name': f'订阅适配器 · {agent_name or agent_id[:8]}',
-        'base_url': f'http://127.0.0.1:{int(port)}/v1',
-        'brand': 'adapter',
-        'enabled': True,
-        'adapter': {'agent_id': agent_id, 'port': int(port)},
-        'api_keys': [api_key],
-        'protocol': 'openai',
-        'models': [{'model_id': mid, 'capabilities': ['text', 'vision']}
-                   for mid in model_ids],
-    }
-
-    changed = {'yes': False}
-
-    def _mutate(cfg):
-        providers = list(cfg.get('providers') or [])
-        out = []
-        found = False
-        for current in providers:
-            if current.get('id') != entry['id']:
-                out.append(current)
-                continue
-            if not found:
-                out.append(entry)
-                found = True
-                if current != entry:
-                    changed['yes'] = True
-            else:
-                changed['yes'] = True
-        if not found:
-            out.append(entry)
-            changed['yes'] = True
-        if not changed['yes']:
-            return None
-        cfg['providers'] = out
-        return cfg
-
-    update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-    if changed['yes']:
-        reload_config()
+    boundary = _adapter_owner_boundary(user_id)
+    repo = repository or ModelRoutingRepository()
+    bundle, credential_id = _adapter_provider_bundle(
+        agent_id, agent_name, int(port), model_ids)
+    mutation = replace_managed_provider(
+        repo,
+        boundary,
+        provider_id=_provider_id(agent_id),
+        bundle=bundle,
+        credential_plaintexts={credential_id: str(api_key)},
+    )
+    if mutation.changed:
         reset_dispatcher()
-        logger.info('[Adapter] provisioned provider %s (%d models)',
-                    entry['id'], len(model_ids))
-    return changed['yes']
+        logger.info('[Adapter] provisioned ProviderAccess %s (%d models)',
+                    mutation.provider_id, len(model_ids))
+    return mutation.changed
 
 
-def deprovision_provider(agent_id: str) -> bool:
-    """Remove the managed provider (adapter stop / agent retired)."""
-    from lib import _SERVER_CONFIG_PATH, reload_config
+def deprovision_provider(
+        agent_id: str, *, user_id: object, repository=None) -> bool:
+    """Remove the owning adapter ProviderAccess after confirmed stop."""
     from lib.llm_dispatch import reset_dispatcher
+    from lib.model_routing import ModelRoutingRepository
+    from lib.model_routing.managed_provider import delete_managed_provider
 
-    pid = f'adapter_{agent_id[:8]}'
-    removed = {'n': 0}
-
-    def _mutate(cfg):
-        before = cfg.get('providers') or []
-        after = [p for p in before if p.get('id') != pid]
-        removed['n'] = len(before) - len(after)
-        if not removed['n']:
-            return None
-        cfg['providers'] = after
-        return cfg
-
-    update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-    if removed['n']:
-        reload_config()
+    boundary = _adapter_owner_boundary(user_id)
+    repo = repository or ModelRoutingRepository()
+    mutation = delete_managed_provider(
+        repo, boundary, provider_id=_provider_id(agent_id))
+    if mutation.changed:
         reset_dispatcher()
-        logger.info('[Adapter] deprovisioned provider %s', pid)
-    return bool(removed['n'])
+        logger.info('[Adapter] deprovisioned ProviderAccess %s',
+                    mutation.provider_id)
+    return mutation.changed

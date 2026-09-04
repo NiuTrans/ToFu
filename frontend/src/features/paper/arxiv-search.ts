@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
 type JsonObject = Record<string, unknown>;
 
@@ -22,7 +23,6 @@ interface KatexApi {
 type ArxivSearchWindow = Window & {
   Api?: { paper?: ArxivSearchApi };
   t?: (key: string) => string;
-  escapeHtml?: (value: unknown) => string;
   debugLog?: (message: string, level?: string) => void;
   katex?: KatexApi;
   _ensureKatex?: () => unknown;
@@ -40,14 +40,6 @@ type ArxivSearchWindow = Window & {
 
 function globals(): ArxivSearchWindow {
   return featureRegistry as unknown as ArxivSearchWindow;
-}
-
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (helper) return helper(value);
-  const node = document.createElement('span');
-  node.textContent = value == null ? '' : String(value);
-  return node.innerHTML;
 }
 
 function translate(key: I18nKey): string {

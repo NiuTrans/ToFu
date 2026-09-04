@@ -11,8 +11,15 @@ import os
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
+
+ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
+HTML_SAFETY = native_module_path(
+    '.native/proxy-html-safety.js',
+    os.path.join(ROOT, 'frontend', 'src', 'html-safety.ts'),
+)
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -306,7 +313,7 @@ def test_proxy_pool_editor_frontend():
         target_js=os.path.join(JS_DIR, 'settings', 'other_tabs.js'),
         body_js=_BODY,
         extra_targets=[
-            os.path.join(JS_DIR, 'core', 'safe_html.js'),
+            HTML_SAFETY,
             os.path.join(JS_DIR, 'settings', 'save_export.js'),
         ],
         expect_pass=43,

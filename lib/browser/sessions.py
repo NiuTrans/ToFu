@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from lib.log import get_logger
+from runtime_guards import resolve_resource_budget
 
 logger = get_logger(__name__)
 
@@ -16,6 +17,10 @@ logger = get_logger(__name__)
 class BrowserSessionMode(str, Enum):
     EPHEMERAL = 'ephemeral'
     PERSISTENT = 'persistent'
+
+
+class BrowserSessionCapacityError(RuntimeError):
+    """The process-wide owner/device lease budget is exhausted."""
 
 
 @dataclass
@@ -52,24 +57,62 @@ class BrowserSessionLease:
 
 
 _leases: dict[str, BrowserSessionLease] = {}
-_lease_timers: dict[str, threading.Timer] = {}
 _leases_lock = threading.RLock()
+_leases_changed = threading.Condition(_leases_lock)
+_lease_sweeper_thread: threading.Thread | None = None
 
 
-def _expire_lease(lease_id: str) -> None:
-    with _leases_lock:
-        lease = _leases.get(lease_id)
-        if not lease or not lease.active:
-            _lease_timers.pop(lease_id, None)
-            return
-        remaining = lease.expires_at - time.time() if lease.expires_at else 0
-        if remaining > 0.05:
-            timer = threading.Timer(remaining, _expire_lease, args=(lease_id,))
-            timer.daemon = True
-            _lease_timers[lease_id] = timer
-            timer.start()
-            return
-    release_browser_lease(lease, reason='timeout')
+def _lease_capacity() -> int:
+    return resolve_resource_budget(
+        'TOFU_BROWSER_SESSION_LEASE_CAPACITY', minimum=1, maximum=8192)
+
+
+def _lease_sweeper_loop() -> None:
+    """Expire every timed lease from one process-wide lifecycle thread."""
+    while True:
+        with _leases_changed:
+            deadlines = [
+                lease.expires_at
+                for lease in _leases.values()
+                if lease.active and lease.expires_at
+            ]
+            if not deadlines:
+                # Once created, the sole daemon stays parked on the condition.
+                # This removes the empty→new-lease exit race without ever
+                # multiplying threads or waking on a polling cadence.
+                _leases_changed.wait()
+                continue
+            delay = max(0.05, min(deadlines) - time.time())
+            _leases_changed.wait(timeout=delay)
+        try:
+            cleanup_expired_leases()
+        except Exception as exc:
+            # A lifecycle thread must not disappear and strand every later
+            # lease because one cleanup path had a programmer bug.
+            logger.error(
+                '[Browser] lease sweep failed: %s', exc, exc_info=True)
+            with _leases_changed:
+                _leases_changed.wait(timeout=1.0)
+
+
+def _ensure_lease_sweeper_locked() -> None:
+    """Start the sole sweeper; caller holds ``_leases_lock``."""
+    global _lease_sweeper_thread
+    if (_lease_sweeper_thread is not None
+            and _lease_sweeper_thread.is_alive()):
+        _leases_changed.notify_all()
+        return
+    thread = threading.Thread(
+        target=_lease_sweeper_loop,
+        name='browser-lease-sweeper',
+        daemon=True,
+    )
+    _lease_sweeper_thread = thread
+    try:
+        thread.start()
+    except Exception:
+        _lease_sweeper_thread = None
+        raise
 
 
 def _normalize_owner(owner_user_id) -> str:
@@ -113,15 +156,18 @@ def acquire_browser_lease(*, owner_user_id: str, client_id: str | None = None,
         mode=mode, tab_id=int(tab_id) if tab_id is not None else None,
         created_at=now, expires_at=(now + max(1.0, float(timeout))) if timeout else 0,
     )
-    with _leases_lock:
+    with _leases_changed:
+        capacity = _lease_capacity()
+        if len(_leases) >= capacity:
+            raise BrowserSessionCapacityError(
+                f'Browser session lease capacity reached ({capacity})')
         _leases[lease.lease_id] = lease
         if lease.expires_at:
-            timer = threading.Timer(
-                max(0.05, lease.expires_at - now), _expire_lease,
-                args=(lease.lease_id,))
-            timer.daemon = True
-            _lease_timers[lease.lease_id] = timer
-            timer.start()
+            try:
+                _ensure_lease_sweeper_locked()
+            except Exception:
+                _leases.pop(lease.lease_id, None)
+                raise
     return lease
 
 
@@ -145,17 +191,16 @@ def release_browser_lease(lease: BrowserSessionLease, *, reason: str = 'complete
     from .queue import send_browser_command
 
     send = sender or send_browser_command
-    with _leases_lock:
+    with _leases_changed:
         if not lease.active:
             return
-        timer = _lease_timers.pop(lease.lease_id, None)
-        if timer is not None:
-            timer.cancel()
         captures = list(lease.network_captures)
         tab_id = lease.tab_id
         should_close = lease.mode is BrowserSessionMode.EPHEMERAL and tab_id is not None
         lease.network_captures.clear()
         lease.released_at = time.time()
+        _leases.pop(lease.lease_id, None)
+        _leases_changed.notify_all()
     for capture_id in captures:
         try:
             send('network_capture_stop', {'captureId': capture_id}, timeout=5,
@@ -174,8 +219,6 @@ def release_browser_lease(lease: BrowserSessionLease, *, reason: str = 'complete
             logger.warning(
                 '[Browser] tab cleanup failed for lease %s (tab %s): %s',
                 lease.lease_id[:12], tab_id, exc)
-    with _leases_lock:
-        _leases.pop(lease.lease_id, None)
 
 
 def cleanup_expired_leases(*, sender=None) -> int:
@@ -199,8 +242,23 @@ def lease_status(*, owner_user_id: str, client_id: str | None = None) -> list[di
             and (client_id is None or lease.client_id == client_id)]
 
 
+def lease_runtime_snapshot() -> dict:
+    """Small resource-budget projection for diagnostics and tests."""
+    with _leases_lock:
+        return {
+            'active': len(_leases),
+            'capacity': _lease_capacity(),
+            'expiring': sum(
+                1 for lease in _leases.values() if lease.expires_at),
+            'sweeperAlive': bool(
+                _lease_sweeper_thread
+                and _lease_sweeper_thread.is_alive()),
+        }
+
+
 __all__ = [
-    'BrowserSessionMode', 'BrowserSessionLease', 'acquire_browser_lease',
+    'BrowserSessionMode', 'BrowserSessionLease',
+    'BrowserSessionCapacityError', 'acquire_browser_lease',
     'get_browser_lease', 'bind_lease_tab', 'release_browser_lease',
-    'cleanup_expired_leases', 'lease_status',
+    'cleanup_expired_leases', 'lease_status', 'lease_runtime_snapshot',
 ]

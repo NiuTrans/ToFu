@@ -19,6 +19,7 @@ Public API (also re-exported by lib/__init__ for back-compat):
     get_model_price_display_policy() — browser-safe rates + freshness metadata
     get_pricing_data()       — thread-safe copy of live pricing state
     lookup_pricing(model, provider_id=None) — provider-scoped pricing resolution
+    first_pricing_increase_boundary(model, provider_id=None) — first proven tier cliff
     set_provider_pricing(provider_id, model_id, info) — register one override
     clear_provider_pricing(provider_id) — drop a provider's overrides
     get_provider_pricing_snapshot()     — snapshot the override map
@@ -39,6 +40,7 @@ from lib.pricing._provider import (  # noqa: E402,F401
     _provider_pricing_lock,
     build_rate_card,
     clear_provider_pricing,
+    first_pricing_increase_boundary,
     get_provider_pricing_snapshot,
     lookup_pricing,
     normalize_pricing,
@@ -78,6 +80,7 @@ __all__ = [
     'get_provider_pricing_snapshot',
     'normalize_pricing',
     'build_rate_card',
+    'first_pricing_increase_boundary',
     # peak schedules
     'peak_multiplier',
     # refresh

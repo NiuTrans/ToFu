@@ -130,6 +130,112 @@ class TestConcurrentConvStateIsolation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  0b. Pre-first-call compaction must bridge the task-thread boundary
+
+class TestPreCallCompactionBoundary:
+    """Compaction may run before a new task thread's first provider call.
+
+    The previous turn still has a warm sibling ``CacheState``, but the new
+    thread does not get its own state until ``detect_cache_break`` normally
+    runs after the provider response. A compaction notification in that gap
+    must materialize the new thread's guard; otherwise its expected read drop
+    is misclassified as ``turn_boundary_rebill`` against the sibling baseline.
+    """
+
+    @staticmethod
+    def _messages():
+        return [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'compacted continuation'},
+        ]
+
+    def test_notify_bridges_empty_current_thread_state(self):
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._roi import notify_compaction
+        from lib.tasks_pkg.cache_tracking._state import (
+            CacheState,
+            _cache_states,
+            _state_key,
+        )
+
+        conv = 'pre-call-compact-boundary'
+        current_key = _state_key(conv, user_id=1)
+        sibling = CacheState()
+        sibling.call_count = 4
+        sibling.last_cache_read_tokens = 204_800
+        sibling.last_update_time = time.time()
+        sibling_key = (1, conv, current_key[2] + 10_000_000)
+        _cache_states[sibling_key] = sibling
+        assert current_key not in _cache_states
+
+        notify_compaction(conv, user_id=1)
+        current = _cache_states.get(current_key)
+        assert current is not None and current.compaction_pending, (
+            'a pre-call compaction must leave a guard on the new task thread')
+
+        result = detect_cache_break(
+            conv, self._messages(), None, 'claude-opus-4',
+            usage={'cache_read_input_tokens': 0,
+                   'cache_creation_input_tokens': 9_700},
+            user_id=1, durable=False)
+        assert result is None, (
+            f'the expected post-compaction drop was falsely classified: {result}')
+        assert current.total_breaks == 0
+        assert current.compaction_pending is False
+
+    def test_notify_existing_state_keeps_o1_path(self, monkeypatch):
+        import lib.tasks_pkg.cache_tracking._roi as roi
+        from lib.tasks_pkg.cache_tracking._state import (
+            CacheState,
+            _cache_states,
+            _state_key,
+        )
+
+        conv = 'existing-state-compact-o1'
+        state = CacheState()
+        state.call_count = 3
+        _cache_states[_state_key(conv, user_id=1)] = state
+
+        def _unexpected_cross_thread_probe(*_args, **_kwargs):
+            raise AssertionError(
+                'existing-state compaction must not scan/persist a baseline')
+
+        monkeypatch.setattr(
+            roi, 'get_prev_turn_cache_read', _unexpected_cross_thread_probe)
+        roi.notify_compaction(conv, user_id=1)
+        assert state.compaction_pending is True
+
+    def test_steady_round_skips_cross_thread_baseline_scan(self, monkeypatch):
+        import lib.tasks_pkg.cache_tracking._detect as detect_module
+        from lib.tasks_pkg.cache_tracking._state import (
+            CacheState,
+            _cache_states,
+            _state_key,
+        )
+
+        conv = 'steady-round-no-sibling-scan'
+        state = CacheState()
+        state.call_count = 2
+        state.last_cache_read_tokens = 50_000
+        state.last_update_time = time.time()
+        _cache_states[_state_key(conv, user_id=1)] = state
+
+        def _unexpected_cross_thread_probe(*_args, **_kwargs):
+            raise AssertionError(
+                'steady rounds must not scan/persist a round-1 baseline')
+
+        monkeypatch.setattr(
+            detect_module, 'get_prev_turn_cache_read',
+            _unexpected_cross_thread_probe)
+        result = detect_module.detect_cache_break(
+            conv, self._messages(), None, 'claude-opus-4',
+            usage={'cache_read_input_tokens': 50_000,
+                   'cache_creation_input_tokens': 0},
+            user_id=1, durable=False)
+        assert result is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  1. last_update_time TTL detection fix
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -661,6 +767,93 @@ class TestPrefixMutationDetection:
         assert 'tools' in r2
         assert 'prefix_mutation' not in r2
 
+    def test_stable_wire_tools_reuse_detailed_hashes(self, monkeypatch):
+        """Stable final tools bytes must not reserialize every source schema.
+
+        A changed provider-bound digest still refreshes both source hash tables
+        and preserves exact per-tool attribution. Malformed evidence takes the
+        conservative fallback instead of suppressing source comparison.
+        """
+        import lib.tasks_pkg.cache_tracking._detect as detect_module
+        from lib.tasks_pkg.wire_fingerprint import (
+            canonical_messages,
+            wire_byte_region,
+        )
+
+        original_hash_tools = detect_module._hash_tools
+        original_hash_tools_per_tool = detect_module._hash_tools_per_tool
+        calls = {'aggregate': 0, 'detail': 0}
+
+        def _count_hash_tools(tools):
+            calls['aggregate'] += 1
+            return original_hash_tools(tools)
+
+        def _count_hash_tools_per_tool(tools):
+            calls['detail'] += 1
+            return original_hash_tools_per_tool(tools)
+
+        monkeypatch.setattr(detect_module, '_hash_tools', _count_hash_tools)
+        monkeypatch.setattr(
+            detect_module, '_hash_tools_per_tool', _count_hash_tools_per_tool)
+
+        messages = self._msgs('tail')
+        tools_v1 = [{
+            'function': {
+                'name': 'grep_search',
+                'description': 'v1',
+                'parameters': {'type': 'object'},
+            },
+        }]
+        tools_v2 = [{
+            'function': {
+                'name': 'grep_search',
+                'description': 'v2 changed',
+                'parameters': {'type': 'object'},
+            },
+        }]
+
+        def _usage(tools, *, cache_read, cache_write):
+            return {
+                'cache_read_input_tokens': cache_read,
+                'cache_creation_input_tokens': cache_write,
+                '_wire_fp': canonical_messages(messages),
+                '_wire_region': wire_byte_region(None, tools),
+            }
+
+        detect_module.detect_cache_break(
+            'tool-wire-reuse', messages, tools_v1, 'claude-opus-4',
+            usage=_usage(tools_v1, cache_read=80000, cache_write=10000),
+            user_id=1,
+        )
+        assert calls == {'aggregate': 1, 'detail': 1}
+
+        stable = detect_module.detect_cache_break(
+            'tool-wire-reuse', messages, tools_v1, 'claude-opus-4',
+            usage=_usage(tools_v1, cache_read=140000, cache_write=1200),
+            user_id=1,
+        )
+        assert stable is None
+        assert calls == {'aggregate': 1, 'detail': 1}
+
+        changed = detect_module.detect_cache_break(
+            'tool-wire-reuse', messages, tools_v2, 'claude-opus-4',
+            usage=_usage(tools_v2, cache_read=30000, cache_write=60000),
+            user_id=1,
+        )
+        assert changed is not None
+        assert '~grep_search' in changed['tools']
+        assert calls == {'aggregate': 2, 'detail': 2}
+
+        malformed_usage = _usage(
+            tools_v2, cache_read=150000, cache_write=1000)
+        malformed_usage['_wire_region'] = {'tools': 'not-a-valid-digest'}
+        detect_module.detect_cache_break(
+            'tool-wire-reuse', messages, tools_v2, 'claude-opus-4',
+            usage=malformed_usage,
+            user_id=1,
+        )
+        assert calls == {'aggregate': 3, 'detail': 3}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  2. Concurrent conversation tracking
@@ -1120,6 +1313,89 @@ class TestPrefixCulpritAttribution:
             {'role': 'assistant', 'content': a_text},
             {'role': 'user', 'content': tail_text},
         ]
+
+    def test_fallback_builds_one_field_baseline_per_round(self, monkeypatch):
+        """No-wire fallback keeps exact attribution with one history pass."""
+        import lib.tasks_pkg.cache_tracking._detect as detect_module
+
+        real_hash_fields = detect_module._hash_prefix_fields
+        hash_calls = []
+
+        def _counted_hash(messages, prefix_count):
+            hash_calls.append(prefix_count)
+            return real_hash_fields(messages, prefix_count)
+
+        monkeypatch.setattr(
+            detect_module, '_hash_prefix_fields', _counted_hash)
+        first = self._msgs('question', 'answer', 'tail A')
+        detect_module.detect_cache_break(
+            'cul-one-pass', first, None, 'claude-opus-4',
+            usage={'cache_creation_input_tokens': 88_000,
+                   'cache_read_input_tokens': 51_000},
+            user_id=1,
+        )
+        second = self._msgs('question [EDITED]', 'answer', 'tail B')
+        result = detect_module.detect_cache_break(
+            'cul-one-pass', second, None, 'claude-opus-4',
+            usage={'cache_creation_input_tokens': 89_000,
+                   'cache_read_input_tokens': 51_000},
+            user_id=1,
+        )
+
+        assert len(hash_calls) == 2
+        assert result is not None and 'prefix_mutation' in result
+        assert 'msg[1].content' in result['prefix_mutation']
+
+    def test_fallback_baseline_is_fixed_width_and_payload_free(self):
+        """Retained fallback state is bounded by fields, not payload bytes."""
+        import copy
+
+        from lib.tasks_pkg.cache_tracking._hashing import (
+            _PREFIX_FIELD_NAMES,
+            _diff_prefix_fields,
+            _hash_prefix_fields,
+        )
+
+        large_text = 'private-payload-' + ('x' * 250_000)
+        messages = [{
+            'role': 'assistant',
+            'content': large_text,
+            'reasoning_content': large_text,
+            'reasoning_details': [{
+                'type': 'reasoning.text',
+                'metadata': {'z': 2, 'a': 1},
+                'text': large_text,
+            }],
+            'thinking_signature': 'signature',
+            'tool_calls': [{
+                'id': 'call-1',
+                'function': {
+                    'name': 'read_file',
+                    'arguments': '{"path":"large.txt"}',
+                },
+            }],
+        }]
+        original = copy.deepcopy(messages)
+
+        baseline = _hash_prefix_fields(messages, 1)
+        assert messages == original
+        assert len(baseline) == 1
+        assert isinstance(baseline[0], tuple)
+        assert len(baseline[0]) == len(_PREFIX_FIELD_NAMES)
+        assert all(value is None or type(value) is int
+                   for value in baseline[0])
+        assert large_text not in repr(baseline)
+
+        # Canonical key order remains irrelevant for reasoning_details, while
+        # a real nested value change retains exact field attribution.
+        reordered = copy.deepcopy(messages)
+        reordered[0]['reasoning_details'][0]['metadata'] = {'a': 1, 'z': 2}
+        assert _hash_prefix_fields(reordered, 1) == baseline
+        changed = copy.deepcopy(reordered)
+        changed[0]['reasoning_details'][0]['metadata']['z'] = 3
+        assert _diff_prefix_fields(
+            baseline, _hash_prefix_fields(changed, 1),
+        ) == ['msg[0].reasoning_details']
 
     def test_content_change_named(self):
         """A content edit on prefix msg[1] is reported as msg[1].content."""

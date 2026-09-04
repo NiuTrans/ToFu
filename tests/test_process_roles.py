@@ -55,7 +55,6 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
     from types import SimpleNamespace
 
     import lib.knowledge.enrichment as enrichment
-    import lib.llm_dispatch.model_catalog_sync as model_catalog
     import lib.oauth.codex_catalog as codex_catalog
     import lib.scheduler.manager as scheduler_manager
     import routes
@@ -79,9 +78,6 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
         codex_catalog, 'start_codex_catalog_refresher',
         lambda: calls.append('codex') or True)
     monkeypatch.setattr(
-        model_catalog, 'start_model_catalog_sync',
-        lambda: calls.append('models'))
-    monkeypatch.setattr(
         enrichment, 'resume_visual_enrichment',
         lambda *, principal: calls.append('enrichment') or 1)
     monkeypatch.setattr(
@@ -94,8 +90,8 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
 
     api_app = App()
     assert routes.start_registered_background_services(
-        api_app, process_role='api') == 2
-    assert calls == ['codex', 'models']
+        api_app, process_role='api') == 1
+    assert calls == ['codex']
 
     calls.clear()
     scheduler_app = App()
@@ -149,7 +145,6 @@ def test_distributed_api_role_does_not_start_ownerless_codex_catalog(
         monkeypatch):
     from types import SimpleNamespace
 
-    import lib.llm_dispatch.model_catalog_sync as model_catalog
     import lib.oauth.codex_catalog as codex_catalog
     import routes
     import runtime_guards
@@ -161,14 +156,11 @@ def test_distributed_api_role_does_not_start_ownerless_codex_catalog(
     monkeypatch.setattr(
         codex_catalog, 'start_codex_catalog_refresher',
         lambda: calls.append('codex') or True)
-    monkeypatch.setattr(
-        model_catalog, 'start_model_catalog_sync',
-        lambda: calls.append('models'))
 
     class App:
         def __init__(self):
             self.extensions = {}
 
     assert routes.start_registered_background_services(
-        App(), process_role='api') == 1
-    assert calls == ['models']
+        App(), process_role='api') == 0
+    assert calls == []

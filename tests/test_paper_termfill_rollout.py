@@ -97,7 +97,9 @@ def test_engine_resolves_interactive_on_headless_off():
     fire for a headless task (cfg stamped False), with NO env flag set."""
     import lib.paper.report_engine.worker as re_mod
     import lib.paper.terminology_backfill as tb
+    from lib.paper.artifact_repository import PaperArtifactRepository
     from lib.paper.report_runtime import _new_report_task
+    from unittest.mock import patch
 
     os.environ.pop('TOFU_PAPER_TERMFILL', None)  # rely on the new default, not the env
 
@@ -123,8 +125,11 @@ def test_engine_resolves_interactive_on_headless_off():
         t1 = _new_report_task('rpt_int', 'phashint0000000000000000000000', 'en', None,
                               client_title='T', config={'paperInsightEnabled': False,
                                         'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
-        re_mod.run_report_task(t1, [{'role': 'system', 'content': 's'},
-                                     {'role': 'user', 'content': 'p'}], [])
+        with patch.object(
+                PaperArtifactRepository, 'put_report', return_value=True):
+            re_mod.run_report_task(
+                t1, [{'role': 'system', 'content': 's'},
+                     {'role': 'user', 'content': 'p'}], [])
         assert calls, 'interactive task (no cfg) must fire the backfill by default'
 
         calls.clear()
@@ -133,8 +138,11 @@ def test_engine_resolves_interactive_on_headless_off():
                               client_title='T', config={'paperTermfillEnabled': False,
                                                         'paperInsightEnabled': False,
                                                         'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
-        re_mod.run_report_task(t2, [{'role': 'system', 'content': 's'},
-                                     {'role': 'user', 'content': 'p'}], [])
+        with patch.object(
+                PaperArtifactRepository, 'put_report', return_value=True):
+            re_mod.run_report_task(
+                t2, [{'role': 'system', 'content': 's'},
+                     {'role': 'user', 'content': 'p'}], [])
         assert not calls, 'headless task (termfill stamped False) must NOT fire the backfill'
     finally:
         re_mod.dispatch_stream = orig_disp

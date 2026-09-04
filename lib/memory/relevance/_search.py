@@ -7,13 +7,17 @@ The two functions that operate over memory dicts:
     in scoring, lazily pulling the corpus from ``lib.memory.storage``.
 """
 
-import math
+from collections.abc import Iterable
 from typing import Any
 
 from lib.log import get_logger
+from lib.memory.contracts import (
+    MEMORY_SEARCH_BODY_MAX_CHARS,
+    MEMORY_SEARCH_TOP_K_DEFAULT,
+    normalize_memory_search,
+)
+from lib.memory.relevance._score import _score_token_documents
 from lib.memory.relevance._tokenize import (
-    BM25_B,
-    BM25_K1,
     DEFAULT_TOP_K,
     _build_memory_doc,
     _tokenize,
@@ -46,45 +50,13 @@ def filter_relevant_memories(
     if n <= top_k:
         return memories
 
-    query_tokens = _tokenize(query)
-    if not query_tokens:
+    scores = [
+        (score, index)
+        for index, score in _score_token_documents(
+            query, (_build_memory_doc(memory) for memory in memories))
+    ]
+    if not scores:
         return memories
-
-    # Build document token lists for all memories
-    docs = [_build_memory_doc(s) for s in memories]
-    doc_lens = [len(d) for d in docs]
-    avg_dl = sum(doc_lens) / n if n > 0 else 1.0
-
-    # Compute document frequency (DF) for each query term
-    query_terms = set(query_tokens)
-    df: dict[str, int] = {}
-    for term in query_terms:
-        count = sum(1 for doc in docs if term in doc)
-        df[term] = count
-
-    # Compute BM25 score for each memory
-    scores = []
-    for i, (mem, doc, dl) in enumerate(zip(memories, docs, doc_lens)):
-        score = 0.0
-        # Term frequency map for this document
-        tf_map: dict[str, int] = {}
-        for t in doc:
-            if t in query_terms:
-                tf_map[t] = tf_map.get(t, 0) + 1
-
-        for term in query_terms:
-            tf = tf_map.get(term, 0)
-            if tf == 0:
-                continue
-            d = df.get(term, 0)
-            # IDF: log((N - df + 0.5) / (df + 0.5) + 1)
-            idf = math.log((n - d + 0.5) / (d + 0.5) + 1.0)
-            # BM25 term score
-            numerator = tf * (BM25_K1 + 1)
-            denominator = tf + BM25_K1 * (1 - BM25_B + BM25_B * dl / avg_dl)
-            score += idf * numerator / denominator
-
-        scores.append((score, i))
 
     # Sort by score descending, then by original index for stability
     scores.sort(key=lambda x: (-x[0], x[1]))
@@ -102,14 +74,15 @@ def filter_relevant_memories(
 #  search_memories — Tool-callable search with body content
 # ═══════════════════════════════════════════════════════
 
-SEARCH_DEFAULT_TOP_K = 30
+SEARCH_DEFAULT_TOP_K = MEMORY_SEARCH_TOP_K_DEFAULT
 
 
 def _score_corpus(
     query: str,
-    memories: list[dict[str, Any]],
+    memories: Iterable[dict[str, Any]],
     *,
     include_body: bool = True,
+    retain_body: bool = True,
 ) -> list[tuple[float, dict[str, Any]]]:
     """Score ``memories`` against ``query`` (BM25), best-first.
 
@@ -119,42 +92,26 @@ def _score_corpus(
     sorted by score desc, stable on original index; empty list when the
     query has no usable terms.
     """
-    if not memories or not query or not query.strip():
-        return []
-    query_tokens = _tokenize(query)
-    if not query_tokens:
+    if not query or not query.strip():
         return []
 
-    n = len(memories)
-    docs = [_build_memory_doc(m, include_body=include_body) for m in memories]
-    doc_lens = [len(d) for d in docs]
-    avg_dl = sum(doc_lens) / n if n > 0 else 1.0
+    retained_memories: list[dict[str, Any]] = []
 
-    query_terms = set(query_tokens)
-    df: dict[str, int] = {}
-    for term in query_terms:
-        df[term] = sum(1 for doc in docs if term in doc)
+    def token_documents():
+        for memory in memories:
+            tokens = _build_memory_doc(memory, include_body=include_body)
+            if include_body and not retain_body and memory.get('body'):
+                memory = dict(memory)
+                memory['body'] = ''
+            retained_memories.append(memory)
+            yield tokens
 
-    scores: list[tuple[float, int]] = []
-    for i, (doc, dl) in enumerate(zip(docs, doc_lens)):
-        score = 0.0
-        tf_map: dict[str, int] = {}
-        for t in doc:
-            if t in query_terms:
-                tf_map[t] = tf_map.get(t, 0) + 1
-        for term in query_terms:
-            tf = tf_map.get(term, 0)
-            if tf == 0:
-                continue
-            d = df.get(term, 0)
-            idf = math.log((n - d + 0.5) / (d + 0.5) + 1.0)
-            numerator = tf * (BM25_K1 + 1)
-            denominator = tf + BM25_K1 * (1 - BM25_B + BM25_B * dl / avg_dl)
-            score += idf * numerator / denominator
-        scores.append((score, i))
-
-    scores.sort(key=lambda x: (-x[0], x[1]))
-    return [(sc, memories[idx]) for sc, idx in scores]
+    scores = _score_token_documents(query, token_documents())
+    scores.sort(key=lambda row: (-row[1], row[0]))
+    return [
+        (score, retained_memories[index])
+        for index, score in scores
+    ]
 
 
 def search_memories_scored(
@@ -178,13 +135,20 @@ def search_memories_scored(
     IDF, making the same dedup question answer differently on different
     machines — project-local scoring is deterministic.
     """
-    from lib.memory.storage import get_eligible_memories
+    query, top_k = normalize_memory_search(query, top_k)
+    if not query.strip():
+        return []
 
-    memories = get_eligible_memories(project_path, extra_paths=extra_paths)
-    if scope:
-        memories = [m for m in memories if m.get('scope') == scope]
-    ranked = _score_corpus(query, memories, include_body=True)
-    return [(sc, m) for sc, m in ranked if sc > 0][:max(1, min(top_k, 50))]
+    from lib.memory.storage import iter_eligible_memories
+    memories = iter_eligible_memories(
+        project_path,
+        extra_paths=extra_paths,
+        body_char_limit=MEMORY_SEARCH_BODY_MAX_CHARS,
+        scope=scope,
+    )
+    ranked = _score_corpus(
+        query, memories, include_body=True, retain_body=False)
+    return [(sc, m) for sc, m in ranked if sc > 0][:top_k]
 
 
 def search_memories(
@@ -209,24 +173,26 @@ def search_memories(
     Returns:
         Formatted index of matching memories with file paths.
     """
-    from lib.memory.storage import get_eligible_memories
+    query, top_k = normalize_memory_search(query, top_k)
+    if not query.strip():
+        return 'Please provide search keywords.'
+    if not _tokenize(query):
+        return 'No valid search terms after tokenization.'
 
-    memories = get_eligible_memories(project_path, extra_paths=extra_paths)
-    if not memories:
-        return 'No memories found. You have no accumulated memories yet.'
-
-    if not query or not query.strip():
-        return f'Please provide search keywords. You have {len(memories)} memories available.'
-
-    top_k = max(1, min(top_k, 50))  # Clamp to [1, 50]
-
-    ranked = _score_corpus(query, memories, include_body=True)
+    from lib.memory.storage import iter_eligible_memories
+    memories = iter_eligible_memories(
+        project_path,
+        extra_paths=extra_paths,
+        body_char_limit=MEMORY_SEARCH_BODY_MAX_CHARS,
+    )
+    ranked = _score_corpus(
+        query, memories, include_body=True, retain_body=False)
     if not ranked:
-        return f'No valid search terms after tokenization. You have {len(memories)} memories available.'
+        return 'No memories found. You have no accumulated memories yet.'
 
     # Filter to only memories with score > 0
     relevant = ranked  # [(score, mem)]
-    n = len(memories)
+    n = len(ranked)
     if not relevant or relevant[0][0] <= 0:
         return f'No memories matched query "{query}".'
     relevant = [(sc, m) for sc, m in relevant if sc > 0]

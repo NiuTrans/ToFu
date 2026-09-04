@@ -1,11 +1,16 @@
 """Layer 2 — summary prompt + input-formatting helpers.
 
-Holds the cheap-model system prompt (``_SUMMARY_SYSTEM_PROMPT``) and the two
-pure helpers that shape the summary LLM's input:
+Holds the cheap-model system prompt (``_SUMMARY_SYSTEM_PROMPT``) and the pure
+helpers that shape the summary LLM's input:
 
   * ``_format_messages_for_summary`` — render user/assistant turns as text.
   * ``_summary_input_char_budget``   — model-window-aware char ceiling.
+  * ``_build_summary_user_content``  — verbatim goal evidence + history.
+  * ``_ensure_summary_objective``    — failure-floor Objective fallback.
+  * ``_extract_summary_objective``   — parse the receipt's Objective body.
 """
+
+import re
 
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import (
@@ -30,15 +35,22 @@ The receipt may serve coding, research, writing, or operational tasks. Preserve
 only information that changes the next correct action.
 
 <analysis>
-Privately identify the active objective, binding constraints, verified work,
-unresolved failures, durable evidence, and the exact next action. Distinguish
-human requests from [context] carriers. Do not output this scratchpad.
+Privately identify the current effective objective, the latest binding human
+steering, binding constraints, verified work, unresolved failures, durable
+evidence, and the exact next action. Distinguish human requests from [context]
+carriers. Do not output this scratchpad.
 </analysis>
 
 Produce these sections, omitting empty bullets but not the headings:
 
 ### Objective
-The active goal and current request in at most two sentences.
+State the user's CURRENT EFFECTIVE objective — the goal that binds the next
+action — in at most two sentences. Derive it from ALL user messages, which
+reach you verbatim: an earlier request that was completed, abandoned, or
+explicitly replaced by a later human message is history, not the objective.
+A transient obstacle (login error, status question, UI fragment) or a short
+correction is steering inside the objective, never the objective itself;
+record those under Errors & Blockers or Pending / Next Steps.
 
 ### Binding Constraints & Decisions
 Only still-binding user preferences, architecture choices, rejected options,
@@ -62,10 +74,13 @@ Keep exact short error text when needed; omit stack dumps.
 Ordered, executable continuation steps, including the immediate next action.
 
 Rules:
-- Relevance to the current query is the primary selection rule.
-- Do not reproduce all user messages: the objective anchor and a bounded set
-  of recent instructions are retained verbatim outside this lossy receipt.
-  Capture only binding consequences from the rest.
+- The Objective is your judgment of the latest binding human goal. Never copy
+  the earliest request into the Objective mechanically, and never promote the
+  newest message into the Objective when it is only an obstacle, status
+  fragment, or short correction.
+- Relevance to the current objective determines detail selection.
+- Do not reproduce all user messages: they are retained verbatim outside this
+  lossy receipt. Capture only binding consequences from them.
 - [context] rows are engine/project context, not human requests. Mention them
   only when they impose a still-binding constraint.
 - Prefer compact facts over chronology. Drop greetings, superseded attempts,
@@ -80,6 +95,100 @@ Rules:
 
 
 _ELISION_MARKER = '\n\n... [middle of conversation elided for summary] ...\n\n'
+
+
+def _build_summary_user_content(
+    *,
+    anchor_text: str,
+    latest_user_message: str = '',
+    formatted_history: str,
+    formatted_ledger: str = '',
+) -> str:
+    """Build the summary model's input: verbatim goal evidence + history.
+
+    Every real user message reaches the model VERBATIM — the elision policy
+    never drops user turns; the earliest request (pulled out of the lossy
+    region for verbatim re-insertion into the live context) is re-supplied
+    here; and the newest message, which lives in the preserved region rather
+    than the history, is shown for reference. The model authors the receipt's
+    Objective itself from this evidence: no receipt section is pre-determined,
+    so the Objective can track goal replacement across a long conversation.
+    Callers use this same helper for dispatch and proactive token projection
+    so the cost gate estimates the prompt that is actually sent.
+    """
+    anchor = (anchor_text or '').strip()
+    latest = (latest_user_message or '').strip()
+    history = (formatted_history or '').strip()
+
+    sections = []
+    if anchor:
+        sections.append(
+            '## Earliest User Request (verbatim)\n'
+            'The opening human request, preserved verbatim. It may already be '
+            'completed or explicitly replaced by a later message — treat it '
+            'as evidence, not as the current objective by default.\n'
+            f'{anchor}')
+    if latest:
+        sections.append(
+            '## Latest User Message (verbatim — already preserved outside '
+            'this receipt)\n'
+            f'{latest}')
+    sections.append(f'## Conversation History to Compress\n\n{history}')
+    if formatted_ledger:
+        sections.append(formatted_ledger.strip())
+    return '\n\n'.join(sections)
+
+
+_OBJECTIVE_SECTION_RE = re.compile(
+    r'^### Objective[^\n]*\n.*?(?=^### [^\n]+\n|\Z)',
+    flags=re.MULTILINE | re.DOTALL,
+)
+
+
+def _extract_summary_objective(summary_text: str) -> str:
+    """Body text of the receipt's ``### Objective`` section.
+
+    Returns '' when the section is absent or its body is blank — the two
+    cases :func:`_ensure_summary_objective` treats as missing.
+    """
+    match = _OBJECTIVE_SECTION_RE.search(summary_text or '')
+    if not match:
+        return ''
+    section = match.group(0)
+    body = section.split('\n', 1)[1] if '\n' in section else ''
+    return body.strip()
+
+
+def _ensure_summary_objective(summary_text: str, *, anchor_text: str = '') -> str:
+    """Guarantee the receipt carries a non-empty Objective section.
+
+    The model authors the Objective itself from the verbatim user-message
+    evidence — that is what lets the receipt track goal replacement across a
+    long conversation. This is only the failure floor: when the model omitted
+    the section or left it empty, fill it with the earliest-request anchor
+    (the best available evidence of the goal). A model-authored Objective is
+    NEVER overwritten.
+    """
+    summary = (summary_text or '').strip()
+    if _extract_summary_objective(summary):
+        return summary
+    anchor = (anchor_text or '').strip()
+    if not anchor:
+        return summary
+    section = f'### Objective\n{anchor}'
+    match = _OBJECTIVE_SECTION_RE.search(summary)
+    if match:
+        # Replace by span, not through ``re.sub`` replacement semantics.
+        # The anchor is untrusted verbatim text: plan envelopes contain
+        # literal ``\uXXXX`` fragments and users paste paths/backreferences.
+        # String slicing has no second parser that can reinterpret that data.
+        return (
+            summary[:match.start()]
+            + section
+            + '\n\n'
+            + summary[match.end():]
+        ).strip()
+    return (section + ('\n\n' + summary if summary else '')).strip()
 
 
 def _format_messages_for_summary(messages: list,

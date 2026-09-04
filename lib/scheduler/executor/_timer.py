@@ -66,6 +66,7 @@ def _execute_timer_create(fn_args):
         "max_polls", fn_args.get("max_polls", 120), 120
     )
 
+    timer = None
     try:
         owner_id = _tool_owner_id(fn_args)
         timer = create_timer(
@@ -82,12 +83,22 @@ def _execute_timer_create(fn_args):
             condition_regex=str(fn_args.get("condition_regex") or ""),
         )
         start_timer_loop(timer["id"], user_id=owner_id)
-    except (TypeError, ValueError) as exc:
-        logger.warning("Timer creation rejected: %s", exc)
-        return f"Error: {exc}"
     except Exception as exc:
+        if timer is not None:
+            # Thread admission/start failure must not leave a durable active
+            # watcher that no process is servicing.
+            try:
+                from lib.scheduler.timer import cancel_timer
+                cancel_timer(timer["id"], user_id=owner_id)
+            except Exception as cleanup_exc:
+                logger.error(
+                    "Timer creation rollback failed for %s: %s",
+                    timer.get("id", "?"), cleanup_exc, exc_info=True)
+        if isinstance(exc, (TypeError, ValueError)):
+            logger.warning("Timer creation rejected: %s", exc)
+            return f"Error: {exc}"
         logger.error("Timer creation failed: %s", exc, exc_info=True)
-        return "Error: Failed to create timer. See server diagnostics."
+        return "Error: Timer capacity is occupied or creation failed."
 
     # The originating turn receives one durable, reconstructible hand-off
     # marker. Subsequent polls belong to the timer projection, not to a task

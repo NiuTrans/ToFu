@@ -3,8 +3,8 @@
 Drives the REAL shipped ui/tool_rounds.js under bare node in TWO
 configurations:
 
-  A. DEGRADED — core file alone (ui/tool_rounds_rich.js absent, the
-     pre-prefetch window): renderToolRoundsHTML on a conv-meta round and
+  A. CORE-ONLY — an isolated core fixture (ui/tool_rounds_rich.js absent):
+     renderToolRoundsHTML on a conv-meta round and
      a timer-watcher round must NOT throw and must emit the generic
      ptool-line fallback (never the rich cards, never a ReferenceError).
   B. RICH — core + tool_rounds_rich.js: the same rounds must render the
@@ -12,8 +12,8 @@ configurations:
      remainder must be byte-for-byte the same renderer (the split moves
      code, it does not change rich-mode behaviour).
 
-This is the harness the ledger's "冷渲染子集留 core" design requires:
-source-grep pins prove the text shape; THIS proves the two runtime modes.
+Production composes both sections adjacently. This harness preserves the
+core-only fault-tolerance seam while proving ordinary retained behavior.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ if (typeof renderToolRoundsHTML !== 'function') {
   console.log('FAIL entry renderToolRoundsHTML missing'); process.exit(0);
 }
 
-// ── Phase A: DEGRADED (rich module NOT loaded) ──
+// ── Phase A: isolated core-only materialization ──
 let threwA = null, htmlMetaA = '', htmlTimerA = '';
 try {
   htmlMetaA = renderToolRoundsHTML([convMetaRound()], false);
@@ -104,13 +104,12 @@ check('A_degraded_never_throws', !threwA);
 if (threwA) out.push('  A error: ' + threwA.message);
 check('A_degraded_convmeta_generic_line',
   htmlMetaA.indexOf('ptool-line') !== -1 &&
-  htmlMetaA.indexOf('ptool-convmeta') === -1 &&
-  htmlMetaA.indexOf('Board') === -1 || false);
+  htmlMetaA.indexOf('ptool-convmeta') === -1);
 check('A_degraded_timer_generic_line',
   htmlTimerA.indexOf('ptool-line') !== -1 &&
   htmlTimerA.indexOf('timer-watcher') === -1);
 
-// ── Phase B: RICH (load the deferred module, re-render) ──
+// ── Phase B: retained core + immediately adjacent rich section ──
 eval(fs.readFileSync(process.argv[3], 'utf8'));
 check('B_rich_symbols_present',
   typeof _renderConvMetaBlock === 'function' &&

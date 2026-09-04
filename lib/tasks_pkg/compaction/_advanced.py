@@ -76,15 +76,18 @@ def _make_summarize_fn(conv_id: str, task: dict | None):
                       'conclusions. Drop filler. Output only the summary.')
         tag = f'[AdvSummary conv={conv_id[:8] if conv_id else "?"}]'
         try:
+            from lib.tasks_pkg.manager import task_user_id
+            owner_user_id = task_user_id(task)
             content, usage = dispatch_chat(
                 [
                     {'role': 'system', 'content': sys_prompt},
                     {'role': 'user', 'content': text[:200_000]},
                 ],
-                model=_agent_model or None,
+                prefer_model=_agent_model or None,
                 max_tokens=max_tokens,
                 temperature=0,
                 capability='cheap' if not _agent_model else 'text',
+                owner_user_id=owner_user_id,
                 log_prefix=tag,
             )
             # Count this summarizer call's tokens toward compaction cost so

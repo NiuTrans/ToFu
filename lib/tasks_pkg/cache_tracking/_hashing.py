@@ -10,9 +10,31 @@ from __future__ import annotations
 import hashlib
 import json
 
+import orjson
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+# Alphabetical order preserves the historical culprit ordering from
+# ``sorted(set(old_row) | set(new_row))`` while giving every message a compact,
+# fixed-width representation. ``None`` means the field was absent; every
+# present value is a process-local integer fingerprint.
+_PREFIX_FIELD_NAMES = (
+    'content',
+    'reasoning_content',
+    'reasoning_details',
+    'role',
+    'thinking_signature',
+    'tool_call_id',
+    'tool_calls',
+)
+_PREFIX_FIELD_WIDTH = len(_PREFIX_FIELD_NAMES)
+_REASONING_DETAILS_JSON_OPTIONS = (
+    orjson.OPT_NON_STR_KEYS | orjson.OPT_SORT_KEYS
+)
+PrefixFieldRow = tuple[int | None, ...]
 
 
 def _md5(text: str) -> str:
@@ -86,90 +108,56 @@ def _diff_tool_hashes(
     return changes
 
 
-def _hash_prefix_content(messages: list, prefix_count: int) -> str:
-    """Hash the content of messages in the cache prefix.
-
-    This is NOT used for cache break detection (to avoid false positives
-    from micro-compact). It's used for diagnostic mutation detection:
-    if this hash changes between rounds without a compaction event,
-    something is silently mutating messages in the cached prefix.
-
-    Covers the fields that ACTUALLY land on the wire and therefore affect
-    the Anthropic prefix-byte match — not just ``content`` text. A turn's
-    ``tool_calls`` (name + arguments + id), ``reasoning_content``,
-    ``reasoning_details`` and ``thinking_signature`` are all serialized into
-    the request body by ``build_body``; a per-round change in any of them is a
-    real cache miss. The earlier text-only hash was BLIND to those, so a
-    tool_call / argument / signature mutation produced a real miss with NO
-    ``PREFIX MUTATION DETECTED`` log line (it got mislabeled ``server_side``).
-    Block ORDER is preserved by appending in sequence, so a reorder also
-    changes the hash.
-    """
-    if prefix_count <= 0 or not messages:
-        return ''
-    parts = []
-    for msg in messages[:prefix_count]:
-        parts.append(msg.get('role', ''))
-        content = msg.get('content', '')
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    # text blocks → text; non-text (image/tool_result) → type
-                    parts.append(block.get('text', '') or block.get('type', ''))
-        elif isinstance(content, str):
-            parts.append(content)
-        # Tool calls: name + arguments + id, in order (wire-affecting).
-        for tc in msg.get('tool_calls') or ():
-            if isinstance(tc, dict):
-                parts.append(tc.get('id', ''))
-                fn = tc.get('function') or {}
-                if isinstance(fn, dict):
-                    parts.append(fn.get('name', ''))
-                    parts.append(fn.get('arguments', ''))
-        if msg.get('tool_call_id'):
-            parts.append(str(msg.get('tool_call_id')))
-        # Replayed signed-thinking blocks (Claude) are part of the body.
-        if msg.get('reasoning_content'):
-            parts.append(str(msg.get('reasoning_content')))
-        if msg.get('thinking_signature'):
-            parts.append(str(msg.get('thinking_signature')))
-        rd = msg.get('reasoning_details')
-        if rd:
-            try:
-                parts.append(json.dumps(rd, sort_keys=True, ensure_ascii=False))
-            except (TypeError, ValueError):
-                parts.append(str(rd))
-    return _md5(''.join(parts))
+def _reasoning_details_hash(value: object) -> int:
+    """Return a compact process-local fingerprint for one reasoning payload."""
+    try:
+        return hash(orjson.dumps(
+            value, option=_REASONING_DETAILS_JSON_OPTIONS))
+    except (TypeError, ValueError) as exc:
+        logger.debug(
+            '[CacheTrack] reasoning_details not JSON-serialisable (%s) — '
+            'hashing str() form', exc)
+        return hash(str(value))
 
 
-def _hash_prefix_fields(messages: list, prefix_count: int) -> list[dict]:
-    """Per-message, per-field hashes of the cache prefix.
+def _hash_prefix_fields(
+    messages: list,
+    prefix_count: int,
+) -> list[PrefixFieldRow]:
+    """Build compact per-message, per-field cache-prefix fingerprints.
 
-    Companion to ``_hash_prefix_content`` (which rolls the WHOLE prefix into
-    one hash). This returns a list — one dict per message in
-    ``messages[:prefix_count]`` — mapping each wire-affecting FIELD
+    Returns one fixed-width tuple per message in ``messages[:prefix_count]``.
+    Tuple positions are defined by ``_PREFIX_FIELD_NAMES`` and contain only a
+    process-local integer fingerprint or ``None``. CacheState is neither
+    persisted nor shared across processes, so Python's keyed runtime hash keeps
+    the same 64-bit comparison envelope as the former truncated MD5 while
+    avoiding UTF-8 copies, hexadecimal strings, and one dict per message.
+
+    The tuple covers each wire-affecting FIELD
     (``role`` / ``content`` / ``tool_calls`` / ``tool_call_id`` /
     ``reasoning_content`` / ``thinking_signature`` / ``reasoning_details``)
-    to its individual hash. ``_diff_prefix_fields`` then names the EXACT
+    individually. ``_diff_prefix_fields`` still names the EXACT
     ``(message_index, field)`` that changed between two rounds — the same
     way ``_diff_tool_hashes`` names the exact tool. This turns the old
     terminal "silent prefix byte change (guess)" into a concrete culprit.
     """
     if prefix_count <= 0 or not messages:
         return []
-    out: list[dict] = []
+    out: list[PrefixFieldRow] = []
     for msg in messages[:prefix_count]:
-        fh: dict[str, str] = {'role': _md5(msg.get('role', ''))}
         content = msg.get('content', '')
+        content_hash = None
         if isinstance(content, list):
-            _cp = []
-            for block in content:
-                if isinstance(block, dict):
-                    _cp.append(block.get('text', '') or block.get('type', ''))
-            fh['content'] = _md5('\x1f'.join(_cp))
+            content_hash = hash(tuple(
+                block.get('text', '') or block.get('type', '')
+                for block in content
+                if isinstance(block, dict)
+            ))
         elif isinstance(content, str):
-            fh['content'] = _md5(content)
+            content_hash = hash(content)
+
         tcs = msg.get('tool_calls') or ()
+        tool_calls_hash = None
         if tcs:
             _tp = []
             for tc in tcs:
@@ -179,24 +167,44 @@ def _hash_prefix_fields(messages: list, prefix_count: int) -> list[dict]:
                     if isinstance(fn, dict):
                         _tp.append(fn.get('name', ''))
                         _tp.append(fn.get('arguments', ''))
-            fh['tool_calls'] = _md5('\x1f'.join(_tp))
-        if msg.get('tool_call_id'):
-            fh['tool_call_id'] = _md5(str(msg.get('tool_call_id')))
-        if msg.get('reasoning_content'):
-            fh['reasoning_content'] = _md5(str(msg.get('reasoning_content')))
-        if msg.get('thinking_signature'):
-            fh['thinking_signature'] = _md5(str(msg.get('thinking_signature')))
+            tool_calls_hash = hash(tuple(_tp))
+
+        reasoning_content = msg.get('reasoning_content')
         rd = msg.get('reasoning_details')
-        if rd:
-            try:
-                fh['reasoning_details'] = _md5(
-                    json.dumps(rd, sort_keys=True, ensure_ascii=False))
-            except (TypeError, ValueError) as e:
-                logger.debug('[CacheTrack] reasoning_details not JSON-serialisable '
-                             '(%s) — hashing str() form', e)
-                fh['reasoning_details'] = _md5(str(rd))
-        out.append(fh)
+        thinking_signature = msg.get('thinking_signature')
+        tool_call_id = msg.get('tool_call_id')
+        out.append((
+            content_hash,
+            hash(str(reasoning_content)) if reasoning_content else None,
+            _reasoning_details_hash(rd) if rd else None,
+            hash(msg.get('role', '')),
+            hash(str(thinking_signature)) if thinking_signature else None,
+            hash(str(tool_call_id)) if tool_call_id else None,
+            tool_calls_hash,
+        ))
     return out
+
+
+def _is_current_prefix_field_snapshot(snapshot: list) -> bool:
+    """Whether a baseline uses the current packed process-local format.
+
+    A live code reload can leave one legacy dict baseline in memory. Treat it
+    as incomparable for one round and replace it instead of reporting every
+    field as mutated merely because the representation changed.
+    """
+    if not snapshot:
+        return True
+    first = snapshot[0]
+    return isinstance(first, tuple) and len(first) == _PREFIX_FIELD_WIDTH
+
+
+def _prefix_field_row_values(row: object) -> tuple:
+    """Read packed rows and legacy dict rows for diagnostic compatibility."""
+    if isinstance(row, tuple) and len(row) == _PREFIX_FIELD_WIDTH:
+        return row
+    if isinstance(row, dict):
+        return tuple(row.get(field) for field in _PREFIX_FIELD_NAMES)
+    return (None,) * _PREFIX_FIELD_WIDTH
 
 
 def _diff_prefix_fields(old: list, new: list, max_report: int = 6) -> list:
@@ -211,10 +219,10 @@ def _diff_prefix_fields(old: list, new: list, max_report: int = 6) -> list:
     changes: list[str] = []
     n = min(len(old), len(new))
     for i in range(n):
-        o = old[i] or {}
-        nw = new[i] or {}
-        for field in sorted(set(o) | set(nw)):
-            if o.get(field) != nw.get(field):
+        old_values = _prefix_field_row_values(old[i])
+        new_values = _prefix_field_row_values(new[i])
+        for field_index, field in enumerate(_PREFIX_FIELD_NAMES):
+            if old_values[field_index] != new_values[field_index]:
                 changes.append(f'msg[{i}].{field}')
                 if len(changes) >= max_report:
                     changes.append('…')

@@ -46,6 +46,8 @@ assert _CAP_SEMANTICS.get(TTS_CAP, {}).get('endpoint') == 'audio_speech', (
 #: doesn't know it rejects the request with a clear 400 the caller surfaces.
 #: Deployments SHOULD set default_voice in data/config/tts.json.
 _FALLBACK_VOICE = 'alloy'
+_MIN_INPUT_CHARS = 200
+_MAX_INPUT_CHARS = 4096
 
 
 def _load_tts_config() -> dict:
@@ -99,17 +101,18 @@ def default_speed() -> float:
 def max_input_chars() -> int:
     """Max characters per synthesis call (chunking bound for long scripts).
 
-    Config ``max_input_chars`` wins; env ``TOFU_TTS_MAX_INPUT_CHARS`` next;
-    default 2000 (conservative vs OpenAI's 4096 ceiling; smaller chunks also
-    bound per-call latency and let segment progress tick visibly).
+    Config ``max_input_chars`` wins; env ``TOFU_TTS_MAX_INPUT_CHARS`` next.
+    Values are clamped to 200..4096: the upper edge respects common provider
+    ceilings, while the lower edge prevents one malformed setting from turning
+    a bounded script into thousands of paid calls. Default 2000.
     """
     v = _cfg().get('max_input_chars')
     if isinstance(v, int) and v > 0:
-        return v
+        return max(_MIN_INPUT_CHARS, min(_MAX_INPUT_CHARS, v))
     try:
         env_v = int(os.environ.get('TOFU_TTS_MAX_INPUT_CHARS', '') or 0)
         if env_v > 0:
-            return env_v
+            return max(_MIN_INPUT_CHARS, min(_MAX_INPUT_CHARS, env_v))
     except (ValueError, TypeError) as e:
         logger.debug('[TTS] bad TOFU_TTS_MAX_INPUT_CHARS, using default: %s', e)
     return 2000
@@ -118,9 +121,10 @@ def max_input_chars() -> int:
 def _tts_slots() -> list:
     """Return configured tts-capable slots (best score first).
 
-    Scans ``dispatcher.slots`` for the ``tts`` capability exactly as
-    ``lib/transcription._transcription_slots`` scans for its caps. OAuth
-    subscription slots are excluded (their endpoints expose no /audio/speech).
+    Scans the hard-pinned request group for the ``tts`` capability exactly as
+    ``lib.transcription._transcription_slots`` scans for its caps. Owner-facing
+    entry points mint that group from model-routing v2. OAuth subscription
+    slots are excluded (their endpoints expose no /audio/speech).
     """
     try:
         from lib.llm_dispatch.factory import get_dispatcher
@@ -129,33 +133,65 @@ def _tts_slots() -> list:
     except Exception as e:
         logger.warning('[TTS] dispatcher unavailable: %s', e)
         return []
+    from lib.llm_dispatch.provider_pin import get_pinned_provider
+    pinned_provider = get_pinned_provider()
     slots = [s for s in dispatcher.slots
-             if (TTS_CAP in (s.capabilities or set())) and not s.oauth]
+             if (TTS_CAP in (s.capabilities or set())) and not s.oauth
+             and (not pinned_provider or s.provider_id == pinned_provider)]
     slots.sort(key=lambda s: s.score())
     return slots
 
 
-def tts_available() -> bool:
+def _owner_tts_routes(owner_user_id: int, tenant_id: str | None = None) -> list:
+    """Return OpenAI-speech-compatible routes inside one owner boundary."""
+    from lib.model_routing import (
+        ModelRoutingRepository,
+        OPENAI_COMPATIBLE_PROTOCOLS,
+        OwnerBoundary,
+        list_capability_routes,
+    )
+
+    return list_capability_routes(
+        ModelRoutingRepository(),
+        OwnerBoundary.create(owner_user_id, tenant_id),
+        TTS_CAP,
+        required_protocols=OPENAI_COMPATIBLE_PROTOCOLS,
+    )
+
+
+def tts_available(*, owner_user_id: int | None = None,
+                  tenant_id: str | None = None) -> bool:
     """True when at least one tts-capable slot is configured.
 
     The podcast feature degrades to script-only when this is False (owner
     directive: no hard failure when no TTS slot is registered).
     """
-    # Resolve through the package facade so test monkeypatches on
-    # ``lib.tts._tts_slots`` take effect (facade parity with transcription).
+    if owner_user_id is not None:
+        return bool(_owner_tts_routes(owner_user_id, tenant_id))
+    # Retain the storage-free path for direct library callers and focused
+    # provider-seam tests. HTTP/background product paths always pass an owner.
     from lib import tts as _facade
     return bool(_facade._tts_slots())
 
 
-def list_tts_models() -> list[dict]:
+def list_tts_models(*, owner_user_id: int | None = None,
+                    tenant_id: str | None = None) -> list[dict]:
     """Return ``[{model, provider_id}]`` for configured tts slots (deduped)."""
+    if owner_user_id is not None:
+        return [
+            {'model': route.model_id, 'provider_id': route.provider_id}
+            for route in _owner_tts_routes(owner_user_id, tenant_id)
+        ]
     from lib import tts as _facade
     seen: set[tuple[str, str]] = set()
     out: list[dict] = []
     for s in _facade._tts_slots():
-        key = (s.model, s.provider_id or 'default')
+        model = getattr(s, 'logical_model', '') or s.model
+        provider_id = (getattr(s, 'routing_provider_id', '')
+                       or s.provider_id or 'default')
+        key = (model, provider_id)
         if key in seen:
             continue
         seen.add(key)
-        out.append({'model': s.model, 'provider_id': s.provider_id or 'default'})
+        out.append({'model': model, 'provider_id': provider_id})
     return out

@@ -1,44 +1,9 @@
-"""Regression: the topbar signal badge (netLatencyBadge) must reflect the REAL
-connection state, not just the push-socket RTT.
+"""The topbar badge projects canonical Push RTT/close and chat-SSE health.
 
-WHY
----
-`static/js/net-latency.js` paints the topbar signal bars. Historically its ONLY
-data source was `pushOnLatency` (push.js ping/pong RTT). Two consequences the
-owner reported:
-
-  ① A chat SSE reply stream that is reconnecting / stalled never showed on the
-     badge — the badge stayed green "50ms" while the reply connection was dead.
-  ③ Under a buffering proxy (VS Code port-forward) ping/pong frames are
-     delayed/batched. The 9s staleness watchdog force-painted OFFLINE on any
-     stale reading, so the badge flapped offline↔green even though the socket
-     was still OPEN ("odd status / one moment offline one moment fine").
-  ② A half-open push socket only flipped to 'timeout' on the next 4s interval
-     tick, so the badge sat on a stale green reading for ~12s.
-
-THE FIX (root, not band-aid)
-----------------------------
-  ① health_stream_timer.js broadcasts chat-stream health via
-     `streamHealthSubscribe`; net-latency.js merges it and shows the WORSE of
-     {push RTT, SSE health}. A degraded SSE with a green push RTT paints 'poor'
-     + a "reconnecting" label.
-  ③ The staleness watchdog now consults `pushIsConnected()`: socket still OPEN
-     → neutral 'unknown' (gray, no red flap); only a truly closed socket →
-     'offline'. push.js owns the real offline verdict via onclose.
-  ② push.js arms a per-ping watchdog (setTimeout PING_TIMEOUT_MS) that EMITS
-     'timeout' + force-closes the moment the window elapses.
-
-CHECKS (drive the REAL shipped JS under node)
---------------------------------------------
-(A ①) SSE degraded → badge state=poor, label='重连中' (even with a good RTT).
-(B ①) SSE recovers → badge returns to the RTT-derived good state.
-(C ③) socket still OPEN + reading stale → watchdog paints 'unknown', NOT offline.
-(D ③) socket CLOSED + reading stale → watchdog paints 'offline'.
-(E ②) ping watchdog fires within the timeout window → 'timeout' emitted promptly.
-
-DOUBLE-NEUTER: revert the pushIsConnected() guard in the watchdog → (C) FAILS
-(the badge falsely flaps offline while the socket is open). Proves the guard is
-load-bearing. The shipped files are left byte-identical.
+The Push owner already has one per-ping timeout that emits ``timeout`` and
+force-closes a half-open socket; ``onclose`` emits ``offline``. The badge must
+merge those events with the typed SSE aggregate without creating a second
+four-second liveness interval or guessing transport state from elapsed time.
 """
 
 from __future__ import annotations
@@ -46,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -62,8 +28,7 @@ def _node_available() -> bool:
     return bool(shutil.which('node'))
 
 
-# argv[2]=push.js path, argv[3]=net-latency.js path (so a neutered COPY of
-# net-latency.js can be swapped in for the double-neuter).
+# argv[2]=push.js path, argv[3]=net-latency.js path.
 _HARNESS = r"""
 const fs = require('fs');
 global.window = global;
@@ -76,9 +41,8 @@ global.console = console;
 let _clock = 2_000_000;
 Date.now = () => _clock;
 
-// ── Timer capture: setInterval(fn) → keep the LAST as the watchdog cb; also
-//    push.js uses setInterval for pinging + setTimeout for the ping watchdog
-//    and reconnect. We keep them addressable. ──
+// Push owns one ping interval plus demand timeouts for ping failure/reconnect.
+// The badge must add no interval of its own.
 let _intervals = [];
 let _timeouts = [];
 global.setInterval = (fn, ms) => { _intervals.push({ fn, ms }); return _intervals.length; };
@@ -149,7 +113,7 @@ global.document = {
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // REAL push.js
 eval(fs.readFileSync(process.argv[3], 'utf8'));   // REAL net-latency.js
 
-// ── Fake stream-health source (health_stream_timer seam). net-latency.js calls
+// ── Fake typed connection-health source. net-latency.js calls
 //    streamHealthSubscribe(fn) — we capture fn so the test can toggle degraded. ──
 let _streamCb = null;
 global.streamHealthSubscribe = (fn) => { _streamCb = fn; fn({ degraded: false, count: 0, at: Date.now() }); return () => {}; };
@@ -186,30 +150,15 @@ function feedGoodPong(rttMs) {
   check('B_sse_recovered_state_good', _badge.dataset.state === 'good');
   check('B_sse_recovered_label_ms', _badge._ms.textContent === '50ms');
 
-  // Find net-latency's staleness watchdog (the 4000ms interval it registered).
-  const wd = _intervals.find(iv => iv.ms === 4000);
-  check('watchdog_registered', !!wd);
+  check('C_badge_adds_no_liveness_interval',
+    _intervals.filter(iv => iv.ms === 4000).length === 1);
 
-  // (C ③) socket STILL OPEN + stale reading → paint 'unknown', NOT offline.
-  //   The FakeWS onopen already fired, so the REAL push socket is OPEN
-  //   (pushIsConnected() === true). We do NOT override pushIsConnected — it is
-  //   resolved lexically inside the shared eval scope, so a global override
-  //   would be a no-op; we exercise the real state. Advance the clock past
-  //   _STALE_MS and fire the watchdog: the guard must paint neutral 'unknown'.
-  _clock += 20000;                 // make the last reading stale (> _STALE_MS=9000)
-  wd.fn();
-  check('C_stale_open_socket_unknown', _badge.dataset.state === 'unknown');
-  check('C_stale_open_socket_not_offline', _badge.dataset.state !== 'offline');
-
-  // (D ③) socket genuinely CLOSED → offline. push.js owns this verdict via
-  //   onclose (the real offline path). Fire the real onclose (code 1006) so
-  //   push flips _connected=false and emits {state:'offline'}; the badge must
-  //   show offline. This is the "socket truly closed" complement to (C).
+  // (D) A real Push close emits the canonical offline verdict.
   if (_lastWs && _lastWs.onclose) _lastWs.onclose({ code: 1006 });
   await Promise.resolve(); await Promise.resolve();
   check('D_closed_socket_offline', _badge.dataset.state === 'offline');
 
-  // (E ②) The push per-ping watchdog is a setTimeout(_firePingTimeout,
+  // (E) The Push per-ping watchdog is a setTimeout(_firePingTimeout,
   //   PING_TIMEOUT_MS) armed when a ping is SENT. Reconnect a fresh socket,
   //   let it open + send a ping, then fire the armed watchdog by hand: it must
   //   emit {state:'timeout'} promptly (not wait for the next 4s interval tick)
@@ -259,37 +208,14 @@ def test_signal_badge_reflects_sse_and_proxy_jitter():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'signal-badge behavior failures:\n' + output
-    assert output.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{output}'
+    assert output.count('PASS') == 8, f'expected 8 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_watchdog_pushisconnected_guard_double_neuter(tmp_path):
-    """DOUBLE-NEUTER: revert the pushIsConnected() guard so the watchdog always
-    paints 'offline' on a stale reading (the old buggy behaviour). Then (C) — a
-    still-OPEN socket with a stale reading — FAILS because the badge falsely
-    flaps to offline. Proves the guard is load-bearing. Shipped file untouched."""
-    push_js = os.path.join(JS_DIR, 'push.js')
-    net_js = os.path.join(JS_DIR, 'net-latency.js')
-    with open(net_js, encoding='utf-8') as f:
-        src = f.read()
-
-    needle = "      const sockOpen = (typeof pushIsConnected === 'function') ? pushIsConnected() : false;\n      const verdict = sockOpen ? 'unknown' : 'offline';"
-    assert needle in src, 'watchdog guard fragment drifted — update the neuter target'
-    neutered = src.replace(
-        needle,
-        "      const sockOpen = false;\n      const verdict = 'offline';",
-        1,
-    )
-    copy = tmp_path / 'net_latency_neutered.js'
-    copy.write_text(neutered, encoding='utf-8')
-
-    proc = _run_harness(push_js, str(copy))
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    assert 'FAIL C_stale_open_socket_unknown' in output, (
-        'DOUBLE-NEUTER did not bite: watchdog still avoided false offline '
-        'without the pushIsConnected guard.\n' + output
-    )
-
-    with open(net_js, encoding='utf-8') as f:
-        assert f.read() == src, 'harness mutated the shipped net-latency.js'
+def test_badge_source_has_no_competing_liveness_clock():
+    source = Path(os.path.join(JS_DIR, 'net-latency.js')).read_text(
+        encoding='utf-8')
+    assert 'setInterval' not in source
+    assert '_watchdogTimer' not in source
+    assert '_STALE_MS' not in source
+    assert 'pushIsConnected' not in source
+    assert 'retainedCompositionLifecycle.add(destroyNetLatency)' in source

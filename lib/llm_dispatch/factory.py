@@ -64,16 +64,6 @@ class DispatcherFactory:
             self._instance = None
         logger.info('Dispatcher reset — will re-initialize on next call')
 
-    def set_instance(self, dispatcher: LLMDispatcher):
-        """Replace the singleton with a custom instance (e.g. for testing).
-
-        Args:
-            dispatcher: A pre-configured LLMDispatcher (or mock).
-        """
-        with self._lock:
-            self._instance = dispatcher
-
-
 # ── Default global factory ──
 _default_factory = DispatcherFactory()
 

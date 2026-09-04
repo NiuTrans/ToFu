@@ -13,6 +13,7 @@ logger = get_logger(__name__)
 import hashlib
 import json
 import re
+from collections import defaultdict, deque
 
 
 # ══════════════════════════════════════════════════════════
@@ -55,6 +56,19 @@ def _mint_tool_call_id(msg_idx: int, call_idx: int, tc: dict) -> str:
     return f'call_{digest[:12]}'
 
 
+def _mint_unique_tool_call_id(
+    msg_idx: int, call_idx: int, tc: dict, claimed_ids: set[str],
+) -> str:
+    """Mint one deterministic call id that cannot collide on this wire."""
+    base = _mint_tool_call_id(msg_idx, call_idx, tc)
+    candidate = base
+    occurrence = 1
+    while candidate in claimed_ids:
+        occurrence += 1
+        candidate = f'{base}_{occurrence}'
+    return candidate
+
+
 def _fix_tool_call_wire_shape(messages: list) -> list:
     """Heal OpenAI-style tool_call protocol violations on the wire.
 
@@ -70,9 +84,10 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
         "tokenization failed")
       * ``function.arguments`` dict/list → JSON string; None/non-str scalar
         → ``'{}'`` (probe K — "expected type string")
-      * tool message with empty/missing ``tool_call_id`` → positionally
-        paired with the preceding assistant message's next unclaimed id;
-        unpairable → dropped (probe M — "tool_call_id is not found")
+      * tool message ``tool_call_id`` → occurrence-paired only within its
+        immediately preceding assistant/tool run; blank IDs use the next
+        unclaimed occurrence, and all unpairable/duplicate receipts are
+        dropped (probe M — "tool_call_id is not found")
 
     Normalised for cross-vendor safety (tolerated by kimi, rejected by
     Anthropic's name pattern):
@@ -83,6 +98,10 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
         tolerates ``''`` (probe J), but the orphan/adjacency fixer pairs
         BY id; and a random mint would break the cache prefix every round
         because the deep-copy seam never writes the heal back
+      * duplicate truthy ids → later occurrences are deterministically
+        reminted and their adjacent tool receipts are rewritten positionally.
+        Provider ids are correlation tokens, not unique execution authority;
+        legacy positional-id histories may reuse them across many rounds.
 
     Deliberately NOT touched (live-probed accepted — healing them would
     change behaviour on a guess and destroy evidence):
@@ -100,14 +119,18 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
         return messages
 
     fixed_name = fixed_type = fixed_args = fixed_id = 0
-    paired_tid = dropped_entry = dropped_tool = 0
+    paired_tid = dropped_entry = dropped_message = dropped_tool = 0
     name_locations = []
 
     out = []
-    unclaimed = []  # ids of the current assistant → tool* run, not yet matched
+    # (provider/original id, effective unique id) for the current adjacent run.
+    unclaimed: list[tuple[str, str]] = []
+    claimed_ids: set[str] = set()
     for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
-            out.append(msg)
+            # A malformed persisted carrier must not crash later ``.get``
+            # passes or reach a strict provider as a non-message JSON value.
+            dropped_message += 1
             unclaimed = []
             continue
         role = msg.get('role')
@@ -122,6 +145,7 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
                 out.append(msg)
                 continue
             kept = []
+            kept_claims: list[tuple[str, str]] = []
             for tc_i, tc in enumerate(tcs):
                 if not isinstance(tc, dict):
                     dropped_entry += 1
@@ -130,9 +154,13 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
                 if tcid is not None and not isinstance(tcid, str):
                     tc['id'] = str(tcid)
                     fixed_id += 1
-                elif not tcid:
-                    tc['id'] = _mint_tool_call_id(idx, tc_i, tc)
+                original_id = str(tc.get('id') or '')
+                if not original_id or original_id in claimed_ids:
+                    tc['id'] = _mint_unique_tool_call_id(
+                        idx, tc_i, tc, claimed_ids)
                     fixed_id += 1
+                effective_id = str(tc['id'])
+                claimed_ids.add(effective_id)
                 if tc.get('type') != 'function':
                     tc['type'] = 'function'
                     fixed_type += 1
@@ -160,9 +188,10 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
                     fn['arguments'] = '{}'
                     fixed_args += 1
                 kept.append(tc)
+                kept_claims.append((original_id, effective_id))
             if kept:
                 msg['tool_calls'] = kept
-                unclaimed = [tc.get('id') for tc in kept if tc.get('id')]
+                unclaimed = kept_claims
             else:
                 msg.pop('tool_calls', None)
                 unclaimed = []
@@ -177,7 +206,8 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
                 fixed_id += 1
             if not tcid:
                 if unclaimed:
-                    msg['tool_call_id'] = unclaimed.pop(0)
+                    _original_id, effective_id = unclaimed.pop(0)
+                    msg['tool_call_id'] = effective_id
                     paired_tid += 1
                 else:
                     # Protocol-dead: no vendor accepts a tool message with an
@@ -185,8 +215,24 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
                     # drops truthy ids — so the drop must happen here.
                     dropped_tool += 1
                     continue
-            elif tcid in unclaimed:
-                unclaimed.remove(tcid)
+            else:
+                matching_index = next((
+                    claim_index
+                    for claim_index, (original_id, effective_id)
+                    in enumerate(unclaimed)
+                    if tcid in {original_id, effective_id}
+                ), None)
+                if matching_index is not None:
+                    _original_id, effective_id = unclaimed.pop(matching_index)
+                    if tcid != effective_id:
+                        msg['tool_call_id'] = effective_id
+                        fixed_id += 1
+                else:
+                    # Never borrow a globally equal id from another round. A
+                    # second receipt for one occurrence or a non-adjacent
+                    # result is protocol-dead and must fail closed here.
+                    dropped_tool += 1
+                    continue
             out.append(msg)
             continue
 
@@ -195,15 +241,16 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
         out.append(msg)
 
     total = (fixed_name + fixed_type + fixed_args + fixed_id
-             + paired_tid + dropped_entry + dropped_tool)
+             + paired_tid + dropped_entry + dropped_message + dropped_tool)
     if total:
         logger.warning(
             '[build_body] Healed tool_call wire shape: name=%d type=%d '
             'args=%d id=%d paired_tool_id=%d dropped_entries=%d '
-            'dropped_tool_msgs=%d%s — strict vendors hard-400 the whole '
+            'dropped_messages=%d dropped_tool_msgs=%d%s — strict vendors '
+            'hard-400 the whole '
             'request on these (Kimi "tokenization failed", 2026-08-07)',
             fixed_name, fixed_type, fixed_args, fixed_id, paired_tid,
-            dropped_entry, dropped_tool,
+            dropped_entry, dropped_message, dropped_tool,
             (f' (name fixes at msg {", ".join(name_locations)})'
              if name_locations else ''))
     return out
@@ -213,205 +260,130 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
 #  Tool-call/result repair (Anthropic-strict)
 # ══════════════════════════════════════════════════════════
 
-def _fix_orphaned_tool_calls(messages: list) -> list:
-    """Remove or fix assistant messages with tool_calls that lack matching tool_results.
+def _message_survives_tool_call_strip(message: dict) -> bool:
+    """Whether an assistant still carries model-visible protocol payload."""
+    if message.get('content'):
+        return True
+    return any(message.get(field) for field in (
+        'function_call', 'reasoning_content', 'reasoning_details',
+        'thinking_signature', '_responses_items', '_anthropic_content_blocks',
+    ))
 
-    Claude/Anthropic API requires every tool_use block to have a corresponding
-    tool_result in the immediately following message.  If a task was aborted
-    mid-tool-call, the stored/persisted messages may contain orphaned tool_use
-    blocks.  This causes HTTP 400:
-      "tool_use ids were found without tool_result blocks immediately after"
 
-    Strategy:
-      1. Collect all tool_call IDs from assistant messages
-      2. Collect all tool_call_ids from tool-role messages
-      3. For any assistant message whose tool_calls ALL lack matching tool_results,
-         strip the tool_calls (keep content if any, else remove the message)
-      4. Remove any tool-role messages that reference non-existent tool_calls
-      5. Validate adjacency: tool results must immediately follow their tool_calls
-         (Anthropic requires this, even if matching IDs exist elsewhere)
+def _repair_adjacent_tool_runs(messages: list) -> list:
+    """Occurrence-pair assistant calls with their adjacent result run.
 
-    Returns a new list (non-mutating).
+    A provider call ID is a selector only inside one contiguous
+    ``assistant(tool_calls) -> tool*`` run. Duplicate IDs pair FIFO by
+    occurrence. Results after an intervening user/assistant/system message are
+    never moved backwards: crossing that semantic boundary can make an old
+    result settle the wrong action. Missing calls and unmatched/duplicate
+    results are removed, while valid siblings and reasoning sidecars survive.
     """
     if not messages:
         return messages
 
-    # ── Pass 1: Collect all tool_call IDs and tool_result IDs ──
-    tool_call_ids = set()
-    tool_result_ids = set()
-    for msg in messages:
-        if msg.get('role') == 'tool' and msg.get('tool_call_id'):
-            tool_result_ids.add(msg['tool_call_id'])
-        tcs = msg.get('tool_calls')
-        if tcs and msg.get('role') == 'assistant':
-            for tc in tcs:
-                if tc.get('id'):
-                    tool_call_ids.add(tc['id'])
+    repaired: list[dict] = []
+    stripped_calls = 0
+    dropped_results = 0
+    dropped_messages = 0
+    position = 0
+    while position < len(messages):
+        message = messages[position]
+        if not isinstance(message, dict):
+            dropped_messages += 1
+            position += 1
+            continue
 
-    # ── Pass 2: Strip orphaned tool_calls and orphaned tool_results ──
-    fixed = []
-    orphan_tc_count = 0
-    orphan_tr_count = 0
-    for msg in messages:
-        # Remove orphaned tool results (role=tool without matching tool_call)
-        if msg.get('role') == 'tool':
-            tcid = msg.get('tool_call_id')
-            if tcid and tcid not in tool_call_ids:
-                orphan_tr_count += 1
-                logger.debug('[build_body] Dropping orphaned tool_result tc_id=%.16s '
-                             '(no matching tool_call)', tcid)
+        role = message.get('role')
+        if role == 'tool':
+            # A tool message is valid only when consumed with the immediately
+            # preceding assistant run; reaching it here proves it is orphaned.
+            dropped_results += 1
+            position += 1
+            continue
+
+        raw_calls = message.get('tool_calls')
+        if role != 'assistant' or not raw_calls:
+            repaired.append(message)
+            position += 1
+            continue
+        if not isinstance(raw_calls, list):
+            stripped_calls += 1
+            stripped = _strip_tool_calls(message)
+            if _message_survives_tool_call_strip(stripped):
+                repaired.append(stripped)
+            position += 1
+            continue
+
+        result_end = position + 1
+        adjacent_results: list[dict] = []
+        while result_end < len(messages):
+            result = messages[result_end]
+            if not isinstance(result, dict) or result.get('role') != 'tool':
+                break
+            adjacent_results.append(result)
+            result_end += 1
+
+        call_positions_by_id: dict[str, deque[int]] = defaultdict(deque)
+        for call_position, call in enumerate(raw_calls):
+            if not isinstance(call, dict):
                 continue
-            fixed.append(msg)
-            continue
+            call_id = str(call.get('id') or '').strip()
+            if call_id:
+                call_positions_by_id[call_id].append(call_position)
 
-        tcs = msg.get('tool_calls')
-        if not tcs or msg.get('role') != 'assistant':
-            fixed.append(msg)
-            continue
+        matched_call_positions: set[int] = set()
+        matched_results: list[dict] = []
+        for result in adjacent_results:
+            result_id = str(result.get('tool_call_id') or '').strip()
+            call_queue = call_positions_by_id.get(result_id)
+            if not result_id or not call_queue:
+                dropped_results += 1
+                continue
+            matched_call_positions.add(call_queue.popleft())
+            matched_results.append(result)
 
-        # Separate matched vs orphaned tool_calls
-        matched_tcs = [tc for tc in tcs if tc.get('id') in tool_result_ids]
-        orphaned_tcs = [tc for tc in tcs if tc.get('id') not in tool_result_ids]
-
-        if not orphaned_tcs:
-            # All tool_calls have results — keep as-is
-            fixed.append(msg)
-        elif matched_tcs:
-            # Some matched, some orphaned — keep only matched
-            new_msg = dict(msg)
-            new_msg['tool_calls'] = matched_tcs
-            fixed.append(new_msg)
-            orphan_tc_count += len(orphaned_tcs)
+        kept_calls = [
+            call for call_position, call in enumerate(raw_calls)
+            if call_position in matched_call_positions
+        ]
+        stripped_calls += len(raw_calls) - len(kept_calls)
+        if kept_calls:
+            if len(kept_calls) == len(raw_calls):
+                repaired.append(message)
+            else:
+                kept_message = dict(message)
+                kept_message['tool_calls'] = kept_calls
+                repaired.append(kept_message)
+            repaired.extend(matched_results)
         else:
-            # ALL tool_calls are orphaned — strip tool_calls but keep content
-            # AND reasoning fields (thinking replay needs them).
-            content = msg.get('content')
-            if content:
-                fixed.append(_strip_tool_calls(msg))
-            # If no content either, we drop the message entirely
-            orphan_tc_count += len(orphaned_tcs)
+            stripped = _strip_tool_calls(message)
+            if _message_survives_tool_call_strip(stripped):
+                repaired.append(stripped)
 
-    if orphan_tc_count:
+        position = result_end
+
+    if stripped_calls:
         logger.warning(
-            '[build_body] Fixed %d orphaned tool_call(s) without matching tool_result '
-            '— stripped to prevent Claude HTTP 400', orphan_tc_count)
-    if orphan_tr_count:
+            '[build_body] Stripped %d orphaned/non-adjacent tool_call(s); '
+            'correlation is occurrence-local', stripped_calls)
+    if dropped_results:
         logger.warning(
-            '[build_body] Removed %d orphaned tool_result(s) without matching tool_call',
-            orphan_tr_count)
+            '[build_body] Removed %d orphaned/duplicate tool_result(s); '
+            'no cross-round ID borrowing', dropped_results)
+    if dropped_messages:
+        logger.warning(
+            '[build_body] Removed %d malformed non-object message carrier(s)',
+            dropped_messages)
+    return repaired
 
-    # ── Pass 3: Validate adjacency ──
-    # Anthropic requires tool_result blocks to be immediately after the
-    # assistant message containing the corresponding tool_use.  If an
-    # assistant message with tool_calls is NOT immediately followed by
-    # tool-role messages with matching IDs, fix by reordering or stripping.
-    fixed = _fix_tool_call_adjacency(fixed)
 
-    return fixed
+def _fix_orphaned_tool_calls(messages: list) -> list:
+    """Remove orphaned calls/results without guessing across message runs."""
+    return _repair_adjacent_tool_runs(messages)
 
 
 def _fix_tool_call_adjacency(messages: list) -> list:
-    """Ensure tool results immediately follow their assistant tool_calls.
-
-    Anthropic requires tool_result blocks in the message immediately after
-    the tool_use.  OpenAI is more lenient (results can be anywhere after).
-    This function validates and fixes adjacency:
-      - For each assistant message with tool_calls, check that the next N
-        messages (where N = number of tool_calls) are role=tool with matching IDs.
-      - If tool results are present but out of order, reorder them.
-      - If tool results are missing from the immediately following position,
-        strip the tool_calls from the assistant message.
-
-    Returns a new list.
-    """
-    if not messages:
-        return messages
-
-    result = list(messages)
-    fix_count = 0
-
-    i = 0
-    while i < len(result):
-        msg = result[i]
-        tcs = msg.get('tool_calls')
-        if not tcs or msg.get('role') != 'assistant':
-            i += 1
-            continue
-
-        # Collect expected tool_call IDs
-        expected_ids = {tc.get('id') for tc in tcs if tc.get('id')}
-        if not expected_ids:
-            i += 1
-            continue
-
-        # Check the next N messages are tool results with matching IDs.
-        # Bound the scan by the number of id-bearing tool_calls (NOT the
-        # deduplicated id set): duplicate/empty ids would shrink the set and
-        # stop the scan before all genuinely-adjacent tool results are
-        # consumed, causing already-adjacent results to be re-moved.
-        n_expected = sum(1 for tc in tcs if tc.get('id'))
-        following_tool_ids = set()
-        j = i + 1
-        while j < len(result) and j - i - 1 < n_expected:
-            fmsg = result[j]
-            if fmsg.get('role') != 'tool':
-                break
-            tcid = fmsg.get('tool_call_id')
-            if tcid in expected_ids:
-                following_tool_ids.add(tcid)
-            j += 1
-
-        missing_ids = expected_ids - following_tool_ids
-        if not missing_ids:
-            # All tool results are adjacent — good
-            i = j
-            continue
-
-        # Some tool results are not adjacent — search for them elsewhere
-        found_elsewhere = {}
-        for k in range(j, len(result)):
-            if result[k].get('role') == 'tool':
-                tcid = result[k].get('tool_call_id')
-                if tcid in missing_ids:
-                    found_elsewhere[tcid] = k
-
-        if found_elsewhere:
-            # Move misplaced tool results to the correct position
-            # Remove from original positions (in reverse order to preserve indices)
-            moved_msgs = []
-            for _idx in sorted(found_elsewhere.values(), reverse=True):
-                moved_msgs.insert(0, result.pop(_idx))
-            # Insert them right after the assistant message (after existing adjacent tools)
-            insert_pos = i + 1 + len(following_tool_ids)
-            for m in moved_msgs:
-                result.insert(insert_pos, m)
-                insert_pos += 1
-            fix_count += len(moved_msgs)
-            logger.warning(
-                '[build_body] Reordered %d tool_result(s) to be adjacent to '
-                'their tool_calls (Anthropic adjacency fix)',
-                len(moved_msgs))
-        else:
-            # Tool results genuinely missing — strip orphaned tool_calls
-            still_matched = [tc for tc in tcs if tc.get('id') not in missing_ids]
-            if still_matched:
-                result[i] = dict(msg)
-                result[i]['tool_calls'] = still_matched
-            else:
-                content = msg.get('content')
-                if content:
-                    result[i] = _strip_tool_calls(msg)
-                else:
-                    result.pop(i)
-                    continue  # Don't increment i
-            fix_count += len(missing_ids)
-            logger.warning(
-                '[build_body] Stripped %d tool_call(s) with non-adjacent results '
-                '(Anthropic adjacency requirement)', len(missing_ids))
-
-        i += 1
-
-    if fix_count:
-        logger.info('[build_body] Tool adjacency fixes applied: %d total', fix_count)
-
-    return result
+    """Compatibility entry point for occurrence-local adjacency repair."""
+    return _repair_adjacent_tool_runs(messages)

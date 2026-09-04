@@ -68,34 +68,35 @@
 
   /* ── MCP rail state ──────────────────────────────────────────────
    * MCP tools are NOT a composer toggle — they come from connected MCP
-   * servers (lib/mcp). The settings tab tracks them, but the per-turn
-   * capsule needs a cheap, always-available snapshot of "which MCP
-   * servers are connected right now", independent of whether the
-   * settings panel was ever opened. We keep a tiny module-level cache,
-   * refreshed at boot and after any catalog mutation (install / connect
-   * / uninstall) via runtimeScope.refreshMcpRailState(). Shape:
-   *   { servers: [{name, count}], total: <toolCount> }. */
+   * servers (lib/mcp). The already-required server-config response carries
+   * a compact server/count projection for first paint; Settings carries the
+   * same projection on catalog and per-tool mutation responses. The rail
+   * therefore owns no request, timer, or schema-sized cache. Shape:
+   *   { servers: [{name, count}], total: <enabledToolCount> }. */
+  const _MCP_RAIL_MAX_SERVERS = 64;
+  const _MCP_RAIL_MAX_NAME_CHARS = 120;
+  const _MCP_RAIL_MAX_TOOL_COUNT = 100000;
   let _mcpRail = { servers: [], total: 0 };
 
-  async function refreshMcpRailState() {
-    try {
-      if (typeof Api === 'undefined' || !Api.mcp || typeof Api.mcp.toolsList !== 'function') return;
-      const resp = await Api.mcp.toolsList();
-      if (!resp || !resp.ok) return;
-      const data = await resp.json();
-      const counts = {};
-      for (const tdef of (data.tools || [])) {
-        const s = tdef && tdef.server;
-        if (s) counts[s] = (counts[s] || 0) + 1;
-      }
-      _mcpRail = {
-        servers: Object.keys(counts).sort().map((n) => ({ name: n, count: counts[n] })),
-        total: data.total || 0,
-      };
-    } catch (e) {
-      /* Best-effort: a missing/failed MCP endpoint just means no MCP chip. */
-      if (typeof console !== 'undefined') console.debug('[info-rail] MCP rail refresh failed:', e);
+  function applyMcpToolSummary(summary) {
+    const rows = summary && Array.isArray(summary.servers) ? summary.servers : [];
+    const counts = new Map();
+    for (const row of rows) {
+      if (counts.size >= _MCP_RAIL_MAX_SERVERS) break;
+      const name = typeof row?.name === 'string'
+        ? row.name.trim().slice(0, _MCP_RAIL_MAX_NAME_CHARS) : '';
+      const numericCount = Number(row?.count);
+      const count = Number.isFinite(numericCount)
+        ? Math.min(_MCP_RAIL_MAX_TOOL_COUNT, Math.max(0, Math.floor(numericCount))) : 0;
+      if (!name || count < 1 || counts.has(name)) continue;
+      counts.set(name, count);
     }
+    const servers = Array.from(counts, ([name, count]) => ({ name, count }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    _mcpRail = {
+      servers,
+      total: servers.reduce((sum, row) => sum + row.count, 0),
+    };
   }
 
   /* ── Collect the active-tool set ─────────────────────────────────
@@ -182,10 +183,8 @@
   }
 
   /* Real provider brand logo (Anthropic / OpenAI / Gemini / …) for a model
-   * id — reuses the shared icon system in settings/branding.js so the mark
-   * + brand color match the model picker exactly. Falls back to '' if the
-   * helpers aren't loaded yet (info-rail loads after branding, so this is
-   * just defensive). */
+   * id — reuses the typed model-brand icon owner so the mark + color match
+   * the model picker. Falls back to '' for isolated alternate entries. */
   function _brandLogo(modelId, size) {
     if (typeof _detectBrand === 'function' && typeof _brandSvg === 'function') {
       return _brandSvg(_detectBrand(modelId || ''), size || 15);
@@ -418,17 +417,11 @@
   runtimeScope.buildTurnCtxSnapshot = buildTurnCtxSnapshot;
   runtimeScope.renderTurnCtxNote = renderTurnCtxNote;
   runtimeScope.reconcileTurnCtxCapsule = reconcileTurnCtxCapsule;
-  runtimeScope.refreshMcpRailState = refreshMcpRailState;
+  runtimeScope.applyMcpToolSummary = applyMcpToolSummary;
 
-  /* Refresh the MCP rail state once at boot so the FIRST turn of a session
-   * already reflects connected servers (not just after the settings panel
-   * is opened). Best-effort; failures are swallowed inside the function. */
+  /* The click listener is the rail's only browser lifecycle. MCP state arrives
+   * through existing responses and never installs a boot hook of its own. */
   if (typeof document !== 'undefined') {
     document.addEventListener('click', _onTctxClick);
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => { refreshMcpRailState(); }, { once: true });
-    } else {
-      refreshMcpRailState();
-    }
   }
 })();

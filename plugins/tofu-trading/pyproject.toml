@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tofu-trading"
+version = "0.2.0"
+description = "Trading subsystem for Tofu (豆腐) — portfolio, market intel, autopilot, backtest & strategy engines. Mounts into a Tofu host via entry points."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    # Tofu 0.17 owns every durable connection through storage.v1. Trading
+    # contributes a declarative manifest and uses named semantic operations;
+    # it never imports a host database driver.
+    "tofu-agent>=0.17,<0.18",
+]
+
+[tool.uv.sources]
+tofu-agent = { workspace = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/rangehow/ToFu/tree/main/plugins/tofu-trading"
+Repository = "https://github.com/rangehow/ToFu"
+
+# ── Entry points: how the Tofu host discovers and mounts this plugin ──
+# Each group is consumed by a registry in core:
+#   tofu.blueprints → routes/plugin_registry.py::discover_blueprint_plugins
+#   tofu.storage    → lib/storage/plugin_registry.py::discover_plugin_manifests
+#   tofu.flags      → lib/feature_registry (feature-flag declarations)
+[project.entry-points."tofu.blueprints"]
+trading = "tofu_trading.web:register"
+
+[project.entry-points."tofu.startup"]
+trading = "tofu_trading.web:start_workers"
+
+[project.entry-points."tofu.task_runtimes"]
+trading = "tofu_trading.web:get_task_runtimes"
+
+[project.entry-points."tofu.storage"]
+trading = "tofu_trading.storage_manifest:MANIFEST"
+
+[project.entry-points."tofu.flags"]
+trading = "tofu_trading.flags:register"
+
+[tool.setuptools.packages.find]
+include = ["tofu_trading*"]
+
+[tool.setuptools.package-data]
+# Ship the frontend assets (HTML page, JS bundle files, CSS) alongside the
+# Python package so the host can serve them.
+tofu_trading = ["static/**/*", "templates/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --tb=short"
+markers = [
+    "unit: Pure unit tests (no server, no DB)",
+    "api: API integration tests (requires a Tofu host + DB)",
+]

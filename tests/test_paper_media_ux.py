@@ -111,7 +111,9 @@ def podcast_env(tmp_path, monkeypatch, storage_env):
     import lib.paper_identity as hashing
     import lib.paper.podcast_engine.worker as PE
     import lib.paper.podcast_engine._audio as PA
+    import lib.model_routing as routing
     import lib.tts as T
+    from types import SimpleNamespace
     monkeypatch.setattr(hashing, 'PAPER_DIR', str(tmp_path))
     (tmp_path / 'podcast').mkdir(exist_ok=True)
     monkeypatch.setattr(PE, 'generate_script',
@@ -124,6 +126,16 @@ def podcast_env(tmp_path, monkeypatch, storage_env):
     monkeypatch.setattr(T, '_tts_slots', lambda: [_FakeSlot()])
     monkeypatch.setattr(T, '_post_speech',
                         lambda slot, text, *, voice, fmt, speed: _tiny_wav())
+    route = SimpleNamespace(model_id='unit-tts', provider_id='prov0')
+    group = SimpleNamespace(pin_id='prov0')
+    monkeypatch.setattr(
+        routing, 'list_capability_routes',
+        lambda *_args, **_kwargs: [route])
+    monkeypatch.setattr(
+        routing, 'mint_capability_slot_group',
+        lambda *_args, **_kwargs: ('unit-tts', group))
+    monkeypatch.setattr(
+        routing, 'dispose_routed_slot_group', lambda _group: True)
     monkeypatch.setattr(PA, '_transcode_to_mp3', lambda wav: None)
     del storage_env
     return tmp_path
@@ -391,6 +403,12 @@ def _engine_task(tmp_path, monkeypatch, **over):
     from lib.motion_video.runtime import _new_motion_task, _motion_task_id
     monkeypatch.setattr('lib.motion_video._env.motion_root',
                         lambda: str(tmp_path))
+    # These engine tests assert phase/progress vocabulary (P-UX3), not
+    # composition authoring. Force the zero-LLM template path so a poisoned
+    # dispatcher/key_stats state from an earlier test in the same worker can
+    # never turn the per-scene author's dispatch into an unbounded slot-wait
+    # (the full-suite xdist hang).
+    monkeypatch.setenv('TOFU_MOTION_SCENE_AUTHOR', '0')
     srt_path = tmp_path / 't.srt'
     srt_path.write_text(_SRT, encoding='utf-8')
     kw = dict(srt_path=str(srt_path), workdir=str(tmp_path / 'job'),
@@ -437,13 +455,22 @@ def _fake_media(monkeypatch):
 
 def _fake_tts(monkeypatch):
     import lib.tts as T
-    monkeypatch.setattr(T, 'tts_available', lambda: True)
+    import lib.model_routing as routing
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(T, 'tts_available', lambda **_kwargs: True)
     monkeypatch.setattr(T, 'max_input_chars', lambda: 4000)
     monkeypatch.setattr(T, 'synthesize',
                         lambda text, *, voice, fmt, speed:
                         type('R', (), {'audio_bytes': _tiny_wav()})())
     monkeypatch.setattr(T, 'wav_duration', lambda wav: 0.1)
     monkeypatch.setattr(T, 'wav_params', lambda wav: (1, 2, 8000, 800))
+    group = SimpleNamespace(pin_id='test-motion-tts')
+    monkeypatch.setattr(
+        routing, 'mint_capability_slot_group',
+        lambda *_args, **_kwargs: ('unit-tts', group))
+    monkeypatch.setattr(
+        routing, 'dispose_routed_slot_group', lambda _group: True)
 
 
 def test_engine_phase_vocabulary_and_progress(monkeypatch, tmp_path):
@@ -505,7 +532,9 @@ def test_narrate_progress_AB_callback_loadbearing(monkeypatch, tmp_path):
 
 
 def test_narrate_on_scene_done_counts(monkeypatch, tmp_path):
-    """Direct: the real synthesize calls on_scene_done 1..N in order."""
+    """Direct: the real synthesize settles every scene exactly once, with a
+    strictly increasing 1..N counter (parallel TTS completes out of order, so
+    scene arrival order is NOT part of the contract)."""
     from lib.motion_video._audio import synthesize_scene_narrations
     _fake_tts(monkeypatch)
     calls = []
@@ -513,6 +542,23 @@ def test_narrate_on_scene_done_counts(monkeypatch, tmp_path):
                'text': f'第{i}句。'} for i in (1, 2, 3)]
     res = synthesize_scene_narrations(
         scenes, str(tmp_path / 'audio'),
+        on_scene_done=lambda i, n, sid: calls.append((i, n, sid)))
+    assert res['ok'] is True
+    assert [c[0] for c in calls] == [1, 2, 3]
+    assert [c[1] for c in calls] == [3, 3, 3]
+    assert sorted(c[2] for c in calls) == ['scene-001', 'scene-002',
+                                           'scene-003']
+
+
+def test_narrate_on_scene_done_sequential_order(monkeypatch, tmp_path):
+    """Sequential rendering (max_workers=1) settles scenes in scene order."""
+    from lib.motion_video._audio import synthesize_scene_narrations
+    _fake_tts(monkeypatch)
+    calls = []
+    scenes = [{'id': f'scene-{i:03d}', 'start': (i - 1) * 2.0, 'end': i * 2.0,
+               'text': f'第{i}句。'} for i in (1, 2, 3)]
+    res = synthesize_scene_narrations(
+        scenes, str(tmp_path / 'audio'), max_workers=1,
         on_scene_done=lambda i, n, sid: calls.append((i, n, sid)))
     assert res['ok'] is True
     assert calls == [(1, 3, 'scene-001'), (2, 3, 'scene-002'),

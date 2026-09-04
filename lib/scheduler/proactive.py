@@ -77,7 +77,10 @@ def gather_system_status(task: dict[str, Any]) -> str:
         try:
             from lib.conversations.repository import get_conversation
             row = get_conversation(
-                target_conv, user_id=int(task['user_id']))
+                target_conv,
+                user_id=int(task['user_id']),
+                message_window=2,
+            )
             if row is not None:
                 title = row['title'] or '(untitled)'
                 msg_count = row['msg_count'] or 0
@@ -118,7 +121,11 @@ _POLL_SYSTEM_PROMPT = build_poll_system_prompt(
         "\n- This is poll-only — you cannot use tools here"))
 
 
-def poll_decision(task: dict[str, Any]) -> tuple[bool, str, int]:
+def poll_decision(
+    task: dict[str, Any],
+    *,
+    status_snapshot: str | None = None,
+) -> tuple[bool, str, int]:
     """Run a lightweight LLM poll to decide whether to act.
 
     Args:
@@ -130,7 +137,14 @@ def poll_decision(task: dict[str, Any]) -> tuple[bool, str, int]:
     from lib.llm_dispatch import smart_chat
 
     instruction = task.get('command', '')
-    status = gather_system_status(task)
+    # The scheduler persists the same snapshot beside the decision. Reuse it
+    # when supplied so one poll cannot pay for (or observe) two conversation
+    # projections with subtly different state.
+    status = (
+        gather_system_status(task)
+        if status_snapshot is None
+        else status_snapshot
+    )
 
     messages = [
         {'role': 'system', 'content': _POLL_SYSTEM_PROMPT},

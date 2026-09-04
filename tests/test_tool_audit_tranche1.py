@@ -90,6 +90,8 @@ def test_merge_memories_reports_failed_deletes(tmp_path, monkeypatch):
     import lib.memory.storage._crud as memory_crud
 
     created = {}
+    x_path = str(tmp_path / 'x.md')
+    y_path = str(tmp_path / 'y.md')
 
     def fake_create(name, description='', body='', tags=None, scope='project',
                     project_path=None):
@@ -97,16 +99,28 @@ def test_merge_memories_reports_failed_deletes(tmp_path, monkeypatch):
         created['m'] = m
         return m
 
-    def fake_list(project_path=None, extra_paths=None):
-        return [{'id': 'x', 'tags': []}, {'id': 'y', 'tags': []}]
+    def fake_find(memory_ids, project_path=None, extra_paths=None):
+        assert memory_ids == ['x', 'y']
+        return {
+            'x': {'id': 'x', 'tags': [], 'filepath': x_path,
+                  'scope': 'project', 'is_package': False},
+            'y': {'id': 'y', 'tags': [], 'filepath': y_path,
+                  'scope': 'project', 'is_package': False},
+        }
 
     # x deletes fine, y fails → must appear in failed_ids and be logged.
-    def fake_delete(mid, project_path=None, extra_paths=None):
-        return mid == 'x'
+    def fake_remove(filepath):
+        if filepath == y_path:
+            raise OSError('injected delete failure')
 
     monkeypatch.setattr(memory_crud, 'create_memory', fake_create)
-    monkeypatch.setattr(memory_crud, 'list_all_memories', fake_list)
-    monkeypatch.setattr(memory_crud, 'delete_memory', fake_delete)
+    monkeypatch.setattr(memory_crud, '_find_memory_summaries', fake_find)
+    monkeypatch.setattr(
+        memory_crud, '_refresh_memory_summary',
+        lambda summary: (summary, 'stable-revision'))
+    monkeypatch.setattr(
+        memory_crud, '_revision_is_current', lambda *_args: True)
+    monkeypatch.setattr(memory_crud.os, 'remove', fake_remove)
 
     warnings = []
     # merge_memories logs via its own submodule logger (lib.memory.storage._crud)
@@ -214,10 +228,12 @@ def test_browser_doc_fixes():
     assert 'time.sleep()' not in src, 'no bogus Python time.sleep reference'
 
 
-def test_intervene_documents_rate_limit():
-    from lib.tools.conversation import PEER_INTERVENE_TOOL
-    desc = PEER_INTERVENE_TOOL['function']['description']
-    assert 'rate-limit' in desc.lower() and 'project_message' in desc
+def test_project_brain_model_tools_are_retired():
+    from lib.tools import conversation
+
+    assert 'PEER_INTERVENE_TOOL' not in conversation.__all__
+    assert conversation.INTEGRATION_TOOL_NAMES == {
+        'integration_checkpoint', 'integration_submit'}
 
 
 # ── 6. ask_human attendance-aware guard (headless task-wedge fix) ────

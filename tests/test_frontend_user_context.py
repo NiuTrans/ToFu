@@ -14,21 +14,23 @@ from tests._jsdom import run_harness
 from tests._runtime_sections import (
     native_module_path,
     runtime_section,
-    runtime_section_path,
 )
 
 pytestmark = pytest.mark.unit
-_AUDIT_SYNTHETIC_REPO_PATHS = {'static/js/preferences.js'}
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFERENCES_SOURCE = ROOT / 'frontend/src/features/memory/preferences.ts'
 PREFERENCES_JS = native_module_path(
     'preferences.js', PREFERENCES_SOURCE)
+PREFERENCE_ACTIONS_SOURCE = (
+    ROOT / 'frontend/src/features/memory/preference-actions.ts'
+)
+PREFERENCE_ACTIONS_JS = native_module_path(
+    '.native/preference-actions.js', PREFERENCE_ACTIONS_SOURCE,
+)
 
 
 def _read(relative: str) -> str:
-    if relative == 'static/js/preferences.js':
-        return PREFERENCES_SOURCE.read_text(encoding='utf-8')
     if relative.startswith('static/js/'):
         return runtime_section(relative.removeprefix('static/js/'))
     return (ROOT / relative).read_text(encoding='utf-8')
@@ -41,20 +43,6 @@ def test_panel_explains_always_on_context_and_separate_memory():
     assert 'id="prefsList"' in panel
     assert 'data-i18n="context.memoryTitle"' in panel
     assert 'clearLegacyMemories(this)' in panel
-
-
-def test_editor_has_three_explicit_types_and_condition_action_fields():
-    source = _read('static/js/preferences.js')
-    icons = _read('static/js/core/icons.js')
-    for item_type in ('identity', 'work_rule', 'response_preference'):
-        assert f"type: '{item_type}'" in source
-    assert 'item.condition' in source and 'item.action' in source
-    assert 'contextApi().replace(cleanItems())' in source
-    assert 'estimateChars() > capacity' in source
-    for icon in ('brain', 'wrench', 'messageCircle', 'edit', 'trash'):
-        assert f'{icon}:' in icons
-
-
 def test_context_and_clear_api_wiring_is_complete():
     api = _read('static/js/api.js')
     route = _read('routes/api_v1/memory.py')
@@ -68,56 +56,118 @@ def test_context_and_clear_api_wiring_is_complete():
     assert 'Bulk memory clearing is disabled in multi-user mode' in route
 
 
-def test_context_layout_has_mobile_contract_and_undo_affordance():
+def test_context_layout_has_mobile_contract():
     css = _read('static/settings.css')
-    timeline = _read('static/js/ui/tool_rounds.js')
     assert '.ctx-group-work_rule' in css
     assert '@media(max-width:760px)' in css
     # My Context widens its panel while active and keeps a content-width
     # (not viewport) single-column floor for the masonry.
     assert '.settings-panel:has(#settingsTab_preferences.active)' in css
     assert '@container' in css
-    assert 'pl-seg-undo' in timeline
 
 
 _UNDO_HARNESS = r'''
 const fs = require('fs');
 global.window = globalThis;
-const calls = [];
-global.Api = { userContext: {
-  undo: async (changeId) => { calls.push(changeId); },
-} };
-global.t = (key) => ({
-  'context.undoing': 'undoing',
-  'context.undone': 'undone',
-})[key] || key;
 (0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
-const classes = [];
-const button = {
-  textContent: 'undo', disabled: false,
-  classList: { add: (name) => classes.push(name) },
-};
+const calls = [];
+const failures = [];
+let failResolve = false;
+let failUndo = false;
+const controller = createPreferenceActionsController({
+  resolvePendingPreference: async (pendingId, accept) => {
+    calls.push(['resolve', pendingId, accept]);
+    if (failResolve) throw new Error('resolve failed');
+  },
+  undoContextChange: async (changeId) => {
+    calls.push(['undo', changeId]);
+    if (failUndo) throw new Error('undo failed');
+  },
+  translate: (key) => ({
+    'prefs.learnedReinforced': 'reinforced',
+    'prefs.dismiss': 'dismissed',
+    'context.undoing': 'undoing',
+    'context.undone': 'undone',
+  })[key] || key,
+  iconHtml: (name, size) => `<i>${name}:${size}</i>`,
+  reportResolveFailure: (error) => failures.push(['resolve', error.message]),
+  reportUndoFailure: (error) => failures.push(['undo', error.message]),
+});
+
+function rowAndButton() {
+  const classes = [];
+  const row = {
+    style: { opacity: '', pointerEvents: '' }, innerHTML: '',
+    classList: { add: (name) => classes.push(name) },
+  };
+  return { row, classes, button: { closest: () => row } };
+}
+
 (async () => {
-  await undoContextChange(button, 'change-42');
-  console.log(JSON.stringify({ calls, button, classes }));
+  const accepted = rowAndButton();
+  await controller.resolvePreference(accepted.button, 'pending/42', true);
+
+  failResolve = true;
+  const rejected = rowAndButton();
+  await controller.resolvePreference(rejected.button, 'pending-43', false);
+
+  const undoClasses = [];
+  const undoButton = {
+    textContent: 'undo', disabled: false,
+    classList: { add: (name) => undoClasses.push(name) },
+  };
+  await controller.undoContextChange(undoButton, 'change-42');
+
+  failUndo = true;
+  const failedUndoButton = {
+    textContent: 'undo again', disabled: false,
+    classList: { add: () => {} },
+  };
+  await controller.undoContextChange(failedUndoButton, 'change-43');
+
+  console.log(JSON.stringify({
+    calls, failures,
+    accepted: { row: accepted.row, classes: accepted.classes },
+    rejected: rejected.row,
+    undoButton, undoClasses, failedUndoButton,
+  }));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 '''
 
 
 @pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
-def test_context_change_undo_uses_public_api_and_settles_button():
-    owner = runtime_section_path('ui/preference_actions.js')
+def test_preference_actions_use_injected_ports_and_roll_back_failures():
     proc = subprocess.run(
-        ['node', '-e', _UNDO_HARNESS, owner], capture_output=True, text=True,
+        ['node', '-e', _UNDO_HARNESS, PREFERENCE_ACTIONS_JS],
+        capture_output=True, text=True,
         timeout=30)
     assert proc.returncode == 0, proc.stderr
     got = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert got['calls'] == ['change-42']
-    assert got['button']['disabled'] is True
-    assert got['button']['textContent'] == 'undone'
-    assert got['classes'] == ['is-undone']
-
-
+    assert got['calls'] == [
+        ['resolve', 'pending/42', True],
+        ['resolve', 'pending-43', False],
+        ['undo', 'change-42'],
+        ['undo', 'change-43'],
+    ]
+    assert got['accepted']['row']['innerHTML'] == (
+        '<span class="pl-lead"><i>check:13</i></span>'
+        '<span class="pl-text">reinforced</span>'
+    )
+    assert got['accepted']['row']['style'] == {
+        'opacity': '', 'pointerEvents': 'none',
+    }
+    assert got['accepted']['classes'] == ['pl-resolved']
+    assert got['rejected']['style'] == {
+        'opacity': '', 'pointerEvents': '',
+    }
+    assert got['undoButton']['disabled'] is True
+    assert got['undoButton']['textContent'] == 'undone'
+    assert got['undoClasses'] == ['is-undone']
+    assert got['failedUndoButton']['disabled'] is False
+    assert got['failedUndoButton']['textContent'] == 'undo again'
+    assert got['failures'] == [
+        ['resolve', 'resolve failed'], ['undo', 'undo failed'],
+    ]
 _JSDOM_BODY = r'''
 const fs = require('fs');
 const path = require('path');

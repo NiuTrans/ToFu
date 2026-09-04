@@ -26,22 +26,25 @@ import time
 
 from lib.llm_dispatch import dispatch_chat, dispatch_stream
 from lib.log import get_logger
+from lib.paper.contracts import PAPER_PODCAST_MAX_SOURCE_CHARS
 from lib.paper.injection_guard import wrap_untrusted
 from lib.paper.podcast_prompts import (
     MODE_LENGTH_EN,
     MODE_LENGTH_ZH,
+    PODCAST_SEGMENT_LIMITS,
     build_critic_prompt,
     build_script_prompt,
 )
 
 from lib.paper.podcast_engine._validate import estimate_seconds, validate_script
+from lib.paper.podcast_engine._errors import PodcastGenerationAborted
 
 logger = get_logger(__name__)
 
 #: Upper bound on script-source characters sent to the model. Reports run
 #: 8–25K chars, so 40K is generous headroom; translation-fallback sources are
 #: truncated to this (oldest-first keeps the front matter + method intact).
-_MAX_SOURCE_CHARS = 40000
+_MAX_SOURCE_CHARS = PAPER_PODCAST_MAX_SOURCE_CHARS
 
 
 class ScriptParseError(Exception):
@@ -110,12 +113,18 @@ def normalize_script(raw: dict, *, mode: str, lang: str) -> dict:
     speaker to 'host' (P1 single voice) and figure_ref to None. The LLM's own
     est_seconds (if any) is discarded — the server stamps its own estimate.
     """
+    segment_limit = PODCAST_SEGMENT_LIMITS.get(
+        mode, PODCAST_SEGMENT_LIMITS['short'])
     segs_out: list[dict] = []
+    valid_segments = 0
     for seg in raw.get('segments') or []:
         if not isinstance(seg, dict):
             continue
         text = (seg.get('text') or '').strip()
         if not text:
+            continue
+        valid_segments += 1
+        if len(segs_out) >= segment_limit:
             continue
         ref = seg.get('figure_ref')
         segs_out.append({
@@ -131,6 +140,7 @@ def normalize_script(raw: dict, *, mode: str, lang: str) -> dict:
         'lang': lang,
         'mode': mode,
         'segments': segs_out,
+        'segments_dropped': max(0, valid_segments - segment_limit),
     }
 
 
@@ -156,7 +166,8 @@ def critic_enabled() -> bool:
 
 
 def _critic_review(*, lang: str, script: dict, figure_list_text: str,
-                   fenced_report: str, model: str | None) -> list[str]:
+                   fenced_report: str, model: str | None,
+                   max_429_attempts: int, abort_check=None) -> list[str]:
     """One LLM review round; returns issue strings ([] = pass). Never raises.
 
     The critic is a SECOND model pass over (script, source) — semantic checks
@@ -171,8 +182,12 @@ def _critic_review(*, lang: str, script: dict, figure_list_text: str,
         content, _usage = dispatch_chat(
             [{'role': 'user', 'content': prompt}],
             max_tokens=2048, temperature=0, prefer_model=model,
+            abort_check=abort_check, max_retries=2,
+            max_429_attempts=max_429_attempts,
             log_prefix='[Paper:Podcast:Critic]')
     except Exception as e:
+        if abort_check and abort_check():
+            raise PodcastGenerationAborted() from e
         logger.warning('[Paper:Podcast:Critic] review call failed (pass open): %s', e)
         return []
     try:
@@ -199,7 +214,8 @@ _SECTION_KEY_RE = re.compile(r'"section"\s*:')
 
 
 def _stream_call(messages: list[dict], *, model: str | None,
-                 emit) -> tuple[str, dict]:
+                 emit, max_429_attempts: int,
+                 abort_check=None) -> tuple[str, dict]:
     """Run the draft as a STREAM, reporting real progress as bytes arrive.
 
     ``dispatch_chat`` blocks for the whole 1–3 minute generation, which is
@@ -238,6 +254,8 @@ def _stream_call(messages: list[dict], *, model: str | None,
     stream_result = require_verified_provider_stream_result(dispatch_stream(
         messages, max_tokens=16384, temperature=0.2, prefer_model=model,
         on_content=_on_content, on_attempt_restart=_on_attempt_restart,
+        abort_check=abort_check, max_retries=2,
+        max_429_attempts=max_429_attempts,
         log_prefix='[Paper:Podcast:Script]'),
         context='paper podcast script')
     return ''.join(buf), stream_result.usage
@@ -248,7 +266,7 @@ def _stream_call(messages: list[dict], *, model: str | None,
 def generate_script(*, source_text: str, lang: str, mode: str, title: str,
                     images: list[dict], model: str | None,
                     source_kind: str = 'report',
-                    on_event=None) -> tuple[dict, dict]:
+                    on_event=None, abort_check=None) -> tuple[dict, dict]:
     """Generate + validate + critic-review a podcast script.
 
     Args:
@@ -265,6 +283,8 @@ def generate_script(*, source_text: str, lang: str, mode: str, title: str,
             ``on_event({'type': 'progress', 'phase': 'script', 'unit': 'pass',
             'step': 'draft'|'validate'|'revise'|'critic', ...})`` as the
             pipeline advances. Never let a sink failure break generation.
+        abort_check: optional task cancellation predicate propagated through
+            every model call and checked between deterministic passes.
 
     Returns:
         (script, meta) — meta carries low_confidence, issues, critic_issues,
@@ -280,6 +300,15 @@ def generate_script(*, source_text: str, lang: str, mode: str, title: str,
             logger.debug('[Paper:Podcast:Script] on_event sink failed: %s', e)
     lang = 'zh' if lang == 'zh' else 'en'
     mode = mode if mode in ('short', 'full') else 'short'
+    from runtime_guards import resolve_resource_budget
+    max_429_attempts = resolve_resource_budget(
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', maximum=64)
+
+    def _raise_if_aborted() -> None:
+        if abort_check and abort_check():
+            raise PodcastGenerationAborted()
+
+    _raise_if_aborted()
     figure_list_text, manifest_files = render_figure_list(images)
     fenced = wrap_untrusted((source_text or '')[:_MAX_SOURCE_CHARS])
 
@@ -310,8 +339,16 @@ def generate_script(*, source_text: str, lang: str, mode: str, title: str,
         return _emit
 
     def _call(messages: list[dict], *, step: str = 'draft') -> dict:
-        content, usage = _stream_call(messages, model=model,
-                                      emit=_emit_stream_progress(step))
+        _raise_if_aborted()
+        try:
+            content, usage = _stream_call(
+                messages, model=model, emit=_emit_stream_progress(step),
+                abort_check=abort_check,
+                max_429_attempts=max_429_attempts)
+        except Exception as exc:
+            if abort_check and abort_check():
+                raise PodcastGenerationAborted() from exc
+            raise
         if isinstance(usage, dict):
             meta['usage']['input'] += int(usage.get('prompt_tokens') or 0)
             meta['usage']['output'] += int(usage.get('completion_tokens') or 0)
@@ -339,6 +376,7 @@ def generate_script(*, source_text: str, lang: str, mode: str, title: str,
 
     # ── Round 2: validator feedback revision (one shot) ──
     _progress('validate')
+    _raise_if_aborted()
     issues = validate_script(script, mode=mode, lang=lang,
                              source_text=source_text or '',
                              manifest_files=manifest_files)
@@ -363,10 +401,13 @@ def generate_script(*, source_text: str, lang: str, mode: str, title: str,
 
     # ── Round 3: critic semantic review (+1 critic-feedback revision) ──
     if critic_enabled() and not issues:
+        _raise_if_aborted()
         _progress('critic')
         critic_issues = _critic_review(lang=lang, script=script,
                                        figure_list_text=figure_list_text,
-                                       fenced_report=fenced, model=model)
+                                       fenced_report=fenced, model=model,
+                                       abort_check=abort_check,
+                                       max_429_attempts=max_429_attempts)
         if critic_issues:
             meta['revisions'] += 1
             _progress('revise', reason='critic_feedback', issues=len(critic_issues))

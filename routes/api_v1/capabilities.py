@@ -3,9 +3,8 @@
 Lets a headless client discover what THIS deployment supports without
 hardcoding. Inferred at request time from runtime state:
 
-  * **models**   — configured models (from persisted server config);
-                   capability flags (vision/thinking/embedding/image_gen/
-                   transcription/audio_chat/cheap)
+  * **models**   — intentionally empty on this public endpoint; owner model
+                   access is discovered through the scoped v2 authority
   * **tools**    — currently-registered tool definitions
   * **agents**   — list of agent endpoints (paper, translate, swarm, …)
   * **presets**  — supported preset/effort values
@@ -18,7 +17,7 @@ from __future__ import annotations
 
 from quart import Blueprint
 
-from lib.api_response import api_ok
+from lib.api_response import api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.ttl_cache import TTLCache
@@ -50,206 +49,6 @@ def _caps_cache_key() -> int:
     except Exception as e:
         logger.debug('[capabilities] cache-key resolve failed: %s', e)
         return 0
-
-
-def _catalog_models_summary(config: dict) -> list[dict]:
-    """Describe one logical model per row with explicit provider offerings.
-
-    Sources the normalized catalog (persisted ``model_catalog`` or an
-    in-memory migration from ``providers``). Compatibility fields on the top
-    level mirror the legacy per-(provider, model) row for the first offering;
-    the complete provider fan-out lives under ``offerings``.
-    """
-    from lib.model_catalog import provider_shells, resolve_catalog
-    from lib.model_info import resolved_context_profile
-    from lib.model_profiles import build_model_profile
-
-    catalog = resolve_catalog(config)
-    shells = provider_shells(config)
-    provider_names: dict[str, str] = {}
-    for shell in shells:
-        pid = str(shell.get('id') or shell.get('key')
-                  or shell.get('brand') or '')
-        if pid:
-            provider_names[pid] = str(shell.get('name') or pid)
-
-    out: list[dict] = []
-    for model_id in sorted(catalog['models'], key=str.casefold):
-        model = catalog['models'][model_id]
-        offerings = [
-            catalog['offerings'][oid]
-            for oid in catalog['routes'][model_id]['offering_ids']
-            if oid in catalog['offerings']
-        ]
-        caps = list(model.get('capabilities') or [])
-        first = offerings[0] if offerings else None
-        first_provider = (first or {}).get('provider_id') or ''
-        first_config = (first or {}).get('configuration') or {}
-
-        try:
-            context = resolved_context_profile(model_id, first_provider)
-        except Exception as exc:
-            logger.warning(
-                '[Capabilities] context profile failed model=%s provider=%s: %s',
-                model_id, first_provider or '-', exc,
-            )
-            context = {}
-        try:
-            # Catalog profiles may contain only the operator-authored fields.
-            # Always pass them through the profile boundary so the public API
-            # also carries derived routing fields and explicit compatibility
-            # identity for the selected top-level offering.
-            profile = build_model_profile(
-                model_id,
-                provider_id=first_provider,
-                model_entry={
-                    **dict(first_config),
-                    'model_id': model_id,
-                    'capability_profile': model.get('capability_profile'),
-                },
-            )
-        except Exception as exc:
-            logger.warning(
-                '[Capabilities] model profile failed model=%s provider=%s: %s',
-                model_id, first_provider or '-', exc,
-            )
-            profile = {}
-
-        aliases: list[str] = []
-        offering_rows: list[dict] = []
-        for offering in offerings:
-            cfg = offering.get('configuration') or {}
-            wire_ids = list(cfg.get('request_ids')
-                            or cfg.get('aliases') or [])
-            if not wire_ids:
-                wire_ids = [offering.get('model_id')]
-            for alias in (cfg.get('aliases') or []):
-                if alias not in aliases:
-                    aliases.append(alias)
-            try:
-                off_context = resolved_context_profile(
-                    offering.get('model_id'), offering.get('provider_id'))
-            except Exception as exc:
-                logger.warning(
-                    '[Capabilities] offering context failed model=%s provider=%s: %s',
-                    offering.get('model_id'), offering.get('provider_id'), exc,
-                )
-                off_context = {}
-            offering_rows.append({
-                'offering_id': offering.get('offering_id'),
-                'provider': offering.get('provider_id'),
-                'provider_id': offering.get('provider_id'),
-                'provider_name': provider_names.get(
-                    offering.get('provider_id'), offering.get('provider_id')),
-                'capabilities': list(cfg.get('capabilities') or ['text']),
-                'enabled': bool(offering.get('enabled')),
-                'pricing': cfg.get('pricing'),
-                'context': off_context,
-                'wire_ids': wire_ids,
-            })
-
-        row: dict = {
-            'id': model_id,
-            'enabled': bool(model.get('enabled')),
-            'provider': first_provider,
-            'provider_name': provider_names.get(first_provider,
-                                                first_provider),
-            'providers': [o['provider'] for o in offering_rows],
-            'capabilities': caps,
-            'thinking': 'thinking' in caps,
-            'vision': 'vision' in caps,
-            'embedding': 'embedding' in caps,
-            'image_gen': 'image_gen' in caps,
-            'transcription': 'transcription' in caps,
-            'audio_chat': 'audio_chat' in caps,
-            'cheap': 'cheap' in caps,
-            'aliases': aliases,
-            'context': context,
-            'capability_profile': profile,
-            'offerings': offering_rows,
-        }
-        if first is not None:
-            pricing = first_config.get('pricing')
-            row['rpm'] = first_config.get('rpm')
-            row['cost_per_1k'] = first_config.get('cost')
-            row['input_price_per_1m'] = (
-                pricing.get('input') if isinstance(pricing, dict) else None)
-            row['output_price_per_1m'] = (
-                pricing.get('output') if isinstance(pricing, dict) else None)
-        out.append(row)
-    return out
-
-
-def _legacy_models_summary() -> list[dict]:
-    """Legacy per-(provider, model) summary used when the catalog is absent."""
-    out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    try:
-        from lib import _SAVED_CONFIG  # type: ignore
-        providers = _SAVED_CONFIG.get('providers', []) or []
-    except Exception as e:
-        logger.debug('[capabilities] saved config unavailable: %s', e)
-        providers = []
-
-    for prov in providers:
-        if not isinstance(prov, dict):
-            continue
-        if not prov.get('enabled', True):
-            continue
-        prov_id = prov.get('id') or prov.get('brand') or 'unknown'
-        prov_name = prov.get('name') or prov_id
-        for m in prov.get('models', []) or []:
-            if not isinstance(m, dict):
-                continue
-            mid = m.get('model_id') or ''
-            identity = (str(prov_id), mid)
-            if not mid or identity in seen:
-                continue
-            seen.add(identity)
-            from lib.model_info import resolved_context_profile
-            from lib.model_profiles import build_model_profile
-            context = resolved_context_profile(mid, str(prov_id))
-            profile = build_model_profile(
-                mid, provider_id=str(prov_id), model_entry=m)
-            caps = list(m.get('capabilities') or [])
-            out.append({
-                'id': mid,
-                'provider': prov_id,
-                'provider_name': prov_name,
-                'capabilities': caps,
-                'thinking': 'thinking' in caps,
-                'vision': 'vision' in caps,
-                'embedding': 'embedding' in caps,
-                'image_gen': 'image_gen' in caps,
-                'transcription': 'transcription' in caps,
-                'audio_chat': 'audio_chat' in caps,
-                'cheap': 'cheap' in caps,
-                'aliases': list(m.get('aliases') or []),
-                'context': context,
-                'capability_profile': profile,
-                'rpm': m.get('rpm'),
-                'cost_per_1k': m.get('cost'),
-                'input_price_per_1m': m.get('input_price'),
-                'output_price_per_1m': m.get('output_price'),
-            })
-    return out
-
-
-def _models_summary() -> list[dict]:
-    """Describe configured models as logical rows with per-provider offerings.
-
-    Uses the normalized catalog when the saved config carries providers or a
-    persisted catalog, otherwise falls back to the legacy per-(provider, model)
-    projection so an empty/fresh config still yields ``[]``.
-    """
-    try:
-        from lib import _SAVED_CONFIG  # type: ignore
-        config = _SAVED_CONFIG if isinstance(_SAVED_CONFIG, dict) else {}
-        if config.get('providers') or config.get('model_catalog'):
-            return _catalog_models_summary(config)
-    except Exception as e:
-        logger.debug('[capabilities] catalog models summary failed: %s', e)
-    return _legacy_models_summary()
 
 
 def _tools_summary() -> list[dict]:
@@ -508,15 +307,6 @@ def _features() -> dict:
                 feats[f.json_key] = bool(getattr(_lib, f.env_key, f.default))
         except Exception as _pe:
             logger.debug('[capabilities] plugin flags unavailable: %s', _pe)
-        # Voice input (speech-to-text) — advertised as OFF when no
-        # transcription-capable slot is configured, so a foreign frontend
-        # hides the mic affordance rather than offering a feature that 503s.
-        try:
-            from lib.transcription import transcription_available
-            feats['voice_input'] = bool(transcription_available())
-        except Exception as _ve:
-            logger.debug('[capabilities] voice_input probe failed: %s', _ve)
-            feats['voice_input'] = False
         return feats
     except Exception as e:
         logger.debug('[capabilities] features lookup failed: %s', e)
@@ -562,7 +352,10 @@ def _build_capabilities() -> dict:
         'api_version': 'v1',
         'relay': _relay_summary(),
         'features': _features(),
-        'models': _models_summary(),
+        # This endpoint is public and therefore has no owner boundary. Never
+        # project machine/provider credentials or pretend one owner's model
+        # access is global. Authenticated clients read the v2 endpoint below.
+        'models': [],
         'tools': _tools_summary(),
         'extensibility': _extensibility_summary(),
         'agents': _agents_summary(),
@@ -575,11 +368,11 @@ def _build_capabilities() -> dict:
         # use ``chat_excluded_caps`` to filter model pickers; the dispatcher's
         # own ``issubset`` set is exposed for parity/debugging.
         'capability_taxonomy': taxonomy_payload(),
-        # Advertise the normalized model-catalog surface + its machine contract
-        # so a foreign frontend can edit logical models/offerings through CAS.
-        'model_catalog': {
-            'endpoint': '/api/v1/model-catalog',
-            'contract_version': 'tofu.model-catalog/v1',
+        # One owner-scoped CAS aggregate replaces model_catalog/v1 and
+        # providers[].models. Credentials remain metadata + secret references.
+        'model_routing': {
+            'endpoint': '/api/v1/model-routing',
+            'contract_version': 'tofu.model-routing/v2',
         },
         'compat': {
             'openai_chat_completions': '/v1/chat/completions',
@@ -637,17 +430,26 @@ async def system_prompt_default():
             has_real_tools=tools,
             is_code_context=project,
             tool_names=_preview_tool_names,
+            tool_search_available=tools,
             # Omit the trailing "Current date:" line — the date is injected
             # dynamically at request time, so baking it into the editor text
             # would freeze a stale date if the user saves it in replace mode.
             include_date=False,
+            # Environment renders as a per-turn tail block at runtime; keep
+            # the editor preview aligned with the real static prompt.
+            include_environment=False,
         )
     try:
         text = _PROMPT_CACHE.get_or_compute(('default', project, tools), _build)
     except Exception as e:
         logger.error('[capabilities] build default system prompt failed: %s',
                      e, exc_info=True)
-        return api_ok({'prompt': '', 'error': str(e)})
+        return api_internal_error(
+            e,
+            context='capabilities:system-prompt-default',
+            source='routes.api_v1.capabilities',
+            log_traceback=False,
+        )
     return api_ok({'prompt': text, 'project': project, 'tools': tools})
 
 
@@ -687,14 +489,21 @@ async def system_prompt_blocks():
             has_real_tools=tools,
             is_code_context=project,
             tool_names=_preview_tool_names,
+            tool_search_available=tools,
             include_date=False,  # date is dynamic; don't expose in editor
+            include_environment=False,  # tail block at runtime, not static
         )
     try:
         blocks = _PROMPT_CACHE.get_or_compute(('blocks', project, tools), _build)
     except Exception as e:
         logger.error('[capabilities] build system prompt blocks failed: %s',
                      e, exc_info=True)
-        return api_ok({'blocks': [], 'error': str(e)})
+        return api_internal_error(
+            e,
+            context='capabilities:system-prompt-blocks',
+            source='routes.api_v1.capabilities',
+            log_traceback=False,
+        )
     return api_ok({'blocks': blocks, 'project': project, 'tools': tools})
 
 

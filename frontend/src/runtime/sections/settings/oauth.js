@@ -25,6 +25,58 @@
 //  All browser-driven. Server only does: PKCE generation + token exchange.
 // ══════════════════════════════════════════════════════
 
+// ── Pending-flow registry + callback message gate ──
+// ANY window can postMessage us and any same-origin page can broadcast, so a
+// bare `type: 'oauth_callback'` check accepts injected codes/states from
+// unrelated pages. The relay page is served by OUR loopback relay on the
+// flow's callback port and echoes the flow's server-minted state, so a
+// legitimate callback is provable on two axes: sender origin and per-flow
+// state nonce. Both are recorded here when a login starts.
+var _oauthPendingFlows = {};
+
+var _OAUTH_RELAY_DEFAULT_PORTS = { claude: 54545, codex: 1455 };
+
+function _oauthRelayOrigins(provider, port) {
+  var p = Number(port) || _OAUTH_RELAY_DEFAULT_PORTS[provider] || 0;
+  if (!p) return [];
+  // The relay binds 127.0.0.1 but the registered redirect may say
+  // `localhost` — the popup's final origin can be either spelling.
+  return ['http://127.0.0.1:' + p, 'http://localhost:' + p];
+}
+
+function _oauthRecordPendingFlow(provider, port, state) {
+  _oauthPendingFlows[provider] = {
+    state: state || '',
+    origins: _oauthRelayOrigins(provider, port),
+  };
+}
+
+function _oauthClearPendingFlow(provider) {
+  delete _oauthPendingFlows[provider];
+}
+
+// origin === null marks the BroadcastChannel path: it is same-origin by
+// construction, so there is no sender origin to verify and the pending-flow
+// state check is the whole gate.
+function _oauthCallbackMessageAllowed(provider, state, origin) {
+  var pending = provider && _oauthPendingFlows[provider];
+  if (!pending) {
+    console.warn('[OAuth] Ignoring callback for %s — no pending flow', provider);
+    return false;
+  }
+  if (origin !== null && pending.origins.length &&
+      pending.origins.indexOf(origin) < 0) {
+    console.warn('[OAuth] Rejecting %s callback from unexpected origin: %s',
+      provider, origin);
+    return false;
+  }
+  if (pending.state && state !== pending.state) {
+    console.warn('[OAuth] Rejecting %s callback — state mismatch', provider);
+    return false;
+  }
+  return true;
+}
+
 // ── Global postMessage listener for OAuth callbacks ──
 // The relay page (served by the server's lightweight HTTP relay) sends
 // the authorization code back to us via postMessage or BroadcastChannel.
@@ -33,6 +85,7 @@
   window.addEventListener('message', function(event) {
     var data = event.data;
     if (!data || data.type !== 'oauth_callback') return;
+    if (!_oauthCallbackMessageAllowed(data.provider, data.state, event.origin || '')) return;
     console.log('[OAuth] Received code via postMessage from relay page for:', data.provider);
     _handleOAuthCode(data.provider, data.code, data.state);
   });
@@ -43,6 +96,7 @@
     bc.onmessage = function(event) {
       var data = event.data;
       if (!data || data.type !== 'oauth_callback') return;
+      if (!_oauthCallbackMessageAllowed(data.provider, data.state, null)) return;
       console.log('[OAuth] Received code via BroadcastChannel for:', data.provider);
       _handleOAuthCode(data.provider, data.code, data.state);
     };
@@ -118,13 +172,15 @@ function _storeBrowserToken(provider, tokenJson) {
 // Rejection Error carries `_statusCode` from the server's error body
 // (403 geo-block / 0 network-or-egress-unavailable / 400-401 auth rejection)
 // so _completeLogin can classify whether a browser retry makes sense.
-function _serverExchange(provider, code, state) {
+function _serverExchange(provider, code, state, manual) {
   var body = { provider: provider, code: code };
   if (state) body.state = state;
+  if (manual) body.manual = true;
   function _req(useGet) {
     if (useGet) {
       var qs = 'provider=' + encodeURIComponent(provider) + '&code=' + encodeURIComponent(code);
       if (state) qs += '&state=' + encodeURIComponent(state);
+      if (manual) qs += '&manual=1';
       return Api.oauth.callbackGet(qs);
     }
     return Api.oauth.callbackPost(body);
@@ -153,11 +209,15 @@ function _serverExchange(provider, code, state) {
 // 2. Browser exchange (B1) — only when the server failed with a geo-block
 //    (403) / network error / egress-unavailable (status_code 0), i.e. the
 //    code is provably still unconsumed.
-function _completeLogin(provider, code, state) {
+function _completeLogin(provider, code, state, opts) {
+  // manual: the user pasted the code/URL by hand — the only path allowed to
+  // arrive without the flow's state (raw code paste has no state channel).
+  var manual = !!(opts && opts.manual);
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   _updateOAuthCard(provider, { status: 'exchanging' });
 
   function _onSuccess(data) {
+    _oauthClearPendingFlow(provider);
     // Exchange/store responses historically returned `{ok, email}` without
     // the status projection fields consumed by _updateOAuthCard. Passing that
     // object through made a successful login repaint as "not logged in".
@@ -174,11 +234,13 @@ function _completeLogin(provider, code, state) {
     if (manualInput) manualInput.value = '';
   }
   function _onError(msg) {
+    _oauthClearPendingFlow(provider);
     _updateOAuthCard(provider, { status: 'error' });
     showAlert(t('settings.oauthAuthorizationFailed', { msg: msg }));
   }
 
   function _recoveryFailed(reason) {
+    _oauthClearPendingFlow(provider);
     console.error('[OAuth] Automatic recovery exhausted for %s: %s', provider, reason || 'unknown');
     _updateOAuthCard(provider, { status: 'error' });
     showAlert(t('settings.oauthAutomaticRecoveryFailed'));
@@ -200,7 +262,7 @@ function _completeLogin(provider, code, state) {
       .catch(function(e2) { _recoveryFailed((e2 && e2.message) || 'browser exchange failed'); });
   }
 
-  _serverExchange(provider, code, state)
+  _serverExchange(provider, code, state, manual)
     .then(function(data) {
       if (!data || data.error) { _tryBrowser((data && data.error) || 'empty result'); return; }
       _onSuccess(data);
@@ -266,6 +328,22 @@ function _oauthQuotaWindowLabel(minutes) {
   return t('quota.windowUnknown');
 }
 
+function _oauthQuotaResetLabel(timestamp) {
+  var seconds = Number(timestamp || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  var when = new Date(seconds * 1000);
+  if (!Number.isFinite(when.getTime())) return '';
+  try {
+    var locale = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh')
+      ? 'zh-CN' : 'en-US';
+    return new Intl.DateTimeFormat(locale, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    }).format(when);
+  } catch (_err) {
+    return '';
+  }
+}
+
 function _renderOAuthQuota(provider, quota, authenticated) {
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   var el = document.getElementById('oauth' + capProvider + 'Quota');
@@ -289,8 +367,14 @@ function _renderOAuthQuota(provider, quota, authenticated) {
     if (!win || !Number.isFinite(Number(win.remaining_percent))) return;
     var remaining = Math.max(0, Math.min(100, Number(win.remaining_percent)));
     var label = _oauthQuotaWindowLabel(win.window_minutes);
+    var resetTime = _oauthQuotaResetLabel(win.resets_at);
+    var resetCopy = resetTime
+      ? '<span class="oauth-quota-reset">' + escapeHtml(t(
+        'settings.oauthQuotaResetsAt', { time: resetTime })) + '</span>'
+      : '';
     rows.push('<div class="oauth-quota-row">' +
-      '<div class="oauth-quota-row-head"><span>' + escapeHtml(label) + '</span>' +
+      '<div class="oauth-quota-row-head"><span class="oauth-quota-window">' +
+      escapeHtml(label) + resetCopy + '</span>' +
       '<span>' + escapeHtml(t('settings.oauthQuotaRemaining', {
         remaining: _oauthQuotaPct(remaining) })) + '</span></div>' +
       '<div class="oauth-quota-track"><span style="width:' + remaining + '%"></span></div>' +
@@ -512,6 +596,12 @@ function _updateOAuthCard(provider, status) {
     // handling the exchange without asking the user for infrastructure work.
     if (status.exchange) {
       _oauthExchangeParams[provider] = status.exchange;
+      // Re-arm the callback gate too: the login response is gone after a
+      // reload, but the status projection still carries the flow's state
+      // nonce (the port falls back to the provider's registered default).
+      if (!_oauthPendingFlows[provider]) {
+        _oauthRecordPendingFlow(provider, 0, status.exchange.state || '');
+      }
     }
   } else if (status.status === 'error') {
     badge.textContent = t('settings.oauthError');
@@ -531,6 +621,7 @@ function _updateOAuthCard(provider, status) {
 
 function _oauthCancelAndRetry(provider) {
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
+  _oauthClearPendingFlow(provider);
   // Call logout to reset the server-side flow state
   Api.oauth.logoutPost(provider).catch(function() {});
   // Reset UI immediately
@@ -636,6 +727,11 @@ function _oauthLogin(provider, preferConsole) {
       // user's VPN) does the exchange itself. code_verifier is OUR PKCE
       // secret, so it's fine to keep it client-side for the duration.
       _oauthExchangeParams[provider] = data.exchange || null;
+      // Arm the callback gate for THIS flow before the popup can navigate
+      // back: only our relay origin echoing this flow's state gets through.
+      _oauthRecordPendingFlow(
+        provider, data.callback_port,
+        (data.exchange && data.exchange.state) || '');
 
       // Step 2: Open the auth URL in a popup window
       // For Claude: redirects to console.anthropic.com which shows code#state
@@ -883,6 +979,7 @@ async function _oauthLogout(provider) {
     })
     .then(function(r) { return r.json(); })
     .then(function() {
+      _oauthClearPendingFlow(provider);
       _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
       if (typeof _refreshSubscriptionModelCatalog === 'function') {
         return _refreshSubscriptionModelCatalog();
@@ -937,7 +1034,7 @@ function _oauthManualSubmit(provider) {
   }
 
   // Browser-first exchange (bypasses the server's geo-block), server fallback.
-  _completeLogin(provider, code, state);
+  _completeLogin(provider, code, state, { manual: true });
 }
 
 function _autoConfigureOAuthProvider(provider, status) {
@@ -952,11 +1049,6 @@ function _autoConfigureOAuthProvider(provider, status) {
   if (typeof _refreshSubscriptionModelCatalog === 'function') {
     _refreshSubscriptionModelCatalog().then(function(cfg) {
       if (!cfg) return;
-      var pid = provider === 'codex' ? 'oauth_codex' : 'oauth_claude';
-      var managed = (cfg.providers || []).find(function(p) { return p.id === pid; });
-      if (!managed || !(managed.models || []).length) {
-        showAlert(t('settings.oauthCatalogRepairFailed'));
-      }
       _loadOAuthStatus();
     }).catch(function(e) {
       console.warn('[OAuth] subscription catalogue refresh failed:', e);
@@ -964,4 +1056,3 @@ function _autoConfigureOAuthProvider(provider, status) {
     });
   }
 }
-

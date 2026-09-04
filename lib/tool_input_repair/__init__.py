@@ -4,8 +4,8 @@ Implements the validate-then-repair pattern from Awais 2025. The model's
 JSON-decoded ``arguments`` dict is walked once against the tool's declared
 JSON schema (extracted from ``lib/tools/*`` at startup); each declared
 parameter that fails its expected type is run through an ordered repair
-stack. **Valid inputs are never touched.** Only the exact failing paths
-are repaired.
+stack. **Schema-valid inputs are never touched.** Only the exact failing paths
+and one explicitly documented invalid-value sentinel are repaired.
 
 Repair patterns, applied in this order (ordering is load-bearing):
 
@@ -37,13 +37,18 @@ Repair patterns, applied in this order (ordering is load-bearing):
    wrapped). Runs FIRST inside the per-value stack but only AFTER the
    ``actual == expected`` early-return, so well-formed string fields
    (e.g. ``write_file`` ``content``) are never touched.
-
 Before the per-value type-walk, a separate **parameter-key alias** pass
 (:func:`_apply_param_aliases`) renames wrong-harness argument KEYS to their
 canonical schema keys (e.g. Claude Code's *Edit* keys
 ``{file_path, old_string, new_string}`` → ``apply_diff``'s
 ``{path, search, replace}``). This is what stops the empty ``File not found:``
 failure when the model calls the right tool with another harness's arg names.
+
+After key aliasing but before the per-value type-walk, one constrained-value
+repair handles ``zero_cursor_omission``: the optional, exclusive, 1-based
+``get_conversation.before`` cursor arrived as non-boolean zero, the common
+first-page sentinel, so only that key is deleted before the schema's
+``minimum: 1`` check. Negatives, fractions and other tools stay untouched.
 
 **Critical:** ``stringified_json`` MUST run before ``bare_string_to_array``
 — otherwise ``'["a","b"]'`` would be wrapped to ``['["a","b"]']``,

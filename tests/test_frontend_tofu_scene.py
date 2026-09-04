@@ -30,7 +30,7 @@ from tests._runtime_sections import runtime_section_path
 # The classic js tree is gone; sections materialize from the retained
 # runtime (lazy chunks are concatenated back into the virtual view).
 SCENE_JS = Path(runtime_section_path('tofu-scene.js'))
-APP_RUNTIME = REPO / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
+APP_RUNTIME = REPO / 'frontend' / 'src' / 'main.ts'
 VITE_MANIFEST = REPO / 'static' / 'vite' / 'manifest.json'
 INDEX = REPO / "index.html"
 CSS = REPO / "static" / "styles.css"
@@ -1078,8 +1078,8 @@ def test_registered_in_bundler_after_pet():
     render-blocking core; the runtime shell schedules both imports and the
     manifest must carry the emitted chunks."""
     shell = APP_RUNTIME.read_text(encoding='utf-8')
-    pet_import = "import('./scene/tofu-pet.js')"
-    scene_import = "import('./scene/tofu-scene.js')"
+    pet_import = "import('./runtime/scene/tofu-pet.js')"
+    scene_import = "import('./runtime/scene/tofu-scene.js')"
     assert pet_import in shell, 'tofu-pet.js lazy chunk not scheduled — silent no-op'
     assert scene_import in shell, 'tofu-scene.js lazy chunk not scheduled — silent no-op'
     assert shell.index(pet_import) < shell.index(scene_import), \

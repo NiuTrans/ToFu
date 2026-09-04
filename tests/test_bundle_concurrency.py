@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -14,6 +16,7 @@ from lib.vite_assets import VITE_MANIFEST, validate_vite_artifact
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'scripts/build_frontend.mjs'
+TEST_BUNDLER = ROOT / 'scripts/vite_test_bundle.mjs'
 
 
 def _source() -> str:
@@ -81,3 +84,33 @@ def test_server_import_and_request_paths_never_build_frontend_code():
     # The actionable validation error names ``npm run build:frontend``. Guard
     # behavior rather than banning that user-facing word from the source.
     assert 'scripts/build_frontend.mjs' not in source
+
+
+@pytest.mark.parametrize(
+    ('source', 'expected_success'),
+    [
+        ('export const answer: number = 42;', True),
+        ('export const = ;', False),
+    ],
+)
+def test_stdin_test_bundle_reclaims_its_virtual_entry(
+        tmp_path, source, expected_success):
+    temp_root = tmp_path / 'temp'
+    temp_root.mkdir()
+    output = tmp_path / 'bundle.mjs'
+    completed = subprocess.run(
+        [
+            'node', str(TEST_BUNDLER), '--bundle', '--format=esm',
+            '--platform=node', '--loader=ts', '--sourcefile=virtual.ts',
+            f'--outfile={output}',
+        ],
+        input=source,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, 'TMPDIR': str(temp_root)},
+    )
+
+    assert (completed.returncode == 0) is expected_success, completed.stderr
+    assert output.is_file() is expected_success
+    assert list(temp_root.iterdir()) == []

@@ -4,6 +4,8 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+_VERTICAL_PURPOSE_MAX_CHARS = 96
+
 
 def _vertical_domains() -> list[dict]:
     """Capability metadata for every currently-usable vertical domain.
@@ -31,16 +33,30 @@ def _vertical_enum(domains: list[dict]) -> list[str]:
 
 
 def _render_vertical_section(domains: list[dict]) -> str:
-    """Render the explicit-vertical prose from capability metadata."""
+    """Render a bounded explicit-vertical summary from capability metadata.
+
+    The main tool description already owns identifier rules and examples.
+    Repeating upstream ``when_to_use`` text plus three examples per domain made
+    every search-capable request pay for the same guidance twice.  Keep the
+    capability-specific purpose and partial-availability warning here, while
+    bounding upstream prose so runtime activation cannot inflate the schema
+    without limit.
+    """
     if not domains:
         return ''
-    lines = ["**Explicit vertical**: pass ``vertical='<domain>'`` to FORCE a "
-             "domain-level vertical search regardless of phrasing.\n"]
+    lines = [
+        "**Explicit vertical**: set ``vertical='<domain>'`` to force one "
+        "source."
+    ]
     for d in domains:
-        line = f"- ``{d['domain']}`` — {d.get('purpose', '')} {d.get('when_to_use', '')}".rstrip()
-        examples = d.get('examples') or []
-        if examples:
-            line += ' Examples: ' + '; '.join(f'"{e}"' for e in examples[:3]) + '.'
+        purpose = ' '.join(str(d.get('purpose') or '').split())
+        if len(purpose) > _VERTICAL_PURPOSE_MAX_CHARS:
+            purpose = (
+                purpose[:_VERTICAL_PURPOSE_MAX_CHARS - 1].rstrip() + '…'
+            )
+        line = f"- ``{d['domain']}``"
+        if purpose:
+            line += f" — {purpose}"
         # A partially-available domain must say so, or the model will ask it for
         # the capability that is switched off and come back empty-handed.
         gap = [u['type'] for u in (d.get('unavailable_types') or [])]
@@ -50,8 +66,6 @@ def _render_vertical_section(domains: list[dict]) -> str:
                      f"{d.get('credential_env') or 'a credential'} to be configured "
                      f"— do NOT use this domain for {', '.join(gap)} queries.")
         lines.append(line)
-    lines.append("- ``auto`` (default) → phrase-detect from query.")
-    lines.append("- ``off`` → web only, skip vertical entirely.")
     return '\n'.join(lines)
 
 
@@ -165,60 +179,55 @@ def build_fetch_url_tool() -> dict:
     filter_on = bool(getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True))
 
     description = (
-        "Fetch and read the full content of a remote URL (HTML, PDF, plain text) via HTTP/HTTPS. "
-        "Use this when the user pastes or mentions a web URL they want you to read, "
-        "or to deeply read pages you found promising from search results. "
-        "You can call this multiple times for different URLs. "
-        "When a page contains links to sub-pages (shown in '--- Page Links ---' section), "
-        "you SHOULD use fetch_url to follow the most relevant links and explore deeper.\n"
-        "IMPORTANT: This tool is for REMOTE web URLs only (http:// or https://). "
-        "Do NOT use for local file paths or file:// URIs — use read_files with an absolute path instead.\n"
-        "If the URL points to a file asset rather than a web page (e.g. an SVG, image, "
-        "archive, font or Office document), it is handled automatically: text-like assets "
-        "(SVG/JSON/source code) are returned inline, while binary assets are transferred to a "
-        "server staging path and the response tells you the path to open with read_files. "
-        "If the server lacks the site's login but the selected browser has it, bytes stream "
-        "from that authenticated browser session to server staging; they are never silently "
-        "saved in the browser device's Downloads folder. Server staging is temporary and is "
-        "NOT the user's requested final destination: when they named a project/path, perform "
-        "a separate authorized filesystem copy/move from the returned staging path, and only "
-        "claim success after that destination operation returns its own receipt.\n"
+        "Fetch and read one remote HTTP(S) URL (HTML, PDF, or text). Use it for "
+        "a user-provided URL or a promising search result; follow only relevant "
+        "returned Page Links. For local paths or file:// URIs use `read_files`. "
+        "Text-like assets (SVG/JSON/source) return inline; binary images, archives, "
+        "fonts, and Office files return a temporary server-staging path readable "
+        "with `read_files`. If server HTTP lacks the site's login but the selected "
+        "browser has it, bytes stream from that session to server staging, never "
+        "browser Downloads. Staging is not a requested final destination: copy/move "
+        "through an authorized filesystem tool and verify its own receipt before "
+        "claiming completion.\n"
     )
     if filter_on:
         description += (
-            "Large HTML pages (>~3000 chars) pass through a cheap LLM cleaner that "
-            "strips boilerplate (nav/ads/banners) and applies a relevance GATE keyed "
-            "on your 'reason': a page that doesn't help is dropped and returns 'Failed "
-            "to fetch'. 'reason' decides keep-vs-drop for the whole page (be accurate, "
-            "not narrow) — it never trims to matching parts or summarizes. PDFs, short "
-            "pages, and batch fetches are not filtered. Content is capped (large "
-            "pages/PDFs are truncated).\n"
+            "Large HTML (>~3000 chars) uses a cheap boilerplate cleaner plus a "
+            "relevance GATE keyed by `reason`. It keeps or drops the whole extracted "
+            "page (`Failed to fetch`); it does not select passages or summarize. Give "
+            "an accurate, non-narrow reason. PDFs, short pages, and batches bypass the "
+            "gate; large content is capped.\n"
         )
     else:
-        description += (
-            "Content is returned as raw extracted text (large pages/PDFs are truncated).\n"
-        )
+        description += "Returns raw extracted text; large pages/PDFs are capped.\n"
     description += (
-        "For MULTIPLE URLs in one call, provide a 'urls' array — each entry has "
-        "{url}. All fetches run concurrently and this is much faster than multiple "
-        "separate fetch_url calls. NOTE: when 'urls' is present the top-level 'url' "
-        "is IGNORED" + ("; 'reason' applies to single-URL mode only." if filter_on else ".")
+        "For multiple URLs use concurrent `urls:[{url}, ...]`; top-level `url` "
+        "is ignored" + (" and `reason` applies only to single-URL mode."
+                        if filter_on else ".")
     )
 
     properties = {
         "url": {
             "type": "string",
-            "description": "Complete remote URL starting with http:// or https://. Single-fetch mode; omit when using 'urls'."
+            "description": (
+                "Remote HTTP(S) URL for single mode; omit when using `urls`."
+            ),
         },
     }
     if filter_on:
         properties["reason"] = {
             "type": "string",
-            "description": "What you're looking for on this page (single-URL mode). Used as the keep-vs-drop relevance gate for large HTML pages — be accurate, not narrow (it decides whether the whole page is kept, not which parts)."
+            "description": (
+                "Accurate whole-page relevance goal for the large-HTML "
+                "keep/drop gate; single mode only."
+            ),
         }
     properties["urls"] = {
         "type": "array",
-        "description": "Array of URLs to fetch (for batch mode). All fetches run concurrently. Much faster than multiple separate fetch_url calls. Each element MUST be an object like {\"url\": \"...\"} — never a single bare string; for one URL use the top-level 'url' field instead.",
+        "description": (
+            "Concurrent batch of `{url}` objects, never bare strings; "
+            "top-level `url` is ignored."
+        ),
         "items": {
             "type": "object",
             "properties": {
@@ -241,7 +250,7 @@ def build_fetch_url_tool() -> dict:
     }
 
 
-def build_download_url_to_server_tool() -> dict:
+def build_browser_download_url_to_server_tool() -> dict:
     """Build the explicit remote-URL → server-staging contract.
 
     ``fetch_url`` remains the page-reading tool and may discover a binary
@@ -253,35 +262,58 @@ def build_download_url_to_server_tool() -> dict:
     return {
         "type": "function",
         "function": {
-            "name": "download_url_to_server",
+            "name": "browser_download_url_to_server",
             "description": (
-                "Download one http:// or https:// URL into temporary storage ON "
-                "THE TOFU SERVER. Use this whenever the user asks to download, "
-                "save, install, unzip, or copy a remote file on the server or into "
-                "a server-side project. The tool automatically tries safe server "
-                "HTTP first and, when the server cannot reach/authenticate the URL, "
-                "streams the response through the user's selected logged-in browser "
-                "to server staging. Cookies remain inside Chrome: NEVER call "
-                "browser_get_cookies and replay them with curl/wget. This tool does "
-                "not use Chrome Downloads and never reports a device-local file as a "
-                "server file. Success returns location=server_staging, an absolute "
-                "path, byte size, SHA-256, and transport. Staging is temporary; if "
-                "the user named a final project path, perform a separate authorized "
-                "filesystem copy/move and verify that destination before claiming the "
-                "whole task is complete."
+                "Stage one remote file ON THE TOFU SERVER for download/save/install/"
+                "unzip/export/copy. Supply its exact HTTP(S) url, or text/selector "
+                "(+ optional tab_id) from an open page to recover the full signed link. "
+                "It tries bounded server HTTP first, then the selected logged-in browser; "
+                "cookies stay in Chrome—never use browser_get_cookies, curl/wget, or "
+                "browser Downloads, and never call a device-local file server-side. "
+                "Success: location=server_staging, absolute path, byte size, SHA-256, "
+                "transport. Staging is temporary; a named final project path needs a "
+                "separately authorized copy/move and verified destination."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": (
-                            "Exact remote file URL starting with http:// or https://. "
-                            "Signed query parameters are accepted and are not logged."
-                        ),
+                        "minLength": 1,
+                        "maxLength": 8192,
+                        "description": "Exact HTTP(S) file URL; keep its signed query.",
+                    },
+                    "tab_id": {
+                        "type": "integer",
+                        "description": "Open-page tab; omit for the working tab.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500,
+                        "description": "Visible link/button text.",
+                    },
+                    "selector": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2048,
+                        "description": "Exact link CSS selector; wins over text.",
                     },
                 },
-                "required": ["url"],
+                "anyOf": [
+                    {
+                        "properties": {"url": {"type": "string"}},
+                        "required": ["url"],
+                    },
+                    {
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                    },
+                    {
+                        "properties": {"selector": {"type": "string"}},
+                        "required": ["selector"],
+                    },
+                ],
                 "additionalProperties": False,
             },
         },
@@ -291,16 +323,14 @@ def build_download_url_to_server_tool() -> dict:
 # Boot-time snapshot for static capability listing (routes/api_v1/capabilities.py).
 # Per-request consumers must call build_fetch_url_tool() instead — see its docstring.
 FETCH_URL_TOOL = build_fetch_url_tool()
-DOWNLOAD_URL_TO_SERVER_TOOL = build_download_url_to_server_tool()
+BROWSER_DOWNLOAD_URL_TO_SERVER_TOOL = build_browser_download_url_to_server_tool()
+# Python compatibility only. Both aliases build/point at the single canonical
+# browser-prefixed wire schema; the legacy function name is never exposed.
+def build_download_url_to_server_tool() -> dict:
+    return build_browser_download_url_to_server_tool()
 
-__all__ = [
-    'build_search_tool', 'build_fetch_url_tool',
-    'build_download_url_to_server_tool', 'FETCH_URL_TOOL',
-    'DOWNLOAD_URL_TO_SERVER_TOOL',
-]
-# Boot-time snapshot for static capability listing (routes/api_v1/capabilities.py).
-# Per-request consumers must call build_fetch_url_tool() instead — see its docstring.
-FETCH_URL_TOOL = build_fetch_url_tool()
+
+DOWNLOAD_URL_TO_SERVER_TOOL = BROWSER_DOWNLOAD_URL_TO_SERVER_TOOL
 
 
 def build_update_search_settings_tool() -> dict:
@@ -317,46 +347,34 @@ def build_update_search_settings_tool() -> dict:
         "function": {
             "name": "update_search_settings",
             "description": (
-                "Read or adjust the SERVER-WIDE web search & fetch pipeline settings "
-                "(the same knobs shown in Settings → Search). Changes apply globally, "
-                "persist across restarts, and take effect immediately (hot reload) — "
-                "they affect every conversation, so change them only when the user "
-                "asks or when search/fetch results are demonstrably hurt by the current "
-                "values (e.g. repeated fetch timeouts, too-shallow results).\n\n"
-                "Call with NO arguments to read the current effective values first — "
-                "always do this before proposing a change.\n\n"
-                "Adjustable knobs (all optional; integers are clamped to safe ranges):\n"
-                "- profile (fast/balanced/deep): 3 pages/30k/no filter; "
-                "6 pages/60k/gate; or 10 pages/100k/gate+link deepening.\n"
-                "- overrides: optional profile-key overrides; legacy concrete knobs "
-                "below remain accepted and are stored as overrides.\n"
-                "- fetch_top_n (1-20): pages auto-fetched per search. Higher = more "
-                "complete, slower, more tokens.\n"
-                "- fetch_timeout (5-120s): per-page fetch timeout.\n"
-                "- max_chars_search / max_chars_direct: content caps for search-result "
-                "pages / direct fetch_url calls.\n"
-                "- max_chars_pdf (0 = unlimited): PDF text cap.\n"
-                "- max_download_mb (>0, MB): max download size. Use MB, NOT bytes.\n"
-                "- llm_content_filter (boolean): when ON, a cheap LLM strips nav/ads "
-                "from fetched pages (better quality, slower); OFF returns raw text "
-                "(faster, cheaper, noisier).\n"
-                "- block_domain / unblock_domain: add/remove a domain in the fetch "
-                "blocklist (e.g. block_domain='pinterest.com' when results keep "
-                "surfacing useless pages from one host).\n\n"
-                "The result reports what was applied, what was rejected (with reasons), "
-                "env-var overrides that shadow a saved change, and the new effective "
-                "values. Report the outcome to the user in plain language."
+                "Read or change SERVER-WIDE web search/fetch settings. No arguments is "
+                "a PURE READ: always inspect current effective values before proposing "
+                "a change. Writes persist across restarts, hot-reload immediately, and "
+                "affect every conversation; write only when the user asks or repeated "
+                "results prove current values harmful. Integers clamp to safe ranges.\n"
+                "Profiles: fast=3 pages/30k chars/no LLM filter; balanced=6/60k/filter; "
+                "deep=10/100k/filter+link deepening. overrides customizes a profile; "
+                "legacy concrete knobs remain accepted and are stored as overrides.\n"
+                "Trade-offs: fetch_top_n adds coverage, latency, and tokens; "
+                "fetch_timeout is seconds; max_chars_* cap search/direct/PDF text "
+                "(PDF 0=unlimited); max_download_mb is MB, not bytes; "
+                "llm_content_filter=true uses a slower selective LLM gate, false uses "
+                "faster/cheaper lexical ranking. block_domain/unblock_domain edit the "
+                "normalized fetch blocklist.\n"
+                "The result reports applied and rejected values with reasons, env "
+                "overrides shadowing saved values, and the new effective state. Explain "
+                "the outcome to the user."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "profile": {
                         "type": "string", "enum": ["fast", "balanced", "deep"],
-                        "description": "Search depth preset."
+                        "description": "Depth preset."
                     },
                     "overrides": {
                         "type": "object",
-                        "description": "Optional custom overrides on top of the preset.",
+                        "description": "Custom values layered on the preset.",
                         "properties": {
                             "fetch_top_n": {"type": "integer"},
                             "max_chars_search": {"type": "integer"},
@@ -366,7 +384,7 @@ def build_update_search_settings_tool() -> dict:
                     },
                     "fetch_top_n": {
                         "type": "integer",
-                        "description": "Pages auto-fetched per search (1-20)."
+                        "description": "Pages fetched per search (1-20)."
                     },
                     "fetch_timeout": {
                         "type": "integer",
@@ -374,27 +392,27 @@ def build_update_search_settings_tool() -> dict:
                     },
                     "max_chars_search": {
                         "type": "integer",
-                        "description": "Max characters kept from a search-result page (1000-500000)."
+                        "description": "Search-page character cap (1000-500000)."
                     },
                     "max_chars_direct": {
                         "type": "integer",
-                        "description": "Max characters kept from a direct fetch_url page (1000-1000000)."
+                        "description": "Direct-fetch character cap (1000-1000000)."
                     },
                     "max_chars_pdf": {
                         "type": "integer",
-                        "description": "Max characters kept from a PDF (0 = unlimited, up to 2000000)."
+                        "description": "PDF character cap (0=unlimited; max 2000000)."
                     },
                     "max_download_mb": {
                         "type": "integer",
-                        "description": "Max download size in MEGABYTES (>0, ≤500) — converted to bytes server-side."
+                        "description": "Download cap in MB (>0, max 500), not bytes."
                     },
                     "llm_content_filter": {
                         "type": "boolean",
-                        "description": "ON = LLM strips boilerplate from fetched pages; OFF = raw text (faster)."
+                        "description": "true=LLM relevance gate; false=local lexical ranking."
                     },
                     "block_domain": {
                         "type": "string",
-                        "description": "Add a domain to the fetch blocklist (normalized: scheme/www/path stripped)."
+                        "description": "Block a normalized fetch domain."
                     },
                     "unblock_domain": {
                         "type": "string",
@@ -408,6 +426,8 @@ def build_update_search_settings_tool() -> dict:
 
 __all__ = [
     'build_search_tool', 'build_fetch_url_tool',
+    'build_browser_download_url_to_server_tool',
     'build_download_url_to_server_tool', 'FETCH_URL_TOOL',
-    'DOWNLOAD_URL_TO_SERVER_TOOL', 'build_update_search_settings_tool',
+    'BROWSER_DOWNLOAD_URL_TO_SERVER_TOOL', 'DOWNLOAD_URL_TO_SERVER_TOOL',
+    'build_update_search_settings_tool',
 ]

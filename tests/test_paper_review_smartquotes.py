@@ -26,9 +26,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+import pytest  # noqa: E402
 
 TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
+pytestmark = pytest.mark.unit
 
 LSQUO, RSQUO = '\u2018', '\u2019'
 LDQUO, RDQUO = '\u201c', '\u201d'
@@ -105,6 +107,7 @@ def _run(lang_key, ui_lang, phash):
         task = _new_report_task('t_' + phash[:6], phash, lang_key, None,
                                 client_title='P', ui_lang=ui_lang,
                                 config={
+                                    'responses': {'promptProfile': 'full'},
                                     'paperInsightEnabled': False,
                                     'paperCheckpointsEnabled': False,
                                 }, user_id=TEST_OWNER_USER_ID)

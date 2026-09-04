@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import hmac
 import json
 import re
 import time
@@ -29,7 +30,14 @@ from lib.conversation_sync.service import (
     ConversationCursorError,
     ConversationSyncNotFound,
     ConversationSyncService,
+    ConversationTurnPageStale,
 )
+from lib.conversation_sync.turn_images import (
+    ConversationTurnImageNotFound,
+    ConversationTurnImageStale,
+    turn_image_owner_scope,
+)
+from lib.conversation_sync.snapshot_admission import snapshot_admission
 from lib.conversation_sync.validation import ContractViolation, decode
 from lib.log import get_logger
 from lib.observability import record_stream_admission
@@ -37,6 +45,8 @@ from lib.request_parser import parse_body
 from lib.storage.errors import StorageError
 from lib.tasks_pkg.manager.runtime import push_withheld_for_conv
 from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
+from lib.turn_lifecycle import cancel_queued_turn_pair
+from lib.turn_image_transport import MAX_TURN_IMAGES
 from routes.api_v1.auth import (
     current_auth,
     request_user_id as _request_user_id,
@@ -52,11 +62,142 @@ conversation_sync_v3_bp = Blueprint("conversation_sync_v3", __name__)
 _service = ConversationSyncService(SidecarConversationSyncRepository())
 logger = get_logger(__name__)
 _STREAM_CLIENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$")
+_BROWSER_PAGE_REQUEST_ID = re.compile(r"^([a-z0-9]{6})-[1-9][0-9]{0,11}$")
 _MAX_STREAM_GENERATION = 2_147_483_647
+_SNAPSHOT_SEGMENT_PAYLOADS = frozenset({"full", "refs"})
+_SNAPSHOT_TURN_WINDOWS = {"full": None, "tail-96": 96}
+_MAX_TURN_HISTORY_ORDINAL = 2**63 - 1
+_MAX_TURN_HISTORY_PAGE = 256
+_OWNER_CACHE_SCOPE = re.compile(r"^[0-9a-f]{24}$")
 
 
 def _validate_body(schema_name: str) -> None:
     decode(schema_name, parse_body())
+
+
+def _snapshot_segment_payload() -> str:
+    """Decode the optional snapshot representation selector exactly once."""
+    values = request.args.getlist("segmentPayload")
+    if not values:
+        return "full"
+    if len(values) != 1 or values[0] not in _SNAPSHOT_SEGMENT_PAYLOADS:
+        raise ValueError("Invalid conversation segment payload")
+    return values[0]
+
+
+def _snapshot_turn_limit() -> int | None:
+    """Decode the contract-owned browser tail-window profile."""
+    values = request.args.getlist("turnWindow")
+    if not values:
+        return None
+    if len(values) != 1 or values[0] not in _SNAPSHOT_TURN_WINDOWS:
+        raise ValueError("Invalid conversation snapshot turn window")
+    return _SNAPSHOT_TURN_WINDOWS[values[0]]
+
+
+def _snapshot_artifact_hint() -> bool:
+    """Opt into the bounded artifact-existence projection exactly once."""
+    values = request.args.getlist("artifactHint")
+    if not values:
+        return False
+    if len(values) != 1 or values[0] != "has-any":
+        raise ValueError("Invalid conversation snapshot artifact hint")
+    return True
+
+
+def _turn_history_page_request() -> tuple[str, int, int | None, int, str]:
+    """Decode one strict, bounded lane-history query."""
+    lane_values = request.args.getlist("laneId")
+    if len(lane_values) != 1:
+        raise ValueError("A conversation history laneId is required")
+    lane_id = lane_values[0]
+    if not lane_id or lane_id != lane_id.strip() or len(lane_id) > 128:
+        raise ValueError("Invalid conversation history laneId")
+
+    sync_values = request.args.getlist("syncSeq")
+    if len(sync_values) != 1:
+        raise ValueError("A conversation history syncSeq is required")
+    try:
+        sync_sequence = int(sync_values[0])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid conversation history syncSeq") from exc
+    if not 0 <= sync_sequence <= _MAX_TURN_HISTORY_ORDINAL:
+        raise ValueError("Invalid conversation history syncSeq")
+
+    before_values = request.args.getlist("beforeOrdinal")
+    if len(before_values) > 1:
+        raise ValueError("Invalid conversation history beforeOrdinal")
+    before_ordinal: int | None = None
+    if before_values:
+        try:
+            before_ordinal = int(before_values[0])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "Invalid conversation history beforeOrdinal"
+            ) from exc
+        if not 0 <= before_ordinal <= _MAX_TURN_HISTORY_ORDINAL:
+            raise ValueError("Invalid conversation history beforeOrdinal")
+
+    limit_values = request.args.getlist("limit")
+    if len(limit_values) > 1:
+        raise ValueError("Invalid conversation history limit")
+    try:
+        limit = int(limit_values[0]) if limit_values else 64
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid conversation history limit") from exc
+    if not 1 <= limit <= _MAX_TURN_HISTORY_PAGE:
+        raise ValueError("Invalid conversation history limit")
+    return (
+        lane_id,
+        sync_sequence,
+        before_ordinal,
+        limit,
+        _snapshot_segment_payload(),
+    )
+
+
+def _turn_image_request(
+    conversation_id: str,
+    turn_id: str,
+    image_index: int,
+) -> tuple[int, str]:
+    """Decode the contract-owned immutable image fence and cache scope."""
+    if (
+        not conversation_id
+        or len(conversation_id) > 256
+        or not turn_id
+        or len(turn_id) > 128
+        or not 0 <= image_index < MAX_TURN_IMAGES
+    ):
+        raise ValueError("Invalid conversation Turn image identity")
+    revision_values = request.args.getlist("projectionRevision")
+    if len(revision_values) != 1:
+        raise ValueError("A Turn image projectionRevision is required")
+    try:
+        projection_revision = int(revision_values[0])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid Turn image projectionRevision") from exc
+    if not 1 <= projection_revision <= _MAX_TURN_HISTORY_ORDINAL:
+        raise ValueError("Invalid Turn image projectionRevision")
+    owner_scope_values = request.args.getlist("ownerScope")
+    if (
+        len(owner_scope_values) != 1
+        or _OWNER_CACHE_SCOPE.fullmatch(owner_scope_values[0]) is None
+    ):
+        raise ValueError("A valid Turn image ownerScope is required")
+    return projection_revision, owner_scope_values[0]
+
+
+def _snapshot_browser_page_id() -> str:
+    """Return the stable page prefix from the generated browser transport.
+
+    Headless callers and arbitrary request IDs remain ungated. This boundary
+    is a cooperative stale-browser circuit breaker, not an authorization or
+    abuse-prevention identity.
+    """
+    request_id = str(request.headers.get("X-Request-ID") or "").strip()
+    match = _BROWSER_PAGE_REQUEST_ID.fullmatch(request_id)
+    return match.group(1) if match is not None else ""
 
 
 def _command_response(
@@ -136,17 +277,150 @@ def _stream_stop_response(reason: str) -> Response:
 async def conversation_sync_snapshot(conversation_id: str):
     user_id = _request_user_id()
     try:
+        segment_payload = _snapshot_segment_payload()
+        turn_limit = _snapshot_turn_limit()
+        include_artifact_hint = _snapshot_artifact_hint()
+    except ValueError as exc:
+        return api_bad_request(str(exc))
+    page_id = _snapshot_browser_page_id()
+    admission = None
+    if page_id:
+        admission_view = (
+            segment_payload
+            if turn_limit is None
+            else f"{segment_payload}:tail-{turn_limit}"
+        )
+        if include_artifact_hint:
+            admission_view += ":artifact-hint"
+        admission = snapshot_admission.enter(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            page_id=page_id,
+            representation=admission_view,
+        )
+        if not admission.allowed:
+            response, status = api_error(
+                "snapshot_in_flight",
+                status=429,
+                retryAfterMs=250,
+            )
+            response.headers["Retry-After"] = "1"
+            response.headers["Cache-Control"] = "no-store"
+            return response, status
+    try:
         # Read-side wedge signal: the live task's withheld pushes can never
         # carry it (the write path is what is broken), so the snapshot does.
         withheld = push_withheld_for_conv(conversation_id) is not None
         snapshot = await asyncio.to_thread(
-            _service.snapshot, conversation_id, user_id, push_withheld=withheld)
+            _service.snapshot,
+            conversation_id,
+            user_id,
+            push_withheld=withheld,
+            segment_payload=segment_payload,
+            turn_limit=turn_limit,
+            include_artifact_hint=include_artifact_hint,
+        )
         return api_prevalidated_payload(snapshot)
     except ConversationSyncNotFound as exc:
         return api_not_found(str(exc))
     except StorageError as exc:
         return storage_failure_response(
             exc, operation="conversation.sync.snapshot")
+    finally:
+        if admission is not None:
+            snapshot_admission.release(admission.lease)
+
+
+@conversation_sync_v3_bp.route(
+    "/api/v3/conversations/<conversation_id>/turns/history", methods=["GET"]
+)
+@require_scope("chat")
+async def conversation_turn_history_page(conversation_id: str):
+    user_id = _request_user_id()
+    try:
+        lane_id, sync_sequence, before_ordinal, limit, segment_payload = (
+            _turn_history_page_request()
+        )
+        page = await asyncio.to_thread(
+            _service.turn_page,
+            conversation_id,
+            user_id,
+            lane_id=lane_id,
+            expected_sync_sequence=sync_sequence,
+            before_ordinal=before_ordinal,
+            limit=limit,
+            segment_payload=segment_payload,
+        )
+        return api_prevalidated_payload(page)
+    except ValueError as exc:
+        return api_bad_request(str(exc))
+    except ConversationSyncNotFound as exc:
+        return api_not_found(str(exc))
+    except ConversationTurnPageStale as exc:
+        return api_error(
+            "history_page_stale",
+            status=409,
+            currentSyncSeq=exc.current_sync_sequence,
+        )
+    except StorageError as exc:
+        return storage_failure_response(
+            exc, operation="conversation.sync.turn_page"
+        )
+
+
+@conversation_sync_v3_bp.route(
+    "/api/v3/conversations/<conversation_id>/turns/<turn_id>/images/"
+    "<int:image_index>",
+    methods=["GET"],
+)
+@require_scope("chat")
+async def conversation_turn_image(
+    conversation_id: str,
+    turn_id: str,
+    image_index: int,
+):
+    user_id = _request_user_id()
+    try:
+        projection_revision, supplied_owner_scope = _turn_image_request(
+            conversation_id, turn_id, image_index,
+        )
+    except ValueError as exc:
+        return api_bad_request(str(exc))
+    expected_owner_scope = turn_image_owner_scope(user_id, conversation_id)
+    if not hmac.compare_digest(supplied_owner_scope, expected_owner_scope):
+        return api_not_found("Conversation Turn image not found")
+    try:
+        image = await asyncio.to_thread(
+            _service.turn_image,
+            conversation_id,
+            turn_id,
+            user_id,
+            projection_revision=projection_revision,
+            image_index=image_index,
+        )
+    except ConversationTurnImageNotFound as exc:
+        return api_not_found(str(exc))
+    except ConversationTurnImageStale as exc:
+        return api_error(
+            "turn_image_stale",
+            status=409,
+            currentProjectionRevision=exc.current_projection_revision,
+        )
+    except StorageError as exc:
+        return storage_failure_response(
+            exc, operation="conversation.sync.turn_image"
+        )
+
+    if request.if_none_match.contains(image.digest):
+        response = Response(status=304)
+    else:
+        response = Response(image.content, mimetype=image.media_type)
+    response.set_etag(image.digest)
+    response.headers["Cache-Control"] = (
+        "private, max-age=31536000, immutable"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @conversation_sync_v3_bp.route(
@@ -334,6 +608,22 @@ def conversation_turn_create_v3(conversation_id: str):
 
 
 @conversation_sync_v3_bp.route(
+    "/api/v3/conversations/<conversation_id>/queue/<queue_id>",
+    methods=["DELETE"],
+)
+@require_scope("chat")
+def conversation_queue_cancel_v3(conversation_id: str, queue_id: str):
+    if not queue_id or len(queue_id) > 256:
+        return api_bad_request("Invalid queue identity")
+    return _command_response(
+        "turn.queue.cancel",
+        lambda: CommandOutcome(cancel_queued_turn_pair(
+            conversation_id, queue_id, user_id=_request_user_id(),
+        )),
+    )
+
+
+@conversation_sync_v3_bp.route(
     "/api/v3/conversations/<conversation_id>/turns/settled", methods=["POST"]
 )
 @require_scope("chat")
@@ -365,6 +655,25 @@ def conversation_turn_update_v3(conversation_id: str, turn_id: str):
         "turn.patch",
         lambda: conversation_turn_commands.update_turn(
             conversation_id, turn_id, user_id, body),
+    )
+
+
+@conversation_sync_v3_bp.route(
+    "/api/v3/conversations/<conversation_id>/turns/<turn_id>/perception",
+    methods=["POST"],
+)
+@require_scope("chat")
+def conversation_turn_perception_record_v3(
+    conversation_id: str, turn_id: str,
+):
+    try:
+        _validate_body("RecordPerceptionRequest")
+    except ContractViolation as exc:
+        return api_bad_request(str(exc), violations=list(exc.violations))
+    return _command_response(
+        "turn.perception.record",
+        lambda: conversation_turn_commands.record_perception(
+            conversation_id, turn_id, _request_user_id(), parse_body()),
     )
 
 

@@ -1,7 +1,6 @@
 """Paper routes — section-deepening task and paper notes CRUD endpoints."""
 
 import asyncio
-import json
 import time
 import uuid
 
@@ -128,24 +127,6 @@ async def start_deepen_task():
 # ══════════════════════════════════════════════════════
 #  Reader margin notes (reading-xp P4)
 # ══════════════════════════════════════════════════════
-
-
-def _note_row_to_dict(row):
-    """Project a legacy row through the retained paper-note wire contract."""
-    try:
-        anchor = json.loads(row["anchor"] or "{}")
-    except (json.JSONDecodeError, TypeError) as error:
-        logger.debug("[Paper] note anchor JSON unreadable, using {}: %s", error)
-        anchor = {}
-    return PaperNote(
-        note_id=str(row["id"]),
-        paper_hash=str(row["paper_hash"]),
-        lang=str(row["lang"]),
-        anchor=anchor,
-        note=str(row["note"]),
-        created_at=int(row["created_at"] or 0),
-        updated_at=int(row["updated_at"] or 0),
-    ).to_projection()
 
 
 @api_v1_paper_bp.route("/api/v1/paper/notes", methods=["GET"])

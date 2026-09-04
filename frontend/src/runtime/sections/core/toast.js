@@ -185,8 +185,8 @@ function showToast(iconOrMsg, titleOrType, detail, durationMs, opts) {
 /**
  * _ephemeralToast — a minimal "append a styled div to a scoped parent, fade it
  * out after N ms" toast. This is the shared skeleton behind the bespoke
- * scoped toasts (_showInstallToast in the memory modal card, _skillsToast on
- * document.body) that deliberately do NOT use the rich global showToast() —
+ * scoped install toasts in the typed Memory/Skills feature chunks that
+ * deliberately do NOT use the rich global showToast() —
  * they need their OWN parent + CSS class (in-modal placement, distinct
  * styling). De-dups the create/append/fade-remove plumbing while leaving each
  * caller its parent, class and duration.
@@ -218,4 +218,3 @@ if (typeof window !== 'undefined') {
   runtimeScope.showToast = showToast;
   runtimeScope._ephemeralToast = _ephemeralToast;
 }
-

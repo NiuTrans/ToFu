@@ -463,6 +463,7 @@ const ExportImages = (() => {
     }
   }
 
+  let _previewModalEscHandler = null;
   function _showPreviewModal(canvases) {
     // Remove any existing modal
     const existing = document.getElementById('export-preview-modal');
@@ -470,6 +471,10 @@ const ExportImages = (() => {
       // Revoke any old blob URLs to free memory
       existing.querySelectorAll('img[src^="blob:"]').forEach(img => URL.revokeObjectURL(img.src));
       existing.remove();
+    }
+    if (_previewModalEscHandler) {
+      document.removeEventListener('keydown', _previewModalEscHandler);
+      _previewModalEscHandler = null;
     }
 
     const overlay = document.createElement('div');
@@ -483,6 +488,7 @@ const ExportImages = (() => {
       blobUrls.length = 0;
       overlay.remove();
       document.removeEventListener('keydown', escHandler);
+      if (_previewModalEscHandler === escHandler) _previewModalEscHandler = null;
     }
 
     overlay.onclick = (e) => {
@@ -574,6 +580,7 @@ const ExportImages = (() => {
     const escHandler = (e) => {
       if (e.key === 'Escape') _cleanup();
     };
+    _previewModalEscHandler = escHandler;
     document.addEventListener('keydown', escHandler);
   }
 

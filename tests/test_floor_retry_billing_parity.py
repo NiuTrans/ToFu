@@ -253,6 +253,8 @@ def test_parity_primary_path_recovered_resend(monkeypatch, pinned_pricing):
     assert len(api_rounds) == 2, (
         f'api_rounds must record BOTH billed requests; got {len(api_rounds)}: '
         f'{[r.get("tag") for r in api_rounds]}')
+    assert api_rounds[0].get('responseAuthoring', True) is True
+    assert api_rounds[1]['responseAuthoring'] is False
 
     reported = compute_cost(accumulated, model_id='aws.claude-opus-4.8')
     assert reported is not None

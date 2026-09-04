@@ -1,18 +1,1865 @@
 {
-  "version": 1,
+  "version": 2,
   "responsibility": "Ordered authoring sources for the generated retained browser runtime.",
   "output": "frontend/src/runtime/app-runtime.js",
   "prelude": "_prelude.js",
   "epilogue": "_epilogue.js",
+  "lazyBundles": [
+    {
+      "name": "project-brain",
+      "output": "frontend/src/runtime/project-brain-runtime.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "_i18nLang",
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "Icon",
+          "kind": "function"
+        },
+        {
+          "name": "getActiveConv",
+          "kind": "function"
+        },
+        {
+          "name": "pushSubscribe",
+          "kind": "function"
+        },
+        {
+          "name": "pushUnsubscribe",
+          "kind": "function"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "project-brain.js",
+          "path": "project-brain.js"
+        },
+        {
+          "source": "project-brain-integration.js",
+          "path": "project-brain-integration.js"
+        }
+      ],
+      "runtimeExports": [],
+      "runtimeBindings": []
+    },
+    {
+      "name": "paper-reader-presenters",
+      "output": "frontend/src/runtime/paper-reader-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "_i18nLang",
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "Icon",
+          "kind": "function"
+        },
+        {
+          "name": "debugLog",
+          "kind": "function"
+        },
+        {
+          "name": "pushSubscribe",
+          "kind": "function"
+        },
+        {
+          "name": "pushUnsubscribe",
+          "kind": "function"
+        },
+        {
+          "name": "renderMarkdown",
+          "kind": "function"
+        },
+        {
+          "name": "renderToolRoundsHTML",
+          "kind": "function"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        },
+        {
+          "name": "_openImageFullscreen",
+          "kind": "function"
+        },
+        {
+          "name": "normalizeErrorEnvelope",
+          "kind": "function"
+        },
+        {
+          "name": "errorEnvelopeMessage",
+          "kind": "function"
+        },
+        {
+          "name": "prefersReducedMotion",
+          "kind": "function"
+        },
+        {
+          "name": "formatCny",
+          "kind": "function"
+        },
+        {
+          "name": "renderSegmentTimelineHTML",
+          "kind": "function"
+        },
+        {
+          "name": "_compareModelsByDisplayName",
+          "kind": "function"
+        },
+        {
+          "name": "_modelShortName",
+          "kind": "function"
+        },
+        {
+          "name": "_paperModelPickerState",
+          "kind": "function"
+        },
+        {
+          "name": "apiUrl",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "paper/report.js",
+          "path": "paper/report.js"
+        },
+        {
+          "source": "paper-reader.js",
+          "path": "paper-reader.js"
+        }
+      ],
+      "runtimeExports": [],
+      "runtimeBindings": []
+    },
+    {
+      "name": "paper-media-presenters",
+      "output": "frontend/src/runtime/paper-media-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        },
+        {
+          "source": "frontend/src/features/paper/media-model-ui.ts",
+          "bindings": [
+            "modelFieldHtml",
+            "modelInlineHtml",
+            "shortModelName"
+          ]
+        },
+        {
+          "source": "frontend/src/features/paper/podcast-runtime.ts",
+          "bindings": [
+            "startPodcastTick"
+          ]
+        },
+        {
+          "source": "frontend/src/features/paper/video-runtime.ts",
+          "bindings": [
+            "startVideoTick"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        }
+      ],
+      "sections": [
+        {
+          "source": "paper/podcast.js",
+          "path": "paper/podcast.js"
+        },
+        {
+          "source": "paper/video.js",
+          "path": "paper/video.js"
+        }
+      ],
+      "runtimeExports": [],
+      "runtimeBindings": []
+    },
+    {
+      "name": "image-generation",
+      "output": "frontend/src/runtime/image-generation-runtime.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "Icon",
+          "kind": "function"
+        },
+        {
+          "name": "ImageGenerationComposerState",
+          "kind": "object"
+        },
+        {
+          "name": "_applyImageGenUI",
+          "kind": "function"
+        },
+        {
+          "name": "_buildConvSettings",
+          "kind": "function"
+        },
+        {
+          "name": "_brandSvg",
+          "kind": "function"
+        },
+        {
+          "name": "_detectBrand",
+          "kind": "function"
+        },
+        {
+          "name": "_modelShortName",
+          "kind": "function"
+        },
+        {
+          "name": "_scheduleReflow",
+          "kind": "function"
+        },
+        {
+          "name": "_waitForImageProcessing",
+          "kind": "function"
+        },
+        {
+          "name": "apiUrl",
+          "kind": "function"
+        },
+        {
+          "name": "captureActiveConversationSettings",
+          "kind": "function"
+        },
+        {
+          "name": "debugLog",
+          "kind": "function"
+        },
+        {
+          "name": "getActiveConv",
+          "kind": "function"
+        },
+        {
+          "name": "renderConversationList",
+          "kind": "function"
+        },
+        {
+          "name": "renderImagePreviews",
+          "kind": "function"
+        },
+        {
+          "name": "scrollToBottom",
+          "kind": "function"
+        },
+        {
+          "name": "updateSubmenuCounts",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "image-gen.js",
+          "path": "image-gen.js"
+        },
+        {
+          "source": "image-gen-batch.js",
+          "path": "image-gen-batch.js"
+        }
+      ],
+      "runtimeExports": [
+        "_igCancelGeneration",
+        "_igRetryGenerationTurn",
+        "_igUpdateGenButton",
+        "_loadIgModels"
+      ],
+      "runtimeBindings": []
+    },
+    {
+      "name": "myday-presenters",
+      "output": "frontend/src/runtime/myday-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        },
+        {
+          "source": "frontend/src/features/myday/presentation-assets.ts",
+          "bindings": [
+            "MYDAY_PRESENTATION_ASSETS"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "_applyBrowserUI",
+          "kind": "function"
+        },
+        {
+          "name": "_applyCodeExecUI",
+          "kind": "function"
+        },
+        {
+          "name": "_applyFetchEnabledUI",
+          "kind": "function"
+        },
+        {
+          "name": "_applySearchModeUI",
+          "kind": "function"
+        },
+        {
+          "name": "newChat",
+          "kind": "function"
+        },
+        {
+          "name": "updateSendButton",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "myday.js",
+          "path": "myday.js"
+        }
+      ],
+      "runtimeExports": [],
+      "runtimeBindings": []
+    },
+    {
+      "name": "knowledge-presenters",
+      "output": "frontend/src/runtime/knowledge-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "_i18nLang",
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "apiUrl",
+          "kind": "function"
+        },
+        {
+          "name": "showConfirm",
+          "kind": "function"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "knowledge.js",
+          "path": "knowledge.js"
+        }
+      ],
+      "runtimeExports": [],
+      "runtimeBindings": []
+    },
+    {
+      "name": "project-presenters",
+      "output": "frontend/src/runtime/project-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        },
+        {
+          "source": "frontend/src/core/project-browse-coordinator.ts",
+          "bindings": [
+            "createProjectBrowseCoordinator"
+          ]
+        },
+        {
+          "source": "frontend/src/features/project/directory-browser.ts",
+          "bindings": [
+            "createProjectDirectoryBrowser"
+          ]
+        },
+        {
+          "source": "frontend/src/features/project/presentation-assets.ts",
+          "bindings": [
+            "PROJECT_PRESENTATION_ASSETS"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "ProjectPresentationShellState",
+          "kind": "object"
+        },
+        {
+          "name": "_applyProjectData",
+          "kind": "function"
+        },
+        {
+          "name": "_saveConvProjectPath",
+          "kind": "function"
+        },
+        {
+          "name": "_updateProjectUI",
+          "kind": "function"
+        },
+        {
+          "name": "captureActiveConversationSettings",
+          "kind": "function"
+        },
+        {
+          "name": "debugLog",
+          "kind": "function"
+        },
+        {
+          "name": "generateId",
+          "kind": "function"
+        },
+        {
+          "name": "getActiveFolderId",
+          "kind": "function"
+        },
+        {
+          "name": "loadProjectStatus",
+          "kind": "function"
+        },
+        {
+          "name": "onProjectAttached",
+          "kind": "function"
+        },
+        {
+          "name": "onProjectCleared",
+          "kind": "function"
+        },
+        {
+          "name": "reconcileConversationCatalogMetadata",
+          "kind": "function"
+        },
+        {
+          "name": "renderConversationList",
+          "kind": "function"
+        },
+        {
+          "name": "showAlert",
+          "kind": "function"
+        },
+        {
+          "name": "showConfirm",
+          "kind": "function"
+        },
+        {
+          "name": "showPrompt",
+          "kind": "function"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "project.js",
+          "path": "project.js"
+        }
+      ],
+      "runtimeExports": [
+        "ProjectModalPresentation",
+        "mpAddBrowsedPath",
+        "mpDeleteFolder"
+      ],
+      "runtimeBindings": []
+    },
+    {
+      "name": "local-control-presenters",
+      "output": "frontend/src/runtime/local-control-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "_i18nLang",
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "BASE_PATH",
+          "kind": "value"
+        },
+        {
+          "name": "LocalControlShellState",
+          "kind": "object"
+        },
+        {
+          "name": "_applyBrowserUI",
+          "kind": "function"
+        },
+        {
+          "name": "_applyDesktopUI",
+          "kind": "function"
+        },
+        {
+          "name": "_lcUpdateBadge",
+          "kind": "function"
+        },
+        {
+          "name": "_safeClipboardWrite",
+          "kind": "function"
+        },
+        {
+          "name": "apiUrl",
+          "kind": "function"
+        },
+        {
+          "name": "captureActiveConversationSettings",
+          "kind": "function"
+        },
+        {
+          "name": "updateSubmenuCounts",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "local-control.js",
+          "path": "local-control.js"
+        }
+      ],
+      "runtimeExports": [
+        "LocalControlPresentationState"
+      ],
+      "runtimeBindings": []
+    },
+    {
+      "name": "diagnostics-presenters",
+      "output": "frontend/src/runtime/diagnostics-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "DebugShellState",
+          "kind": "object"
+        },
+        {
+          "name": "Icon",
+          "kind": "function"
+        },
+        {
+          "name": "_findRenderedNativeTurnNode",
+          "kind": "function"
+        },
+        {
+          "name": "_safeClipboardWrite",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "core/debug_panel.js",
+          "path": "core/debug_panel.js"
+        },
+        {
+          "source": "core/request_inspector.js",
+          "path": "core/request_inspector.js"
+        }
+      ],
+      "runtimeExports": [
+        "DebugPresentationState",
+        "openRequestInspectorForTask"
+      ],
+      "runtimeBindings": []
+    },
+    {
+      "name": "compaction-viewer-presenters",
+      "output": "frontend/src/runtime/compaction-viewer-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "_applyI18n",
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "CompactionHistoryState",
+          "kind": "object"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "compaction-viewer.js",
+          "path": "compaction-viewer.js"
+        }
+      ],
+      "runtimeExports": [
+        "openCompactionViewer",
+        "closeCompactionViewer"
+      ],
+      "runtimeBindings": []
+    },
+    {
+      "name": "utility-panels",
+      "output": "frontend/src/runtime/utility-panels-runtime.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "Icon",
+          "kind": "function"
+        },
+        {
+          "name": "IconDot",
+          "kind": "function"
+        },
+        {
+          "name": "_onReady",
+          "kind": "function"
+        },
+        {
+          "name": "_safeClipboardWrite",
+          "kind": "function"
+        },
+        {
+          "name": "debugLog",
+          "kind": "function"
+        },
+        {
+          "name": "getConvById",
+          "kind": "function"
+        },
+        {
+          "name": "loadConversation",
+          "kind": "function"
+        },
+        {
+          "name": "pushSubscribe",
+          "kind": "function"
+        },
+        {
+          "name": "pushUnsubscribe",
+          "kind": "function"
+        },
+        {
+          "name": "pushOnReconnect",
+          "kind": "function"
+        },
+        {
+          "name": "pushIsConnected",
+          "kind": "function"
+        },
+        {
+          "name": "showConfirm",
+          "kind": "function"
+        },
+        {
+          "name": "showPrompt",
+          "kind": "function"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "optimizer.js",
+          "path": "optimizer.js"
+        },
+        {
+          "source": "update.js",
+          "path": "update.js"
+        },
+        {
+          "source": "timer.js",
+          "path": "timer.js"
+        }
+      ],
+      "runtimeExports": [
+        "_refreshOptimizerPanel",
+        "_refreshTimerPanel",
+        "_renderSettingsUpdatePill",
+        "toggleOptimizerPanel"
+      ],
+      "runtimeBindings": []
+    },
+    {
+      "name": "settings-presenters",
+      "output": "frontend/src/runtime/settings-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "_i18nLang",
+            "_syncLangPicker",
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml",
+            "raw",
+            "safeHtml"
+          ]
+        }
+      ],
+      "registryImports": [],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "ConvCache",
+          "kind": "object"
+        },
+        {
+          "name": "config",
+          "kind": "object"
+        },
+        {
+          "name": "Icon",
+          "kind": "function"
+        },
+        {
+          "name": "IconDot",
+          "kind": "function"
+        },
+        {
+          "name": "_applyFlowUI",
+          "kind": "function"
+        },
+        {
+          "name": "_applyModelUI",
+          "kind": "function"
+        },
+        {
+          "name": "_persistSttProvider",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_brandSvg",
+          "kind": "function"
+        },
+        {
+          "name": "_compareModelIds",
+          "kind": "function"
+        },
+        {
+          "name": "_configForPersist",
+          "kind": "function"
+        },
+        {
+          "name": "_detectBrand",
+          "kind": "function"
+        },
+        {
+          "name": "_getCurrentTheme",
+          "kind": "function"
+        },
+        {
+          "name": "_loadServerConfigAndPopulate",
+          "kind": "function"
+        },
+        {
+          "name": "_modelRoutingDropdownModels",
+          "kind": "function"
+        },
+        {
+          "name": "_modelShortName",
+          "kind": "function"
+        },
+        {
+          "name": "_populateDevicesTab",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_populateModelDropdown",
+          "kind": "function"
+        },
+        {
+          "name": "_populatePreferencesTab",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_populateSkillsTab",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_populateSpeechTab",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_refreshSttStatus",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_renderAuthSources",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_renderCredentialsVault",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_renderPrivateHosts",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "_sortModelEntriesByDisplayName",
+          "kind": "function"
+        },
+        {
+          "name": "_sortModelsByDisplayName",
+          "kind": "function"
+        },
+        {
+          "name": "_sortedBrandKeys",
+          "kind": "function"
+        },
+        {
+          "name": "_warnModelCapsMissing",
+          "kind": "function"
+        },
+        {
+          "name": "applySectionRequirements",
+          "kind": "function",
+          "providedBy": "feature"
+        },
+        {
+          "name": "brandLogoImgAttrs",
+          "kind": "function"
+        },
+        {
+          "name": "captureActiveConversationSettings",
+          "kind": "function"
+        },
+        {
+          "name": "debugLog",
+          "kind": "function"
+        },
+        {
+          "name": "errorEnvelopeMessage",
+          "kind": "function"
+        },
+        {
+          "name": "getActiveConv",
+          "kind": "function"
+        },
+        {
+          "name": "refreshInputSendHint",
+          "kind": "function"
+        },
+        {
+          "name": "renderConversationList",
+          "kind": "function"
+        },
+        {
+          "name": "showAlert",
+          "kind": "function"
+        },
+        {
+          "name": "showConfirm",
+          "kind": "function"
+        },
+        {
+          "name": "showPrompt",
+          "kind": "function"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "settings.js",
+          "path": "settings.js"
+        },
+        {
+          "source": "settings/core_panel.js",
+          "path": "settings/core_panel.js"
+        },
+        {
+          "source": "settings/provider_render.js",
+          "path": "settings/provider_render.js"
+        },
+        {
+          "source": "settings/visibility_defaults.js",
+          "path": "settings/visibility_defaults.js"
+        },
+        {
+          "source": "widgets/chip_input.js",
+          "path": "widgets/chip_input.js"
+        },
+        {
+          "source": "settings/other_tabs.js",
+          "path": "settings/other_tabs.js"
+        },
+        {
+          "source": "settings/save_export.js",
+          "path": "settings/save_export.js"
+        },
+        {
+          "source": "settings/system_prompt_editor.js",
+          "path": "settings/system_prompt_editor.js"
+        },
+        {
+          "source": "settings/oauth.js",
+          "path": "settings/oauth.js"
+        },
+        {
+          "source": "settings/mcp.js",
+          "path": "settings/mcp.js"
+        }
+      ],
+      "runtimeExports": [
+        "_applyDebugModeVisibility",
+        "_applyTradingVisibility",
+        "_oauthLogin",
+        "_renderMcpCatalog",
+        "_renderPresetsTab",
+        "_renderProvidersTab",
+        "closeSettings",
+        "openSettings",
+        "saveSettings",
+        "switchSettingsTab"
+      ],
+      "runtimeBindings": [
+        {
+          "name": "_serverConfig",
+          "kind": "value"
+        },
+        {
+          "name": "_modelPriceDisplayPolicy",
+          "kind": "object"
+        }
+      ]
+    },
+    {
+      "name": "orchestration-presenters",
+      "output": "frontend/src/runtime/orchestration-presenters.generated.js",
+      "moduleImports": [
+        {
+          "source": "frontend/src/i18n/index.ts",
+          "bindings": [
+            "t"
+          ]
+        },
+        {
+          "source": "frontend/src/html-safety.ts",
+          "bindings": [
+            "escapeHtml"
+          ]
+        },
+        {
+          "source": "frontend/src/core/http-result.ts",
+          "bindings": [
+            "HTTP_RESULT"
+          ]
+        }
+      ],
+      "registryImports": [
+        {
+          "source": "frontend/src/features/orchestration/registry.ts",
+          "binding": "orchestrationRegistry",
+          "members": [
+            "ORCHESTRATION_LAYOUT_BREAKPOINTS",
+            "ORCHESTRATION_RUNTIME_SECTION_VALIDATORS",
+            "ORCHESTRATION_RUN_FILTERS",
+            "_ORCHESTRATION_HTTP_READ_PROJECTORS",
+            "_ORCHESTRATION_REQUEST_CONTRACTS",
+            "_normalizeOrchestrationReplayRead",
+            "_normalizeOrchestrationRuntimeStart",
+            "_orchestrationActionRead",
+            "_orchestrationActionReason",
+            "_orchestrationContractFieldsMatch",
+            "_orchestrationContractRecord",
+            "_orchestrationDefinitionActionRead",
+            "_orchestrationDefinitionEntryMatches",
+            "_orchestrationDefinitionFields",
+            "_orchestrationDefinitionListMatches",
+            "_orchestrationDefinitionVersion",
+            "_orchestrationDefinitionVersionMatches",
+            "_orchestrationDefinitionWriteContract",
+            "_orchestrationDurableListEnvelope",
+            "_orchestrationDurableRunFields",
+            "_orchestrationDurableRunMatches",
+            "_orchestrationHttpFailureReason",
+            "_orchestrationHttpRead",
+            "_orchestrationLiveReplayMatches",
+            "_orchestrationMutationLegacyValue",
+            "_orchestrationNormalizedHttpRead",
+            "_orchestrationReplayEventMatches",
+            "_orchestrationRequestLimitValue",
+            "_orchestrationRequireArray",
+            "_orchestrationRequireArraySubset",
+            "_orchestrationRequireBoolean",
+            "_orchestrationRequireFieldSpecs",
+            "_orchestrationRequireMapValues",
+            "_orchestrationRequireOptional",
+            "_orchestrationRequirePositiveInteger",
+            "_orchestrationRequireString",
+            "_orchestrationRequireStringFields",
+            "_orchestrationRequireStringVocabulary",
+            "_orchestrationRequiredResponseFieldsMatch",
+            "_orchestrationRunStatuses",
+            "_orchestrationRuntimeSectionNames",
+            "_orchestrationTraceContract",
+            "_projectOrchestrationOutcomeText",
+            "_tmAbortRun",
+            "_tmAdoptRunSnapshot",
+            "_tmAfterClose",
+            "_tmAgo",
+            "_tmApiClient",
+            "_tmBindImageFallbacks",
+            "_tmClearRunSurface",
+            "_tmContracts",
+            "_tmControlDef",
+            "_tmDeleteRun",
+            "_tmDuration",
+            "_tmEnsureActions",
+            "_tmEnsureCommands",
+            "_tmEnsureContractController",
+            "_tmEnsureControllerHub",
+            "_tmEnsureEventController",
+            "_tmEnsureGraphView",
+            "_tmEnsureInspectorView",
+            "_tmEnsureModal",
+            "_tmEnsureMutationReconciler",
+            "_tmEnsureNodePresentation",
+            "_tmEnsurePanelLayout",
+            "_tmEnsureRunController",
+            "_tmEnsureRunListController",
+            "_tmEnsureRunListView",
+            "_tmEnsureRunView",
+            "_tmEnsureShell",
+            "_tmEnsureTimelineView",
+            "_tmEnsureWorkspace",
+            "_tmEsc",
+            "_tmGateCard",
+            "_tmHumanApprove",
+            "_tmHumanInput",
+            "_tmIco",
+            "_tmIsTerminal",
+            "_tmLimitPolicy",
+            "_tmLine",
+            "_tmNodeAccent",
+            "_tmNodeGlyph",
+            "_tmNodeIconHtml",
+            "_tmNodeLabel",
+            "_tmNodeSub",
+            "_tmOpenRun",
+            "_tmOpenStudio",
+            "_tmProjectRunTransition",
+            "_tmReconcileRunMutation",
+            "_tmRefreshAuthoringContract",
+            "_tmRefreshRuns",
+            "_tmRenderEvent",
+            "_tmRenderGraph",
+            "_tmRenderInspector",
+            "_tmRenderRunList",
+            "_tmRenderTimelineEvent",
+            "_tmRenderTitle",
+            "_tmReportTaskFailure",
+            "_tmRerun",
+            "_tmResetEventState",
+            "_tmResyncRun",
+            "_tmRoleDef",
+            "_tmRunSession",
+            "_tmRunStore",
+            "_tmSelectNode",
+            "_tmSelectPanel",
+            "_tmServices",
+            "_tmSetRunListBusy",
+            "_tmSetTimelineBusy",
+            "_tmShowFinal",
+            "_tmStatusChip",
+            "_tmStatusLabel",
+            "_tmStudioClient",
+            "_tmSyncChip",
+            "_tmT",
+            "_tmTaskClient",
+            "_tmToast",
+            "_tmTraceDetail",
+            "_validateDurableRunRuntimeSection",
+            "_validateEventRuntimeSection",
+            "_validateMutationRuntimeSection",
+            "_validateOutcomeRuntimeSection",
+            "_validateReplayRuntimeSection",
+            "_validateRequestLimitsRuntimeSection",
+            "_validateRunRuntimeSection",
+            "_validateRuntimeStartRuntimeSection",
+            "_validateTraceRuntimeSection",
+            "applyOrchestrationInputLimit",
+            "applyOrchestrationStudioRequestLimits",
+            "applyOrchestrationTraceActivity",
+            "bindOrchestrationPointerSession",
+            "closeTaskMode",
+            "createOrchestrationActionLock",
+            "createOrchestrationApiRequestInvoker",
+            "createOrchestrationBoundedState",
+            "createOrchestrationComposerRequestClient",
+            "createOrchestrationCursorPoller",
+            "createOrchestrationDefinitionMutationCoordinator",
+            "createOrchestrationDefinitionRequestClient",
+            "createOrchestrationDefinitionSnapshotPort",
+            "createOrchestrationDialogFocusManager",
+            "createOrchestrationDirtyGuard",
+            "createOrchestrationDisclosureState",
+            "createOrchestrationDocumentController",
+            "createOrchestrationDocumentValidationController",
+            "createOrchestrationDocumentView",
+            "createOrchestrationDraftState",
+            "createOrchestrationDurableRunCommand",
+            "createOrchestrationEditLifecycle",
+            "createOrchestrationEditorControllerHub",
+            "createOrchestrationEditorState",
+            "createOrchestrationEndpointRequestClient",
+            "createOrchestrationEphemeralAbortController",
+            "createOrchestrationEphemeralRunController",
+            "createOrchestrationEventState",
+            "createOrchestrationGraphActions",
+            "createOrchestrationGraphSelectionActions",
+            "createOrchestrationGraphTools",
+            "createOrchestrationHistoryController",
+            "createOrchestrationHumanGateController",
+            "createOrchestrationHumanGateInteraction",
+            "createOrchestrationHumanGatePresentation",
+            "createOrchestrationHumanGateView",
+            "createOrchestrationKeyedActionLock",
+            "createOrchestrationMutationCommand",
+            "createOrchestrationMutationRequestClient",
+            "createOrchestrationNodeCatalogue",
+            "createOrchestrationPanelFocusReturn",
+            "createOrchestrationRequestLimits",
+            "createOrchestrationRequestReader",
+            "createOrchestrationRovingItemsController",
+            "createOrchestrationRunController",
+            "createOrchestrationRunDrawerView",
+            "createOrchestrationRunEventController",
+            "createOrchestrationRunFilter",
+            "createOrchestrationRunPlanCommand",
+            "createOrchestrationRunPlanView",
+            "createOrchestrationRunRequestClient",
+            "createOrchestrationRunSession",
+            "createOrchestrationRuntimeContractPort",
+            "createOrchestrationScrollState",
+            "createOrchestrationSelectionFocus",
+            "createOrchestrationSessionController",
+            "createOrchestrationSingleFlight",
+            "createOrchestrationStudioApi",
+            "createOrchestrationSurfaceHandoff",
+            "createOrchestrationTaskRequestClient",
+            "createOrchestrationTraceState",
+            "createOrchestrationValidationClient",
+            "createOrchestrationValidationCoordinator",
+            "createOrchestrationValidationState",
+            "createOrchestrationWorkspaceDeleteCommand",
+            "createOrchestrationWorkspaceLoadCommand",
+            "createOrchestrationWorkspacePersistence",
+            "createOrchestrationWorkspacePersistenceContext",
+            "createOrchestrationWorkspaceRequestClient",
+            "createOrchestrationWorkspaceSaveCommand",
+            "createOrchestrationWorkspaceSessionPort",
+            "createTaskModeActionController",
+            "createTaskModeCommandController",
+            "createTaskModeContractController",
+            "createTaskModeContractSession",
+            "createTaskModeControllerHub",
+            "createTaskModeEventController",
+            "createTaskModeGatePresentation",
+            "createTaskModeGateView",
+            "createTaskModeGraphProjection",
+            "createTaskModeGraphView",
+            "createTaskModeInspectorPresentation",
+            "createTaskModeInspectorView",
+            "createTaskModeListErrorView",
+            "createTaskModeListFocusController",
+            "createTaskModeListPaging",
+            "createTaskModeMutationReconciler",
+            "createTaskModeNodePresentation",
+            "createTaskModePanelLayoutController",
+            "createTaskModePanelSelection",
+            "createTaskModeRootController",
+            "createTaskModeRunCommandController",
+            "createTaskModeRunController",
+            "createTaskModeRunFinalView",
+            "createTaskModeRunListController",
+            "createTaskModeRunListPresentation",
+            "createTaskModeRunListView",
+            "createTaskModeRunReader",
+            "createTaskModeRunReplayController",
+            "createTaskModeRunStatusPresentation",
+            "createTaskModeRunStore",
+            "createTaskModeRunTime",
+            "createTaskModeRunTitleView",
+            "createTaskModeRunView",
+            "createTaskModeServices",
+            "createTaskModeShell",
+            "createTaskModeTimelineView",
+            "createTaskModeTransitionProjector",
+            "createTaskModeViewRegistry",
+            "createTaskModeWorkspace",
+            "focusOrchestrationPanel",
+            "formatOrchestrationEventLines",
+            "formatOrchestrationRichCopy",
+            "inspectOrchestrationWireFormat",
+            "normalizeOrchestrationAuthoringContractRead",
+            "normalizeOrchestrationBuiltinRead",
+            "normalizeOrchestrationComposeResult",
+            "normalizeOrchestrationDefinitionAdoption",
+            "normalizeOrchestrationDefinitionDelete",
+            "normalizeOrchestrationDefinitionListRead",
+            "normalizeOrchestrationDefinitionRead",
+            "normalizeOrchestrationDefinitionSave",
+            "normalizeOrchestrationDefinitionWrite",
+            "normalizeOrchestrationInspection",
+            "normalizeOrchestrationLayoutRead",
+            "normalizeOrchestrationMutation",
+            "normalizeOrchestrationMutationRead",
+            "normalizeOrchestrationOutcome",
+            "normalizeOrchestrationPlanRead",
+            "normalizeOrchestrationRunPollRead",
+            "normalizeOrchestrationRunStart",
+            "normalizeOrchestrationTaskCreate",
+            "normalizeOrchestrationTaskEventsRead",
+            "normalizeOrchestrationTaskListRead",
+            "normalizeOrchestrationTaskRead",
+            "normalizeOrchestrationValidationRead",
+            "normalizeTaskReplayPage",
+            "openTaskMode",
+            "orchestrationCompactMedia",
+            "orchestrationCompatibilityContract",
+            "orchestrationDefinitionSelection",
+            "orchestrationDefinitionWriteConflict",
+            "orchestrationDirectContract",
+            "orchestrationEventCapability",
+            "orchestrationEventContractSpec",
+            "orchestrationEventGateEffect",
+            "orchestrationEventPreviewLimit",
+            "orchestrationEventShouldReduce",
+            "orchestrationEventShouldTimeline",
+            "orchestrationEventStringCapability",
+            "orchestrationExecutionOptionLabel",
+            "orchestrationFitMinScale",
+            "orchestrationFlowPickerDisplayName",
+            "orchestrationFlowPickerIcon",
+            "orchestrationHttpReadProjector",
+            "orchestrationInspectionMatchesContract",
+            "orchestrationIssueMessages",
+            "orchestrationMutationMessage",
+            "orchestrationNodeTraceSnapshot",
+            "orchestrationOutcomeMessage",
+            "orchestrationPublishedContract",
+            "orchestrationRequestContract",
+            "orchestrationRequestFailureKey",
+            "orchestrationRequestFailureMessage",
+            "orchestrationRequestLimitPolicy",
+            "orchestrationRequestMaxDepth",
+            "orchestrationRequestMaxItems",
+            "orchestrationRequestMaxLength",
+            "orchestrationRequestRetainedItems",
+            "orchestrationResultData",
+            "orchestrationResultError",
+            "orchestrationResultOk",
+            "orchestrationRunContract",
+            "orchestrationRunHasStatus",
+            "orchestrationRunIsTerminal",
+            "orchestrationRunPresentation",
+            "orchestrationRunStatus",
+            "orchestrationRuntimeContractPort",
+            "orchestrationScrollScope",
+            "orchestrationSheetMedia",
+            "orchestrationSheetMediaQuery",
+            "orchestrationShortLandscapeMedia",
+            "orchestrationShortLandscapeMediaQuery",
+            "orchestrationSummaryNodeParam",
+            "orchestrationTraceHistoryLimit",
+            "orchestrationWireContractSpec",
+            "orchestrationWireFormat",
+            "projectOrchestrationActionState",
+            "projectOrchestrationControlSummary",
+            "projectOrchestrationDefinitionAdoption",
+            "projectOrchestrationDocumentStatus",
+            "projectOrchestrationDurableRunSnapshot",
+            "projectOrchestrationDurableStartOutcome",
+            "projectOrchestrationEventPresentation",
+            "projectOrchestrationEventPreview",
+            "projectOrchestrationFinalResult",
+            "projectOrchestrationFlowCatalogNotice",
+            "projectOrchestrationFlowPickerItems",
+            "projectOrchestrationHttpRead",
+            "projectOrchestrationInspection",
+            "projectOrchestrationRequestFailure",
+            "projectOrchestrationRoleExecutionSummary",
+            "projectOrchestrationRuntimeContracts",
+            "projectOrchestrationSavedWorkflowItems",
+            "projectOrchestrationSubflowSummary",
+            "projectOrchestrationTraceActivity",
+            "projectOrchestrationTraceAttemptDelta",
+            "projectOrchestrationTraceAttemptDeltaPresentation",
+            "projectOrchestrationTraceAttempts",
+            "projectOrchestrationTraceSections",
+            "projectOrchestrationTraceStatus",
+            "projectOrchestrationTraceStatusPresentation",
+            "projectOrchestrationTraceText",
+            "reportOrchestrationDiagnostic",
+            "recordOrchestrationTraceAttempt",
+            "reconcileOrchestrationFlowSelection",
+            "reduceOrchestrationEvent",
+            "reduceOrchestrationTraceEvent",
+            "registerOrchestrationHttpReadProjectors",
+            "resetOrchestrationEventState",
+            "renderOrchestrationFlowCatalogNotice",
+            "setOrchestrationPanelState",
+            "taskModeCompactMedia",
+            "taskModeShellMarkup",
+            "validateOrchestrationDurableListEnvelope",
+            "wireOrchestrationFlowPicker"
+          ]
+        }
+      ],
+      "runtimeServices": [
+        {
+          "name": "Api",
+          "kind": "object"
+        },
+        {
+          "name": "BASE_PATH",
+          "kind": "value"
+        },
+        {
+          "name": "_featureFlags",
+          "kind": "object"
+        },
+        {
+          "name": "_agentInteractionChangeBlocked",
+          "kind": "function"
+        },
+        {
+          "name": "_orchestrationFlowCatalog",
+          "kind": "object"
+        },
+        {
+          "name": "setActiveFlow",
+          "kind": "function"
+        },
+        {
+          "name": "showChoice",
+          "kind": "function"
+        },
+        {
+          "name": "showConfirm",
+          "kind": "function"
+        },
+        {
+          "name": "showToast",
+          "kind": "function"
+        }
+      ],
+      "sections": [
+        {
+          "source": "orchestration-catalog.js",
+          "path": "orchestration-catalog.js"
+        },
+        {
+          "source": "orchestration-authoring-metadata.generated.js",
+          "path": "orchestration-authoring-metadata.generated.js"
+        },
+        {
+          "source": "orchestration-popup-menu.js",
+          "path": "orchestration-popup-menu.js"
+        },
+        {
+          "source": "orchestration-shell-toolbar.js",
+          "path": "orchestration-shell-toolbar.js"
+        },
+        {
+          "source": "orchestration-shell-work-surfaces.js",
+          "path": "orchestration-shell-work-surfaces.js"
+        },
+        {
+          "source": "orchestration-shell-command-bindings.js",
+          "path": "orchestration-shell-command-bindings.js"
+        },
+        {
+          "source": "orchestration-shell.js",
+          "path": "orchestration-shell.js"
+        },
+        {
+          "source": "orchestration-shell-commands.js",
+          "path": "orchestration-shell-commands.js"
+        },
+        {
+          "source": "orchestration-mobile-surface-projection.js",
+          "path": "orchestration-mobile-surface-projection.js"
+        },
+        {
+          "source": "orchestration-mobile-sheets.js",
+          "path": "orchestration-mobile-sheets.js"
+        },
+        {
+          "source": "orchestration-work-surfaces.js",
+          "path": "orchestration-work-surfaces.js"
+        },
+        {
+          "source": "orchestration-studio-keyboard.js",
+          "path": "orchestration-studio-keyboard.js"
+        },
+        {
+          "source": "orchestration-studio.js",
+          "path": "orchestration-studio.js"
+        },
+        {
+          "source": "orchestration-panel-layout.js",
+          "path": "orchestration-panel-layout.js"
+        },
+        {
+          "source": "orchestration-panel-width-model.js",
+          "path": "orchestration-panel-width-model.js"
+        },
+        {
+          "source": "orchestration-panel-resize.js",
+          "path": "orchestration-panel-resize.js"
+        },
+        {
+          "source": "orchestration-palette-presentation.js",
+          "path": "orchestration-palette-presentation.js"
+        },
+        {
+          "source": "orchestration-palette.js",
+          "path": "orchestration-palette.js"
+        },
+        {
+          "source": "orchestration-write-recovery.js",
+          "path": "orchestration-write-recovery.js"
+        },
+        {
+          "source": "orchestration-contract-section-registry-validation.js",
+          "path": "orchestration-contract-section-registry-validation.js"
+        },
+        {
+          "source": "orchestration-authoring-section-validation.js",
+          "path": "orchestration-authoring-section-validation.js"
+        },
+        {
+          "source": "orchestration-field-option-validation.js",
+          "path": "orchestration-field-option-validation.js"
+        },
+        {
+          "source": "orchestration-field-value-contract-validation.js",
+          "path": "orchestration-field-value-contract-validation.js"
+        },
+        {
+          "source": "orchestration-authoring-policy-validation.js",
+          "path": "orchestration-authoring-policy-validation.js"
+        },
+        {
+          "source": "orchestration-authoring-default-validation.js",
+          "path": "orchestration-authoring-default-validation.js"
+        },
+        {
+          "source": "orchestration-authoring-catalogue-validation.js",
+          "path": "orchestration-authoring-catalogue-validation.js"
+        },
+        {
+          "source": "orchestration-authoring-contract-validation.js",
+          "path": "orchestration-authoring-contract-validation.js"
+        },
+        {
+          "source": "orchestration-diagnostic-target.js",
+          "path": "orchestration-diagnostic-target.js"
+        },
+        {
+          "source": "orchestration-diagnostic-index.js",
+          "path": "orchestration-diagnostic-index.js"
+        },
+        {
+          "source": "orchestration-issue-presentation.js",
+          "path": "orchestration-issue-presentation.js"
+        },
+        {
+          "source": "orchestration-issue-navigator.js",
+          "path": "orchestration-issue-navigator.js"
+        },
+        {
+          "source": "orchestration-feedback.js",
+          "path": "orchestration-feedback.js"
+        },
+        {
+          "source": "orchestration-export.js",
+          "path": "orchestration-export.js"
+        },
+        {
+          "source": "orchestration-composer-log-view.js",
+          "path": "orchestration-composer-log-view.js"
+        },
+        {
+          "source": "orchestration-composer-view.js",
+          "path": "orchestration-composer-view.js"
+        },
+        {
+          "source": "orchestration-composer.js",
+          "path": "orchestration-composer.js"
+        },
+        {
+          "source": "orchestration-store-menu-focus.js",
+          "path": "orchestration-store-menu-focus.js"
+        },
+        {
+          "source": "orchestration-store-browser-presentation.js",
+          "path": "orchestration-store-browser-presentation.js"
+        },
+        {
+          "source": "orchestration-store-browser.js",
+          "path": "orchestration-store-browser.js"
+        },
+        {
+          "source": "orchestration-workspace.js",
+          "path": "orchestration-workspace.js"
+        },
+        {
+          "source": "orchestration-run-overlay.js",
+          "path": "orchestration-run-overlay.js"
+        },
+        {
+          "source": "orchestration-field-value.js",
+          "path": "orchestration-field-value.js"
+        },
+        {
+          "source": "orchestration-field-validity.js",
+          "path": "orchestration-field-validity.js"
+        },
+        {
+          "source": "orchestration-inspector.js",
+          "path": "orchestration-inspector.js"
+        },
+        {
+          "source": "orchestration-io-tools.js",
+          "path": "orchestration-io-tools.js"
+        },
+        {
+          "source": "orchestration-io-presentation.js",
+          "path": "orchestration-io-presentation.js"
+        },
+        {
+          "source": "orchestration-io.js",
+          "path": "orchestration-io.js"
+        },
+        {
+          "source": "orchestration-contract-sections.js",
+          "path": "orchestration-contract-sections.js"
+        },
+        {
+          "source": "orchestration-contract-loader.js",
+          "path": "orchestration-contract-loader.js"
+        },
+        {
+          "source": "orchestration-catalogue-projection.js",
+          "path": "orchestration-catalogue-projection.js"
+        },
+        {
+          "source": "orchestration-contract.js",
+          "path": "orchestration-contract.js"
+        },
+        {
+          "source": "orchestration-layout-contract.js",
+          "path": "orchestration-layout-contract.js"
+        },
+        {
+          "source": "orchestration-graph-topology.js",
+          "path": "orchestration-graph-topology.js"
+        },
+        {
+          "source": "orchestration-graph-workspace.js",
+          "path": "orchestration-graph-workspace.js"
+        },
+        {
+          "source": "orchestration-graph-action-context.js",
+          "path": "orchestration-graph-action-context.js"
+        },
+        {
+          "source": "orchestration-graph-mutation-actions.js",
+          "path": "orchestration-graph-mutation-actions.js"
+        },
+        {
+          "source": "orchestration-breadcrumb.js",
+          "path": "orchestration-breadcrumb.js"
+        },
+        {
+          "source": "orchestration-navigation.js",
+          "path": "orchestration-navigation.js"
+        },
+        {
+          "source": "orchestration-viewport-geometry.js",
+          "path": "orchestration-viewport-geometry.js"
+        },
+        {
+          "source": "orchestration-viewport.js",
+          "path": "orchestration-viewport.js"
+        },
+        {
+          "source": "orchestration-canvas.js",
+          "path": "orchestration-canvas.js"
+        },
+        {
+          "source": "orchestration-canvas-gesture-context.js",
+          "path": "orchestration-canvas-gesture-context.js"
+        },
+        {
+          "source": "orchestration-canvas-node-drag.js",
+          "path": "orchestration-canvas-node-drag.js"
+        },
+        {
+          "source": "orchestration-canvas-connection.js",
+          "path": "orchestration-canvas-connection.js"
+        },
+        {
+          "source": "orchestration-canvas-surface-interaction.js",
+          "path": "orchestration-canvas-surface-interaction.js"
+        },
+        {
+          "source": "orchestration-canvas-interaction.js",
+          "path": "orchestration-canvas-interaction.js"
+        },
+        {
+          "source": "orchestration-edge-view.js",
+          "path": "orchestration-edge-view.js"
+        },
+        {
+          "source": "orchestration-node-presentation.js",
+          "path": "orchestration-node-presentation.js"
+        },
+        {
+          "source": "orchestration-node-view.js",
+          "path": "orchestration-node-view.js"
+        },
+        {
+          "source": "orchestration-node-editor.js",
+          "path": "orchestration-node-editor.js"
+        },
+        {
+          "source": "orchestration-inspector-content.js",
+          "path": "orchestration-inspector-content.js"
+        },
+        {
+          "source": "orchestration-inspector-focus.js",
+          "path": "orchestration-inspector-focus.js"
+        },
+        {
+          "source": "orchestration-inspector-interaction.js",
+          "path": "orchestration-inspector-interaction.js"
+        },
+        {
+          "source": "orchestration-inspector-projection.js",
+          "path": "orchestration-inspector-projection.js"
+        },
+        {
+          "source": "orchestration-inspector-view.js",
+          "path": "orchestration-inspector-view.js"
+        },
+        {
+          "source": "orchestration-canvas-view.js",
+          "path": "orchestration-canvas-view.js"
+        },
+        {
+          "source": "orchestration-studio-services.js",
+          "path": "orchestration-studio-services.js"
+        },
+        {
+          "source": "orchestration-command-bridge.js",
+          "path": "orchestration-command-bridge.js"
+        },
+        {
+          "source": "orchestration-canvas-command-bridge.js",
+          "path": "orchestration-canvas-command-bridge.js"
+        },
+        {
+          "source": "orchestration-view-bridge.js",
+          "path": "orchestration-view-bridge.js"
+        },
+        {
+          "source": "orchestration-lifecycle-bridge.js",
+          "path": "orchestration-lifecycle-bridge.js"
+        },
+        {
+          "source": "orchestration.js",
+          "path": "orchestration.js"
+        }
+      ],
+      "runtimeExports": [
+        "closeOrchestration",
+        "openOrchestration"
+      ],
+      "runtimeBindings": []
+    }
+  ],
   "sections": [
-    {
-      "source": "core/icons.js",
-      "path": "core/icons.js"
-    },
-    {
-      "source": "idb-cache.js",
-      "path": "idb-cache.js"
-    },
     {
       "source": "core.js",
       "path": "core.js"
@@ -30,92 +1877,20 @@
       "path": "core/cost.js"
     },
     {
-      "source": "core/debug_panel.js",
-      "path": "core/debug_panel.js"
-    },
-    {
-      "source": "core/request_inspector.js",
-      "path": "core/request_inspector.js"
-    },
-    {
-      "source": "core/escape_html.js",
-      "path": "core/escape_html.js"
-    },
-    {
-      "source": "core/safe_html.js",
-      "path": "core/safe_html.js"
-    },
-    {
-      "source": "core/error_envelope.js",
-      "path": "core/error_envelope.js"
-    },
-    {
-      "source": "core/model_caps.js",
-      "path": "core/model_caps.js"
+      "source": "core/debug_state.js",
+      "path": "core/debug_state.js"
     },
     {
       "source": "core/brand_logo.js",
       "path": "core/brand_logo.js"
     },
     {
-      "source": "core/model_health.js",
-      "path": "core/model_health.js"
-    },
-    {
-      "source": "core/model_group.js",
-      "path": "core/model_group.js"
-    },
-    {
-      "source": "core/model_fold.js",
-      "path": "core/model_fold.js"
-    },
-    {
-      "source": "core/current_user.js",
-      "path": "core/current_user.js"
-    },
-    {
-      "source": "core/zip_drop_zone.js",
-      "path": "core/zip_drop_zone.js"
-    },
-    {
-      "source": "core/frame_identity.js",
-      "path": "core/frame_identity.js"
-    },
-    {
-      "source": "core/async_pool.js",
-      "path": "core/async_pool.js"
-    },
-    {
       "source": "core/conv_apply_settings.js",
       "path": "core/conv_apply_settings.js"
     },
     {
-      "source": "core/conv_reducers.js",
-      "path": "core/conv_reducers.js"
-    },
-    {
-      "source": "core/conv_save.js",
-      "path": "core/conv_save.js"
-    },
-    {
       "source": "core/conversation_catalog.js",
       "path": "core/conversation_catalog.js"
-    },
-    {
-      "source": "core/sse_reader.js",
-      "path": "core/sse_reader.js"
-    },
-    {
-      "source": "core/translate_guard.js",
-      "path": "core/translate_guard.js"
-    },
-    {
-      "source": "core/translation_model.js",
-      "path": "core/translation_model.js"
-    },
-    {
-      "source": "core/cache_stats.js",
-      "path": "core/cache_stats.js"
     },
     {
       "source": "core/markdown.js",
@@ -126,56 +1901,12 @@
       "path": "core/toast.js"
     },
     {
-      "source": "core/dialog.js",
-      "path": "core/dialog.js"
-    },
-    {
       "source": "api.js",
       "path": "api.js"
     },
     {
-      "source": "api/http-result.js",
-      "path": "api/http-result.js"
-    },
-    {
-      "source": "api/orchestration-http-contract.generated.js",
-      "path": "api/orchestration-http-contract.generated.js"
-    },
-    {
-      "source": "api/orchestration-response-contracts.js",
-      "path": "api/orchestration-response-contracts.js"
-    },
-    {
-      "source": "api/orchestration-client-methods.js",
-      "path": "api/orchestration-client-methods.js"
-    },
-    {
-      "source": "api/orchestration-endpoint-transport.js",
-      "path": "api/orchestration-endpoint-transport.js"
-    },
-    {
-      "source": "api/orchestration-endpoints.js",
-      "path": "api/orchestration-endpoints.js"
-    },
-    {
-      "source": "api/orchestrations.js",
-      "path": "api/orchestrations.js"
-    },
-    {
-      "source": "orchestration-flow-catalog.js",
-      "path": "orchestration-flow-catalog.js"
-    },
-    {
       "source": "push.js",
       "path": "push.js"
-    },
-    {
-      "source": "cookie_capture_consent.js",
-      "path": "cookie_capture_consent.js"
-    },
-    {
-      "source": "core/backend_offline_monitor.js",
-      "path": "core/backend_offline_monitor.js"
     },
     {
       "source": "feature-bridge.js",
@@ -188,10 +1919,6 @@
     {
       "source": "artifacts.js",
       "path": "artifacts.js"
-    },
-    {
-      "source": "ui/image_fullscreen.js",
-      "path": "ui/image_fullscreen.js"
     },
     {
       "source": "ui/conversation_list.js",
@@ -226,18 +1953,6 @@
       "path": "ui/swarm_live_projection.js"
     },
     {
-      "source": "ui/preference_actions.js",
-      "path": "ui/preference_actions.js"
-    },
-    {
-      "source": "ui/conversation_refresh.js",
-      "path": "ui/conversation_refresh.js"
-    },
-    {
-      "source": "ui/swarm_push.js",
-      "path": "ui/swarm_push.js"
-    },
-    {
       "source": "ui/send_button.js",
       "path": "ui/send_button.js"
     },
@@ -270,32 +1985,12 @@
       "path": "project_state.js"
     },
     {
-      "source": "memory_skill_install.js",
-      "path": "memory_skill_install.js"
-    },
-    {
-      "source": "skills_install.js",
-      "path": "skills_install.js"
-    },
-    {
-      "source": "settings.js",
-      "path": "settings.js"
-    },
-    {
-      "source": "settings/branding.js",
-      "path": "settings/branding.js"
-    },
-    {
       "source": "main/conversation_turn_store.js",
       "path": "main/conversation_turn_store.js"
     },
     {
       "source": "main/main_conv_lifecycle.js",
       "path": "main/main_conv_lifecycle.js"
-    },
-    {
-      "source": "main/main_translating_bubble.js",
-      "path": "main/main_translating_bubble.js"
     },
     {
       "source": "main/main_send_pipeline.js",
@@ -314,10 +2009,6 @@
       "path": "main/main_input_handling.js"
     },
     {
-      "source": "main/main_init_tasks.js",
-      "path": "main/main_init_tasks.js"
-    },
-    {
       "source": "diag_collect.js",
       "path": "diag_collect.js"
     },
@@ -326,8 +2017,8 @@
       "path": "main.js"
     },
     {
-      "source": "compaction-viewer.js",
-      "path": "compaction-viewer.js"
+      "source": "compaction-viewer-state.js",
+      "path": "compaction-viewer-state.js"
     },
     {
       "source": "context-bar.js",
@@ -342,8 +2033,8 @@
       "path": "info-rail.js"
     },
     {
-      "source": "local-control.js",
-      "path": "local-control.js"
+      "source": "local-control-state.js",
+      "path": "local-control-state.js"
     },
     {
       "source": "onboarding.js",
@@ -358,484 +2049,20 @@
       "path": "mobile_panels.js"
     },
     {
-      "source": "orchestration-catalog.js",
-      "path": "orchestration-catalog.js"
-    },
-    {
-      "source": "orchestration-authoring-metadata.generated.js",
-      "path": "orchestration-authoring-metadata.generated.js"
-    },
-    {
-      "source": "orchestration-popup-menu.js",
-      "path": "orchestration-popup-menu.js"
-    },
-    {
-      "source": "orchestration-shell-toolbar.js",
-      "path": "orchestration-shell-toolbar.js"
-    },
-    {
-      "source": "orchestration-shell-work-surfaces.js",
-      "path": "orchestration-shell-work-surfaces.js"
-    },
-    {
-      "source": "orchestration-shell-command-bindings.js",
-      "path": "orchestration-shell-command-bindings.js"
-    },
-    {
-      "source": "orchestration-shell.js",
-      "path": "orchestration-shell.js"
-    },
-    {
-      "source": "orchestration-shell-commands.js",
-      "path": "orchestration-shell-commands.js"
-    },
-    {
-      "source": "orchestration-mobile-surface-projection.js",
-      "path": "orchestration-mobile-surface-projection.js"
-    },
-    {
-      "source": "orchestration-mobile-sheets.js",
-      "path": "orchestration-mobile-sheets.js"
-    },
-    {
-      "source": "orchestration-work-surfaces.js",
-      "path": "orchestration-work-surfaces.js"
-    },
-    {
-      "source": "orchestration-studio-keyboard.js",
-      "path": "orchestration-studio-keyboard.js"
-    },
-    {
-      "source": "orchestration-studio.js",
-      "path": "orchestration-studio.js"
-    },
-    {
-      "source": "orchestration-panel-layout.js",
-      "path": "orchestration-panel-layout.js"
-    },
-    {
-      "source": "orchestration-panel-width-model.js",
-      "path": "orchestration-panel-width-model.js"
-    },
-    {
-      "source": "orchestration-panel-resize.js",
-      "path": "orchestration-panel-resize.js"
-    },
-    {
-      "source": "orchestration-palette-presentation.js",
-      "path": "orchestration-palette-presentation.js"
-    },
-    {
-      "source": "orchestration-palette.js",
-      "path": "orchestration-palette.js"
-    },
-    {
-      "source": "orchestration-write-recovery.js",
-      "path": "orchestration-write-recovery.js"
-    },
-    {
-      "source": "orchestration-contract-section-registry-validation.js",
-      "path": "orchestration-contract-section-registry-validation.js"
-    },
-    {
-      "source": "orchestration-authoring-section-validation.js",
-      "path": "orchestration-authoring-section-validation.js"
-    },
-    {
-      "source": "orchestration-field-option-validation.js",
-      "path": "orchestration-field-option-validation.js"
-    },
-    {
-      "source": "orchestration-field-value-contract-validation.js",
-      "path": "orchestration-field-value-contract-validation.js"
-    },
-    {
-      "source": "orchestration-authoring-policy-validation.js",
-      "path": "orchestration-authoring-policy-validation.js"
-    },
-    {
-      "source": "orchestration-authoring-default-validation.js",
-      "path": "orchestration-authoring-default-validation.js"
-    },
-    {
-      "source": "orchestration-authoring-catalogue-validation.js",
-      "path": "orchestration-authoring-catalogue-validation.js"
-    },
-    {
-      "source": "orchestration-authoring-contract-validation.js",
-      "path": "orchestration-authoring-contract-validation.js"
-    },
-    {
-      "source": "orchestration-diagnostic-target.js",
-      "path": "orchestration-diagnostic-target.js"
-    },
-    {
-      "source": "orchestration-diagnostic-index.js",
-      "path": "orchestration-diagnostic-index.js"
-    },
-    {
-      "source": "orchestration-issue-presentation.js",
-      "path": "orchestration-issue-presentation.js"
-    },
-    {
-      "source": "orchestration-issue-navigator.js",
-      "path": "orchestration-issue-navigator.js"
-    },
-    {
-      "source": "orchestration-feedback.js",
-      "path": "orchestration-feedback.js"
-    },
-    {
-      "source": "orchestration-export.js",
-      "path": "orchestration-export.js"
-    },
-    {
-      "source": "orchestration-composer-log-view.js",
-      "path": "orchestration-composer-log-view.js"
-    },
-    {
-      "source": "orchestration-composer-view.js",
-      "path": "orchestration-composer-view.js"
-    },
-    {
-      "source": "orchestration-composer.js",
-      "path": "orchestration-composer.js"
-    },
-    {
-      "source": "orchestration-store-menu-focus.js",
-      "path": "orchestration-store-menu-focus.js"
-    },
-    {
-      "source": "orchestration-store-browser-presentation.js",
-      "path": "orchestration-store-browser-presentation.js"
-    },
-    {
-      "source": "orchestration-store-browser.js",
-      "path": "orchestration-store-browser.js"
-    },
-    {
-      "source": "orchestration-workspace.js",
-      "path": "orchestration-workspace.js"
-    },
-    {
-      "source": "orchestration-run-overlay.js",
-      "path": "orchestration-run-overlay.js"
-    },
-    {
-      "source": "orchestration-field-value.js",
-      "path": "orchestration-field-value.js"
-    },
-    {
-      "source": "orchestration-field-validity.js",
-      "path": "orchestration-field-validity.js"
-    },
-    {
-      "source": "orchestration-inspector.js",
-      "path": "orchestration-inspector.js"
-    },
-    {
-      "source": "orchestration-io-tools.js",
-      "path": "orchestration-io-tools.js"
-    },
-    {
-      "source": "orchestration-io-presentation.js",
-      "path": "orchestration-io-presentation.js"
-    },
-    {
-      "source": "orchestration-io.js",
-      "path": "orchestration-io.js"
-    },
-    {
-      "source": "orchestration-contract-sections.js",
-      "path": "orchestration-contract-sections.js"
-    },
-    {
-      "source": "orchestration-contract-loader.js",
-      "path": "orchestration-contract-loader.js"
-    },
-    {
-      "source": "orchestration-catalogue-projection.js",
-      "path": "orchestration-catalogue-projection.js"
-    },
-    {
-      "source": "orchestration-contract.js",
-      "path": "orchestration-contract.js"
-    },
-    {
-      "source": "orchestration-layout-contract.js",
-      "path": "orchestration-layout-contract.js"
-    },
-    {
-      "source": "orchestration-graph-topology.js",
-      "path": "orchestration-graph-topology.js"
-    },
-    {
-      "source": "orchestration-graph-workspace.js",
-      "path": "orchestration-graph-workspace.js"
-    },
-    {
-      "source": "orchestration-graph-action-context.js",
-      "path": "orchestration-graph-action-context.js"
-    },
-    {
-      "source": "orchestration-graph-mutation-actions.js",
-      "path": "orchestration-graph-mutation-actions.js"
-    },
-    {
-      "source": "orchestration-breadcrumb.js",
-      "path": "orchestration-breadcrumb.js"
-    },
-    {
-      "source": "orchestration-navigation.js",
-      "path": "orchestration-navigation.js"
-    },
-    {
-      "source": "orchestration-viewport-geometry.js",
-      "path": "orchestration-viewport-geometry.js"
-    },
-    {
-      "source": "orchestration-viewport.js",
-      "path": "orchestration-viewport.js"
-    },
-    {
-      "source": "orchestration-canvas.js",
-      "path": "orchestration-canvas.js"
-    },
-    {
-      "source": "orchestration-canvas-gesture-context.js",
-      "path": "orchestration-canvas-gesture-context.js"
-    },
-    {
-      "source": "orchestration-canvas-node-drag.js",
-      "path": "orchestration-canvas-node-drag.js"
-    },
-    {
-      "source": "orchestration-canvas-connection.js",
-      "path": "orchestration-canvas-connection.js"
-    },
-    {
-      "source": "orchestration-canvas-surface-interaction.js",
-      "path": "orchestration-canvas-surface-interaction.js"
-    },
-    {
-      "source": "orchestration-canvas-interaction.js",
-      "path": "orchestration-canvas-interaction.js"
-    },
-    {
-      "source": "orchestration-edge-view.js",
-      "path": "orchestration-edge-view.js"
-    },
-    {
-      "source": "orchestration-node-presentation.js",
-      "path": "orchestration-node-presentation.js"
-    },
-    {
-      "source": "orchestration-node-view.js",
-      "path": "orchestration-node-view.js"
-    },
-    {
-      "source": "orchestration-node-editor.js",
-      "path": "orchestration-node-editor.js"
-    },
-    {
-      "source": "orchestration-inspector-content.js",
-      "path": "orchestration-inspector-content.js"
-    },
-    {
-      "source": "orchestration-inspector-focus.js",
-      "path": "orchestration-inspector-focus.js"
-    },
-    {
-      "source": "orchestration-inspector-interaction.js",
-      "path": "orchestration-inspector-interaction.js"
-    },
-    {
-      "source": "orchestration-inspector-projection.js",
-      "path": "orchestration-inspector-projection.js"
-    },
-    {
-      "source": "orchestration-inspector-view.js",
-      "path": "orchestration-inspector-view.js"
-    },
-    {
-      "source": "orchestration-canvas-view.js",
-      "path": "orchestration-canvas-view.js"
-    },
-    {
-      "source": "orchestration-studio-services.js",
-      "path": "orchestration-studio-services.js"
-    },
-    {
-      "source": "orchestration-command-bridge.js",
-      "path": "orchestration-command-bridge.js"
-    },
-    {
-      "source": "orchestration-canvas-command-bridge.js",
-      "path": "orchestration-canvas-command-bridge.js"
-    },
-    {
-      "source": "orchestration-view-bridge.js",
-      "path": "orchestration-view-bridge.js"
-    },
-    {
-      "source": "orchestration-lifecycle-bridge.js",
-      "path": "orchestration-lifecycle-bridge.js"
-    },
-    {
-      "source": "orchestration.js",
-      "path": "orchestration.js"
-    },
-    {
-      "source": "paper/report.js",
-      "path": "paper/report.js"
-    },
-    {
-      "source": "paper/podcast.js",
-      "path": "paper/podcast.js"
-    },
-    {
-      "source": "paper/video.js",
-      "path": "paper/video.js"
-    },
-    {
-      "source": "paper-reader.js",
-      "path": "paper-reader.js"
-    },
-    {
-      "source": "image-gen.js",
-      "path": "image-gen.js"
-    },
-    {
-      "source": "image-gen-batch.js",
-      "path": "image-gen-batch.js"
-    },
-    {
-      "source": "project-brain.js",
-      "path": "project-brain.js"
-    },
-    {
-      "source": "project-brain-attention.js",
-      "path": "project-brain-attention.js"
-    },
-    {
-      "source": "project-brain-peers.js",
-      "path": "project-brain-peers.js"
-    },
-    {
-      "source": "project-brain-status.js",
-      "path": "project-brain-status.js"
-    },
-    {
-      "source": "project-brain-integration.js",
-      "path": "project-brain-integration.js"
-    },
-    {
-      "source": "project-brain-i18n.js",
-      "path": "project-brain-i18n.js"
-    },
-    {
       "source": "core/conversation_invalidation.js",
       "path": "core/conversation_invalidation.js"
-    },
-    {
-      "source": "core/health_stream_timer.js",
-      "path": "core/health_stream_timer.js"
-    },
-    {
-      "source": "settings/providers/access_matrix.js",
-      "path": "settings/providers/access_matrix.js"
     },
     {
       "source": "ui/streaming_swarm_panel.js",
       "path": "ui/streaming_swarm_panel.js"
     },
     {
-      "source": "myday.js",
-      "path": "myday.js"
-    },
-    {
-      "source": "myday_tasks.js",
-      "path": "myday_tasks.js"
-    },
-    {
-      "source": "knowledge.js",
-      "path": "knowledge.js"
-    },
-    {
-      "source": "project.js",
-      "path": "project.js"
+      "source": "execution-interactions.js",
+      "path": "execution-interactions.js"
     },
     {
       "source": "ui/finish_info_rich.js",
       "path": "ui/finish_info_rich.js"
-    },
-    {
-      "source": "optimizer.js",
-      "path": "optimizer.js"
-    },
-    {
-      "source": "update.js",
-      "path": "update.js"
-    },
-    {
-      "source": "timer.js",
-      "path": "timer.js"
-    },
-    {
-      "source": "settings/provider_templates.js",
-      "path": "settings/provider_templates.js"
-    },
-    {
-      "source": "settings/local_endpoints.js",
-      "path": "settings/local_endpoints.js"
-    },
-    {
-      "source": "settings/core_panel.js",
-      "path": "settings/core_panel.js"
-    },
-    {
-      "source": "settings/provider_faces.js",
-      "path": "settings/provider_faces.js"
-    },
-    {
-      "source": "settings/provider_render.js",
-      "path": "settings/provider_render.js"
-    },
-    {
-      "source": "settings/template_actions.js",
-      "path": "settings/template_actions.js"
-    },
-    {
-      "source": "settings/model_edit.js",
-      "path": "settings/model_edit.js"
-    },
-    {
-      "source": "settings/visibility_defaults.js",
-      "path": "settings/visibility_defaults.js"
-    },
-    {
-      "source": "widgets/chip_input.js",
-      "path": "widgets/chip_input.js"
-    },
-    {
-      "source": "settings/other_tabs.js",
-      "path": "settings/other_tabs.js"
-    },
-    {
-      "source": "settings/save_export.js",
-      "path": "settings/save_export.js"
-    },
-    {
-      "source": "settings/system_prompt_editor.js",
-      "path": "settings/system_prompt_editor.js"
-    },
-    {
-      "source": "settings/oauth.js",
-      "path": "settings/oauth.js"
-    },
-    {
-      "source": "settings/mcp.js",
-      "path": "settings/mcp.js"
     }
   ]
 }

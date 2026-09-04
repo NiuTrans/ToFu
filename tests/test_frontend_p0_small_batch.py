@@ -3,7 +3,7 @@
 Three P0-class frontend fixes, one suite each:
 
   ① Boot-path localStorage bare ``JSON.parse`` (core.js claude_client_config,
-    core/cost.js claude_auto_translate / claude_auto_apply). One corrupted
+    core/cost.js claude_auto_translate). One corrupted
     key threw at module top level and white-screened the app. Now routed
     through ``_safeJsonParse`` (corrupt → fallback). Drives the REAL helper
     under node.
@@ -36,18 +36,20 @@ import shutil
 import subprocess
 
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = _legacy_test_root()
-CORE_JS = os.path.join(ROOT, 'static', 'js', 'core.js')
-COST_JS = os.path.join(ROOT, 'static', 'js', 'core', 'cost.js')
-IMAGE_GEN_JS = os.path.join(ROOT, 'static', 'js', 'image-gen.js')
-MAIN_JS = os.path.join(ROOT, 'static', 'js', 'main.js')
-BUNDLER = os.path.join(ROOT, 'lib', 'js_bundler.py')
-SCHEDULER_JS = os.path.join(ROOT, 'static', 'js', 'scheduler.js')
+ROOT = os.path.normpath(os.path.join(HERE, '..'))
+CORE_JS = runtime_section_path('core.js')
+COST_JS = runtime_section_path('core/cost.js')
+IMAGE_GEN_JS = runtime_section_path('image-gen.js')
+MAIN_JS = runtime_section_path('main.js')
+RUNTIME_MANIFEST = os.path.join(
+    ROOT, 'frontend', 'src', 'runtime', 'sections', 'manifest.json')
+SCHEDULER_JS = os.path.join(
+    ROOT, 'frontend', 'src', 'runtime', 'sections', 'scheduler.js')
 
 
 def _read(path: str) -> str:
@@ -114,14 +116,17 @@ def test_NEUTER_safe_parse_gutted_throws():
 
 
 def test_boot_sites_use_safe_parse():
+    from tests._source_scan import strip_comments
+
     core = _read(CORE_JS)
-    cost = _read(COST_JS)
+    cost = strip_comments(_read(COST_JS), lang='js', inline=True)
     assert '_safeJsonParse(\n  localStorage.getItem("claude_client_config")' in core
     assert 'JSON.parse(\n  localStorage.getItem("claude_client_config")' not in core
-    assert cost.count('_safeJsonParse(\n  localStorage.getItem("claude_auto_') == 2, (
-        f'expected 2 safe-parse sites in cost.js, found '
+    assert cost.count('_safeJsonParse(\n  localStorage.getItem("claude_auto_') == 1, (
+        f'expected the auto-translate safe-parse site in cost.js, found '
         f'{cost.count("_safeJsonParse(chr(10)  localStorage")}')
     assert 'JSON.parse(\n  localStorage.getItem("claude_auto_' not in cost
+    assert 'localStorage.getItem("claude_auto_apply")' not in cost
 
 
 # ── ② image-gen cancel vs timeout ─────────────────────────────────────────
@@ -166,28 +171,26 @@ def test_image_gen_cancel_is_labelled_as_cancel_not_network_error():
     from tests._source_scan import brace_block
 
     src = _read(IMAGE_GEN_JS)
-    catch = brace_block(src, "const isAbort = err.name === 'AbortError';")
+    catch = brace_block(
+        src, "const cancelled = error?.name === 'AbortError';",
+    )
 
     # An abort must be classified as a cancel …
-    assert 'isUserCancel' in catch, (
+    assert 'cancelled' in catch, (
         'the catch block no longer derives a user-cancel verdict at all')
     assert "'Cancelled by user.'" in catch, (
         'a cancelled generation must say so, not report a network failure')
-    # … and drive BOTH the title and the machine-readable errorType.
-    assert "'Cancelled'" in catch, 'the error card title must read Cancelled'
-    assert "'cancelled'" in catch, (
+    # … and drive BOTH visible copy and the machine-readable errorType.
+    assert 'Image generation cancelled' in catch
+    assert "errorType: cancelled ? 'cancelled' : 'network'" in catch, (
         "errorType must be 'cancelled' so the renderer picks the cancel style, "
         "not the network-error style")
     # A NON-abort failure must still be labelled a network error — the
     # complement, without which "always say cancelled" would pass.
-    assert "'Network error'" in catch, (
+    assert 'Image generation network error' in catch, (
         'a genuine transport failure must still be labelled a network error')
-    assert "'network'" in catch, (
-        "errorType must stay 'network' for a non-abort failure")
-    # A cancel is NOT a timeout: isTimeout must not be set on this path.
-    assert 'isTimeout: false' in catch, (
-        'the cancel/network path must not claim isTimeout — there is no '
-        'client-side timeout on this path any more')
+    assert 'timed out' not in catch.lower(), (
+        'the cancel/network path must not claim a client-side timeout')
 
 
 def test_abort_implies_cancel_precondition_still_holds():
@@ -243,19 +246,19 @@ def test_abort_implies_cancel_precondition_still_holds():
 # ── ③ dead scheduler UI removed ───────────────────────────────────────────
 
 def test_scheduler_dead_ui_fully_removed():
-    assert not os.path.exists(SCHEDULER_JS), 'static/js/scheduler.js still exists'
-    bundler = _read(BUNDLER)
-    assert "'scheduler.js'," not in bundler, 'scheduler.js still in _CLASSIC_ASSET_FILES'
+    assert not os.path.exists(SCHEDULER_JS), 'runtime scheduler.js still exists'
+    manifest = _read(RUNTIME_MANIFEST)
+    assert '"source": "scheduler.js"' not in manifest
     main = _read(MAIN_JS)
     assert '_applySchedulerUI' not in main, 'main.js still defines/calls _applySchedulerUI'
 
 
 def test_NEUTER_scheduler_scans_fire_on_old_shape():
     """NEUTER: reintroduce the markers — every absence-scan must fire."""
-    bundler = _read(BUNDLER) + "    'scheduler.js',\n"
-    assert "'scheduler.js'," in bundler
-    main = _read(MAIN_JS) + '\nfunction _applySchedulerUI() {}\n'
-    assert '_applySchedulerUI' in main
+    neutered_manifest = _read(RUNTIME_MANIFEST) + '\n{"source": "scheduler.js"}\n'
+    assert '"source": "scheduler.js"' in neutered_manifest
+    neutered_main = _read(MAIN_JS) + '\nfunction _applySchedulerUI() {}\n'
+    assert '_applySchedulerUI' in neutered_main
 
 
 if __name__ == '__main__':

@@ -265,6 +265,71 @@ def test_poll_batch_shape():
     _ok('HTTP /api/translate/poll_batch returns matching shape')
 
 
+def test_start_queue_saturation_returns_retryable_503(monkeypatch):
+    import asyncio
+    import importlib.util
+
+    import routes.api_v1.translate as translate_route
+    from lib.error_envelope import make_envelope
+
+    def reject(runtime, task_id, *_args, **_kwargs):
+        runtime.finish(
+            task_id,
+            error=make_envelope(
+                'server_busy',
+                detail='Translation queue is full; retry shortly',
+                context='translation:queue_saturated',
+                source='test',
+            ),
+        )
+        return False
+
+    monkeypatch.setattr(translate_route, 'submit_translation_task', reject)
+    spec = importlib.util.spec_from_file_location(
+        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               'server.py'))
+    mod = importlib.util.module_from_spec(spec)
+    mod.__name__ = 'server'
+    spec.loader.exec_module(mod)
+
+    async def _t():
+        async with mod.app.test_client() as client:
+            response = await client.post(
+                '/api/v1/translate/start',
+                json={'text': 'translate this', 'targetLang': 'Chinese'},
+            )
+            assert response.status_code == 503
+
+    asyncio.run(_t())
+
+
+def test_abort_endpoint_reaches_translation_runtime():
+    import asyncio
+    import importlib.util
+
+    from lib.translate import _translate_runtime
+
+    spec = importlib.util.spec_from_file_location(
+        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               'server.py'))
+    mod = importlib.util.module_from_spec(spec)
+    mod.__name__ = 'server'
+    spec.loader.exec_module(mod)
+    task = _translate_runtime.create(user_id=1)
+    _translate_runtime.mark_running(task['id'])
+
+    async def _t():
+        async with mod.app.test_client() as client:
+            response = await client.post(
+                f'/api/v1/translate/abort/{task["id"]}')
+            assert response.status_code == 200
+            assert task['abort_event'].is_set()
+
+    asyncio.run(_t())
+    _translate_runtime.finish(task['id'])
+    assert task['status'] == 'aborted'
+
+
 def main():
     print()
     print(_color('═══ Translation Runtime Contract Tests ═══', '36'))

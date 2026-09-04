@@ -7,9 +7,9 @@
    latency of the live push WebSocket (push.js), so a poor network shows
    up at a glance and can be ruled in/out as the cause of slow responses.
 
-   Data source: pushOnLatency(fn) — push.js probes the already-open socket
-   every few seconds ({action:'ping',t} → {type:'pong',t}) and reports
-   {ms, state, connected}. No extra connection, no polling endpoint.
+   Data source: pushOnLatency(fn) — push.js probes the already-open socket,
+   owns the per-ping timeout/close verdict, and reports {ms,state,connected}.
+   This projection owns no second liveness clock, connection, or endpoint.
 
    State → visual:
      good    (<150ms)  4 bars, green
@@ -27,14 +27,8 @@
   let _textEl = null;  // ms label
   let _unsub = null;
   let _lastReading = null;   // most recent reading from pushOnLatency
-  let _lastReadingAt = 0;    // when it arrived (ms) — for the staleness watchdog
-  let _watchdogTimer = null;
   let _sseDegraded = false;  // any active chat stream is reconnecting / stalled
   let _unsubStream = null;
-  // push.js probes every ~4s; if two probe windows pass with no fresh reading
-  // the socket is wedged (stuck CONNECTING / reconnect scheduled but not open),
-  // so a stale "good/120ms" would be a lie. Force the offline display instead.
-  const _STALE_MS = 9000;
 
   // How many bars to light per state.
   const _barsFor = {
@@ -73,7 +67,6 @@
   function _render(reading) {
     if (!_el) return;
     _lastReading = reading;
-    _lastReadingAt = Date.now();
     let state = (!reading.connected) ? 'offline' : (reading.state || 'unknown');
     /* ① Merge the chat-SSE health: if any active reply stream is
      *    reconnecting/stalled, the badge must warn even when the push RTT is
@@ -111,65 +104,58 @@
     return true;
   }
 
+  function _releaseSubscriptions() {
+    const releases = [_unsub, _unsubStream];
+    _unsub = null;
+    _unsubStream = null;
+    for (const release of releases) {
+      if (typeof release !== 'function') continue;
+      try { release(); }
+      catch (error) {
+        console.debug('[NetLatency] subscription cleanup failed', error);
+      }
+    }
+  }
+
   function initNetLatency() {
     if (!_build()) return;
     if (typeof pushOnLatency !== 'function') {
       console.warn('[NetLatency] pushOnLatency unavailable — indicator inert');
       return;
     }
-    if (_unsub) _unsub();
+    _releaseSubscriptions();
     _unsub = pushOnLatency(_render);
     // ① Subscribe to chat-SSE health so a reconnecting reply stream flips the
     //    badge to warning even when the push RTT is fine. Repaint the last
     //    push reading through the merge whenever the SSE state toggles.
-    const subscribeStreamHealth = runtimeScope.streamHealthSubscribe;
-    if (typeof subscribeStreamHealth === 'function') {
-      if (_unsubStream) _unsubStream();
-      _unsubStream = subscribeStreamHealth((h) => {
+    if (typeof streamHealthSubscribe === 'function') {
+      _unsubStream = streamHealthSubscribe((h) => {
         _sseDegraded = !!(h && h.degraded);
         _render(_lastReading || pushGetLatency());
       });
     }
-    // Staleness watchdog: pushOnLatency only fires when push.js emits. If the
-    // socket wedges (CONNECTING forever, or a reconnect scheduled but the open
-    // never lands) emits stop, and the badge would freeze on the last reading
-    // — e.g. green "120ms" while actually disconnected. Every few seconds,
-    // if the newest reading is older than _STALE_MS AND it wasn't already an
-    // offline reading, repaint as offline so the widget never lies.
-    if (_watchdogTimer) clearInterval(_watchdogTimer);
-    _watchdogTimer = setInterval(() => {
-      if (!_el) return;
-      if (!_lastReadingAt) return;
-      const age = Date.now() - _lastReadingAt;
-      if (age < _STALE_MS) return;
-      if (_lastReading && _lastReading.connected === false) return; // already offline
-      /* ③ A stale reading does NOT prove the socket is dead. Under a buffering
-       *    proxy (VS Code port-forward) ping/pong frames are delayed/batched,
-       *    so a late pong is not a disconnect. Only paint OFFLINE when push.js
-       *    itself reports the socket is closed (pushIsConnected() === false).
-       *    While the socket is still OPEN we paint the neutral 'unknown' (gray,
-       *    not red) — no more false offline↔green flapping. push.js owns the
-       *    real offline/timeout verdict via onclose / ping-timeout. */
-      const sockOpen = (typeof pushIsConnected === 'function') ? pushIsConnected() : false;
-      const verdict = sockOpen ? 'unknown' : 'offline';
-      console.debug('[NetLatency] no fresh reading for %dms — socket %s → painting %s',
-        age, sockOpen ? 'still OPEN' : 'closed', verdict);
-      _render({ ms: null, state: verdict, connected: sockOpen, at: Date.now() });
-    }, 4000);
     // Ensure the push socket is actually connecting so probes can flow even
     // if nothing else has subscribed yet.
     try { if (typeof pushConnect === 'function') pushConnect(); } catch (e) { /* noop */ }
   }
 
-  runtimeScope.initNetLatency = initNetLatency;
+  function destroyNetLatency() {
+    _releaseSubscriptions();
+    _lastReading = null;
+    _el = null;
+    _barsEl = null;
+    _textEl = null;
+  }
 
-  // Boot after DOM + push.js are present. main.js loads last; we self-init on
-  // DOMContentLoaded and retry once shortly after in case the topbar node is
-  // injected late.
+  runtimeScope.initNetLatency = initNetLatency;
+  if (typeof retainedCompositionLifecycle !== 'undefined') {
+    retainedCompositionLifecycle.add(destroyNetLatency);
+  }
+
+  // Boot once after DOM + push.js are present.
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initNetLatency);
+    document.addEventListener('DOMContentLoaded', initNetLatency, { once: true });
   } else {
     initNetLatency();
   }
 })();
-

@@ -33,6 +33,55 @@ logger = get_logger(__name__)
 # ── Auto-learned model limits (persisted to server_config.json) ──────────
 _limits_lock = threading.Lock()
 _LEARNED_MODEL_LIMITS: dict[str, int] = {}  # model_id → max_tokens
+_MAX_MODEL_ID_CHARS = 256
+_MAX_LEARNED_MODEL_LIMIT = 1_000_000
+_MAX_LEARNED_MODEL_ENTRIES = 2_048
+
+
+def _sanitize_learned_limits(
+    raw_limits,
+    *,
+    max_entries: int = _MAX_LEARNED_MODEL_ENTRIES,
+) -> tuple[dict[str, int], bool]:
+    """Return a bounded plain-map projection of persisted model limits.
+
+    ``model_limits`` predates per-entry metadata, so JSON/dict insertion order
+    is its only recency signal. Writers move fresh evidence to the end and the
+    sanitizer retains that newest tail when the shared capacity is reached.
+    """
+    source = raw_limits if isinstance(raw_limits, dict) else {}
+    cleaned: dict[str, int] = {}
+    for model, value in source.items():
+        if not (
+            isinstance(model, str)
+            and model
+            and model == model.strip()
+            and len(model) <= _MAX_MODEL_ID_CHARS
+        ):
+            continue
+        try:
+            limit = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 1 <= limit <= _MAX_LEARNED_MODEL_LIMIT:
+            cleaned[model] = limit
+    if len(cleaned) > max_entries:
+        cleaned = dict(list(cleaned.items())[-max_entries:])
+    return cleaned, not isinstance(raw_limits, dict) or cleaned != raw_limits
+
+
+def _repair_persisted_limits(cfg_path: str) -> None:
+    """Sanitize the file's current map under its cross-writer lock."""
+    from lib.json_store import update_json_atomic
+
+    def _mutate(cfg):
+        if not isinstance(cfg, dict):
+            cfg = {}
+        limits, _ = _sanitize_learned_limits(cfg.get('model_limits'))
+        cfg['model_limits'] = limits
+        return cfg
+
+    update_json_atomic(cfg_path, _mutate, default={})
 
 
 def _load_learned_limits() -> dict:
@@ -43,10 +92,19 @@ def _load_learned_limits() -> dict:
         if os.path.isfile(cfg_path):
             with open(cfg_path) as f:
                 cfg = json.load(f)
-            limits = cfg.get('model_limits', {})
+            limits, changed = _sanitize_learned_limits(
+                cfg.get('model_limits'))
+            if changed:
+                try:
+                    _repair_persisted_limits(cfg_path)
+                except Exception as e:
+                    # A read-only/transiently unavailable config must not
+                    # discard the valid bounded projection we already loaded.
+                    logger.warning(
+                        '[ModelInfo] Failed to repair learned limits: %s', e)
             if limits:
-                logger.info('[ModelInfo] Loaded %d auto-learned model limits: %s',
-                            len(limits), ', '.join(f'{m}={v}' for m, v in limits.items()))
+                logger.info('[ModelInfo] Loaded %d auto-learned model limits',
+                            len(limits))
             return limits
     except Exception as e:
         logger.warning('[ModelInfo] Failed to load learned model limits: %s', e)
@@ -106,11 +164,28 @@ def _learn_model_limit(model: str, limit: int):
         model: Model identifier (e.g. 'gpt-4.1-mini').
         limit: Detected max_tokens upper bound.
     """
+    if not (
+        isinstance(model, str)
+        and model
+        and model == model.strip()
+        and len(model) <= _MAX_MODEL_ID_CHARS
+        and isinstance(limit, int)
+        and not isinstance(limit, bool)
+        and 1 <= limit <= _MAX_LEARNED_MODEL_LIMIT
+    ):
+        logger.warning(
+            '[ModelInfo] Ignoring invalid learned model limit identity/value')
+        return
+
     with _limits_lock:
         old = _LEARNED_MODEL_LIMITS.get(model)
         if old == limit:
             return  # already known
+        _LEARNED_MODEL_LIMITS.pop(model, None)
         _LEARNED_MODEL_LIMITS[model] = limit
+        sanitized, _ = _sanitize_learned_limits(_LEARNED_MODEL_LIMITS)
+        _LEARNED_MODEL_LIMITS.clear()
+        _LEARNED_MODEL_LIMITS.update(sanitized)
         logger.warning('[ModelInfo] ⚙️ Auto-learned max_tokens for model=%s: %d (was: %s). '
                        'Persisting to config.', model, limit, old or 'unknown')
         # Persist to server_config.json via the locked read-modify-write so
@@ -124,10 +199,21 @@ def _learn_model_limit(model: str, limit: int):
             def _mutate(cfg):
                 if not isinstance(cfg, dict):
                     cfg = {}
-                cfg.setdefault('model_limits', {})[model] = limit
+                limits, _ = _sanitize_learned_limits(
+                    cfg.get('model_limits'))
+                # Refresh insertion order so finite-capacity eviction follows
+                # actual evidence rather than the model's first-ever sighting.
+                limits.pop(model, None)
+                limits[model] = limit
+                limits, _ = _sanitize_learned_limits(limits)
+                cfg['model_limits'] = limits
                 return cfg
 
-            update_json_atomic(cfg_path, _mutate, default={})
+            persisted = update_json_atomic(cfg_path, _mutate, default={})
+            persisted_limits, _ = _sanitize_learned_limits(
+                (persisted or {}).get('model_limits'))
+            _LEARNED_MODEL_LIMITS.clear()
+            _LEARNED_MODEL_LIMITS.update(persisted_limits)
             logger.info('[ModelInfo] Persisted model limit to %s', cfg_path)
         except Exception as e:
             logger.error('[ModelInfo] Failed to persist model limit for %s: %s',

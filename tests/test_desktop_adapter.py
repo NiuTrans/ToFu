@@ -22,6 +22,7 @@ import base64
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -31,6 +32,8 @@ import pytest
 pytestmark = pytest.mark.unit
 
 from lib.desktop import adapter, egress
+
+OWNER_ID = '1'
 
 
 class TestPolicy(unittest.TestCase):
@@ -83,7 +86,8 @@ class TestLoopbackTargetServer(unittest.TestCase):
                         return_value=(good, None)) as send:
             resp = egress.egress_http(
                 'http://127.0.0.1:8317/v1/models', method='GET',
-                agent_id='agent-1', target='loopback', loopback_port=8317)
+                agent_id='agent-1', user_id=OWNER_ID,
+                target='loopback', loopback_port=8317)
         self.assertEqual(resp.status_code, 200)
         _args, kwargs = send.call_args
         self.assertEqual(kwargs.get('target_agent_id'), 'agent-1')
@@ -99,7 +103,8 @@ class TestLoopbackTargetServer(unittest.TestCase):
             with self.assertRaises(egress.EgressUnavailable):
                 egress.egress_http(
                     'http://127.0.0.1:8317/v1/models', method='GET',
-                    agent_id='agent-1', target='loopback', loopback_port=8317)
+                    agent_id='agent-1', user_id=OWNER_ID,
+                    target='loopback', loopback_port=8317)
         self.assertEqual(send.call_count, 1)
 
     def test_egress_http_loopback_bad_port_refused_before_enqueue(self):
@@ -107,7 +112,8 @@ class TestLoopbackTargetServer(unittest.TestCase):
             with self.assertRaises(egress.EgressUnavailable):
                 egress.egress_http(
                     'http://127.0.0.1:9999/v1/models', method='GET',
-                    agent_id='agent-1', target='loopback', loopback_port=8317)
+                    agent_id='agent-1', user_id=OWNER_ID,
+                    target='loopback', loopback_port=8317)
         self.assertFalse(send.called)
 
 
@@ -117,7 +123,8 @@ class TestRelayAndModels(unittest.TestCase):
         with mock.patch.object(egress, 'egress_http',
                                return_value='RESP') as eh:
             out = adapter.relay_http('agent-1', 8317, '/v1/models',
-                                     headers={'Authorization': 'Bearer k'})
+                                     headers={'Authorization': 'Bearer k'},
+                                     user_id=OWNER_ID)
         self.assertEqual(out, 'RESP')
         _args, kwargs = eh.call_args
         self.assertEqual(kwargs.get('agent_id'), 'agent-1')
@@ -133,17 +140,18 @@ class TestRelayAndModels(unittest.TestCase):
     def test_fetch_models_happy(self):
         with mock.patch.object(adapter, 'relay_http',
                                return_value=self._models_resp(['m1', 'm2'])):
-            self.assertEqual(adapter.fetch_models('a', 8317, 'k'), ['m1', 'm2'])
+            self.assertEqual(adapter.fetch_models(
+                'a', 8317, 'k', user_id=OWNER_ID), ['m1', 'm2'])
 
     def test_fetch_models_empty_and_error(self):
         with mock.patch.object(adapter, 'relay_http',
                                return_value=self._models_resp([])):
             with self.assertRaises(RuntimeError):
-                adapter.fetch_models('a', 8317, 'k')
+                adapter.fetch_models('a', 8317, 'k', user_id=OWNER_ID)
         with mock.patch.object(adapter, 'relay_http',
                                return_value=self._models_resp([], status=401)):
             with self.assertRaises(RuntimeError):
-                adapter.fetch_models('a', 8317, 'k')
+                adapter.fetch_models('a', 8317, 'k', user_id=OWNER_ID)
 
     def _management_resp(self, data, status=200):
         return egress.EgressResponse(
@@ -160,7 +168,8 @@ class TestRelayAndModels(unittest.TestCase):
         with mock.patch.object(adapter, 'policy_for', return_value=policy), \
              mock.patch.object(adapter, 'relay_http',
                                return_value=self._management_resp(raw)) as relay:
-            accounts = adapter.adapter_accounts('acct-agent', force=True)
+            accounts = adapter.adapter_accounts(
+                'acct-agent', user_id=OWNER_ID, force=True)
         self.assertEqual([a['provider'] for a in accounts], ['claude', 'codex'])
         self.assertFalse(any('access_token' in a for a in accounts))
         self.assertEqual(relay.call_args.kwargs['headers']['Authorization'],
@@ -172,7 +181,8 @@ class TestRelayAndModels(unittest.TestCase):
             {'status': 'ok', 'url': 'https://auth.example/', 'state': 'abc_123'})
         with mock.patch.object(adapter, 'policy_for', return_value=policy), \
              mock.patch.object(adapter, 'relay_http', return_value=response) as relay:
-            out = adapter.start_adapter_oauth('agent', 'codex')
+            out = adapter.start_adapter_oauth(
+                'agent', 'codex', user_id=OWNER_ID)
         self.assertEqual(out['state'], 'abc_123')
         self.assertIn('/codex-auth-url?is_webui=true', relay.call_args.args[2])
 
@@ -184,14 +194,13 @@ class TestRelayAndModels(unittest.TestCase):
                                              'models': 7}) as sync, \
              mock.patch.object(adapter, 'adapter_accounts', return_value=[]):
             out = adapter.adapter_oauth_status(
-                'agent', 'state', agent_name='box')
+                'agent', 'state', agent_name='box', user_id=OWNER_ID)
         self.assertEqual(out['status'], 'ok')
         self.assertEqual(out['models'], 7)
         sync.assert_called_once()
 
     def test_running_status_self_heals_missing_provider(self):
-        with adapter._status_lock:
-            adapter._status_cache.pop('heal-agent', None)
+        adapter._status_cache.invalidate((OWNER_ID, 'heal-agent'))
         with mock.patch('lib.desktop.send_desktop_command',
                         return_value=({'running': True, 'installed': True}, None)), \
              mock.patch.object(adapter, 'adapter_accounts', return_value=[
@@ -206,59 +215,111 @@ class TestRelayAndModels(unittest.TestCase):
                                ]), \
              mock.patch.object(adapter, 'sync_provider',
                                return_value={'models': 8}) as sync:
-            status = adapter.adapter_status('heal-agent', agent_name='box')
+            status = adapter.adapter_status(
+                'heal-agent', agent_name='box', user_id=OWNER_ID)
         self.assertTrue(status['provider_ready'])
         self.assertEqual(status['provider_counts']['codex'], 1)
         sync.assert_called_once()
+
+    def test_account_cache_is_partitioned_by_owner(self):
+        first = {'files': [{'name': 'one.json', 'provider': 'codex'}]}
+        second = {'files': [{'name': 'two.json', 'provider': 'claude'}]}
+        with mock.patch.object(
+                adapter, '_management_request', side_effect=[first, second]) as request:
+            owner_one = adapter.adapter_accounts(
+                'shared-agent-id', user_id='1', force=True)
+            owner_two = adapter.adapter_accounts(
+                'shared-agent-id', user_id='2')
+        self.assertEqual(owner_one[0]['name'], 'one.json')
+        self.assertEqual(owner_two[0]['name'], 'two.json')
+        self.assertEqual(request.call_count, 2)
 
 
 class TestProvisioning(unittest.TestCase):
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._cfg = os.path.join(self._tmp.name, 'server_config.json')
-        with open(self._cfg, 'w') as f:
-            json.dump({'providers': []}, f)
-
-    def tearDown(self):
-        self._tmp.cleanup()
+        from lib.model_routing import (
+            InMemoryModelRoutingRepository,
+            OwnerBoundary,
+            empty_document,
+        )
+        self._repo = InMemoryModelRoutingRepository()
+        self._boundary = OwnerBoundary.create(int(OWNER_ID))
+        self._repo.compare_and_swap(
+            self._boundary, empty_document(), expected_revision=0)
 
     def _run(self, fn, *a):
-        with mock.patch('lib._SERVER_CONFIG_PATH', self._cfg), \
-             mock.patch('lib.reload_config', lambda: None), \
-             mock.patch('lib.llm_dispatch.reset_dispatcher', lambda: None):
-            return fn(*a)
+        with mock.patch('lib.llm_dispatch.reset_dispatcher', lambda: None):
+            return fn(
+                *a, user_id=OWNER_ID, repository=self._repo)
 
     def _load(self):
-        with open(self._cfg) as f:
-            return json.load(f)
+        return self._repo.get(self._boundary).document
 
     def test_provision_and_deprovision_roundtrip(self):
         self._run(adapter.provision_provider, 'agent-123456', 'box', 8317,
                   'ta_key', ['claude-opus-4-5', 'gpt-5.5'])
-        cfg = self._load()
-        prov = next(p for p in cfg['providers'] if p['id'] == 'adapter_agent-12')
-        self.assertEqual(prov['adapter'],
+        document = self._load()
+        provider = next(
+            row for row in document['providers']
+            if row['provider_id'] == 'adapter_agent-12')
+        self.assertEqual(provider['scope'], 'owner')
+        connection = document['connections'][0]
+        self.assertEqual(connection['adapter'],
                          {'agent_id': 'agent-123456', 'port': 8317})
-        self.assertEqual(prov['api_keys'], ['ta_key'])
-        self.assertEqual(prov['base_url'], 'http://127.0.0.1:8317/v1')
-        self.assertEqual([m['model_id'] for m in prov['models']],
-                         ['claude-opus-4-5', 'gpt-5.5'])
-        self.assertTrue(adapter.is_adapter_provider(prov))
-        # Idempotent re-provision.
+        self.assertEqual(connection['base_url'],
+                         'http://127.0.0.1:8317/v1')
+        self.assertTrue(adapter.is_adapter_provider(connection))
+        self.assertEqual(
+            sorted(row['pending_model_id'] for row in document['offerings']),
+            ['claude-opus-4-5', 'gpt-5.5'])
+        credential = document['credentials'][0]
+        self.assertNotEqual(credential['secret_reference'], '')
+        self.assertEqual(
+            self._repo.resolve_secret(
+                self._boundary, credential['secret_reference']),
+            'ta_key')
+
+        revision = self._repo.get(self._boundary).revision
+        repeated = self._run(
+            adapter.provision_provider, 'agent-123456', 'box', 8317,
+            'ta_key', ['claude-opus-4-5', 'gpt-5.5'])
+        self.assertFalse(repeated)
+        self.assertEqual(self._repo.get(self._boundary).revision, revision)
+
         self._run(adapter.provision_provider, 'agent-123456', 'box', 8317,
                   'ta_key', ['m1'])
-        cfg = self._load()
-        self.assertEqual(sum(1 for p in cfg['providers']
-                             if p['id'] == 'adapter_agent-12'), 1)
+        document = self._load()
+        self.assertEqual(sum(
+            1 for row in document['providers']
+            if row['provider_id'] == 'adapter_agent-12'), 1)
+        self.assertEqual(
+            [row['pending_model_id'] for row in document['offerings']], ['m1'])
         # Deprovision.
         removed = self._run(adapter.deprovision_provider, 'agent-123456')
         self.assertTrue(removed)
-        self.assertFalse(any(p['id'] == 'adapter_agent-12'
-                             for p in self._load()['providers']))
+        self.assertFalse(any(
+            row['provider_id'] == 'adapter_agent-12'
+            for row in self._load()['providers']))
 
 
 class TestEnsureTask(unittest.TestCase):
+
+    def test_resident_state_and_worker_budgets_are_hard_bounded(self):
+        self.assertEqual(adapter._status_cache.stats()['max_size'], 64)
+        self.assertEqual(adapter._accounts_cache.stats()['max_size'], 64)
+        self.assertEqual(adapter._ensure_tasks.stats()['max_size'], 128)
+        self.assertLessEqual(adapter._ENSURE_CAPACITY, 2)
+
+    def test_saturated_ensure_lane_rejects_without_starting_thread(self):
+        saturated_slots = mock.Mock()
+        saturated_slots.acquire.return_value = False
+        with mock.patch.object(adapter, '_ensure_slots', saturated_slots), \
+             mock.patch.object(threading.Thread, 'start') as start:
+            with self.assertRaises(adapter.AdapterEnsureCapacityError):
+                adapter.ensure_adapter(
+                    'agent-saturated', user_id=OWNER_ID)
+        start.assert_not_called()
 
     def test_ensure_happy_path_background(self):
         with tempfile.TemporaryDirectory() as td, \
@@ -272,19 +333,22 @@ class TestEnsureTask(unittest.TestCase):
                                    return_value=['m1', 'm2', 'm3']), \
                  mock.patch.object(adapter, 'provision_provider',
                                    return_value=True) as prov:
-                adapter._status_cache['agent-xyz'] = (
-                    time.monotonic(), {'ok': True, 'running': False})
-                adapter._accounts_cache['agent-xyz'] = (
-                    time.monotonic(), [])
-                task = adapter.ensure_adapter('agent-xyz', agent_name='box')
+                cache_key = (OWNER_ID, 'agent-xyz')
+                adapter._status_cache.set(
+                    cache_key, {'ok': True, 'running': False})
+                adapter._accounts_cache.set(cache_key, [])
+                task = adapter.ensure_adapter(
+                    'agent-xyz', agent_name='box', user_id=OWNER_ID)
                 self.assertEqual(task.get('state'), 'ensuring')
                 deadline = time.time() + 5
                 while time.time() < deadline:
-                    state = adapter.ensure_task_state('agent-xyz')
+                    state = adapter.ensure_task_state(
+                        'agent-xyz', user_id=OWNER_ID)
                     if state.get('state') != 'ensuring':
                         break
                     time.sleep(0.05)
-                state = adapter.ensure_task_state('agent-xyz')
+                state = adapter.ensure_task_state(
+                    'agent-xyz', user_id=OWNER_ID)
             self.assertEqual(state.get('state'), 'ready')
             self.assertEqual(state.get('models'), 3)
             self.assertEqual(state.get('version'), 'v7.2.116')
@@ -296,8 +360,8 @@ class TestEnsureTask(unittest.TestCase):
             self.assertTrue(params['mgmt_secret'])
             self.assertEqual(kwargs.get('ttl'), 600)
             self.assertTrue(prov.called)
-            self.assertNotIn('agent-xyz', adapter._status_cache)
-            self.assertNotIn('agent-xyz', adapter._accounts_cache)
+            self.assertNotIn(cache_key, adapter._status_cache)
+            self.assertNotIn(cache_key, adapter._accounts_cache)
 
     def test_ensure_agent_error_surfaces(self):
         with tempfile.TemporaryDirectory() as td, \
@@ -305,10 +369,11 @@ class TestEnsureTask(unittest.TestCase):
                                return_value=os.path.join(td, 'p.json')):
             with mock.patch('lib.desktop.send_desktop_command',
                             return_value=({'error': 'download failed'}, None)):
-                adapter.ensure_adapter('agent-err')
+                adapter.ensure_adapter('agent-err', user_id=OWNER_ID)
                 deadline = time.time() + 5
                 while time.time() < deadline:
-                    state = adapter.ensure_task_state('agent-err')
+                    state = adapter.ensure_task_state(
+                        'agent-err', user_id=OWNER_ID)
                     if state.get('state') != 'ensuring':
                         break
                     time.sleep(0.05)
@@ -328,10 +393,11 @@ class TestEnsureTask(unittest.TestCase):
                  mock.patch.object(adapter, 'deprovision_provider',
                                    return_value=False), \
                  mock.patch.object(adapter, 'provision_provider') as provision:
-                adapter.ensure_adapter('agent-empty')
+                adapter.ensure_adapter('agent-empty', user_id=OWNER_ID)
                 deadline = time.time() + 5
                 while time.time() < deadline:
-                    state = adapter.ensure_task_state('agent-empty')
+                    state = adapter.ensure_task_state(
+                        'agent-empty', user_id=OWNER_ID)
                     if state.get('state') != 'ensuring':
                         break
                     time.sleep(0.05)
@@ -345,9 +411,23 @@ class TestEnsureTask(unittest.TestCase):
                         return_value=({'running': False}, None)), \
              mock.patch.object(adapter, 'deprovision_provider',
                                return_value=True) as deprov:
-            out = adapter.stop_adapter('agent-xyz')
+            out = adapter.stop_adapter('agent-xyz', user_id=OWNER_ID)
         self.assertTrue(out.get('ok'))
         self.assertTrue(deprov.called)
+
+    def test_stop_transport_failure_keeps_managed_provider(self):
+        with mock.patch('lib.desktop.send_desktop_command',
+                        return_value=(None, 'agent offline')), \
+             mock.patch.object(adapter, 'deprovision_provider') as deprov:
+            out = adapter.stop_adapter('agent-xyz', user_id=OWNER_ID)
+        self.assertFalse(out.get('ok'))
+        deprov.assert_not_called()
+
+    def test_ownerless_adapter_command_fails_before_enqueue(self):
+        with mock.patch('lib.desktop.send_desktop_command') as send:
+            with self.assertRaises(ValueError):
+                adapter.stop_adapter('agent-xyz', user_id='')
+        send.assert_not_called()
 
 
 class TestRouteRegistration(unittest.TestCase):

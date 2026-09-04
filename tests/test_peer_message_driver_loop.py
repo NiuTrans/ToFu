@@ -60,6 +60,8 @@ class DrainHelperGuardTest(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertEqual(messages[-1]['role'], 'user')
         self.assertIn('alpha', messages[-1]['content'])
+        self.assertTrue(messages[-1].get('_isInboxInject'))
+        self.assertFalse(messages[-1].get('_containsHumanSteer'))
         # Stashed for the deferred chip + durable-row de-dup.
         pending = t.get('_peer_inject_pending') or []
         self.assertEqual(len(pending), 1)

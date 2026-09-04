@@ -75,7 +75,7 @@ def test_schema_27_migrates_runs_and_events_without_importing_ownerless_files(
     }
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION == 40
+    assert int(version) == SCHEMA_VERSION
     assert tuple(run) == (1, '', 'done')
     assert tuple(event) == (1, '', 0)
     assert definition_count == 0

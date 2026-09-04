@@ -207,6 +207,17 @@ def test_native_live_projection_places_chip_before_anchor():
 
 def _extract_timeline_fns() -> str:
     src = open(TR_JS, encoding='utf-8').read()
+    # renderSegmentTimelineHTML now folds batches through the native
+    # tool-execution-groups owner (toolExecutionLlmRound /
+    # computeExecutionBatches / presentToolExecutionPanel). The retained
+    # extraction below only pulls the vanilla-JS functions, so eval the native
+    # owner first — its IIFE footer copies the exports onto globalThis, making
+    # them visible to the retained functions under node.
+    groups_native = open(native_module_path(
+        '.native/tool-execution-groups.js',
+        os.path.join(ROOT, 'frontend', 'src', 'conversation', 'presentation',
+                     'tool-execution-groups.ts'),
+    ), encoding='utf-8').read()
     project_start = src.index('function _projectTodoRoundsForDisplay(')
     project_end = src.index('\nfunction ', project_start + 1)
     project = src[project_start:project_end]
@@ -214,16 +225,17 @@ def _extract_timeline_fns() -> str:
     end = src.index('\nfunction _renderUnifiedGroup(')
     chunk = project + '\n' + src[start:end]
     assert 'renderSegmentTimelineHTML' in chunk
-    return chunk
+    return groups_native + '\n' + chunk
 
 
 _TIMELINE_STUBS = r"""
 function escapeHtml(s){ return String(s == null ? '' : s); }
 function renderMarkdown(s){ return '<md>' + String(s) + '</md>'; }
-function t(k){ return k; }
+// presentToolExecutionPanel (the typed owner) renders the panel header and
+// passes the real-round count as `{n}`; echo it so the count is observable.
+function t(k, o){ return k + (o && o.n != null ? ':' + o.n : ''); }
 function Icon(name, size){ return '<ICON name=' + name + ' size=' + size + '>'; }
 function getToolRoundsFromMsg(m){ return (m && m.toolRounds) || []; }
-function _toolPanelHeaderLabel(rounds, active){ return 'HDR[' + (rounds||[]).length + ']'; }
 function _renderToolGroupsHTML(rounds, allRounds){
   return (rounds || []).map(function(r){ return '<TOOL name=' + (r.toolName||'') + '>'; }).join('');
 }
@@ -288,7 +300,7 @@ check('chip_before_anchor_prose', idx('<INJECT kind=steer round=1>') >= 0 &&
 // Deliverable still excluded.
 check('deliverable_excluded', idx('ANSWER') === -1);
 // Header count must EXCLUDE the synthetic row (2 real tools, not 3).
-check('header_counts_real_only', idx('HDR[2]') >= 0);
+check('header_counts_real_only', idx('toolPanel.toolsUsed:2') >= 0);
 
 console.log(out.join('\n'));
 """

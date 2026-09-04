@@ -7,7 +7,6 @@ are serialized inside the Storage Sidecar; this process never opens a database.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import uuid
@@ -51,11 +50,6 @@ def detect_format(path: str) -> str | None:
         return None
     _, extension = os.path.splitext(path.lower())
     return _EXT_TO_FORMAT.get(extension)
-
-
-def _sha256_hex(content: str) -> str:
-    return hashlib.sha256(
-        content.encode('utf-8', errors='replace')).hexdigest()
 
 
 _now_ms = now_ms

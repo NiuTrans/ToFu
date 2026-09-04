@@ -443,7 +443,7 @@ class TestResponsive:
         """At mobile width, sidebar should collapse or overlay."""
         ctx = browser.new_context(viewport={"width": 480, "height": 800})
         page = ctx.new_page()
-        page.goto(live_server, wait_until="networkidle")
+        page.goto(live_server, wait_until="domcontentloaded")
         _wait_for_app_ready(page)
 
         path = _screenshot(page, screenshot_dir, "13_narrow_viewport")
@@ -462,7 +462,7 @@ class TestResponsive:
         """At ultra-wide, layout should not stretch excessively."""
         ctx = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = ctx.new_page()
-        page.goto(live_server, wait_until="networkidle")
+        page.goto(live_server, wait_until="domcontentloaded")
         _wait_for_app_ready(page)
 
         path = _screenshot(page, screenshot_dir, "14_wide_viewport")

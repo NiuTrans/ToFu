@@ -533,29 +533,34 @@ def test_NEUTER_edge_touched_art_is_caught(tmp_path):
 @pytest.mark.skipif(is_opensource_build(),
                     reason='the frame pipeline (static/icons/_gen/) is not '
                            'shipped in opensource builds')
-def test_NEUTER_pipeline_drift_is_caught():
+def test_NEUTER_pipeline_drift_is_caught(tmp_path):
     """A hand-edited frame must make the --check gate red.
 
-    Uses a real temporary edit + guaranteed restore, because the gate compares
-    pixels on disk: an in-memory poison could not exercise it.
+    Operates on a COPY of the shipped frame tree under ``tmp_path`` (pytest
+    disposes it afterwards), never on the tracked assets — so a failed run can
+    never leave a shipped frame corrupted. The gate under test is the REAL
+    pipeline ``--check`` (the same subprocess the guard runs), pointed at the
+    copy via ``--out-dir``; the assertion also pins that EXACTLY the tampered
+    frame drifted, so an incomplete copy cannot false-positive the bite.
     """
+    import shutil
     from PIL import Image
 
-    target = PET_DIR / "tofu-idle.png"
-    original = target.read_bytes()
-    try:
-        im = Image.open(target).convert("RGBA")
-        px = im.load()
-        cx, cy = im.width // 2, im.height // 2
-        px[cx, cy] = (255, 0, 0, 255)                  # one hand-painted pixel
-        im.save(target)
-        r = subprocess.run(["python3", str(PIPELINE), "--check"],
-                           capture_output=True, text=True, cwd=str(REPO), timeout=120)
-        assert r.returncode != 0, \
-            "the --check gate stayed green after a frame was hand-edited — it does not bite"
-    finally:
-        target.write_bytes(original)
-    # and the tree is genuinely restored
-    r2 = subprocess.run(["python3", str(PIPELINE), "--check"],
-                        capture_output=True, text=True, cwd=str(REPO), timeout=120)
-    assert r2.returncode == 0, "failed to restore the frame after the neuter"
+    for f in _frame_files():
+        shutil.copy(f, tmp_path / f.name)
+
+    target = tmp_path / "tofu-idle.png"
+    im = Image.open(target).convert("RGBA")
+    px = im.load()
+    cx, cy = im.width // 2, im.height // 2
+    px[cx, cy] = (255, 0, 0, 255)                  # one hand-painted pixel
+    im.save(target)
+
+    r = subprocess.run(["python3", str(PIPELINE), "--check", "--out-dir", str(tmp_path)],
+                       capture_output=True, text=True, cwd=str(REPO), timeout=120)
+    assert r.returncode != 0, \
+        "the --check gate stayed green after a frame was hand-edited — it does not bite"
+    assert "DRIFT: 1 frame(s) differ from the pipeline: idle" in r.stderr, (
+        f"expected the gate to flag exactly the tampered frame, got:\n"
+        f"{r.stdout}\n{r.stderr}"
+    )

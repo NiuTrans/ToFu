@@ -15,6 +15,9 @@ Object.defineProperty(runtimeScope, 'paperMode', {
   set: (enabled) => { paperMode = !!enabled; },
 });
 var _paperDescribeDraft = '';  // persists the landing "describe it" textarea across mode switches
+function _setPaperDescribeDraft(input) {
+  _paperDescribeDraft = String(input?.value || '');
+}
 var _paperPdfUrl = '';
 var _paperFileName = '';
 var _paperParsedText = '';
@@ -28,11 +31,6 @@ var _paperRenderToken = 0;          // bumped each _renderAllPages() so a stale 
 var _paperLoadGen = 0;              // bumped each _loadPaperPdf() so a stale/slow load can't clobber a newer sidebar selection
 var _paperIntersectionObserver = null;  // lazy-raster trigger for virtualized pages
 var _paperReopenInFlight = false;   // single-flight guard for the raster-failure {data} re-open
-/** Monotonic-ish clock for the load/render instrumentation (falls back to Date.now). */
-function _paperNow() {
-  try { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
-  catch (_) { return Date.now(); }
-}
 var _paperActiveTab = 'qa';
 var _paperReportCache = '';
 var _paperReportMeta = null;  // finish-tag: {model, costCny, costUsd, promptTokens, ...}
@@ -50,20 +48,10 @@ Object.defineProperties(runtimeScope, {
   },
 });
 
-// Session-scoped snapshot of every report/review body already shown THIS
-// session, keyed by ``<paperId>::<langKey>`` (e.g. 'p1::en', 'p1::zh',
-// 'p1::review:neurips:en'). A language toggle is a PURE VIEW SWITCH: once a
-// language has been rendered, flipping back to it repaints from this snapshot
-// instantly — no server round-trip, so a toggle can NEVER re-trigger a fresh
-// generation (the reported bug: switch en→zh regenerated the Chinese report
-// even though it already existed, because the switch wiped view.cache and the
-// DB round-trip missed). Explicit Regenerate still overwrites via force-start.
-// Cleared on paper switch / mode exit (see _resetReportSnapshots).
-var _paperReportSnapshots = {};  // '<paperId>::<langKey>' -> { report, meta }
 // localStorage key holding a pending "regenerate in progress for (paperHash,
 // lang)" intent. Written synchronously BEFORE the force /start round-trip so a
 // refresh that interrupts that request still resumes the regenerate instead of
-// reverting to the stale cached report (see _setReportRegenIntent).
+// reverting to the stale cached report (see runtimeScope._setReportRegenIntent).
 var _REPORT_REGEN_INTENT_KEY = 'paper_report_regen_intent';
 
 var _paperQAHistory = [];
@@ -108,7 +96,6 @@ var _paperRebuttalCache = '';
 var _paperRebuttalMeta = null;
 var _paperRebuttalStream = null;
 var _paperRebuttalModel = '';
-var _paperRebuttalInputText = '';  // author rebuttal text the user pasted (per paper)
 var _REBUTTAL_REGEN_INTENT_KEY = 'paper_rebuttal_regen_intent';
 // Which Review-tab segment is on screen: 'review' (the peer review) or
 // 'rebuttal' (the author-response → follow-up reply). The two are
@@ -125,27 +112,10 @@ var _PAPER_REVIEW_VENUE_KEY = 'paper_review_venue_by_id';
 // the translation is produced on demand by the Babel translate task under a
 // DISTINCT composite lang key ``review:<venue>:<lang>`` so it never collides
 // with the whole-paper Babel cache.
-var _paperReviewShowTranslation = false;  // is the CN reading view currently shown?
-var _paperReviewTranslatedText = '';      // cached translated markdown (for re-toggle)
-var _paperReviewTranslating = false;      // guard against concurrent translate kicks
-// Per-paper report language ('en' | 'zh'), persisted so the SAME paper
-// re-opens on the language the user last generated it in (survives tab
-// switches AND hard refresh). Keyed by paper id in one localStorage map,
-// mirroring the review-venue map. Absent → default to the current UI language.
-var _PAPER_REPORT_LANG_KEY = 'paper_report_lang_by_id';
 // Review reading language ('en' | 'zh'). English stays the canonical
 // generated/cached/exported text; 'zh' shows an on-demand translated reading
 // view. Persisted per paper so the last-read language re-opens. The toggle is
 // always available (both directions), independent of the app UI language.
-var _PAPER_REVIEW_LANG_KEY = 'paper_review_lang_by_id';
-// Per-(paper, view-language) reading position, persisted so re-opening the
-// Report/Review tab (tab switch OR hard refresh) restores where the reader
-// left off instead of snapping to the top. Keyed by the SAME composite key as
-// the report snapshots (``<paperId>::<langKey>``) so every language of every
-// paper — and reports vs reviews vs venues — keeps its own place. The stored
-// value is a ``_captureReadingAnchor`` anchor ({index,offset} or {frac}).
-var _PAPER_READ_POS_KEY = 'paper_read_pos_by_key';
-
 // View-context registry: the single seam that lets one set of report
 // functions drive two independent tabs. Each context exposes the per-view
 // DOM ids, the regenerate-intent localStorage key, the cache-key resolver,
@@ -158,13 +128,9 @@ var _PAPER_READ_POS_KEY = 'paper_read_pos_by_key';
 function _restoreRebuttalPanel() {
   try {
     var ta = document.getElementById('paperRebuttalInput');
-    var stored = '';
-    try {
-      var raw = localStorage.getItem('paper_rebuttal_text_by_id');
-      var map = raw ? JSON.parse(raw) : {};
-      stored = (_activePaperId && map[_activePaperId]) || '';
-    } catch (e) { stored = ''; }
-    _paperRebuttalInputText = stored;
+    var stored = typeof runtimeScope._restorePaperRebuttalInputText === 'function'
+      ? runtimeScope._restorePaperRebuttalInputText()
+      : '';
     if (ta) ta.value = stored;
     var rv = _reportView('rebuttal');
     if (rv.stream && rv.stream.status === 'running') {
@@ -174,7 +140,7 @@ function _restoreRebuttalPanel() {
       // poll chain on the same stream — duplicate timers, racing repaints, and
       // eventually a wedged "Generate follow-up" button. Mirrors the
       // `!view.stream.pollTimer` guard in _loadOrGenerateReport.
-      if (!rv.stream.pollTimer && typeof _pollReportTask === 'function') _pollReportTask(rv);
+      if (!rv.stream.pollTimer && typeof runtimeScope._pollReportTask === 'function') runtimeScope._pollReportTask(rv);
     } else if (rv.cache || (rv.stream && rv.stream.fullText)) {
       if (typeof _paintReportFromState === 'function' && rv.stream) _paintReportFromState(rv);
       else if (typeof _renderFinalReport === 'function' && rv.cache) {
@@ -273,7 +239,7 @@ function _reportView(kind) {
       // and the review the authors/AC read are English, so English is the
       // canonical text (cache key, lookup, export). A Chinese UI reads a
       // translated view produced on demand by the Babel translate task (see
-      // _toggleReviewTranslation) — the English review underneath is never
+      // _setReviewLang) — the English review underneath is never
       // regenerated per-language.
       uiLang: function() { return 'en'; },
       // Composite cache key — what the server uses to pick the review prompt
@@ -295,128 +261,16 @@ function _reportView(kind) {
     // Report generation language is a PER-PAPER, persisted choice (like the
     // review venue) — a researcher reads different papers in different
     // languages, so a global toggle would fight the user. Derived fresh from
-    // _activePaperId on every call (no module global to reset on paper switch);
+    // runtimeScope._activePaperId on every call (no module global to reset on paper switch);
     // defaults to the current UI language on first open. The report is really
     // generated + cached per (paper_hash, lang), so switching regenerates.
-    uiLang: function() { return _activeReportLang(); },
+    uiLang: function() { return runtimeScope._activeReportLang(); },
     langKey: function() { return this.uiLang(); },
     get cache() { return _paperReportCache; }, set cache(v) { _paperReportCache = v; },
     get meta() { return _paperReportMeta; }, set meta(v) { _paperReportMeta = v; },
     get stream() { return _paperReportStream; }, set stream(v) { _paperReportStream = v; },
     get model() { return _paperReportModel; }, set model(v) { _paperReportModel = v; },
   };
-}
-
-/** Read the per-paper report-language map { paperId: 'en'|'zh' }. */
-function _readReportLangMap() {
-  try {
-    var raw = localStorage.getItem(_PAPER_REPORT_LANG_KEY);
-    return raw ? (JSON.parse(raw) || {}) : {};
-  } catch (e) {
-    console.warn('[Paper:Report] read lang map failed:', e);
-    return {};
-  }
-}
-
-/** The report language for the ACTIVE paper: a persisted per-paper choice if
- *  present, else the current UI language. Always derived (no global to drift). */
-function _activeReportLang() {
-  var uiDefault = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh') ? 'zh' : 'en';
-  if (!_activePaperId) return uiDefault;
-  var stored = _readReportLangMap()[_activePaperId];
-  return (stored === 'en' || stored === 'zh') ? stored : uiDefault;
-}
-
-/** Persist the report language the user picked for the active paper. */
-function _persistReportLang(paperId, lang) {
-  if (!paperId || (lang !== 'en' && lang !== 'zh')) return;
-  try {
-    var map = _readReportLangMap();
-    map[paperId] = lang;
-    localStorage.setItem(_PAPER_REPORT_LANG_KEY, JSON.stringify(map));
-  } catch (e) {
-    console.warn('[Paper:Report] persist lang failed:', e);
-  }
-}
-
-/** Snapshot-store key for a view's CURRENT language. Combines the active
- *  paper id with the view's composite cache key (plain 'en'/'zh' for reports,
- *  'review:<venue>:<uilang>' for reviews) so every language of every paper has
- *  its own slot. */
-function _reportSnapshotKey(view) {
-  view = view || _reportView('report');
-  return (_activePaperId || '') + '::' + view.langKey();
-}
-
-/** Remember a rendered report/review body so a later toggle back to this
- *  language repaints instantly (no server round-trip → no accidental regen). */
-function _rememberReportSnapshot(view, report, meta) {
-  if (!report) return;
-  _paperReportSnapshots[_reportSnapshotKey(view)] = { report: report, meta: meta || null };
-}
-
-/** The remembered body for the view's current language, or null. */
-function _getReportSnapshot(view) {
-  return _paperReportSnapshots[_reportSnapshotKey(view)] || null;
-}
-
-/** Drop ALL session snapshots. Called on paper switch / mode exit so one
- *  paper's reports never paint under another. */
-function _resetReportSnapshots() {
-  _paperReportSnapshots = {};
-}
-
-/** Sync the EN/中 segmented control for a view to reflect its current
- *  language. `view` defaults to the report view. */
-function _syncReportLangToggle(view) {
-  view = view || _reportView('report');
-  var wrap = document.getElementById(view.idPrefix + 'LangToggle');
-  if (!wrap) return;
-  var cur = (view.kind === 'review') ? _activeReviewLang() : _activeReportLang();
-  wrap.querySelectorAll('.paper-report-lang-opt').forEach(function(btn) {
-    btn.classList.toggle('active', btn.dataset.lang === cur);
-  });
-}
-
-/** User clicked EN or 中 in a view's segmented control.
- *   - Report: changes the generation language (per (paper_hash, lang) cache) →
- *     reset local state + load/generate in the new language.
- *   - Review: English stays canonical; 'zh' shows the translated reading view,
- *     'en' restores the original (bidirectional, always available). */
-function _setReportLang(lang, kind) {
-  if (lang !== 'en' && lang !== 'zh') return;
-  var view = _reportView(kind || 'report');
-  if (view.kind === 'review') {
-    _setReviewLang(lang);
-    _syncReportLangToggle(view);
-    return;
-  }
-  var cur = _activeReportLang();
-  if (cur === lang) return;
-  // Before leaving the current language, snapshot whatever is on screen so a
-  // later toggle back repaints it instantly (never regenerates).
-  if (view.cache) _rememberReportSnapshot(view, view.cache, view.meta);
-  if (_activePaperId) _persistReportLang(_activePaperId, lang);
-  _syncReportLangToggle(view);
-  // New language ⇒ different (paper_hash, lang) cache key. Drop local stream
-  // state + in-memory cache so we paint/load the report in the new language
-  // (each language cached separately server-side — no clobber).
-  _resetReportLocalState(view);
-  view.cache = '';
-  // If we've already shown this language THIS session, it's a pure view switch:
-  // repaint from the snapshot with no server round-trip. This is what stops a
-  // toggle from ever re-triggering a fresh generation (the reported bug).
-  var snap = _getReportSnapshot(view);
-  if (snap) {
-    view.cache = snap.report;
-    view.meta = snap.meta || null;
-    if (_paperActiveTab === 'report') {
-      var c = document.getElementById(view.containerId);
-      if (c) _renderFinalReport(c, snap.report, undefined, view);
-    }
-    return;
-  }
-  if (_paperActiveTab === 'report') _loadOrGenerateReport(view);
 }
 
 /**
@@ -436,10 +290,10 @@ function _setReportLang(lang, kind) {
 function _applyResolvedTitle(resolvedTitle, paperId) {
   var title = (resolvedTitle || '').trim();
   if (!title) return;
-  var pid = paperId || _activePaperId;
+  var pid = paperId || runtimeScope._activePaperId;
   var entry = null;
-  for (var i = 0; i < _paperLibrary.length; i++) {
-    if (_paperLibrary[i].id === pid) { entry = _paperLibrary[i]; break; }
+  for (var i = 0; i < runtimeScope._paperLibrary.length; i++) {
+    if (runtimeScope._paperLibrary[i].id === pid) { entry = runtimeScope._paperLibrary[i]; break; }
   }
   if (!entry) return;
   var cur = (entry.title || '').trim();
@@ -447,14 +301,13 @@ function _applyResolvedTitle(resolvedTitle, paperId) {
   if (!isPlaceholder) return;       // respect a real / user-set title
   if (cur === title) return;        // no change
   entry.title = title;
-  if (pid === _activePaperId) {
+  if (pid === runtimeScope._activePaperId) {
     _paperFileName = title;
     _updatePaperTitles();
   }
-  _renderPaperLibrary();
-  // Persist the healed title (server already updated its row, but this keeps
-  // the per-entry PUT path consistent and covers the in-memory entry).
-  if (pid === _activePaperId) _saveActivePaperState();
+  runtimeScope._renderPaperLibrary();
+  // Server healed the durable title; sync only lightweight client metadata.
+  if (pid === runtimeScope._activePaperId) runtimeScope._saveActivePaperState('metadata');
 }
 
 function _updatePaperTitles() {
@@ -516,7 +369,7 @@ function _showPaperLanding() {
             ' ' + escapeHtml(_tt('paper.describeLabel')) +
           '</div>' +
           '<textarea id="paperDescribeInput" class="paper-describe-input" rows="3" placeholder="' + escapeHtml(_tt('paper.describePlaceholder')) + '"' +
-                 ' data-tofu-action-input="_paperDescribeDraft=this.value"' +
+                 ' data-tofu-action-input="_setPaperDescribeDraft(this)"' +
                  ' data-tofu-action-keydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey))_submitPaperDescribe()">' + escapeHtml(_paperDescribeDraft) + '</textarea>' +
           '<button data-tofu-action="_submitPaperDescribe()" class="paper-describe-btn">' +
             '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>' +
@@ -530,7 +383,7 @@ function _showPaperLanding() {
 function _showPaperLandingForNew() {
   // Clear in-memory "which paper am I looking at" state and show the landing.
   // No new DB row is created until the user actually uploads or fetches a PDF.
-  _setActivePaperId('');
+  runtimeScope._setActivePaperId('');
   _paperPdfUrl = '';
   _paperPdfFilename = '';
   _paperFileName = '';
@@ -545,7 +398,7 @@ function _showPaperLandingForNew() {
   runtimeScope._babelTranslatedPages = {};
   _paperTotalPages = 0;
   _updatePaperTitles();
-  _renderPaperLibrary();
+  runtimeScope._renderPaperLibrary();
   _showPaperLanding();
 }
 
@@ -582,7 +435,7 @@ async function _paperUploadFile(file) {
     throw new Error('Paper runtime owners are unavailable');
   }
 
-  // Create a new library entry for this paper (_createPaperEntry sets _activePaperId).
+  // Create a new library entry for this paper (_createPaperEntry sets runtimeScope._activePaperId).
   // Its id is sent WITH the upload so the server persists the bookshelf row
   // itself (server-authoritative ingest) — the paper survives even if this
   // tab closes before the client save. On failure we remove this entry so a
@@ -754,6 +607,7 @@ function _renderArxivFetchProgress(state) {
       (detail ? '<div class="paper-fetch-detail">' + escapeHtml(detail) + '</div>' : '') +
     '</div>';
 }
+runtimeScope._renderArxivFetchProgress = _renderArxivFetchProgress;
 
 /** Recover paper text by asking the server to re-parse the already-stored PDF.
  * Used when a library entry was saved before server-side parsing (or parsing failed).
@@ -776,7 +630,7 @@ async function _ensurePaperText() {
     }
     _paperParsedText = data.text;
     if (data.total_pages) _paperTotalPages = data.total_pages;
-    _saveActivePaperState();
+    runtimeScope._saveActivePaperState('metadata');
     debugLog('[Paper] Recovered ' + (data.text_length || data.text.length) + ' chars from PDF', 'success');
     return true;
   } catch (e) {
@@ -792,14 +646,14 @@ async function _ensurePaperText() {
 
 function _handlePaperKeyDown(e) {
   if (!paperMode) return;
-  if (e.key === 'Escape') { e.preventDefault(); exitPaperMode(); return; }
+  if (e.key === 'Escape') { e.preventDefault(); runtimeScope.exitPaperMode(); return; }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-    if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'paperQAInput') { e.preventDefault(); _sendPaperQuestion(); }
+    if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'paperQAInput') { e.preventDefault(); runtimeScope._sendPaperQuestion(); }
     return;
   }
-  if (e.key === '+' || e.key === '=') { paperZoomIn(); e.preventDefault(); }
-  if (e.key === '-') { paperZoomOut(); e.preventDefault(); }
-  if (e.key === '0') { paperFitWidth(); e.preventDefault(); }
+  if (e.key === '+' || e.key === '=') { runtimeScope.paperZoomIn(); e.preventDefault(); }
+  if (e.key === '-') { runtimeScope.paperZoomOut(); e.preventDefault(); }
+  if (e.key === '0') { runtimeScope.paperFitWidth(); e.preventDefault(); }
 }
 
 // ══════════════════════════════════════════════════════
@@ -810,10 +664,15 @@ function _handlePaperKeyDown(e) {
 /* Explicit renderer surface consumed by the native Paper owners. */
 if (typeof window !== 'undefined') {
   runtimeScope._reportView = _reportView;
+  runtimeScope._applyResolvedTitle = _applyResolvedTitle;
+  runtimeScope._ensurePaperText = _ensurePaperText;
   runtimeScope._restoreRebuttalPanel = _restoreRebuttalPanel;
   runtimeScope._syncReviewSegState = _syncReviewSegState;
   runtimeScope._updatePaperTitles = _updatePaperTitles;
   runtimeScope._showPaperLanding = _showPaperLanding;
   runtimeScope._handlePaperKeyDown = _handlePaperKeyDown;
+  runtimeScope._handlePaperFileDrop = _handlePaperFileDrop;
+  runtimeScope._handlePaperFileUpload = _handlePaperFileUpload;
+  runtimeScope._setPaperDescribeDraft = _setPaperDescribeDraft;
+  runtimeScope._showPaperLandingForNew = _showPaperLandingForNew;
 }
-

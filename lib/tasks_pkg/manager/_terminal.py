@@ -128,4 +128,60 @@ def finalize_chat_task_error(
     return event
 
 
-__all__ = ['finalize_chat_task_error', 'stamp_chat_task_terminal']
+def finalize_chat_task_aborted(
+    task: dict,
+    *,
+    append_event_fn: Callable[[dict, dict], Any] | None = None,
+    persist_task_result_fn: Callable[[dict], Any] | None = None,
+    notify_terminal_fn: Callable[[dict], Any] | None = None,
+) -> dict | None:
+    """Settle a user-cancelled task that never acquired a worker thread."""
+    if append_event_fn is None:
+        from lib.tasks_pkg.manager._events import append_event
+        append_event_fn = append_event
+    if persist_task_result_fn is None:
+        from lib.tasks_pkg.manager._persist import persist_task_result
+        persist_task_result_fn = persist_task_result
+    if notify_terminal_fn is None:
+        from lib.tasks_pkg.manager._registry import notify_terminal_conversation_change
+        notify_terminal_fn = notify_terminal_conversation_change
+
+    task['aborted'] = True
+    first = stamp_chat_task_terminal(
+        task,
+        status='done',
+        finish_reason='aborted',
+        flow_reason='aborted',
+    )
+    if not first:
+        return None
+    event = build_event(EventType.DONE, finishReason='aborted')
+    try:
+        append_event_fn(task, event)
+    except Exception as exc:
+        logger.error(
+            '[Task %s] queued-abort event failed: %s',
+            (task.get('id') or '?')[:8], exc, exc_info=True,
+        )
+    try:
+        persist_task_result_fn(task)
+    except Exception as exc:
+        logger.error(
+            '[Task %s] queued-abort persistence failed: %s',
+            (task.get('id') or '?')[:8], exc, exc_info=True,
+        )
+    try:
+        notify_terminal_fn(task)
+    except Exception as exc:
+        logger.debug(
+            '[Task %s] queued-abort busy projection failed: %s',
+            (task.get('id') or '?')[:8], exc,
+        )
+    return event
+
+
+__all__ = [
+    'finalize_chat_task_aborted',
+    'finalize_chat_task_error',
+    'stamp_chat_task_terminal',
+]

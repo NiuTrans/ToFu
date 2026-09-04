@@ -71,7 +71,11 @@ def _memory_context(query: str, project_path=None):
     try:
         from lib.memory.relevance import filter_relevant_memories
         from lib.memory.storage import get_eligible_memories
-        mems = get_eligible_memories(project_path)
+        mems = get_eligible_memories(
+            project_path,
+            include_body=False,
+            record_view='retrieval',
+        )
         if not mems:
             return []
         top = filter_relevant_memories(mems, query, top_k=_CTX_MEMORY_MAX)

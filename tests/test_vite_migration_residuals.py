@@ -416,6 +416,110 @@ return {
     }
 
 
+def test_sync_snapshot_reads_are_bounded_and_unwedge_after_settlement() -> None:
+    """A stalled snapshot GET must never pin the coalesced hydrate lane.
+
+    Regression pin for the dead-composer incident: the typed transport only
+    enforces a declared timeout, and the coordinator used to call
+    ``api.snapshot``/``api.turnPage`` with no options at all.  One wedged
+    read then kept ``snapshotPromise`` (and the turn runtime's hydrate lane)
+    pending until the page was reloaded, latching the composer send lock —
+    Enter and the Send button silently did nothing.  The coordinator must
+    declare a finite timeout on every read and clear the flight once the
+    read settles so the next hydrate retries against a healthy connection.
+    """
+    result = _run_native(
+        [
+            (
+                "migration-conversation-sync.js",
+                ROOT / "frontend/src/core/conversation-sync.ts",
+            ),
+        ],
+        r"""
+const makeSnapshot = syncSeq => ({
+  ok: true,
+  contract: 'tofu.conversation-sync.snapshot/v1',
+  conversationId: 'conv-a',
+  conversationRevision: syncSeq,
+  syncSeq,
+  cursor: `cursor-${syncSeq}`,
+  serverBootId: 'boot-test', heartbeatIntervalMs: 15000,
+  settings: {}, turns: [], attempts: [],
+});
+class FakeEventSource {
+  constructor(url) { this.url = url; this.closed = false; }
+  addEventListener() {}
+  removeEventListener() {}
+  close() { this.closed = true; }
+}
+const snapshotCalls = [];
+const turnPageCalls = [];
+let releaseWedge = null;
+const api = {
+  snapshot(conversationId, options) {
+    snapshotCalls.push({conversationId, options});
+    if (snapshotCalls.length === 1) {
+      // Wedged read: settles only when the test releases it.
+      return new Promise(resolve => {
+        releaseWedge = () => resolve(makeSnapshot(2));
+      });
+    }
+    return Promise.resolve(makeSnapshot(10));
+  },
+  turnPage(conversationId, laneId, syncSeq, beforeOrdinal, limit, options) {
+    turnPageCalls.push({options});
+    return new Promise(() => {});  // never settles; only the call args matter
+  },
+  eventsUrl(conversationId, after) {
+    return `/conversations/${conversationId}/events?after=${after}`;
+  },
+};
+const coordinator = new ConversationSyncCoordinator({
+  conversationId: 'conv-a',
+  api,
+  eventSourceFactory(url) { return new FakeEventSource(url); },
+  onSnapshot() {},
+  onAttemptEvent() { return true; },
+  onTurnDelta() { return true; },
+});
+
+const firstHydrate = coordinator.hydrate(false);
+const secondHydrate = coordinator.hydrate(false);
+const coalescedWhileWedged = snapshotCalls.length === 1;
+releaseWedge();
+await firstHydrate;
+await secondHydrate;
+
+// The settled flight cleared: a later recovery issues a fresh snapshot read.
+await coordinator.recover('post-wedge-recovery');
+
+// History pages go through the same bounded-read guard.
+void coordinator.loadTurnPage('main').catch(() => 'late-rejection-ignored');
+await new Promise(resolve => setTimeout(resolve, 0));
+
+coordinator.close();
+return {
+  coalescedWhileWedged,
+  snapshotTimeouts: snapshotCalls.map(call => call.options?.timeout ?? null),
+  turnPageTimeout: turnPageCalls[0]?.options?.timeout ?? null,
+  recoveredCursor: coordinator.cursor,
+};
+""",
+    )
+
+    assert result["coalescedWhileWedged"] is True
+    snapshot_timeouts = result["snapshotTimeouts"]
+    assert len(snapshot_timeouts) == 2  # wedged read + post-settlement retry
+    assert all(
+        isinstance(timeout, (int, float)) and 0 < timeout <= 60_000
+        for timeout in snapshot_timeouts
+    ), snapshot_timeouts
+    turn_page_timeout = result["turnPageTimeout"]
+    assert isinstance(turn_page_timeout, (int, float))
+    assert 0 < turn_page_timeout <= 60_000
+    assert result["recoveredCursor"] == "cursor-10"
+
+
 def test_stale_projection_adopts_body_latest_turn_and_clears_pending() -> None:
     result = _run_native(
         [("migration-turn-runtime.js", ROOT / "frontend/src/core/turn-runtime.ts")],

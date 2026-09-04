@@ -330,8 +330,23 @@
   font-size: 11px;
   margin-bottom: 4px;
 }
-.oauth-quota-row-head span:last-child {
+.oauth-quota-row-head > span:last-child {
   font-weight: 700;
+}
+
+.oauth-quota-window {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.oauth-quota-reset {
+  color: var(--s-muted);
+  font-family: var(--font-sans, sans-serif);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 .oauth-quota-track {
   height: 8px;
@@ -574,9 +589,7 @@
    The default 860px panel only offers ~305px (860 − 178 sidebar − content
    padding), where English facts shattered into 3-word lines and long
    tokens broke mid-word ("ModuleNotFoundErr/or"). Two layered fixes:
-   1. While My Context is active, the panel itself widens — pure-CSS
-      counterpart of the matrix tab's stg-matrix-wide (the width
-      transition already lives on .settings-panel), no JS hook needed. */
+   1. While My Context is active, the panel itself widens with no JS hook. */
 @media (min-width:769px){
   .settings-panel:has(#settingsTab_preferences.active){width:min(1180px,96vw)}
 }

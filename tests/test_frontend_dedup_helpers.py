@@ -5,7 +5,7 @@ WHY
 Several files carried their OWN HTML-escaper (a full `.replace(/&/g…)` chain,
 or memory.js's slow `createElement/textContent` variant) and their OWN
 clipboard fallback, instead of the canonical bundled helpers
-`escapeHtml` (core/escape_html.js) and `_safeClipboardWrite`
+`escapeHtml` (frontend/src/html-safety.ts) and `_safeClipboardWrite`
 (core/debug_panel.js). Commit 2 collapsed those onto the shared helpers.
 
 Escaping is XSS-adjacent, so this is verified, not self-reported: the test
@@ -36,7 +36,11 @@ from pathlib import Path
 
 import pytest
 
-from tests._runtime_sections import runtime_section, runtime_sections_dir
+from tests._runtime_sections import (
+    native_module_path,
+    runtime_section,
+    runtime_sections_dir,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -44,6 +48,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = runtime_sections_dir()
 MEMORY_PANEL = Path(ROOT) / 'frontend/src/features/memory/panel.ts'
+HTML_SAFETY = native_module_path(
+    '.native/dedup-html-safety.js',
+    Path(ROOT) / 'frontend/src/html-safety.ts',
+)
 
 
 def _node_deps_available() -> bool:
@@ -68,8 +76,8 @@ global.console = console;
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
-// ── Load the REAL canonical helper (core/escape_html.js) into shared scope ──
-eval(fs.readFileSync(path.join(JS_DIR, 'core', 'escape_html.js'), 'utf8'));
+// ── Load the REAL canonical typed helper into shared scope ──
+(0, eval)(fs.readFileSync(process.argv[4], 'utf8'));
 
 if (typeof escapeHtml !== 'function') { console.log('FAIL fn_exposed escapeHtml missing'); process.exit(0); }
 check('fn_exposed_escapeHtml', true);
@@ -98,7 +106,7 @@ def _run():
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        argv = ['node', harness, ROOT, JS_DIR]
+        argv = ['node', harness, ROOT, JS_DIR, HTML_SAFETY]
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -117,8 +125,9 @@ def test_dedup_helpers_escape_and_clipboard():
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'dedup-helpers failures:\n' + output
     assert output.count('PASS') >= 7, f'expected >=7 PASS lines, got:\n{output}'
-    assert 'globals().escapeHtml?.(value)' in MEMORY_PANEL.read_text(), (
-        'native memory panel no longer delegates escaping to the shared helper')
+    source = MEMORY_PANEL.read_text()
+    assert "import { escapeHtmlText as escape } from '../../html-safety';" in source
+    assert 'function escape(' not in source
 
 
 def test_clipboard_callers_delegate_to_safe_helper():
@@ -136,12 +145,9 @@ def test_clipboard_callers_delegate_to_safe_helper():
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_dedup_helpers_nc_catches_broken_memory_esc():
-    """NC: removing the native delegation must trip the source contract."""
+def test_memory_escape_dependency_has_one_explicit_import():
+    """The memory renderer has no mutable registry/fallback escape policy."""
     source = MEMORY_PANEL.read_text()
-    neutered = source.replace('globals().escapeHtml?.(value)', 'undefined', 1)
-    assert neutered != source, 'native memory escape delegation anchor drifted'
-    assert 'globals().escapeHtml?.(value)' not in neutered
-    output = _run()
-    lines = output.splitlines()
-    assert 'PASS esc_lt' in lines and 'PASS esc_dquote' in lines, output
+    assert source.count("from '../../html-safety'") == 1
+    assert 'escapeHtml?:' not in source
+    assert '.escapeHtml' not in source

@@ -63,6 +63,25 @@ class _FakeSlot:
         return 1.0
 
 
+class _FakeRouteGroup:
+    pin_id = 'prov_test'
+
+
+def _stub_owner_route(monkeypatch, *, group=None):
+    """Make an HTTP route test cross the v2 owner boundary hermetically."""
+    import lib.model_routing as routing
+
+    route_group = group or _FakeRouteGroup()
+    monkeypatch.setattr(
+        routing,
+        'mint_capability_slot_group',
+        lambda *_args, **_kwargs: ('gpt-4o-transcribe', route_group),
+    )
+    monkeypatch.setattr(
+        routing, 'dispose_routed_slot_group', lambda _group: None)
+    return route_group
+
+
 def _multipart(audio_bytes, filename='clip.webm', content_type='audio/webm',
                extra_form=None):
     """Build (form, files) for Quart's test client (needs a FileStorage)."""
@@ -106,6 +125,7 @@ def test_transcribe_happy_path(client, monkeypatch):
     """A valid audio blob with a configured slot returns {ok, text, model}."""
     import lib.transcription as tr
 
+    _stub_owner_route(monkeypatch)
     monkeypatch.setattr(tr, '_transcription_slots', lambda: [_FakeSlot()])
 
     captured = {}
@@ -200,11 +220,43 @@ def test_transcribe_no_model_configured_returns_503(client, monkeypatch):
     _run_async(go())
 
 
-def test_capabilities_reports_availability(client, monkeypatch):
-    """GET /audio/capabilities reflects whether a transcription slot exists."""
+def test_unexpected_transcription_failure_is_redacted(client, monkeypatch):
+    """Provider/programmer faults never disclose exception text."""
     import lib.transcription as tr
 
-    monkeypatch.setattr(tr, '_transcription_slots', lambda: [])
+    monkeypatch.setattr(
+        tr,
+        'transcribe',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError('/secret/path?token=do-not-expose')),
+    )
+
+    async def go():
+        form, files = _multipart(b'\x1a\x45\xdf\xa3fake-webm')
+        response = await client.post(
+            '/api/v1/audio/transcribe', form=form, files=files)
+        assert response.status_code == 500
+        body = await response.get_json()
+        assert body['ok'] is False
+        assert '/secret/path' not in str(body)
+        assert 'do-not-expose' not in str(body)
+
+    _run_async(go())
+
+
+def test_capabilities_reports_availability(client, monkeypatch):
+    """GET /audio/capabilities projects owner-scoped v2 routes."""
+    from types import SimpleNamespace
+
+    import lib.model_routing as routing
+
+    monkeypatch.setattr(
+        routing,
+        'list_capability_route_groups',
+        lambda _repository, _boundary, requirements: {
+            capability: [] for capability in requirements
+        },
+    )
     async def unavailable():
         r = await client.get('/api/v1/audio/capabilities')
         assert r.status_code == 200
@@ -214,7 +266,17 @@ def test_capabilities_reports_availability(client, monkeypatch):
         assert data['maxBytes'] > 0
     _run_async(unavailable())
 
-    monkeypatch.setattr(tr, '_transcription_slots', lambda: [_FakeSlot()])
+    def _route_groups(_repository, _boundary, requirements):
+        return {
+            capability: ([SimpleNamespace(
+                model_id='gpt-4o-transcribe',
+                provider_id='prov_test',
+                offering_id='offering_test',
+            )] if capability == 'transcription' else [])
+            for capability in requirements
+        }
+
+    monkeypatch.setattr(routing, 'list_capability_route_groups', _route_groups)
     async def available():
         r = await client.get('/api/v1/audio/capabilities')
         data = await r.get_json()
@@ -223,6 +285,47 @@ def test_capabilities_reports_availability(client, monkeypatch):
                                     'provider_id': 'prov_test',
                                     'mode': 'endpoint'}]
     _run_async(available())
+
+
+def test_owner_route_pins_and_disposes_request_group(monkeypatch):
+    """Owner-aware transcription cannot escape its request-scoped v2 group."""
+    import lib.model_routing as routing
+    import lib.transcription as tr
+    from lib.llm_dispatch.provider_pin import get_pinned_provider
+
+    route_group = _FakeRouteGroup()
+    disposed = []
+    monkeypatch.setattr(
+        routing,
+        'mint_capability_slot_group',
+        lambda *_args, **_kwargs: ('gpt-4o-transcribe', route_group),
+    )
+    monkeypatch.setattr(
+        routing,
+        'dispose_routed_slot_group',
+        lambda group: disposed.append(group),
+    )
+    monkeypatch.setattr(tr, '_transcription_slots', lambda: [_FakeSlot()])
+    observed_pins = []
+
+    def _post(*_args, **_kwargs):
+        observed_pins.append(get_pinned_provider())
+        return 'owner transcript'
+
+    monkeypatch.setattr(tr, '_post_to_provider', _post)
+
+    result = tr.transcribe(
+        b'\x1a\x45\xdf\xa3fake-webm-bytes',
+        'clip.webm',
+        content_type='audio/webm',
+        owner_user_id=73,
+        tenant_id='tenant-a',
+    )
+
+    assert result.text == 'owner transcript'
+    assert observed_pins == ['prov_test']
+    assert disposed == [route_group]
+    assert get_pinned_provider() is None
 
 
 # ── Unit tests (no HTTP) ────────────────────────────────────────────────

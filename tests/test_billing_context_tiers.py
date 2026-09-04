@@ -4,7 +4,12 @@ import pytest
 
 from lib.billing.cost import MICRO_PER_USD, compute_request_cost
 from lib.cost import compute_cost
-from lib.pricing import build_rate_card, clear_provider_pricing, set_provider_pricing
+from lib.pricing import (
+    build_rate_card,
+    clear_provider_pricing,
+    first_pricing_increase_boundary,
+    set_provider_pricing,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -107,6 +112,30 @@ def test_rate_card_is_authoritative_and_exposes_flat_and_tier_rows():
     assert [t['maxPromptTokens'] for t in qwen['contextTiers']] == [
         128_000, 256_000, 1_000_000]
     assert 'input_per_mtok_micro' not in qwen
+
+
+def test_first_price_increase_boundary_uses_effective_rates():
+    set_provider_pricing('boundary-provider', 'boundary-model', {
+        'contextTiers': [
+            {'id': 'same-a', 'maxPromptTokens': 100, 'input': 2,
+             'output': 4, 'cacheReadMul': .1, 'cacheWriteMul': 1.25},
+            {'id': 'same-b', 'maxPromptTokens': 200, 'input': 2,
+             'output': 4, 'cacheReadMul': .1, 'cacheWriteMul': 1.25},
+            {'id': 'dearer', 'maxPromptTokens': 1000, 'input': 3,
+             'output': 4, 'cacheReadMul': .1, 'cacheWriteMul': 1.25},
+        ]})
+    try:
+        boundary = first_pricing_increase_boundary(
+            'boundary-model', 'boundary-provider')
+        assert boundary['maxPromptTokens'] == 200
+        assert boundary['tierId'] == 'same-b'
+        assert boundary['nextTierId'] == 'dearer'
+    finally:
+        clear_provider_pricing('boundary-provider')
+
+
+def test_flat_model_has_no_price_increase_boundary():
+    assert first_pricing_increase_boundary('gpt-4o') is None
 
 
 def test_unknown_model_default_estimate_is_preserved():

@@ -230,6 +230,28 @@ def test_provider_symmetry_no_gateway_divergence():
     _ok('provider symmetry: carrier transforms provider-independent')
 
 
+def test_wire_preview_uses_gateway_family_and_wire_shape_rules():
+    """Preview and real build share family gating plus call/result repair."""
+    from lib.tasks_pkg.wire_messages import (
+        _gateway_sanitize_enabled,
+        apply_wire_sanitize,
+    )
+
+    assert _gateway_sanitize_enabled('sankuai_anthropic') is True
+    source = [
+        {'role': 'assistant', 'content': '', 'tool_calls': [{
+            'id': '', 'function': {'name': '', 'arguments': {}},
+        }]},
+        {'role': 'tool', 'tool_call_id': '', 'content': 'typed rejection'},
+    ]
+    wire = apply_wire_sanitize(source, provider_id='openai')
+    call = wire[0]['tool_calls'][0]
+    assert call['id']
+    assert call['function']['name']
+    assert isinstance(call['function']['arguments'], str)
+    assert wire[1]['tool_call_id'] == call['id']
+
+
 def main():
     print()
     print(_color(f'═══ wire_messages fidelity (revert={_REVERT or "none"}) ═══', '36'))

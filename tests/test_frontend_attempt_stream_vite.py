@@ -153,6 +153,84 @@ def test_snapshot_flight_is_claimed_before_reentrant_health_callback(
     }
 
 
+def test_snapshot_tool_segment_references_materialize_before_publication(
+        page, assert_no_js_errors):
+    page.wait_for_function(
+        "typeof window.ConversationSyncCoordinator === 'function'",
+        timeout=30_000,
+    )
+
+    result = page.evaluate(r"""
+    async () => {
+      const largeContent = 'result-'.repeat(10_000);
+      const toolArgs = { query: 'bounded reference' };
+      const roundResult = { content: largeContent, status: 'done' };
+      const round = {
+        toolCallId: 'call-ref-a', toolName: 'research', toolArgs,
+        toolContent: largeContent, status: 'done', result: roundResult,
+      };
+      const wireSegment = {
+        type: 'tool_use', blockId: 'tool:call-ref-a', id: 'call-ref-a',
+        name: 'research', result: {}, roundRef: 'call-ref-a',
+      };
+      const wireSnapshot = {
+        ok: true,
+        contract: 'tofu.conversation-sync.snapshot/v1',
+        conversationId: 'conv-reference-segments',
+        conversationRevision: 1,
+        syncSeq: 1,
+        cursor: 'cursor-1',
+        serverBootId: 'boot-test',
+        heartbeatIntervalMs: 15000,
+        settings: {},
+        turns: [{
+          turnId: 'turn-a', conversationId: 'conv-reference-segments',
+          laneId: 'main', ordinal: 1, actor: 'assistant', kind: 'reply',
+          runId: 'run-a', status: 'completed', currentAttemptId: null,
+          projectionRevision: 1, projection: {
+            content: 'done', segments: [wireSegment], toolRounds: [round],
+          },
+        }],
+        attempts: [], queueItems: [],
+      };
+      let published = null;
+      const coordinator = new window.ConversationSyncCoordinator({
+        conversationId: wireSnapshot.conversationId,
+        api: {
+          async snapshot() { return wireSnapshot; },
+          eventsUrl() { return '/unused'; },
+        },
+        onSnapshot(snapshot) { published = snapshot; },
+        onAttemptEvent() { return true; },
+        onTurnDelta() { return true; },
+      });
+      const returned = await coordinator.hydrate(false);
+      coordinator.close();
+      const segment = published.turns[0].projection.segments[0];
+      return {
+        returnedIsMaterialized: returned === published,
+        copiedSnapshot: published !== wireSnapshot,
+        sameRound: segment._round === round,
+        sameInput: segment.input === toolArgs,
+        sameResult: segment.result === roundResult,
+        contentLength: segment.result.content.length,
+        wireUntouched: wireSegment.result !== roundResult
+          && !('input' in wireSegment) && !('_round' in wireSegment),
+      };
+    }
+    """)
+
+    assert result == {
+        'returnedIsMaterialized': False,
+        'copiedSnapshot': True,
+        'sameRound': True,
+        'sameInput': True,
+        'sameResult': True,
+        'contentLength': 70_000,
+        'wireUntouched': True,
+    }
+
+
 def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
         page, assert_no_js_errors):
     page.wait_for_function(
@@ -182,6 +260,7 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
 
       const healthStates = [];
       const events = [];
+      const eventReceipts = [];
       const deltas = [];
       const snapshots = [];
       const protocolErrors = [];
@@ -217,7 +296,11 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
           return source;
         },
         onSnapshot(snapshot) { snapshots.push(snapshot); },
-        onAttemptEvent(event) { events.push(event); return true; },
+        onAttemptEvent(event, receivedAt, serverPublishedAt) {
+          events.push(event);
+          eventReceipts.push({ receivedAt, serverPublishedAt });
+          return true;
+        },
         onTurnDelta(delta) { deltas.push(delta); return true; },
         onHealth(_conversationId, health) { healthStates.push(health.state); },
         onProtocolError(error) { protocolErrors.push(error.message); },
@@ -267,6 +350,9 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
         firstUrl: first.url,
         secondUrl: second.url,
         eventTypes: events.map(event => event.type),
+        receiptPublishedAt: eventReceipts[0]?.serverPublishedAt,
+        receiptHasBrowserClock: Number.isFinite(eventReceipts[0]?.receivedAt)
+          && eventReceipts[0].receivedAt > 1_000_000,
         deltaPatchTargets: deltas.flatMap(delta => delta.turnPatches || [])
           .map(change => change.targetProjectionRevision),
         cursor: coordinator.cursor,
@@ -283,6 +369,8 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
         'firstUrl': '/conversations/conv-a/events?after=cursor-2',
         'secondUrl': '/conversations/conv-a/events?after=cursor-10',
         'eventTypes': ['projection_updated'],
+        'receiptPublishedAt': 3,
+        'receiptHasBrowserClock': True,
         'deltaPatchTargets': [2],
         'cursor': 'cursor-10',
         'snapshotCount': 2,

@@ -1,344 +1,119 @@
-export async function loadFeatureFlags() {
-  try {
-    const response = await window.Api.request('/api/v1/features', { parse: 'response' });
-    if (!response.ok) return;
-    _featureFlags = await response.json();
-    const badge = document.getElementById('optimizerBadge');
-    if (badge) badge.style.display = _featureFlags.optimizer_enabled === false ? 'none' : 'inline-flex';
-    _applyDebugModeVisibility();
-    _applyTradingVisibility();
-    if (typeof renderConversationList === 'function') renderConversationList();
-    if (typeof getActiveConv === 'function') {
-      const conversation = getActiveConv();
-      if (conversation) runtimeScope.requestAuthoritativeConversationRender(
-        conversation.id, { forceScroll: false },
-      );
+// Install the generated typed endpoint catalogue only after the retained Api
+// facade has created its stable `orchestrations` placeholder. The lightweight
+// saved-Flow catalogue remains available without loading Studio or Task Mode.
+installOrchestrationApiClient(Api);
+const _orchestrationFlowCatalog = createOrchestrationFlowCatalog({
+  api: resolveOrchestrationApiClient,
+  onError: (error) => {
+    console.warn('[Flow catalog] list failed:', error?.message ?? error);
+  },
+  onChange: (items) => {
+    if (typeof _reconcileActiveFlowCatalog === 'function') {
+      _reconcileActiveFlowCatalog(items);
     }
-  } catch (error) {
-    console.warn('[features] flags unavailable', error);
+    if (typeof _syncActiveFlowLabel === 'function') _syncActiveFlowLabel();
+  },
+  onObserverError: (error) => {
+    console.error('[Flow catalog] change observer failed:', error);
+  },
+});
+
+function _commitFeatureFlags(nextFlags) {
+  _featureFlags = nextFlags;
+  const badge = document.getElementById('optimizerBadge');
+  if (badge) badge.style.display = _featureFlags.optimizer_enabled === false ? 'none' : 'inline-flex';
+  runtimeScope._applyDebugModeVisibility?.();
+  runtimeScope._applyTradingVisibility?.();
+  if (typeof renderConversationList === 'function') renderConversationList();
+  if (typeof getActiveConv === 'function') {
+    const conversation = getActiveConv();
+    if (conversation) runtimeScope.requestAuthoritativeConversationRender(
+      conversation.id, { forceScroll: false },
+    );
   }
 }
 
+const _featureFlagsLoader = createFeatureFlagsLoader({
+  current: () => _featureFlags,
+  commit: _commitFeatureFlags,
+  request: () => Api.request('/api/v1/features', { parse: 'response' }),
+  onError: (error) => console.warn('[features] flags unavailable', error),
+});
+
+export const loadFeatureFlags = _featureFlagsLoader.load;
+
 // BEGIN GENERATED RUNTIME ACTIONS — scripts/update_runtime_actions.mjs
 const runtimeActions = Object.freeze({
-  _addAlias,
-  _addApiKey,
-  _addExtraHeader,
-  _addFace,
-  _addLocalEndpoint,
-  _addModel,
-  _applyBulkEditEndpoints,
-  _applyMatrixRecommendations,
-  _autofillOpenReview,
-  _browserAccessDenyRead,
-  _cancelTimer,
-  _clearConvCacheFromSettings,
-  _clearLocalEndpoints,
-  _clearMatrixProbe,
-  _clearRecentSearch,
   _cmdBodyToggle,
   _cmdHeaderToggle,
   _cmdInterruptClick,
   _cmdOutputToggle,
-  _copyPaperRebuttal,
-  _copyPaperReport,
-  _copyPaperReview,
-  _copyUpdateLog,
-  _deleteApiKey,
-  _deleteExtraHeader,
-  _deleteFace,
-  _deleteLocalEndpoint,
-  _deleteModel,
-  _deleteProvider,
-  _discoverLocalModels,
-  _discoverModels,
   _downloadGenImage,
-  _editMatrixCell,
-  _editModel,
-  _exportPaperReport,
-  _exportPaperReview,
-  _filterRecentProjects,
-  _generatePaperRebuttal,
-  _generatePaperReport,
-  _generatePaperReview,
-  _getMdTemp,
-  _handlePaperFileUpload,
-  _jumpToTimerConv,
-  _knowledgeApplyCatalog,
-  _knowledgeClearCatalog,
-  _knowledgeDebounceCatalog,
-  _knowledgeDismissUploadReport,
-  _knowledgeDrag,
-  _knowledgeDrop,
-  _knowledgeEsc,
-  _knowledgeGoPage,
-  _knowledgeLoadMoreContent,
-  _knowledgeRefresh,
-  _knowledgeReindex,
-  _knowledgeRemove,
-  _knowledgeSearch,
-  _knowledgeSetCategory,
-  _knowledgeSetSort,
-  _knowledgeToggle,
-  _knowledgeToggleContent,
-  _knowledgeToggleVisual,
-  _knowledgeUpload,
-  _lcDecide,
-  _lcEnsureAgentRelay,
-  _logoutManagedProvider,
-  _mcpApplyUpdate,
-  _mcpCloseAddModal,
-  _mcpCloseInstallModal,
-  _mcpConnectAll,
-  _mcpDoInstall,
-  _mcpEnvPresetChanged,
-  _mcpFilterCatalog,
-  _mcpOpenAddModal,
-  _mcpOpenInstallModal,
-  _mcpPurge,
-  _mcpQuickInstall,
-  _mcpReconnect,
-  _mcpSaveServer,
-  _mcpSetAllTools,
-  _mcpSetCategory,
-  _mcpSetScope,
-  _mcpToggleTool,
-  _mcpToggleToolsPanel,
-  _mcpTransportChanged,
-  _mcpUninstall,
   _mobileCompactNow,
-  _mpRemove,
-  _mpToggleReadOnly,
-  _mydayAddTodo,
-  _mydayCalNext,
-  _mydayCalPrev,
-  _mydayDeleteInheritedTodo,
-  _mydayDeleteTodo,
-  _mydaySelectDay,
-  _mydayStartTodoConv,
-  _mydayStartTodoConvInherited,
-  _mydayStartTodoConvUnfinished,
-  _mydayToggleInheritedTodo,
-  _mydayToggleStreamStatus,
-  _mydayToggleTodo,
-  _mydayTriggerGenerate,
-  _oauthCopyAuthLink,
-  _oauthCopyDeviceCode,
-  _oauthDeviceLogin,
-  _oauthLogin,
-  _oauthLogout,
-  _oauthManualSubmit,
-  _onApiKeyRowEdit,
-  _onDropdownVisibilityChange,
-  _onExtraHeaderRowEdit,
-  _onFacePinChange,
-  _onFaceProtoChange,
-  _onFaceRowEdit,
-  _onIgVisibilityChange,
-  _onKeyLabelEdit,
-  _onLocalEndpointEdit,
-  _onModelIdDraftInput,
-  _onModelProtoChange,
-  _onProvField,
-  _onRebuttalInputChange,
-  _openActiveCompaction,
-  _openBulkEditEndpoints,
   _openExternalAsset,
   _openImageFullscreen,
-  _openSkillsStoreFromMemory,
-  _optApprove,
-  _optimizerRunNow,
-  _optReject,
-  _optRevert,
-  _optToggleHistory,
-  _pickLocalPreset,
-  _podcastExportScript,
-  _podcastSeekSegment,
-  _podcastSleepTimerChange,
-  _poolTagCommit,
-  _poolTagKey,
-  _poolTagRemove,
-  _poolTagSplit,
-  _probeAllDropdownModels,
-  _probeLocalEndpoint,
-  _probeMatrixScope,
-  _proxyBypassDelete,
-  _proxyBypassRefreshCount,
-  _proxyPoolDelete,
-  _proxyPoolMove,
-  _proxyPoolSyncMeta,
-  _proxyPoolTest,
-  _proxyPoolToggleEditor,
-  _proxyPoolToggleUrlVisibility,
-  _proxyPoolUrlChanged,
-  _pvEsc,
   _recoverOfflineConversations,
-  _refreshCostExperimentReport,
-  _regeneratePaperRebuttal,
-  _regeneratePaperReport,
-  _regeneratePaperReview,
-  _removeAlias,
   _removeReplyQuote,
-  _runMatrixProbe,
-  _runUpdateCheck,
   _safeClipboardWrite,
-  _saveMatrixCell,
-  _saveModelEdit,
-  _scrollReportToHeading,
-  _searchProfileChanged,
-  _setMatrixAttempts,
-  _setReportLang,
-  _showPaperLandingForNew,
-  _showTemplateMenu,
-  _skillsInstallFromInput,
   _swarmCopyAgentId,
   _swarmToggleClass,
-  _switchMtProvider,
-  _syncCostExperimentUi,
-  _syncFromTemplate,
   _syncRangeOutput,
-  _syncResponsesExperimentUi,
-  _testMtProvider,
-  _testSearchBrowser,
   _timerWatcherToggle,
-  _toggleAllDropdownModels,
-  _toggleAllIgModels,
-  _toggleApiKeyVisibility,
   _toggleConvGroup,
   _toggleCostPopover,
-  _toggleIdAccess,
-  _toggleMatrixView,
-  _toggleModelCatalogSync,
-  _toggleModelEnabled,
-  _toggleModelThinking,
-  _togglePaperReportExportMenu,
-  _togglePaperReportModelDropdown,
-  _togglePaperReviewExportMenu,
-  _togglePaperReviewModelDropdown,
-  _toggleProviderExpand,
-  _toggleReviewVenueDropdown,
-  _toggleStgProvFold,
-  _triggerTimer,
-  _viewTimerLog,
-  addLocalProvider,
-  addProvider,
   aiCompressLog,
   applyLogClean,
-  applySystemPromptEditor,
-  applyUpdate,
-  BackendOfflineMonitorProbeNow,
-  BackendOfflineMonitorSnooze,
-  browseDirectory,
-  browseParent,
   cancelAutopilotMarker,
   clearProject,
-  clearRecentProjects,
   closeApplyModal,
   closeChatModeMenu,
-  closeDailyReport,
-  closeDebug,
-  closeKnowledgeBase,
-  closeLocalControlModal,
   closeMobileSheet,
   closePreview,
-  closeProjectModal,
-  closeSettings,
   closeSidebarSearch,
-  closeSystemPromptEditor,
-  closeUpdateModal,
   confirmApplyCode,
   copyCode,
-  copyDebugContent,
   copyTableMarkdown,
   cycleSearchMode,
-  enterImageGenMode,
-  escapeHtml,
-  exitImageGenMode,
-  exportServerConfig,
-  extractFencedBlocks,
-  generateImageDirect,
-  getRuntimeService,
   handleAgentModeMenuTriggerKey,
   handleFileUpload,
   handleKeyDown,
   hideLogCleanBanner,
-  highlightCodeInHtml,
-  importServerConfig,
-  installSkillFromFileInput,
   loadConversation,
-  mpAddBrowsedPath,
-  mpAddFolder,
-  mpApplyFolders,
-  mpDeleteFolder,
-  mpNewFolder,
   newChat,
   openApplyModal,
-  openDailyReport,
-  openKnowledgeBase,
-  openLocalControlModal,
-  openOrchestration,
   openOrchestrationFromAgentMode,
-  openProjectModal,
-  openSettings,
-  openSystemPromptEditor,
-  openToolDebugPanel,
-  openTradingMode,
-  openUpdateDialog,
   openVideoUrl,
-  pmMobileTab,
   previewLogClean,
   previewPendingImage,
   previewPendingPdfText,
-  raw,
   removeImage,
   removePdfText,
-  removePendingQueueItem,
   removeVideo,
-  resetSystemPromptBlocks,
   resolvePreference,
-  resolveRuntimeAction,
   resolveWriteApproval,
-  restartServer,
-  saveSettings,
   scrollChatToBottom,
-  selectBrowsedFolder,
-  selectIgAspect,
-  selectIgCount,
-  selectIgModel,
-  selectIgResolution,
-  selectRecentProject,
   selectTheme,
   selectThinkingDepth,
   sendMessage,
   setAgentMode,
   setChatMode,
-  setRuntimeService,
-  shutdownServer,
   submitHumanGuidanceChoice,
   submitHumanGuidanceFreeText,
   submitStdinEof,
   submitStdinInput,
-  switchSettingsTab,
   toggleAgentModeMenu,
   toggleAutoApply,
   toggleAutoTranslate,
-  toggleBrowserFromLocalModal,
   toggleChatModeMenu,
   toggleCodeBlock,
-  toggleDebug,
-  toggleDesktopFromLocalModal,
-  toggleHiddenDirs,
   toggleHumanGuidance,
-  toggleIgModelDropdown,
   toggleImageGenTool,
   toggleMobileSheet,
-  togglePendingQueueCollapsed,
   togglePresetDropdown,
   toggleProjectBarReadOnly,
   toggleSidebar,
   toggleSidebarSearch,
   toggleSubmenu,
-  toggleTimerPanel,
   undoContextChange,
   updateMobileDepth,
   updateMobileSheet,
@@ -346,20 +121,238 @@ const runtimeActions = Object.freeze({
 });
 // END GENERATED RUNTIME ACTIONS
 
+// Stable mutable port for the demand-loaded image owner. The feature registry
+// caches module-owned overrides, so individual mutable values must not be
+// written through that proxy: this object keeps every read live against the
+// retained conversation/composer authority across navigation and resets.
+const ImageGenerationComposerState = Object.freeze({
+  get activeConversationId() { return activeConvId; },
+  set activeConversationId(value) {
+    activeConvId = value == null ? null : String(value);
+  },
+  get conversations() { return conversations; },
+  get pendingImages() { return pendingImages; },
+  set pendingImages(value) { if (Array.isArray(value)) pendingImages = value; },
+  get imageGenMode() { return imageGenMode; },
+  get planMode() { return planMode; },
+  get autopilotEnabled() { return autopilotEnabled; },
+  get activeFlow() { return activeFlow; },
+  get selectedModel() { return _igSelectedModel; },
+  set selectedModel(value) { _igSelectedModel = String(value || ''); },
+  get selectedProviderId() { return _igSelectedProviderId; },
+  set selectedProviderId(value) { _igSelectedProviderId = String(value || ''); },
+  get selectedAspect() { return _igSelectedAspect; },
+  set selectedAspect(value) { _igSelectedAspect = String(value || '1:1'); },
+  get selectedResolution() { return _igSelectedResolution; },
+  set selectedResolution(value) {
+    _igSelectedResolution = String(value || '1K');
+  },
+  get selectedCount() { return _igSelectedCount; },
+  set selectedCount(value) {
+    _igSelectedCount = Math.max(1, Number(value) || 1);
+  },
+  get hiddenModels() { return _hiddenIgModels; },
+});
+
+// Project presentation loads long after boot but must always observe the
+// current conversation and authoritative project object. A frozen live port
+// avoids feature-registry override snapshots while keeping mutation funnels in
+// the retained state owner.
+const ProjectPresentationShellState = Object.freeze({
+  get activeConversationId() { return activeConvId; },
+  set activeConversationId(value) {
+    activeConvId = value == null ? null : String(value);
+  },
+  get conversations() { return conversations; },
+  get projectState() { return projectState; },
+  set projectState(value) {
+    if (value && typeof value === 'object') projectState = value;
+  },
+  get sessionStorage() {
+    try { return globalThis.sessionStorage || null; }
+    catch (_error) { return null; }
+  },
+});
+
+// Local Control keeps the independent browser/desktop permission flags in
+// retained conversation state. Its demand-loaded presentation must always
+// observe the current values after navigation or a settings restore.
+const LocalControlShellState = Object.freeze({
+  get browserEnabled() { return browserEnabled; },
+  get desktopEnabled() { return desktopEnabled; },
+});
+
 Object.assign(runtimeScope, {
+  // Lazy retained feature runtimes declare and validate every lexical service
+  // they consume. Keep this list explicit: a moved section must not fall back
+  // to an accidental window binding that can disappear under ESM evaluation.
+  Api: runtimeScope.Api,
+  BASE_PATH,
+  ConvCache,
+  Icon,
+  IconDot,
+  CompactionHistoryState,
+  ImageGenerationComposerState,
+  DebugShellState,
+  LocalControlShellState,
+  ProjectPresentationShellState,
+  _applyProjectData,
+  _applyBrowserUI,
+  _applyCodeExecUI,
+  _applyDesktopUI,
+  _applyFetchEnabledUI,
+  _applyFlowUI,
+  _lcUpdateBadge,
+  _agentInteractionChangeBlocked,
+  _applyModelUI,
+  _applySearchModeUI,
+  _brandSvg,
+  _compareModelIds,
+  _compareModelsByDisplayName,
+  _detectBrand,
+  _getConvProjectPath,
+  _getCurrentTheme,
+  _findRenderedNativeTurnNode,
+  _loadServerConfigAndPopulate,
+  _modelRoutingDropdownModels,
+  _modelShortName,
+  _orchestrationFlowCatalog,
+  _paperModelPickerState,
+  _populateModelDropdown,
+  _sortModelEntriesByDisplayName,
+  _sortModelsByDisplayName,
+  _sortedBrandKeys,
+  _saveConvProjectPath,
+  _safeClipboardWrite,
+  _updateProjectUI,
+  _warnModelCapsMissing,
+  _setHiddenIgModels: (value) => {
+    if (value instanceof Set) _hiddenIgModels = value;
+  },
+  _setHiddenModels: (value) => {
+    if (value instanceof Set) _hiddenModels = value;
+  },
+  _setModelPricingCache: (value) => {
+    if (value && typeof value === 'object') _modelPricingCache = value;
+  },
   // Native feature owners reach retained composer settings only through this
   // injected service table. The feature must not recreate settings capture or
   // call a compatibility endpoint of its own.
+  _applyImageGenUI,
   _applyMemoryUI,
+  _buildConvSettings,
+  _scheduleReflow,
+  _waitForImageProcessing,
+  brandLogoImgAttrs,
   captureActiveConversationSettings,
+  config,
   buildTurnNav,
-  closeRequestInspector,
-  openRequestInspector,
+  debugLog,
+  distillFallbackDetail,
+  errorEnvelopeKind,
+  errorEnvelopeMessage,
+  fallbackCauseParts,
+  fallbackKindLabel,
+  formatCny,
+  generateId,
+  getActiveConv,
+  getActiveFolderId,
+  getCompactionHistory,
+  isErrorEnvelope,
+  loadProjectStatus,
+  loadConversation,
+  loadCompactionHistory,
+  newChat,
+  normalizeErrorEnvelope,
+  onProjectAttached,
+  onProjectCleared,
+  prefersReducedMotion,
+  pushSubscribe,
+  pushUnsubscribe,
+  reconcileConversationCatalogMetadata,
+  refreshInputSendHint,
+  resolveOrchestrationApiClient,
+  renderConversationList,
+  renderImagePreviews,
+  renderMarkdown,
+  renderSegmentTimelineHTML,
+  renderToolRoundsHTML,
+  scrollToBottom,
+  setActiveFlow,
+  showAlert,
+  showChoice,
+  showConfirm,
+  showPrompt,
+  apiUrl,
+  showToast,
+  updateSendButton,
+  renderErrorEnvelope,
   // The per-message Export button (data-tofu-action=
   // "ExportImages.exportMessageWithPreview(...)") resolves its receiver
   // through runtimeScope — module-private here, so an unpublished name made
   // every export click a refused no-op.
   ExportImages,
+});
+
+// Lazy feature runtimes must observe current navigation/project authority,
+// not a value captured when their chunk first evaluated. These accessors keep
+// mutable shell state private while providing a live, declared read seam.
+Object.defineProperties(runtimeScope, {
+  activeConvId: {
+    configurable: false,
+    enumerable: false,
+    get: () => activeConvId,
+    set: (value) => { activeConvId = value == null ? null : String(value); },
+  },
+  activeFlow: {
+    configurable: false,
+    enumerable: false,
+    get: () => activeFlow,
+    set: (value) => { activeFlow = value == null ? '' : String(value); },
+  },
+  conversations: {
+    configurable: false,
+    enumerable: false,
+    get: () => conversations,
+    set: (value) => { if (Array.isArray(value)) conversations = value; },
+  },
+  _featureFlags: {
+    configurable: false,
+    enumerable: false,
+    get: () => _featureFlags,
+    set: (value) => {
+      if (value && typeof value === 'object') _featureFlags = value;
+    },
+  },
+  _hiddenIgModels: {
+    configurable: false,
+    enumerable: false,
+    get: () => _hiddenIgModels,
+  },
+  _hiddenModels: {
+    configurable: false,
+    enumerable: false,
+    get: () => _hiddenModels,
+  },
+  _modelPricingCache: {
+    configurable: false,
+    enumerable: false,
+    get: () => _modelPricingCache,
+  },
+  _registeredModels: {
+    configurable: false,
+    enumerable: false,
+    get: () => _registeredModels,
+    set: (value) => { if (Array.isArray(value)) _registeredModels = value; },
+  },
+  projectState: {
+    configurable: false,
+    enumerable: false,
+    get: () => projectState,
+    set: (value) => {
+      if (value && typeof value === 'object') projectState = value;
+    },
+  },
 });
 
 export function resolveRuntimeAction(name) {

@@ -3,7 +3,7 @@
 ★ Why this exists (measured 2026-07-28, not hypothetical):
 
 `tofu_search` was installed as a plain COPY under site-packages while its source
-tree lived beside chatui. Both reported version `0.5.2`, but the copy was 30+
+tree lived beside the host checkout. Both reported version `0.5.2`, but the copy was 30+
 `.py` files behind — so the version number, the obvious thing to check, actively
 argued that the copy was current.
 
@@ -19,7 +19,7 @@ alongside the editable finder, at which point `sys.path` order silently decides
 which one wins — and it may still satisfy a load-path check while production
 runs the other.
 
-If this fails, re-run:  pip install -e ../tofu-search
+If this fails, re-run:  pip install -e packages/tofu-search
 """
 
 import pathlib
@@ -30,17 +30,18 @@ import pytest
 import tofu_search
 
 # These are DEV-environment pins: they assert tofu_search is an EDITABLE
-# install pointing at the sibling source checkout (../tofu-search). Public CI
-# deliberately installs the PUBLISHED PyPI wheel (0.8.0+) and has no source
-# checkout, so there is nothing for an editable install to point at — the
-# pins are vacuous there, not violated.
-_SIBLING_CHECKOUT = (
-    pathlib.Path(__file__).resolve().parent.parent.parent / 'tofu-search')
-pytestmark = pytest.mark.skipif(
-    not (_SIBLING_CHECKOUT / 'pyproject.toml').is_file(),
-    reason=f'no tofu-search source checkout at {_SIBLING_CHECKOUT} — '
-           'editable-install pins only apply to the dev layout (public CI '
-           'installs the published PyPI wheel by design)')
+# install pointing at the canonical monorepo member. Public wheel-isolation
+# tests deliberately install the published artifact instead.
+_MONOREPO_CHECKOUT = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / 'packages' / 'tofu-search')
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.skipif(
+        not (_MONOREPO_CHECKOUT / 'pyproject.toml').is_file(),
+        reason=f'no tofu-search workspace member at {_MONOREPO_CHECKOUT}',
+    ),
+]
 
 
 def test_tofu_search_loads_from_a_source_checkout():
@@ -53,7 +54,7 @@ def test_tofu_search_loads_from_a_source_checkout():
         'That is a COPY install: edits to the source tree will not take effect, '
         'and — worse — a fix made in the source repo can look verified there '
         'while production keeps running this stale copy.\n'
-        'Fix with:  pip install -e ../tofu-search'
+        'Fix with:  pip install -e packages/tofu-search'
     )
 
     # A source checkout has the packaging metadata a copy install lacks.
@@ -61,7 +62,7 @@ def test_tofu_search_loads_from_a_source_checkout():
     assert (project_root / 'pyproject.toml').is_file(), (
         f'{loaded} does not look like a source checkout — no pyproject.toml at '
         f'{project_root}. Expected an editable install pointing at the '
-        'tofu-search repository.'
+        'tofu-search workspace member.'
     )
 
 
@@ -79,5 +80,6 @@ def test_no_physical_copy_shadows_the_editable_install():
         pytest.fail(
             f'A physical tofu_search package still exists at {shadow}, '
             'shadowing (or racing) the editable install. Remove it with:\n'
-            '  pip uninstall -y tofu-search && pip install -e ../tofu-search'
+            '  pip uninstall -y tofu-search && '
+            'pip install -e packages/tofu-search'
         )

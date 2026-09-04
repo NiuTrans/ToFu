@@ -64,6 +64,8 @@ const { document, check, report } = setup({
     setActiveFolderId: () => {},
     areFoldersLoaded: () => true,
     renderFolderTabs: () => {},
+    _conversationDisplayTitle: (conversation) => conversation.title || '',
+    conversationTimestampLabels: () => ({ date: 'today', time: '12:00' }),
     BASE_PATH: '',
     activeStreams: new Map(),
     pendingMessageQueue: new Map(),
@@ -137,10 +139,10 @@ def test_boot_load_feature_flags_rerenders_conv_list_wiring():
     harness cannot execute index.html's inline script, so pin the wiring here.
     """
     source = RUNTIME.read_text(encoding='utf-8')
-    start = source.index('export async function loadFeatureFlags()')
+    start = source.index('function _commitFeatureFlags(')
     end = source.index('// BEGIN GENERATED RUNTIME ACTIONS', start)
     body = source[start:end]
-    assign = body.find('_featureFlags = await response.json();')
+    assign = body.find('_featureFlags = nextFlags;')
     assert assign != -1, 'loadFeatureFlags no longer assigns _featureFlags'
     rerender = body.find('renderConversationList()', assign)
     assert rerender != -1, (

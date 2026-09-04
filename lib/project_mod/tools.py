@@ -426,7 +426,8 @@ def _resolve_base(base_path, rel_path, conv_id=None):
                     f'session start), a plain relative path without any colon '
                     f'prefix (resolves under the primary root), or an absolute '
                     f'path under a writable location (its containing directory '
-                    f'auto-registers on first write).'
+                    f'registers as a new root on first write — requires '
+                    f'allow_outside_workspace=true after the user confirms).'
                 ) from _ve
 
     # ── Multi-root cross-check for path-misrouting ──
@@ -630,7 +631,8 @@ def _exec_read_files(fn_args, base_path, conv_id, task_id, kwargs):
         )
     # If SOME specs were invalid, prepend a warning but still read the valid ones
     result = tool_read_files(
-        base_path, resolved, result_items=result_projection_items)
+        base_path, resolved, result_items=result_projection_items,
+        task=kwargs.get('task'))
     if invalid_specs:
         details = '; '.join(f'index {i}: {t} {v!r}' for i, t, v in invalid_specs[:5])
         warn = (
@@ -673,6 +675,7 @@ def _exec_inspect_image(fn_args, base_path, conv_id, task_id, kwargs):
             zoom=fn_args.get('zoom'),
             grid=bool(fn_args.get('grid', False)),
             messages=messages,
+            user_id=task.get('_userId') if isinstance(task, dict) else None,
         )
 
     bp, rp = _rb(base_path, raw_path)
@@ -688,6 +691,9 @@ def _exec_inspect_image(fn_args, base_path, conv_id, task_id, kwargs):
 def _exec_grep_search(fn_args, base_path, conv_id, task_id, kwargs):
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
+
+    task = kwargs.get('task') or {}
+    owner_user_id = task.get('_userId') if isinstance(task, dict) else None
 
     # Batch mode: if 'searches' array is present, run all searches
     searches = fn_args.get('searches')
@@ -712,7 +718,8 @@ def _exec_grep_search(fn_args, base_path, conv_id, task_id, kwargs):
             by_base.setdefault(bp2, []).append(spec)
         parts = []
         for bp2, specs in by_base.items():
-            parts.append(tool_grep_batch(bp2, specs))
+            parts.append(tool_grep_batch(
+                bp2, specs, owner_user_id=owner_user_id))
         return '\n\n'.join(parts)
     search_path = fn_args.get('path')
     bp = base_path
@@ -722,7 +729,8 @@ def _exec_grep_search(fn_args, base_path, conv_id, task_id, kwargs):
                      search_path, fn_args.get('include'),
                      fn_args.get('context_lines'),
                      max_results=fn_args.get('max_results'),
-                     count_only=bool(fn_args.get('count_only', False)))
+                     count_only=bool(fn_args.get('count_only', False)),
+                     owner_user_id=owner_user_id)
 
 
 def _exec_find_files(fn_args, base_path, conv_id, task_id, kwargs):
@@ -776,7 +784,8 @@ def _exec_write_file(fn_args, base_path, conv_id, task_id, kwargs):
     result = tool_write_file(bp, rp,
                              fn_args.get('content', ''),
                              fn_args.get('description', ''),
-                             conv_id=conv_id, task_id=task_id)
+                             conv_id=conv_id, task_id=task_id,
+                             allow_outside=bool(fn_args.get('allow_outside_workspace')))
     if result['ok']:
         msg = (f"File {'created' if result.get('created') else 'updated'}: {result['path']} "
                f"({result['lines']} lines, {_fmt_size(result['bytesWritten'])})")
@@ -801,7 +810,8 @@ def _exec_apply_diff(fn_args, base_path, conv_id, task_id, kwargs):
                              fn_args.get('replace', ''),
                              fn_args.get('description', ''),
                              conv_id=conv_id, task_id=task_id,
-                             replace_all=bool(fn_args.get('replace_all', False)))
+                             replace_all=bool(fn_args.get('replace_all', False)),
+                             allow_outside=bool(fn_args.get('allow_outside_workspace')))
     if result['ok']:
         msg = (f"Applied diff to {result['path']}: "
                f"{result['linesChanged']} lines changed "
@@ -819,7 +829,8 @@ def _exec_apply_diffs(fn_args, base_path, conv_id, task_id, kwargs):
     edits = fn_args.get('edits')
     if not edits or not isinstance(edits, list):
         return _edits_not_array_msg('apply_diffs', edits, '{path, search, replace}')
-    return tool_apply_diffs(base_path, edits, conv_id=conv_id, task_id=task_id)
+    return tool_apply_diffs(base_path, edits, conv_id=conv_id, task_id=task_id,
+                            allow_outside=bool(fn_args.get('allow_outside_workspace')))
 
 
 def _exec_edit_file(fn_args, base_path, conv_id, task_id, kwargs):
@@ -828,7 +839,8 @@ def _exec_edit_file(fn_args, base_path, conv_id, task_id, kwargs):
         return _edits_not_array_msg(
             'edit_file', edits, '{path, operation, anchor, content}')
     return tool_edit_file(
-        base_path, edits, conv_id=conv_id, task_id=task_id)
+        base_path, edits, conv_id=conv_id, task_id=task_id,
+        allow_outside=bool(fn_args.get('allow_outside_workspace')))
 
 
 def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
@@ -845,7 +857,8 @@ def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
                                  fn_args.get('content', ''),
                                  fn_args.get('position', 'after'),
                                  fn_args.get('description', ''),
-                                 conv_id=conv_id, task_id=task_id)
+                                 conv_id=conv_id, task_id=task_id,
+                                 allow_outside=bool(fn_args.get('allow_outside_workspace')))
     if result['ok']:
         msg = (f"Inserted {result['linesInserted']} lines "
                f"{result['position']} anchor at L{result['anchorLine']} "
@@ -864,7 +877,8 @@ def _exec_insert_contents(fn_args, base_path, conv_id, task_id, kwargs):
     edits = fn_args.get('edits')
     if not edits or not isinstance(edits, list):
         return _edits_not_array_msg('insert_contents', edits, '{path, anchor, content}')
-    return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id)
+    return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id,
+                                allow_outside=bool(fn_args.get('allow_outside_workspace')))
 
 
 def _sticky_cwd_enabled():
@@ -888,9 +902,44 @@ def _bounded_directory_fast_path_available(base, rel_path):
         return (
             os.path.commonpath([base_real, target_real]) == base_real
             and os.path.isdir(target_real)
+            # isdir() alone passes on permission-denied directories; the
+            # bounded reader would then return its plain-text failure where
+            # the real shell reports a truthful non-zero exit + stderr.
+            # Decline and keep the shell for unreadable targets.
+            and os.access(target_real, os.R_OK | os.X_OK)
         )
     except (OSError, TypeError, ValueError):
         return False
+
+
+# Failure texts the bounded directory readers RETURN instead of raising
+# (read_tools.py tool_list_dir / tool_find_files). Anchored on prefixes — the
+# same structural signal meta.py::_EXEC_ERROR_PREFIXES relies on. The
+# availability gate pre-validates containment, type and readability, so these
+# only surface on a post-gate race or a partial-walk notice (e.g. a
+# permission-denied SUBdirectory during find) — real ls/find also exit
+# non-zero for both.
+_FAST_PATH_READER_FAILURE_PREFIXES = (
+    'Not a directory:', 'Unable to list directory:', 'find: ')
+
+
+def _fast_path_command_result(command, output):
+    """Wrap a bounded-reader fast-path result in the run_command result contract.
+
+    Every real run_command result settles as ``$ cmd\\n<output>\\n\\n[exit code: N]``
+    (run_command.py), and every downstream classifier — the task handler
+    (handlers/code_exec.py), lib/tools/meta.py and the frontend's
+    historical-round heuristic — parses THAT marker. A fast-path result
+    returned without it is indistinguishable from a pre-execution refusal:
+    a successful listing was rendered as an amber "not run" card with the
+    full text pinned open as the refusal reason.
+    """
+    text = (output or '').strip()
+    exit_code = 1 if text.startswith(_FAST_PATH_READER_FAILURE_PREFIXES) else 0
+    result = f'$ {command}\n'
+    if text:
+        result += f'{text}\n'
+    return result + f'\n[exit code: {exit_code}]'
 
 
 def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
@@ -937,12 +986,14 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
             '[run_command] routed plain ls through bounded directory reader: %s',
             directory_listing['path'],
         )
-        return tool_list_dir(
-            cwd,
-            directory_listing['path'],
-            show_hidden=directory_listing['show_hidden'],
-            shell_compatible=True,
-        )
+        return _fast_path_command_result(
+            command_str,
+            tool_list_dir(
+                cwd,
+                directory_listing['path'],
+                show_hidden=directory_listing['show_hidden'],
+                shell_compatible=True,
+            ))
     file_find = (
         parse_safe_file_find_command(command_str)
         if os.environ.get('TOFU_RUN_FIND_FASTPATH', '1') != '0' else None)
@@ -952,15 +1003,17 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
             '[run_command] routed simple find through bounded file finder: %s %s',
             file_find['path'], file_find['pattern'],
         )
-        return tool_find_files(
-            cwd,
-            file_find['pattern'],
-            rel_path=file_find['path'],
-            max_results=file_find['max_results'],
-            case_sensitive=file_find['case_sensitive'],
-            shell_output=True,
-            respect_project_ignores=False,
-        )
+        return _fast_path_command_result(
+            command_str,
+            tool_find_files(
+                cwd,
+                file_find['pattern'],
+                rel_path=file_find['path'],
+                max_results=file_find['max_results'],
+                case_sensitive=file_find['case_sensitive'],
+                shell_output=True,
+                respect_project_ignores=False,
+            ))
     destructive = _is_destructive_command(command_str)
 
     # Read-only root guard: refuse a destructive command whose working
@@ -1025,6 +1078,8 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
                               on_chunk=kwargs.get('on_chunk'),
                               on_spawn=kwargs.get('on_spawn'),
                               on_grep_intercept=kwargs.get('on_grep_intercept'),
+
+                              runtime_context=kwargs.get('runtime_context'),
                               cwd_sink=cwd_sink,
                               credentials=fn_args.get('credentials'))
 
@@ -1119,7 +1174,7 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
 
 def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callback=None,
                                on_chunk=None, on_spawn=None, task=None,
-                               on_grep_intercept=None):
+                               on_grep_intercept=None, runtime_context=None):
     """Execute run_command without requiring a project path.
 
     ``task`` is the SAME cooperative-control seam the project path already
@@ -1138,27 +1193,31 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
         if directory_listing is not None \
                 and _bounded_directory_fast_path_available(
                     working_dir, directory_listing['path']):
-            return tool_list_dir(
-                working_dir,
-                directory_listing['path'],
-                show_hidden=directory_listing['show_hidden'],
-                shell_compatible=True,
-            )
+            return _fast_path_command_result(
+                command,
+                tool_list_dir(
+                    working_dir,
+                    directory_listing['path'],
+                    show_hidden=directory_listing['show_hidden'],
+                    shell_compatible=True,
+                ))
         file_find = (
             parse_safe_file_find_command(command)
             if os.environ.get('TOFU_RUN_FIND_FASTPATH', '1') != '0' else None)
         if file_find is not None \
                 and _bounded_directory_fast_path_available(
                     working_dir, file_find['path']):
-            return tool_find_files(
-                working_dir,
-                file_find['pattern'],
-                rel_path=file_find['path'],
-                max_results=file_find['max_results'],
-                case_sensitive=file_find['case_sensitive'],
-                shell_output=True,
-                respect_project_ignores=False,
-            )
+            return _fast_path_command_result(
+                command,
+                tool_find_files(
+                    working_dir,
+                    file_find['pattern'],
+                    rel_path=file_find['path'],
+                    max_results=file_find['max_results'],
+                    case_sensitive=file_find['case_sensitive'],
+                    shell_output=True,
+                    respect_project_ignores=False,
+                ))
         result = tool_run_command(working_dir,
                                   command,
                                   fn_args.get('timeout', None),
@@ -1167,6 +1226,8 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
                                   on_spawn=on_spawn,
                                   on_grep_intercept=on_grep_intercept,
                                   task=task,
+
+                                  runtime_context=runtime_context,
                                   credentials=fn_args.get('credentials'))
         if working_dir and _is_destructive_command(command):
             from lib.project_mod import tree_index
@@ -1256,14 +1317,32 @@ def project_tool_display(fn_name, fn_args):
             return head + ':', rest
         # Disambiguate duplicate basenames (rootname-aware)
         from collections import Counter
+        from lib.attachments import attachment_display_name
+
+        def _attachment_label(path_str):
+            # Uploaded-attachment refs render as the user's exact original
+            # filename, clearly marked — never as the raw att_media_/att_txt_
+            # ref. The registry is populated by model projection before the
+            # model can ever pass the ref to read_files.
+            if not path_str.startswith(('att_media_', 'att_txt_')):
+                return None
+            exact = attachment_display_name(path_str)
+            return (f'uploaded attachment "{exact}"' if exact
+                    else f'uploaded attachment {path_str}')
+
         bare_basenames = [_split_rootname(p)[1].rsplit('/', 1)[-1] for p in grouped]
         dup = {b for b, c in Counter(bare_basenames).items() if c > 1}
         parts = []
         for p, ranges in list(grouped.items())[:4]:
-            prefix, bare = _split_rootname(p)
-            base = bare.rsplit('/', 1)[-1]
-            name = '/'.join(bare.rsplit('/', 2)[-2:]) if base in dup else base
-            display_name = f'{prefix}{name}'
+            attachment_label = _attachment_label(p)
+            if attachment_label is not None:
+                display_name = attachment_label
+            else:
+                prefix, bare = _split_rootname(p)
+                base = bare.rsplit('/', 1)[-1]
+                name = ('/'.join(bare.rsplit('/', 2)[-2:])
+                        if base in dup else base)
+                display_name = f'{prefix}{name}'
             if ranges:
                 parts.append(f'{display_name} {", ".join(ranges)}')
             else:
@@ -1320,11 +1399,15 @@ def project_tool_display(fn_name, fn_args):
         if edits and isinstance(edits, list):
             paths = list(dict.fromkeys(
                 e.get('path', '?') for e in edits if isinstance(e, dict)))
-            ops = [e.get('operation', '?') for e in edits if isinstance(e, dict)]
+            # Headline the author's pre-edit intent (schema-capped at 120
+            # chars); the per-operation list ("replace, replace, …") carried
+            # no information — every batch rendered the same words.
+            desc = str(fn_args.get('description') or '').strip()
             label = (f'Edit {paths[0]}' if len(paths) == 1
                      else f'Edit {len(paths)} files')
-            return f'{label} ({len(edits)} edits: {", ".join(ops[:3])}' \
-                   + (f', +{len(ops)-3} more' if len(ops) > 3 else '') + ')'
+            if len(edits) > 1:
+                label += f' ({len(edits)} edits)'
+            return label + (f' — {desc}' if desc else '')
         return 'Edit (empty)'
     elif fn_name == 'apply_diff':
         p = fn_args.get('path', '?')
@@ -1440,4 +1523,17 @@ def format_tool_args_brief(fn_name, fn_args, max_len=200):
         if isinstance(urls, list) and urls:
             return _clip_brief(_batch_terms_brief(urls, 'url', 'URLs'), max_len)
         return _clip_brief(str(fn_args.get('url') or 'fetch_url'), max_len)
+    # Everything else: reuse the full round-label renderer (the same dispatch
+    # table the chat timeline uses) instead of dumping the raw args dict — a
+    # repr of whatever key the model emitted first is not human information.
+    # Lazy import: lib.tasks_pkg.tool_display._renderers imports THIS module.
+    try:
+        from lib.tasks_pkg.tool_display import tool_round_label
+        label = tool_round_label(fn_name, fn_args)
+    except Exception as e:
+        logger.debug('[ToolBrief] round-label delegation failed for %s: %s',
+                     fn_name, e)
+        label = ''
+    if label and label != fn_name:
+        return _clip_brief(' · '.join(label.splitlines()), max_len)
     return _clip_brief(str(fn_args), max_len)

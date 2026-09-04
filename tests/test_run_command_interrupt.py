@@ -8,7 +8,7 @@ TASK — interrupt the command, hand the partial output back to the model, and
 let the turn continue. Killing the task just pushed the recovery onto the
 user, and a re-issued command would hit the exact same wall.
 
-Three seams, one suite:
+Four seams, one suite:
 
   1. ``run_command`` consumes ``task['_cmd_interrupt']`` (~0.2s granularity),
      kills the process tree, and formats the result as
@@ -20,6 +20,12 @@ Three seams, one suite:
      past the grace window (the read loop itself is wedged).
   3. ``POST /api/v1/chat/interrupt-command/<task_id>`` plants the user
      interrupt; ``_build_run_command`` renders the interrupted badge.
+  4. The SubAgent tool proxy (swarm workers AND FlowExecutor leaf workers)
+     bridges the cooperative-control fields across its isolation membrane:
+     ``_subprocess_pid`` proxy→parent so the reaper arms the gentle
+     interrupt instead of force-failing the whole parent (an autopilot
+     run), and ``_cmd_interrupt`` parent→proxy so the planted flag reaches
+     the command's read loop.
 
 Live-subprocess tests use real ``echo … && sleep 30`` commands — the
 interrupt must arrive mid-run and the call must return long before the
@@ -471,3 +477,144 @@ def test_endpoint_task_not_running(flask_client, reg_task):
 def test_endpoint_unknown_task_404(flask_client):
     resp = flask_client.post('/api/v1/chat/interrupt-command/ep-intr-missing')
     assert resp.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 6. SubAgent proxy bridge: the reaper's gentle interrupt must arm for
+#    swarm workers and FlowExecutor leaf workers (autopilot), which execute
+#    tools against an ISOLATED task_proxy — before the bridge, the live
+#    subprocess was invisible on the parent, so a silent leaf-worker command
+#    escalated straight to force-failing the whole parent task/autopilot run.
+# ─────────────────────────────────────────────────────────────────────────
+def _wait_for(pred, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _bare_subagent(parent):
+    """A SubAgent shell carrying only the attributes ``_dispatch_tool`` reads
+    (the full __init__ wires LLM state these tests never touch)."""
+    from types import SimpleNamespace
+    from lib.swarm.agent import SubAgent
+    agent = object.__new__(SubAgent)
+    agent.agent_id = 'agent:test'
+    agent.spec = SimpleNamespace(id='sub-1')
+    agent.parent_task = parent
+    agent.abort_check = lambda: False
+    agent._run_deadline_monotonic = None
+    agent.project_path = ''
+    agent.tools = []
+    agent.model = 'kimi-k3'
+    agent.thinking_enabled = False
+    agent._tool_contract_documents_by_name = {}
+    agent._ptc_local = None
+    return agent
+
+
+def test_subagent_bridge_mirrors_pid_and_transfers_interrupt(monkeypatch):
+    parent = {'id': 'p1', 'convId': 'cv-p1', 'config': {}, 'aborted': False}
+    agent = _bare_subagent(parent)
+    seen = {}
+
+    def fake_exec(task_proxy, *a):
+        # run_command registers its subprocess on the PROXY.
+        task_proxy['_subprocess_pid'] = 4321
+        task_proxy['_subprocess_pgid'] = 4321
+        assert _wait_for(lambda: parent.get('_subprocess_pid') == 4321), \
+            'the bridge must mirror the live pid onto the parent (the reaper scans the parent)'
+        seen['mirrored'] = True
+        # The reaper plants a watchdog interrupt on the PARENT.
+        parent['_cmd_interrupt'] = {'source': 'watchdog', 'ts': time.time(),
+                                    'note': 'no output for 1818s', 'pid': 4321}
+        assert _wait_for(lambda: '_cmd_interrupt' in task_proxy), \
+            'the bridge must transfer the planted interrupt into the proxy'
+        seen['transferred'] = True
+        assert '_cmd_interrupt' in parent, \
+            'the parent copy is retained until the read loop consumes it'
+        # The read loop consumes it.
+        task_proxy.pop('_cmd_interrupt')
+        assert _wait_for(lambda: '_cmd_interrupt' not in parent), \
+            'consumption must retract the parent copy (the reaper treats it as acknowledged)'
+        seen['acked'] = True
+        task_proxy.pop('_subprocess_pid')
+        task_proxy.pop('_subprocess_pgid')
+        return 'tc-1', 'partial output', None
+
+    monkeypatch.setattr('lib.tasks_pkg.executor._execute_tool_one', fake_exec)
+    out = agent._dispatch_tool({'id': 'tc-1'}, 'run_command',
+                               {'command': 'sleep 30'}, 1)
+    assert out == 'partial output'
+    assert seen == {'mirrored': True, 'transferred': True, 'acked': True}
+    assert '_subprocess_pid' not in parent, \
+        'the mirrored pid is retracted when the command finishes'
+    assert '_subprocess_pgid' not in parent
+
+
+def test_subagent_bridge_skips_foreign_pid_interrupt(monkeypatch):
+    """An interrupt stamped for a DIFFERENT pid (its command already exited)
+    is stale — the bridge must not push it into this command's proxy."""
+    parent = {'id': 'p2', 'convId': 'cv-p2', 'config': {}, 'aborted': False}
+    agent = _bare_subagent(parent)
+    observed = {}
+
+    def fake_exec(task_proxy, *a):
+        task_proxy['_subprocess_pid'] = 4321
+        assert _wait_for(lambda: parent.get('_subprocess_pid') == 4321)
+        parent['_cmd_interrupt'] = {'source': 'watchdog', 'ts': time.time(),
+                                    'note': 'x', 'pid': 9999}
+        time.sleep(0.5)
+        observed['proxy_saw'] = '_cmd_interrupt' in task_proxy
+        task_proxy.pop('_subprocess_pid', None)
+        return 'tc-2', 'out', None
+
+    monkeypatch.setattr('lib.tasks_pkg.executor._execute_tool_one', fake_exec)
+    agent._dispatch_tool({'id': 'tc-2'}, 'run_command', {'command': 'sleep 1'}, 1)
+    assert observed['proxy_saw'] is False
+    assert parent['_cmd_interrupt']['pid'] == 9999, \
+        'the foreign flag stays on the parent untouched'
+
+
+def test_reaper_interrupt_reaches_subagent_command_via_bridge(
+        reaper_env, put_task, monkeypatch):
+    """End-to-end: a leaf worker blocked in a silent run_command — the reaper
+    sees the BRIDGED pid on the parent, plants the watchdog interrupt, the
+    bridge delivers it to the proxy read loop, and the parent task (the
+    autopilot run) is NOT reaped."""
+    now = time.time()
+    stale = now - 400
+    parent = _mk_task('subagent-cmd-1',
+                      _t_last_event=stale, _dispatch_heartbeat=stale,
+                      created_at=stale)
+    put_task(parent)
+    agent = _bare_subagent(parent)
+    consumed = []
+
+    def fake_exec(task_proxy, *a):
+        task_proxy['_subprocess_pid'] = 4321
+        assert _wait_for(lambda: '_cmd_interrupt' in task_proxy, timeout=10), \
+            'the planted watchdog interrupt must reach the proxy read loop'
+        consumed.append(task_proxy.pop('_cmd_interrupt'))
+        task_proxy.pop('_subprocess_pid', None)
+        return 'tc-3', 'partial output', None
+
+    monkeypatch.setattr('lib.tasks_pkg.executor._execute_tool_one', fake_exec)
+    worker = threading.Thread(
+        target=lambda: agent._dispatch_tool({'id': 'tc-3'}, 'run_command',
+                                            {'command': 'sleep 30'}, 1),
+        daemon=True)
+    worker.start()
+    assert _wait_for(lambda: parent.get('_subprocess_pid') == 4321)
+    n = _reap()
+    assert n == 0, 'a bridged command must interrupt, not reap, the parent task'
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert consumed, 'the proxy read loop consumed the interrupt'
+    t = _get('subagent-cmd-1')
+    assert t['status'] == 'running'
+    assert t['aborted'] is False
+    assert '_cmd_interrupt' not in t, 'consumption retracts the parent copy'
+    assert '_subprocess_pid' not in t

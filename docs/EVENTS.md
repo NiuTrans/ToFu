@@ -58,6 +58,42 @@ Those events are appended transactionally by the Storage Sidecar and consumed
 by the one conversation coordinator; do not emit them with `build_event` or
 add a second frontend stream.
 
+An `attempt.event` has one exact durable body, not two. New Conversation Sync
+rows store a private `(attemptId, seq)` reference to the already-committed
+AttemptEvent plus `{}` in their JSON slot; a single fenced LEFT JOIN rebuilds
+the byte-equivalent public ConversationChange. Historical rows have a NULL
+reference and keep their inline envelope. Missing/mismatched references are
+integrity failures. AttemptEvent TTL and superseded-attempt cleanup must skip a
+retained reference; sync pruning releases it. Turn deletion/compaction expires
+the referenced replay prefix before removing the event source, making older
+cursors re-anchor by snapshot instead of receiving a partial event sequence.
+
+### Private non-chat push receipt: Codex reset availability
+
+The owner-scoped `oauth` channel has one passive account-state receipt outside
+the shared chat vocabulary. Task ID `codex-reset` and event type
+`codex.reset_offer.updated` carry `{provider: "codex", reset_offer}` after the
+bounded earned-reset daemon settles. `reset_offer` is byte-compatible with the
+projection on `GET /api/v1/oauth/status`; it is already length-bounded and
+contains no token or raw account ID. Push Hub owner filtering is mandatory.
+The frame is a low-latency completion receipt, not durable authority: consumers
+must retain a bounded HTTP reconciliation path for a lost frame and must never
+redeem a credit from the event.
+
+### Private conversation wake hints
+
+The owner-scoped `notify` channel carries best-effort catalog/Conversation Sync
+wake hints outside the shared task vocabulary. Its task ID is the conversation
+ID. `conv_changed` carries `{convId, userId, rev?}`; `conv_deleted` carries
+`{convId, userId}`. Push Hub owner filtering and the browser's frame-owner check
+are both mandatory. A positive integer `rev` is only an optimization hint for a
+content change: the browser may suppress a catalog read after authoritative
+TurnState reaches that revision. Metadata mutations omit `rev`; zero, malformed,
+unknown, overflowed, or still-stale hints retain a full catalog reconciliation.
+The frame never contains transcript content and is never projection authority;
+loss, duplication, reordering, or publication failure is repaired by the
+ordered Conversation Sync stream and bounded visibility/periodic reconciliation.
+
 `turn.compact` is deliberately represented by one small transactional
 `conversation.activity` change whose payload is
 `{requiresSnapshot: true, conversationRevision}`. Compaction can delete a turn
@@ -69,9 +105,42 @@ the replay log never copies the folded transcript or large retained turns.
 Provider microchunks are not individually observable contract events. The
 stream manager emits the first text delta immediately, then losslessly merges
 later content/reasoning for at most 100 ms or 256 characters. It flushes before
-every structural boundary and assigns a sequence only to the merged event, so
-live delivery and durable replay remain byte-identical without paying one
-Sidecar transaction per 4-character provider chunk.
+every structural boundary and assigns a sequence only to the merged event.
+During an active provider dispatch those sequenced frames are process-local
+replay: storage and synchronous push observers are isolated from upstream
+consumption. The first post-provider authoritative event carries the cumulative
+projection and restores the ordinary durable-before-visible contract. This
+avoids one Sidecar transaction per 4-character provider chunk without letting
+a database or frontend delivery fault break the model stream.
+
+Outside ingress isolation, a structural frame carries the exact task event and
+a revision-checked projection patch in one `turn.event.record` transaction; it
+does not carry a second cumulative projection inside the event payload. The
+running executor retains one last-applied projection/revision under a task-local
+lock. After the shared stable-segment normalizer, it also supplies private
+boolean stability evidence; absent evidence keeps replay correct but makes the
+Sidecar normalize once at the next structural boundary. A stale patch rebases
+once from authority, and a rejected/terminal attempt clears that state and
+plants the existing cooperative-abort fence. Coalesced progress frames retain
+an explicit lightweight attempt-status check because no write transaction is
+available to prove liveness for them.
+
+Those exact durable `projectionPatch` payloads may also serve as the live
+Turn's bounded physical reconstruction head; this creates neither a second
+event vocabulary nor a second replay copy. One owner/attempt/revision-fenced
+checkpoint supplies the base, and at most 64 patches / 1 MiB may follow it.
+Rollover writes a new checkpoint, while terminal settlement and recovery write
+the complete Turn projection and remove the head. Attempt-event retention must
+therefore skip every attempt referenced by checkpoint/head metadata; a missing,
+gapped, duplicated, misbased, or oversized chain is an integrity failure, never
+a best-effort projection.
+
+Post-settlement task observers are an exact two-event exception to the carried
+attempt transaction: `round_committed` and `preference_learned`, when the task
+is already terminal, persist through standalone cold replay before live push.
+Their producers own dedicated settled-Turn CAS patches, so they never re-enter
+the closed attempt. No late delta, tool, phase, or lifecycle event shares this
+exception; those still hit the stale-attempt fence and cooperatively abort.
 
 ### Activity timeline projection
 
@@ -81,9 +150,12 @@ one cumulative Turn sidecar as presentation. Tool lifecycle,
 error status), the `compaction` → `compaction_done` archive/receipt pair,
 `model_fallback`, failed/aborted
 `model_request_complete`, and terminal errors are folded by
-`lib/turn_activity_timeline.py` into `projection.activityTimeline`. The fold is
-durable-before-visible through `record_task_event`, so live delivery, reconnect,
-and cold snapshot render the same order without a second task-SSE consumer.
+`lib/turn_activity_timeline.py` into `projection.activityTimeline`. Outside the
+provider-ingress isolation window the fold is durable-before-visible through
+`record_task_event`. In-flight diagnostics can appear first through task-memory
+SSE replay; after successful provider-boundary convergence, reconnect/cold
+snapshot catches up from the cumulative projection without a second task-SSE
+consumer.
 
 The compaction pair becomes one inspectable Turn row keyed by `archiveId`; its
 settled form carries the estimated token/message counts before and after plus
@@ -103,7 +175,10 @@ twice) and per-round `model_request_start` / successful request completion
 bookkeeping (the turn trace owns timing). A model request earns a row only
 when it fails or is aborted.
 Model completion diagnostics additionally carry credential-free `routeId`,
-`routeMode`, `routeDecision`, and `failureStage` fields. Repeated recovery
+`routeMode`, `routeDecision`, and `failureStage` fields. Their bounded
+`observerIsolation` receipt names the provider-ingress contract and counts
+physical provider dispatches, memory-local events, and coalesced checkpoint
+requests; it carries no content. Repeated recovery
 incidents with an explicit `backoff_s` coalesce as counted occurrences whose
 `durationMs` is the sum of actual backoffs; their first-to-last wall envelope
 must never be presented as one continuous wait.
@@ -158,6 +233,20 @@ emit_phase(task, Phase.RETRYING, detail='…', detailKey='stream.phase.retryGene
 append_event(task, {'type': 'phase', 'phase': 'retrying', 'detail': '…'})
 ```
 
+Host-local root-task queueing uses `Phase.EXECUTOR_QUEUED`. Its payload carries
+`queuePosition`, `queued`, `active`, `capacity`, and `waitSeconds`, mirrored in
+`detailArgs` for localization. It is emitted only while the bounded Agent FIFO
+still owns the task and is ordered before the worker-entry phase. Do not reuse
+it for provider throttling or API quota; those waits remain `retrying` with a
+typed reason.
+
+Flow role phases may additionally carry `model` plus a structured `modelRoute`
+with `selectedModel`, `resolvedModel`, `role`, `tier`, and `kind`. A changed
+route emits `detailKey=stream.phase.modelRouted` before dispatch, and the
+manager's current-phase snapshot must preserve the same fields so raw SSE,
+reconnect, and polling render identical disclosure. This is role routing, not
+provider fallback; `model_fallback` remains a separate event and timeline fact.
+
 * `emit_phase(task, Phase.X, **fields)` = `build_phase(Phase.X, **fields)` +
   `append_event` — byte-identical to the old literal, same as `build_event`.
 * Delivering through a NON-manager append seam (a production channel's
@@ -185,7 +274,14 @@ For model streaming, the three progress phases have non-overlapping meaning:
 
 Every phase snapshot carries the assigned event `seq`; repeated wait/stall
 heartbeats repaint through that sequence. Wait/stall phases remain transient
-and do not create activity-timeline retry rows.
+and do not create activity-timeline retry rows. The conversation-sync phase
+snapshot also carries server `emittedAt` so a browser can submit an explicit
+received-to-painted timing receipt. At the canonical manager chokepoint the
+same events project into bounded `timingTrace.statusHistory`; terminal
+settlement freezes that diagnostic history into the generation-attempt authority
+and mirrors it with the current Turn. It never restores
+the transient live phase and is not a second event vocabulary. See
+`TURN_TRACE_CONTRACT.md`.
 
 ### Events built up conditionally
 
@@ -201,6 +297,8 @@ if usage:
 append_event(task, done)
 ```
 
+Model-backed `done` events may also carry `waitingOn` when a turn ends normally but not cleanly (`_todo_blocked` set or `finishReason == 'incomplete'`) and the conversation-scoped swarm session remains live detached. `waitingOn` carries `{kind: "swarm", swarmKey, autoResume, agents}` (where `agents` contains up to 8 live agent status snapshots); clients should render waiting UI indicating a blocking background task that will auto-resume on completion.
+
 Model-backed `done` events also carry `streamState`. This is the authoritative
 closed provider-stream verdict (`provider_finished`, `premature_close`,
 `malformed_stream`, and so on; `semantic_progress_timeout` is retained only for
@@ -209,6 +307,25 @@ infer success from non-empty content or from a compatibility `finishReason=stop`
 `streamState=provider_finished` is positive stream-completion evidence.
 
 ---
+
+## Tool progress is a presentation side channel
+
+`tool_progress` uses its declared, versioned payload in
+`lib/agent_core/events.py`. A frame identifies `taskId`, model/tool round,
+`toolCallId`, and a monotonically increasing per-call `seq`; it may carry an
+ordered stream delta or a bounded replacement preview, observed byte/character
+counts, spooling/truncation state, and an optional terminal reason.
+
+Progress never creates another model-visible tool result and must not be stored
+as an unbounded transcript. Producers coalesce by time/bytes, bound queued
+frames, and keep only a bounded reconnect snapshot on the active round. Clients
+load that snapshot first, resume at the next sequence, ignore duplicate or
+out-of-order frames, and replace provisional output with the authoritative
+single final result. A pause in progress is not completion.
+
+Cancellation may project `cancelling` before the exactly-once terminal
+`cancelled` outcome. A cancelled result may reference retained partial output;
+quota/disk failure instead carries an explicit unretained-overflow state.
 
 ## 2. Adding a NEW event type
 
@@ -296,3 +413,32 @@ reverse-engineer the stream by reading our source. The registry makes the
 contract explicit, versioned, machine-discoverable (`/api/v1/capabilities`),
 and drift-guarded — and `build_event`/`EventType` is the discipline that keeps
 every emission pinned to it.
+
+---
+
+## 6. Project Brain event stream
+
+Project Brain uses `storage_events.stream_kind = 'project_brain'`, separate
+from task UI events. Each event contains explicit `ownerUserId`, normalized
+`projectKey`, monotonic `projectSequence`, `kind`, `timestamp`, and `payload`.
+The relational columns `owner_user_id`, `project_key`, and `project_sequence`
+mirror those identity fields for owner-scoped indexing and uniqueness.
+
+One Sidecar command transaction allocates the next sequence, appends exactly
+one semantic event, folds `storage_project_brain_projects`, writes its
+idempotency receipt, and returns a push hint. A failure rolls back all four
+effects. Public lifecycle kinds are derived from runtime signals:
+
+- `work_started`, `work_title_refined`, `work_changed`, `work_finished`;
+- `narrative_added`, `attention_added`;
+- `checker_registered`, `checker_result`, `decision_promoted`;
+- `watch_added`, `watch_updated`, `watch_deleted`;
+- `cursor_initialized`, `cursor_confirmed`;
+- `legacy_migrated`, `projection_checkpoint`.
+
+Task started/completed telemetry is not copied to this stream or Feed. Feed is
+the bounded `NarrativeEvent` fold: meaningful work results, Checker failures,
+Integration results, checker-backed decisions, and human Watch changes only. Periodic
+`projection_checkpoint` carries a complete rebuild snapshot; only then may a
+reconstructible prefix be reclaimed. Charter, Checker, Watch, and delivery
+cursor state is part of that checkpoint.

@@ -138,9 +138,21 @@ def test_enabled_tool_passes_the_disabled_gate():
 def test_set_disabled_tools_hot_applies_without_reconnect():
     b = _bridge_with({'srv': ['a', 'b']})
     assert len(b.get_openai_tool_defs()) == 2
+    before_fingerprint, before_projection = b.get_tool_catalog_projection()
+    before_search_text = b.get_tool_catalog_search_text_projection()
     b.set_disabled_tools('srv', ['b'])
     assert [d['function']['name'] for d in b.get_openai_tool_defs()] == [
         'mcp__srv__a']
+    after_fingerprint, after_projection = b.get_tool_catalog_projection()
+    assert after_projection is not before_projection
+    assert after_fingerprint != before_fingerprint
+    assert [row['tool_name'] for row in after_projection] == ['a']
+    after_search_text = b.get_tool_catalog_search_text_projection()
+    assert after_search_text is not before_search_text
+    assert set(after_search_text) == {'mcp__srv__a'}
+    b.set_disabled_tools('srv', ['b', 'b'])
+    assert b.get_tool_catalog_projection()[1] is after_projection
+    assert b.get_tool_catalog_search_text_projection() is after_search_text
     # And the live handle's config copy is kept in sync (consistency for any
     # consumer reading handle.config).
     assert b._servers['srv'].config['disabled_tools'] == ['b']

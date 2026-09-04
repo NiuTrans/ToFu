@@ -71,6 +71,11 @@ def drain_peer_messages_into(task: dict[str, Any],
         messages.append({
             'role': 'user',
             'content': '\n\n'.join(it['value'] for it in _peer_items),
+            # Match the main round-boundary inbox projection. Peer evidence is
+            # transparent to human-turn/query extraction; this driver lane
+            # never drains user-steer items.
+            '_isInboxInject': True,
+            '_containsHumanSteer': False,
         })
         task.setdefault('_peer_inject_pending', []).extend(_peer_items)
         logger.info('[Task %s] driver-loop injected %d peer message(s) at '
@@ -130,14 +135,27 @@ def _run_single_turn(
     task['finishReason'] = None
     task['toolRounds'] = []    # fresh tool rounds per turn
     task['programRuns'] = []   # canonical hosted-program runs per turn
+    # Receipt dedupe keys combine attempt/world with the attempt-LOCAL
+    # llmRound, which restarts at 0 on every turn while the Flow task keeps
+    # one identity — a receipt surviving into the next turn would replay a
+    # stale result for a same-shaped call instead of executing it.
+    task['_execute_gateway_receipts'] = {}
 
-    # Flag to tell run_task NOT to emit final 'done' event
+    # Flag to tell run_task NOT to emit final 'done' event. Preserve an outer
+    # Flow owner's marker: Goal Mode reuses this task for many work/VU turns,
+    # and removing the task-level marker after the first inner turn re-enabled
+    # the retired classic autopilot hooks mid-run.
+    flow_marker_was_present = '_flow_managed' in task
+    prior_flow_marker = task.get('_flow_managed')
     task['_flow_managed'] = True
 
     try:
         run_task(task)
     finally:
-        task.pop('_flow_managed', None)
+        if flow_marker_was_present:
+            task['_flow_managed'] = prior_flow_marker
+        else:
+            task.pop('_flow_managed', None)
 
     result = {
         'content':      task.get('content', ''),

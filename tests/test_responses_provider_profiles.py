@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 pytestmark = pytest.mark.unit
-
-ROOT = Path(__file__).resolve().parents[1]
-
 
 def _tools(n=20):
     return [{
@@ -144,36 +139,6 @@ def test_websocket_requires_openai_feature_profile():
 
     assert compatible.responses_transport == 'sse'
     assert openai.responses_transport == 'websocket'
-
-
-def test_frontend_controls_and_runtime_passthrough_are_two_sided():
-    panel = (ROOT / 'static/settings_panels/advanced.html').read_text()
-    runtime = (ROOT / 'frontend/src/runtime/app-runtime.js').read_text()
-    settings = lifecycle = provider = runtime
-    route = (ROOT / 'routes/config.py').read_text()
-
-    for token in ('settingToolSearch', 'settingProgrammaticCalling',
-                  'settingResponsesTransport', 'settingResponsesMultiAgent'):
-        assert token in panel and token in settings
-    assert 'tool-execution-policy' in panel
-    css = (ROOT / 'static/settings.css').read_text()
-    assert '.tool-discovery-card' in css
-    assert "executionScope: 'available'" in settings
-    assert 'settingToolExecutionScope' not in panel
-    toolbar_css = (ROOT / 'static/styles.css').read_text()
-    main_js = runtime
-    i18n = ''.join(
-        path.read_text() for path in
-        (ROOT / 'frontend/src/i18n/locales').glob('*.json'))
-    assert '.submenu-item.discoverable::after' not in toolbar_css
-    assert 'toolbar.toolExposureSearchable' not in main_js + i18n
-    assert '可直呼' not in main_js + i18n
-    assert '.submenu-item.tool-unavailable::after' in toolbar_css
-    assert '_paintToolExposureState' in main_js
-    for block in ('cache', 'tools', 'responses', 'compaction'):
-        assert f'{block}: Object.assign' in lifecycle
-    assert 'responses_profile' in provider
-    assert "'responses_profile': r.responses_profile" in route
 
 
 def test_conv_resolver_preserves_nested_experiment_blocks():

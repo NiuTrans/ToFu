@@ -25,6 +25,7 @@ export interface TurnProjectionState {
   transport?: string;
   turnsById: Record<string, ProjectionTurn | undefined>;
   laneOrder: Record<string, string[] | undefined>;
+  historyByLane?: Record<string, { totalTurns: number } | undefined>;
   commandPending: Record<string, string | null | undefined>;
   liveRoundUsageByTurn: Record<string, LiveRoundUsage | undefined>;
   queueItems?: ReadonlyArray<ConversationQueueItem>;
@@ -96,7 +97,8 @@ export function applyTurnStateProjection(input: ApplyTurnProjectionInput): boole
   if (incomingRevision > Number(conversation._serverRev || 0)) {
     conversation._serverRev = incomingRevision;
   }
-  conversation._serverTurnCount = state.laneOrder.main?.length ?? 0;
+  conversation._serverTurnCount = state.historyByLane?.main?.totalTurns
+    ?? state.laneOrder.main?.length ?? 0;
 
   if (conversation._turnProjectionFingerprint === fingerprint) {
     const transportChanged = conversation._turnTransport !== state.transport;

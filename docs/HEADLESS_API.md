@@ -9,8 +9,8 @@ There are now two headless deployment boundaries:
 
 | Deployment | Contains | State |
 |---|---|---|
-| `tofu-agent` package/sidecar | Agent run, model routing, tools, MCP, network, task replay/abort, one managed-Provider setup page | Bounded task memory + encrypted Provider file; no database/ChatUI frontend |
-| Full Tofu backend | Everything in this guide, including conversations, accounts, feature agents, provider CRUD, billing, and scheduling | Storage Sidecar |
+| `tofu-agent` package/sidecar | Agent run, model routing, tools, MCP, network, task replay/abort, and one v2 setup page | Bounded task memory + encrypted model-routing file; no database/full Tofu frontend |
+| Full Tofu backend | Everything in this guide, including conversations, accounts, feature agents, ProviderAccess management, billing, and scheduling | Storage Sidecar |
 
 For `pip install tofu-agent`, the agent-only OCI image, provider ownership,
 authentication, and exact lightweight route list, read
@@ -102,8 +102,8 @@ once.** After that, only its SHA-256 hash is stored.
 | `agents:trading`     | Trading                                                |
 | `agents:image`       | Image generation                                       |
 | `agents:mcp`         | MCP bridge                                             |
-| `agents:run`         | `/api/v1/agent/run` (single-call agent runtime, BYOM)  |
-| `providers`          | `/api/v1/providers/*` (BYO model-endpoint CRUD)        |
+| `agents:run`         | `/api/v1/agent/run` (single-call agent runtime)        |
+| `providers`          | Owner model-routing and ProviderAccess management       |
 | `webhooks`           | Outbound delivery subscriptions                        |
 | `capabilities`       | (public)                                               |
 | `usage`              | Per-key analytics                                      |
@@ -137,7 +137,9 @@ available via `config`.
 
 ```jsonc
 {
-  "model": "claude-opus-4-7",                         // optional; falls back to server default
+  // Required native identity. Provider preference is separate from identity.
+  "model": {"creator_id": "anthropic", "model_id": "claude-opus-4-7"},
+  "routing": {"preferred_provider_id": "provider-anthropic"}, // optional
   "messages": [
     {"role":"system","content":"…"},
     {"role":"user","content":"Hi"}
@@ -200,7 +202,7 @@ with an effective `responses_profile` of `openai`. See
 > The server admin can configure a global *fallback model* (Settings →
 > model defaults). When set, a transient error on your requested model
 > causes Tofu to **silently re-run that round on the fallback model** —
-> so a request pinned to `model: "X"` can return output from a different
+> so a request pinned to a structured `model` can return output from a different
 > model. The done event / task snapshot expose this via
 > `fallbackModel` / `fallbackFrom` / `fallbackReason`, so always inspect
 > them if model identity matters. For reproducible runs, benchmarks, or
@@ -251,15 +253,31 @@ swarm, etc.), you can drive it uniformly:
 
 ```
 GET    /api/v1/tasks                 — list (filter by kind, status)
-GET    /api/v1/tasks/{id}            — full state snapshot
-GET    /api/v1/tasks/{id}/events?cursor=N — long-poll cursor replay
+GET    /api/v1/tasks/{id}            — current state (event cursor summary only)
+GET    /api/v1/tasks/{id}/events?cursor=N — bounded long-poll cursor replay
 GET    /api/v1/tasks/{id}/stream     — SSE replay-from-cursor
 POST   /api/v1/tasks/{id}/abort      — graceful stop
 DELETE /api/v1/tasks/{id}            — drop from registry (admin)
 ```
 
 Cursor-based replay means the consumer can disconnect and reconnect
-without losing events.
+without losing events. Replay pages are bounded to 128 events and roughly
+1 MiB of event JSON (a single larger event remains lossless). Continue with
+`next_cursor` until `caught_up=true`; `done` and terminal result fields are
+published on that caught-up page. The state endpoint deliberately omits event
+bodies and exposes `event_replay.{retained_count,base_cursor,next_cursor}`
+instead, so status refreshes never retransmit the replay window.
+
+Chat tasks retain a short process-local late-poller window, then these three
+per-task read endpoints fall back to the owner-scoped `task_results` row and
+durable event log. A restart or terminal-registry eviction therefore does not
+turn a known chat task into 404; a missing or foreign-owner ID remains 404.
+Durable sequences can be sparse because provider-ingress deltas are allowed to
+remain memory-local, so clients must always advance to the returned
+`next_cursor` rather than adding the event count. Intermediate cold pages read
+only compact status/clock metadata; the cumulative `content` / `thinking` is
+loaded and emitted once on the caught-up terminal page. The list endpoint is a
+bounded recent/live registry view, not a durable task-history listing.
 
 Terminal task-result metadata exposes
 `toolOrchestrationDecisions[]` as a bounded, provider-neutral trace. Each row
@@ -310,6 +328,12 @@ Stable façades over higher-level features. Each is scope-gated.
 | GET  `/agents/swarm/status/{task_id}`  | `agents:swarm`    | Swarm sub-agents                       |
 | POST `/agents/swarm/abort/{task_id}`   | `agents:swarm`    | Stop a swarm                           |
 
+Paper translation accepts at most 1,000,000 `paper_text` characters (HTTP 413
+beyond the limit), produces at most 128 semantic slices, and has a two-hour
+task deadline. `force=true` requests fresh slices; an explicit `model` is
+strictly pinned. A task becomes `done` only after every validated slice is
+confirmed in the owner-scoped artifact repository.
+
 ### 3.5 Webhooks — `/api/v1/webhooks/*`
 
 Subscribe a URL to event delivery from the same `PushHub` that powers
@@ -330,6 +354,17 @@ X-Tofu-Subscription-Id: wh_…
 ```
 
 Verify with the per-subscription `secret` (returned ONCE on creation).
+Creation is atomically capped per owner and process; capacity exhaustion is a
+409 and never overwrites another concurrent subscription. `event_types`
+accepts at most 32 distinct non-empty names of at most 80 characters. Delivery
+is intentionally bounded and best-effort: personal mode defaults to 64
+subscriptions, 128 immediate items, 64 delayed retries, 16 MiB total retained
+event data, 512 KiB per event, and five actual HTTP attempts. Deleted or
+disabled subscriptions are rechecked against storage before every request, so
+already queued work cannot outlive revocation. A transient failure gates later
+events for that subscription behind the same exponential cooldown; those
+deferrals do not spend attempts, and one probe request reopens delivery after
+recovery.
 
 ### 3.6 Real-time push — `WS /api/push`
 
@@ -435,69 +470,50 @@ unknown event types and unknown fields. A server-side drift test
 (`tests/test_event_registry.py`) guarantees the registry stays in lockstep with
 what the runtime actually emits and what the bundled frontend consumes.
 
-### 3.7 Managed models and Bring Your Own Model (BYOM)
+### 3.7 Model routing and ProviderAccess
 
-> The operator may own the default LLM so callers supply only a Tofu URL and
-> token. A caller may instead select a registered model or provide one
-> endpoint/key/model block for a run. Tofu supplies the agent runtime, tools,
-> memory, swarm, and trajectory capture in every mode.
+> The owner configures service access once, so ordinary callers supply only a
+> Tofu URL, token, and structured Model identity. One-run access uses the same
+> complete v2 aggregate; inline endpoint/key/model blocks do not exist.
 
-Three layered ways to attach a custom endpoint, each strictly more
-powerful than the one below:
+The persistent authority and runtime request are separate layers:
 
-#### 3.7.1 Persistent providers — `/api/v1/providers/*`
+#### 3.7.1 Persistent model routing — `/api/v1/model-routing`
 
-Register an OpenAI-compatible endpoint (vLLM / SGLang / Ollama /
-in-house gateway) once and reuse it across many runs. Providers are
-**scoped to the calling API key** — caller A never sees caller B's
-endpoint or secret.
+The owner-scoped [`tofu.model-routing/v2`](../contracts/model_routing_v2.schema.json)
+aggregate is the sole model/provider authority. It separates official model
+identity, ProviderAccess, Connection, encrypted Credential metadata, Offering,
+and Deployment. Every write is revision-CAS; callers never encode a provider
+inside a model string, and plaintext credentials never enter the aggregate.
 
-```bash
-curl -X POST https://your-tofu/api/v1/providers \
-  -H "Authorization: Bearer tofu_live_…" \
-  -d '{
-    "name": "deepseek-cluster-A",
-    "base_url": "http://33.236.230.114:8080/v1",
-    "api_key": "sk-internal-…",
-    "models": [{"model_id":"deepseek-v4-pro"}]
-  }'
-# → { provider: { id: "prov_a3f2c1", key_hint: "sk-int…ar", … } }
-```
+| Endpoint | Scope | Purpose |
+|---|---|---|
+| `GET /api/v1/model-routing` | `providers` | Read the redacted owner aggregate and revision |
+| `PUT /api/v1/model-routing` | `providers` | CAS-replace the complete aggregate |
+| `GET/POST /api/v1/providers` | `providers` | List/create ProviderAccess bundles |
+| `POST /api/v1/providers/probe` | `providers` | Probe an endpoint and return a secret-free ProviderAccess draft without persisting it |
+| `GET/PATCH/DELETE /api/v1/providers/{provider_id}` | `providers` | Read/CAS-replace/delete one bundle |
+| `PUT /api/v1/model-routing/credentials/{credential_id}/secret` | `providers` | Replace one encrypted secret outside the aggregate |
+| `POST /api/v1/model-routing/migration/{plan,commit}` | `providers` | Preview/commit the one-way legacy migration |
 
-Registration is fast and unconditional — `auto_discover` defaults to
-**false**. To ingest the served model list, follow up with
-`POST /api/v1/providers/{id}/probe` (or pass `auto_discover: true`
-on creation if you're willing to pay for the synchronous round-trip).
+Native chat selects an official model with
+`{"creator_id":"…","model_id":"…"}` and may add
+`routing.preferred_provider_id`. A provider-scoped pending identity uses
+`{"provider_id":"…","offering_id":"…"}`. The dispatcher computes a
+bounded candidate set, mints request-scoped slots, records a route snapshot,
+and disposes the slots on completion.
 
-| Endpoint                                 | Scope       | Purpose                              |
-|------------------------------------------|-------------|--------------------------------------|
-| `POST   /api/v1/providers`               | `providers` | Register the endpoint                |
-| `GET    /api/v1/providers`               | `providers` | List own providers (no api_keys)     |
-| `GET    /api/v1/providers/{id}`          | `providers` | Get one (key redacted to `key_hint`) |
-| `PATCH  /api/v1/providers/{id}`          | `providers` | Update name / url / key / models     |
-| `DELETE /api/v1/providers/{id}`          | `providers` | Drop                                 |
-| `POST   /api/v1/providers/{id}/probe`    | `providers` | Re-discover models                   |
-
-Once registered, pin any chat / agent run to it via the model-string
-suffix `<model_id>@<prov_id>`:
-
-```bash
-curl -X POST https://your-tofu/api/v1/chat/completions \
-  -H "Authorization: Bearer tofu_live_…" \
-  -d '{"model":"deepseek-v4-pro@prov_a3f2c1",
-       "messages":[{"role":"user","content":"Hi"}]}'
-```
-
-The dispatcher mints an ephemeral slot for that one request, runs it
-through the provider, and tears the slot down on completion. The
-api_key is held in process memory only — never logged, never echoed
-back in any response or `/tasks/{id}` snapshot.
+Non-chat model calls follow the same rule. Image, audio/transcription, TTS, and
+`POST /v1/embeddings` list or mint only routes visible to the authenticated
+owner. A model string never authorizes access to another owner's provider, and
+an unavailable v2 route cannot fall back to process-global environment keys.
 
 #### 3.7.2 Single-call agent runtime — `POST /api/v1/agent/run`
 
 Headline endpoint for running one agent turn end-to-end. With a deployment
-default, the request needs only messages. An optional model/provider block,
-agent configuration, and trajectory format may override that composition.
+route already configured, the request supplies a structured model identity,
+messages, and optional routing policy, agent configuration, and trajectory
+format.
 
 ```jsonc
 POST /api/v1/agent/run
@@ -505,17 +521,16 @@ Authorization: Bearer tofu_live_…
 {
   "messages": [{"role":"user","content":"Refactor lib/foo.py"}],
 
-  // 1. model is optional when the deployment owns a default
-  "model": "deepseek-v4-pro",                  // (a) plain alias
-  // "model": "deepseek-v4-pro@prov_a3f2c1",    // (b) registered BYO
+  // 1. Official identity; provider preference is a separate concern.
+  "model": {"creator_id":"deepseek","model_id":"deepseek-v4-pro"},
+  "routing": {
+    "preferred_provider_id": "provider-cluster-a",
+    "required_context": 131072,
+    "price_budget": {"max_input": 1.0, "max_output": 4.0, "currency":"USD"}
+  },
 
-  // 2. (c) inline BYO: model may live inside the provider block
-  // "provider": {
-  //   "base_url": "http://33.236.230.114:8080/v1",
-  //   "api_key":  "sk-…",
-  //   "model":    "deepseek-v4-pro",
-  //   "extra_headers": { "X-Internal-Tag": "..." }
-  // },
+  // A provider-scoped pending identity uses this form instead:
+  // "model": {"provider_id":"provider-cluster-a","offering_id":"offering-v4"},
 
   // 3. unified config — aliases + raw orchestrator keys mix freely
   "config": {
@@ -534,59 +549,24 @@ Authorization: Bearer tofu_live_…
 }
 ```
 
-**Managed default — no model/provider**. Uses the deployment's configured
-provider and model. This is the recommended application integration because
-consumers retain only the Tofu URL/token.
+The owner routing aggregate resolves eligible Deployments, credentials, and
+failover candidates. Each request gets a bounded route group whose slots are
+disposed on terminal completion, including async and disconnected streaming
+requests. Successful responses and stream chunks expose the selected
+`provider_id`; plaintext secrets never cross the HTTP boundary. Opaque,
+owner-scoped `secret_reference` values remain visible so clients can perform
+lossless aggregate CAS edits without retrieving the encrypted value.
 
-**Shape (a) — plain alias**. Resolves against the global slot pool: the
-operator-curated set of models. No ephemeral slot.
+Native requests deliberately reject plain model strings, `model@provider`,
+and inline `provider` blocks. Compatibility `/v1` endpoints retain their
+upstream string model field and translate it into the same v2 authority.
 
-**Shape (b) — BYO suffix**. Resolves against the caller's providers
-(see 3.7.1); mints + disposes an ephemeral slot for this task.
-
-**Shape (c) — inline `provider` block**. The whole
-`(base_url|endpoint, api_key, model, [extra_headers])` is supplied per-request.
-The same one-shot ephemeral slot lifecycle applies. Use this for
-one-off evaluation runs or trajectory generation when you don't
-want to persist the endpoint.
-
-> **Header allowlist**: `extra_headers` rejects `Authorization`,
+> **Header allowlist**: Connection and encrypted-credential `extra_headers`
+> reject `Authorization`,
 > `x-api-key`, `Cookie`, `Host`, `Content-Length`,
 > `Transfer-Encoding`, `Proxy-Authorization` — names that would
 > impersonate Tofu's own outbound auth. Up to 16 entries, 2048 chars
 > per value.
-
-##### Thinking-format dialect (`thinking_format`)
-
-Most BYO callers never need to set this — Tofu auto-detects from the
-model name and (for registered providers) the `/v1/models` `owned_by`
-field. Set it explicitly when the auto-detect would be wrong, most
-commonly when a self-hosted Qwen3 / GLM / DeepSeek-V4 dual-mode model
-is served via **sglang** or **vLLM**: those engines accept
-`chat_template_kwargs.enable_thinking` rather than the cloud-API
-top-level `enable_thinking` field, and silently ignore anything else.
-
-Legal values:
-
-| `thinking_format`      | Body shape sent to the engine                       | Engines       |
-|------------------------|-----------------------------------------------------|---------------|
-| `""` (default)         | Auto-detect from model name + brand                 | —             |
-| `enable_thinking`      | top-level `{"enable_thinking": bool}`               | Bailian Qwen, LongCat, ERNIE |
-| `thinking_type`        | `{"thinking": {"type": "enabled"\|"disabled"}}`     | Doubao, GLM cloud, Kimi, Claude |
-| `reasoning_effort`     | top-level `{"reasoning_effort": "minimal"\|"low"\|"medium"\|"high"}` | Gemini 3.x (maps to Vertex `thinkingLevel`) |
-| `chat_template_kwargs` | `{"chat_template_kwargs": {"enable_thinking": …}}`  | sglang, vLLM, any OpenAI-shim engine that gates thinking through Jinja |
-| `none`                 | nothing thinking-related sent                       | DeepSeek-Reasoner (always-thinking) |
-
-The same value lives on `provider:` block (inline path), on registered
-provider rows (set automatically by `auto_discover` / `/probe`, or via
-`PATCH /api/v1/providers/{id}`), and on the persistent
-`Slot.thinking_format` field. Slot validates at construction —
-unknown values raise `ValueError` rather than silently degrade to
-auto-detect.
-
-Probing via `POST /api/v1/providers` with `auto_discover: true` (or
-`POST /api/v1/providers/{id}/probe`) returns the suggested value so
-your client can echo it back to the user.
 
 The `config` field accepts both **curated aliases** and **raw
 orchestrator keys**. Aliases translate first; raw keys flow through
@@ -619,7 +599,7 @@ does not resubmit the agent request after a transport loss.
 | `providers`  | All `/api/v1/providers/*`               |
 | `agents:run` | `/api/v1/agent/run`                     |
 
-A typical "BYO + trajectory" key is created with:
+A typical model-routing + trajectory key is created with:
 
 ```bash
 curl -X POST /api/v1/keys \
@@ -628,16 +608,17 @@ curl -X POST /api/v1/keys \
        "scopes":["providers","agents:run","tasks"]}'
 ```
 
-Note that **`agents:run` does not include `chat`** — keys minted with
-just `agents:run` cannot use the operator-curated slot pool via
-`/api/v1/chat/completions`; they must supply their own model
-endpoint. Combine with `chat` if you want both.
+Note that **`agents:run` does not include `chat`**. A key with only
+`agents:run` may execute `/api/v1/agent/run` against the owner's v2 authority,
+but cannot call `/api/v1/chat/completions`. Add `providers` only when the
+client must administer access; ordinary run callers do not need it.
 
 #### 3.7.4 Discovery via OpenAI-compatible `/v1/models`
 
-When called with a Bearer key that owns BYO providers, `GET /v1/models`
-includes those providers' models with the BYO suffix already
-attached:
+`GET /v1/models` projects the owner-visible official models. A string is
+unambiguous only when one creator owns that `model_id`; otherwise compatible
+clients add `tofu.creator_id`. Provider preference is carried separately as
+`tofu.preferred_provider_id`, never as a model suffix:
 
 ```jsonc
 GET /v1/models
@@ -645,11 +626,10 @@ Authorization: Bearer tofu_live_…
 → {
   "object": "list",
   "data": [
-    {"id":"gpt-5.6","object":"model","owned_by":"openai", ...},
-    {"id":"deepseek-v4-pro@prov_a3f2c1",      // ← BYO model
-     "object":"model","owned_by":"prov_a3f2c1",
-     "tofu_provider_name":"deepseek-cluster-A",
-     "capabilities":["text","thinking"]}
+    {"id":"gpt-5.6","object":"model","owned_by":"openai",
+     "tofu":{"creator_id":"openai"}},
+    {"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek",
+     "tofu":{"creator_id":"deepseek"}}
   ]
 }
 ```
@@ -779,7 +759,15 @@ GET  /api/v1/motion/videos/{id}/file
 GET  /api/v1/motion/videos/{id}/file?part=srt
 GET  /api/v1/motion/videos/{id}/file?part=audio-plan
 GET  /api/v1/motion/videos/{id}/file?part=audio-attribution
+GET  /api/v1/motion/videos/{id}/file?part=media-attribution
 ```
+
+Topic requests accept `creative_mode: "director" | "standard"`.
+`director` is the default two-candidate, deterministic-gate, independent-critic
+path; `standard` is the single-plan A/B control. The field is part of dedup and
+checkpoint identity. When `PEXELS_API_KEY` is configured, bounded image/video
+queries can materialise local stock assets; `media-attribution` returns the
+provider/creator credit ledger when such assets were used.
 
 `audio_plan` can be supplied inline or by `audio_plan_path` (not both), up to
 256 KB. Relative asset paths resolve from `audio_base_dir` for inline plans or
@@ -810,8 +798,9 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-* `model` resolves through Tofu's dispatcher — supply the same id you'd
-  use in `/api/v1/chat/completions`.
+* `model` remains the upstream-compatible string. Native
+  `/api/v1/chat/completions` instead requires the structured creator/model
+  identity shown in §3.1.
 * Streaming returns standard `chat.completion.chunk` SSE frames.
 * `reasoning_effort=low|medium|high` maps to Tofu's thinking-depth ladder.
 * When `tools` is supplied, Tofu's auto-injected tools (web_search,
@@ -931,7 +920,7 @@ curl -X POST https://your-tofu/api/v1/chat/completions \
   -H "Authorization: Bearer tofu_live_…" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-7",
+    "model": {"creator_id":"anthropic","model_id":"claude-opus-4-7"},
     "messages": [{"role":"user","content":"Add a logger to lib/foo.py"}],
     "config": {
       "projectPath": "/abs/path/to/repo",
@@ -962,7 +951,8 @@ SUB=$(curl -X POST /api/v1/webhooks \
 # 2. Issue a chat completion as fire-and-forget
 curl -X POST /api/v1/chat/completions \
   -H "Authorization: Bearer …" \
-  -d '{"messages":[{"role":"user","content":"Hi"}]}'
+  -d '{"model":{"creator_id":"anthropic","model_id":"claude-opus-4-7"},
+       "messages":[{"role":"user","content":"Hi"}]}'
 # Webhook receives the terminal `done` event with full result.
 ```
 
@@ -997,7 +987,10 @@ curl -H "Authorization: Bearer tofu_admin_…" \
 ```
 
 Each daily bucket carries `requests`, `tokens`, and a `by_model`
-breakdown. Retention: 90 days, rolling.
+breakdown. Retention is 90 days rolling, with at most 1,024 key buckets per
+day and 128 model buckets per key. Higher-cardinality telemetry is accumulated
+under `_overflow` / `_other`, so aggregate request and token totals remain
+available without unbounded analytics state.
 
 ### 7.2 Prometheus metrics
 
@@ -1017,6 +1010,10 @@ Exposed metrics:
 | `tofu_idempotency_cache_size`       | gauge   | —                     |
 | `tofu_rate_limit_buckets`           | gauge   | —                     |
 | `tofu_push_subscribers`             | gauge   | —                     |
+| `tofu_cgroup_relief_attempts_total` | counter | —                     |
+| `tofu_cgroup_relief_reclaimed_bytes_total` | counter | `source`        |
+| `tofu_cgroup_relief_reclaimed_bytes_latest` | gauge | `source`          |
+| `tofu_cgroup_relief_duration_seconds` | histogram | —                 |
 
 The `window` label takes values `1d`, `7d`, `30d` so dashboards can
 graph short- and long-term trends from the same scraper.

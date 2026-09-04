@@ -13,7 +13,7 @@ Routes registered (paths owned by this blueprint, definitions in routes/paper.py
   POST   /api/v1/paper/report/start
   GET    /api/v1/paper/report/poll
   POST   /api/v1/paper/report/abort
-  POST   /api/v1/paper/report/lookup
+  POST   /api/v1/paper/report/lookup  (live task + opt-in cache resolution)
   GET    /api/v1/paper/report/export
   POST   /api/v1/paper/report/cache
   POST   /api/v1/paper/qa/start
@@ -27,6 +27,8 @@ Routes registered (paths owned by this blueprint, definitions in routes/paper.py
   POST   /api/v1/paper/fetch-arxiv
   POST   /api/v1/paper/reparse
   GET    /api/v1/paper/library
+  GET    /api/v1/paper/library/summaries
+  GET    /api/v1/paper/library/<paper_id>
   PUT    /api/v1/paper/library/<paper_id>
   DELETE /api/v1/paper/library/<paper_id>
 

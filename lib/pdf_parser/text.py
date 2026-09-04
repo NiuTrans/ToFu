@@ -2,6 +2,10 @@
 
 Strategy 1: pymupdf4llm  → Markdown with table/header preservation
 Strategy 2: pymupdf raw  → plain-text page-by-page fallback
+
+Public extraction entry points reserve the process-wide classic PDF budget.
+The full-document core uses the explicitly named already-admitted private
+entry so one document is counted exactly once in both server and child paths.
 """
 
 import re
@@ -17,7 +21,13 @@ except ImportError:
 
 from lib.log import get_logger
 from lib.pdf_parser._common import HAS_PYMUPDF4LLM, MAX_PDF_BYTES, PYMUPDF_LOCK
+from lib.pdf_parser.admission import CLASSIC_PDF_ADMISSION
 from lib.pdf_parser.math import postprocess_math_blocks
+from lib.pdf_parser.policy import (
+    bounded_pdf_pages,
+    bounded_pdf_text_chars,
+    resolve_classic_pdf_budget,
+)
 from lib.pdf_parser.postprocess import cleanup_markdown, strip_manuscript_line_numbers
 
 logger = get_logger(__name__)
@@ -106,6 +116,15 @@ _MAX_PAGE_MARKDOWN_CHARS = 32_000
 _MAX_PAGE_MARKDOWN_TO_RAW_RATIO = 8
 
 
+def _truncate_with_marker(text: str, limit: int, marker: str) -> str:
+    """Keep user-visible truncation evidence inside the text budget."""
+    bounded_limit = max(1, int(limit))
+    rendered_marker = f'\n[{marker}]'
+    if len(rendered_marker) >= bounded_limit:
+        return rendered_marker[:bounded_limit]
+    return text[:bounded_limit - len(rendered_marker)] + rendered_marker
+
+
 def _load_pymupdf_rag():
     """Load the classic implementation once without importing layout mode."""
     global _pymupdf_rag, _pymupdf_rag_tried
@@ -169,18 +188,55 @@ def _raw_page_text(md_doc, page_index: int) -> str:
         return ''
 
 
-def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
-                     progress_callback=None, mode: str = 'rich') -> str:
+def extract_pdf_text(
+    pdf_bytes: bytes,
+    max_chars: int = 0,
+    url: str = '',
+    progress_callback=None,
+    mode: str = 'rich',
+    max_pages: int = 0,
+) -> str:
     """Back-compat wrapper returning only the text. See
     :func:`extract_pdf_text_with_meta`."""
     return extract_pdf_text_with_meta(
         pdf_bytes, max_chars=max_chars, url=url,
-        progress_callback=progress_callback, mode=mode)[0]
+        progress_callback=progress_callback, mode=mode,
+        max_pages=max_pages)[0]
 
 
-def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
-                               progress_callback=None, mode: str = 'rich'):
-    """Extract text from PDF as Markdown, and report WHICH strategy won.
+def extract_pdf_text_with_meta(
+    pdf_bytes: bytes,
+    max_chars: int = 0,
+    url: str = '',
+    progress_callback=None,
+    mode: str = 'rich',
+    max_pages: int = 0,
+):
+    """Admit one public text extraction into the classic PDF budget."""
+    budget = resolve_classic_pdf_budget()
+    lease = CLASSIC_PDF_ADMISSION.reserve(budget.unfinished_capacity)
+    try:
+        return _extract_pdf_text_with_meta_without_admission(
+            pdf_bytes,
+            max_chars=max_chars,
+            url=url,
+            progress_callback=progress_callback,
+            mode=mode,
+            max_pages=max_pages,
+        )
+    finally:
+        lease.release()
+
+
+def _extract_pdf_text_with_meta_without_admission(
+    pdf_bytes: bytes,
+    max_chars: int = 0,
+    url: str = '',
+    progress_callback=None,
+    mode: str = 'rich',
+    max_pages: int = 0,
+):
+    """Extract admitted PDF text and report WHICH strategy won.
 
     Strategy 0: docling           → Layout-aware (TableFormer + math model);
                                     only when ``mode='structured'`` AND
@@ -192,7 +248,9 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
 
     Args:
         pdf_bytes: Raw PDF file bytes.
-        max_chars: Soft upper bound on total output length (0 = no limit).
+        max_chars: Soft output ceiling. Zero uses the launch-derived default;
+            positive values may lower but never raise that process budget.
+        max_pages: Page CPU ceiling with the same default/lower-only contract.
         url: Optional URL for log context.
         progress_callback: Optional ``Callable[[int, int], None]`` invoked with
             ``(pages_done, total_pages)`` after each page is processed. Lets
@@ -221,15 +279,40 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
                        url[:80])
         return f'[PDF too large: {len(pdf_bytes) // (1024*1024)} MB exceeds {MAX_PDF_BYTES // (1024*1024)} MB limit]', 'error'
 
-    limit = max_chars if max_chars > 0 else 999_999_999
+    budget = resolve_classic_pdf_budget()
+    limit = bounded_pdf_text_chars(max_chars, budget)
+    page_limit = bounded_pdf_pages(max_pages, budget)
 
     # ── Strategy 0: Docling layout-aware pipeline (opt-in) ──
+    if mode == 'structured':
+        # Docling converts the whole document in one native call and cannot
+        # accept a page subset. Oversized documents therefore use the bounded
+        # per-page rich path instead of doing unobservable work past the cap.
+        try:
+            with PYMUPDF_LOCK:
+                page_probe = pymupdf.open(stream=pdf_bytes, filetype='pdf')
+                try:
+                    structured_pages = len(page_probe)
+                finally:
+                    page_probe.close()
+            if structured_pages > page_limit:
+                logger.warning(
+                    '[PDF] structured mode skipped: %d pages exceeds the '
+                    '%d-page classic extraction budget',
+                    structured_pages,
+                    page_limit,
+                )
+                mode = 'rich'
+        except Exception as exc:
+            logger.debug(
+                '[PDF] structured page preflight failed; parser will '
+                'classify the document: %s', exc)
     if mode == 'structured':
         try:
             from lib.pdf_parser.docling import extract_pdf_text_docling
             md = extract_pdf_text_docling(
                 pdf_bytes,
-                max_chars=limit if limit < 999_999_999 else 0,
+                max_chars=limit,
                 url=url,
                 progress_callback=progress_callback,
             )
@@ -239,6 +322,13 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
                 # consistent shape regardless of which strategy ran.
                 md = postprocess_math_blocks(md)
                 md = cleanup_markdown(md)
+                if len(md) > limit:
+                    md = _truncate_with_marker(
+                        md,
+                        limit,
+                        f'PDF text truncated at {limit:,} characters by the '
+                        'resource budget',
+                    )
                 return md, 'docling'
             logger.info("[PDF] structured mode: docling unavailable/failed, "
                         "falling back to pymupdf4llm — %s", url[:60])
@@ -269,15 +359,16 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
                 md_doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
                 try:
                     n = len(md_doc)
+                    pages_to_process = min(n, page_limit)
                     _safe_progress(progress_callback, 0, n)
                     parts = []
                     total = 0
-                    truncated = False
+                    char_truncated = False
                     page_fallbacks = 0
                     # Reusing this object changes header scanning from O(N²)
                     # to O(N) and isolates the upstream empty-minimum bug.
                     header_info = _classic_header_info(md_doc)
-                    for pi in range(n):
+                    for pi in range(pages_to_process):
                         page_md = ''
                         try:
                             chunks = _to_markdown_classic(
@@ -322,13 +413,11 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
                         page_md = cleanup_markdown(page_md)
                         plen = len(page_md)
                         if total + plen > limit:
-                            remaining = limit - total
-                            if remaining > 200:
+                            remaining = max(0, limit - total)
+                            if remaining:
                                 parts.append(page_md[:remaining])
-                            parts.append(f'\n[…truncated at {total + remaining:,} chars, '
-                                         f'page {pi + 1}/{n}]')
                             total += remaining
-                            truncated = True
+                            char_truncated = True
                             _safe_progress(progress_callback, pi + 1, n)
                             break
                         parts.append(page_md)
@@ -338,10 +427,27 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
                     md_doc.close()
 
             text = '\n\n---\n\n'.join(parts)
-            logger.debug('pymupdf4llm OK: %d pages, %s chars '
-                         '(table_strategy=lines_strict, per-page, truncated=%s, '
-                         'page_fallbacks=%d) — %s',
-                         n, f'{total:,}', truncated, page_fallbacks, url[:60])
+            if len(text) > limit:
+                char_truncated = True
+            if char_truncated:
+                text = _truncate_with_marker(
+                    text,
+                    limit,
+                    f'PDF text truncated at {limit:,} characters by the '
+                    'resource budget',
+                )
+            elif pages_to_process < n:
+                text = _truncate_with_marker(
+                    text,
+                    limit,
+                    f'PDF truncated after {pages_to_process:,} of {n:,} '
+                    'pages by the resource budget',
+                )
+            logger.debug('pymupdf4llm OK: %d/%d pages, %s chars '
+                         '(table_strategy=lines_strict, per-page, '
+                         'char_truncated=%s, page_fallbacks=%d) — %s',
+                         pages_to_process, n, f'{len(text):,}',
+                         char_truncated, page_fallbacks, url[:60])
             extractor = ('pymupdf4llm-partial' if page_fallbacks
                          else 'pymupdf4llm')
             return text, extractor
@@ -355,25 +461,50 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
             doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             try:
                 n = len(doc)
+                pages_to_process = min(n, page_limit)
                 _safe_progress(progress_callback, 0, n)
                 parts = []
                 total = 0
-                for pi, page in enumerate(doc):
+                char_truncated = False
+                for pi in range(pages_to_process):
+                    page = doc[pi]
                     raw = page.get_text()
                     plen = len(raw)
-                    total += plen
-                    parts.append(raw)
+                    if total + plen > limit:
+                        remaining = max(0, limit - total)
+                        if remaining:
+                            parts.append(raw[:remaining])
+                        total += remaining
+                        char_truncated = True
+                    else:
+                        total += plen
+                        parts.append(raw)
                     _safe_progress(progress_callback, pi + 1, n)
-                    if limit < 999_999_999 and total > limit:
-                        parts.append(f'\n[…truncated at {total:,} chars]')
+                    if char_truncated:
                         break
             finally:
                 doc.close()
         if not parts:
             return '[PDF: no extractable text]', 'error'
         full = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts))
-        logger.debug('get_text fallback OK: %d pages, %s chars — %s',
-                     n, f'{total:,}', url[:60])
+        if len(full) > limit:
+            char_truncated = True
+        if char_truncated:
+            full = _truncate_with_marker(
+                full,
+                limit,
+                f'PDF text truncated at {limit:,} characters by the '
+                'resource budget',
+            )
+        elif pages_to_process < n:
+            full = _truncate_with_marker(
+                full,
+                limit,
+                f'PDF truncated after {pages_to_process:,} of {n:,} pages '
+                'by the resource budget',
+            )
+        logger.debug('get_text fallback OK: %d/%d pages, %s chars — %s',
+                     pages_to_process, n, f'{len(full):,}', url[:60])
         return full, 'pymupdf-raw'
     except Exception as e:
         logger.warning('[PDF] get_text fallback extraction failed for %s: %s',

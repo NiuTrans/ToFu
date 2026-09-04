@@ -14,6 +14,12 @@ does not block on the multi-minute render.
 """
 
 from lib.log import get_logger
+from lib.research.contracts import (
+    MAX_RESEARCH_DIRECTION_CHARS,
+    MAX_RESEARCH_IDEAS,
+    MAX_RESEARCH_SEED_PAPERS,
+    MIN_RESEARCH_IDEAS,
+)
 
 logger = get_logger(__name__)
 
@@ -80,6 +86,16 @@ PRODUCE_VIDEO_TOOL = {
                                    "falls back to the template, so the film "
                                    "always completes."
                 },
+                "creative_mode": {
+                    "type": "string",
+                    "enum": ["director", "standard"],
+                    "description": "Planning strategy. 'director' (DEFAULT) "
+                                   "drafts two contrasting evidence/visual "
+                                   "plans, gates both, and uses an independent "
+                                   "critic to select the stronger one. "
+                                   "'standard' makes one planning call and is "
+                                   "the lower-cost A/B control."
+                },
                 "model": {
                     "type": "string",
                     "description": "Optional model id that locks both the "
@@ -143,6 +159,15 @@ PRODUCE_SLIDES_TOOL = {
                     "enum": ["1280x720", "960x540", "720x540"],
                     "description": "Page geometry: 1280x720 (16:9, default), "
                                    "960x540 (16:9 compact), 720x540 (4:3)."
+                },
+                "creative_mode": {
+                    "type": "string",
+                    "enum": ["director", "standard"],
+                    "description": "Planning strategy. 'director' (DEFAULT) "
+                                   "drafts two contrasting deck plans, gates "
+                                   "both, and uses an independent critic to "
+                                   "select the stronger one. 'standard' is the "
+                                   "single-plan A/B control."
                 },
                 "model": {
                     "type": "string",
@@ -269,6 +294,7 @@ PRODUCE_RESEARCH_TOOL = {
             "properties": {
                 "direction": {
                     "type": "string",
+                    "maxLength": MAX_RESEARCH_DIRECTION_CHARS,
                     "description": "The research direction to mine for open "
                                    "problems, e.g. 'long-context KV cache "
                                    "compression' or '扩散模型的推理加速'."
@@ -280,6 +306,8 @@ PRODUCE_RESEARCH_TOOL = {
                 },
                 "n_ideas": {
                     "type": "integer",
+                    "minimum": MIN_RESEARCH_IDEAS,
+                    "maximum": MAX_RESEARCH_IDEAS,
                     "description": "How many ideas to generate and score "
                                    "(3..12, default 6). Ideas that fail the "
                                    "novelty screen against the corpus are "
@@ -287,6 +315,7 @@ PRODUCE_RESEARCH_TOOL = {
                 },
                 "seed_arxiv_ids": {
                     "type": "array",
+                    "maxItems": MAX_RESEARCH_SEED_PAPERS,
                     "items": {"type": "string"},
                     "description": "Optional arXiv ids to seed the corpus "
                                    "with, e.g. ['2312.00752']. Use when the "

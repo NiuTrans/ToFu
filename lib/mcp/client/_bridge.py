@@ -20,10 +20,13 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from types import MappingProxyType
 from typing import Any
 
 from lib.log import audit_log, get_logger, log_context
+from lib.weak_lock_pool import WeakLockPool
 from lib.mcp.config import load_mcp_config
 from lib.mcp.types import (
     MCP_BREAKER_BASE_BACKOFF,
@@ -32,6 +35,8 @@ from lib.mcp.types import (
     MCP_CONNECT_TIMEOUT,
     MCP_COLD_INSTALL_TIMEOUT,
     MCP_CRED_PROBE_INTERVAL,
+    MCP_CRED_PROBE_TIMEOUT,
+    MCP_CRED_PROBE_WORKERS,
     MCP_DEGRADED_TIMEOUT_STREAK,
     MCP_KEEPALIVE_INTERVAL,
     MCP_MAX_RESULT_CHARS,
@@ -41,6 +46,11 @@ from lib.mcp.types import (
     make_namespaced_name,
     parse_namespaced_name,
 )
+
+from lib.mcp.result_content import (
+    MCPToolResult,
+    extract_mcp_image_contents,
+)
 from lib.mcp.client._state import _pkg
 from lib.mcp.client._errors import (
     MCPConnectError,
@@ -49,11 +59,17 @@ from lib.mcp.client._errors import (
     _read_stderr_tail,
     _unwrap_exception_group,
 )
-from lib.mcp.client._coerce import _coerce_args_to_schema, _extract_read_only_hint
+from lib.mcp.client._coerce import (
+    _coerce_args_to_schema,
+    _extract_annotations,
+    _extract_output_schema,
+    _extract_read_only_hint,
+)
 from lib.mcp.client._vendor import _ensure_writable_caches, _propagate_proxy_env
 from lib.mcp.client._install import _prepend_interpreter_bin_to_path
 
 logger = get_logger(__name__)
+_cred_probe_slots = threading.BoundedSemaphore(MCP_CRED_PROBE_WORKERS)
 
 MCP_CURRENT_PROTOCOL_VERSION = '2026-07-28'
 
@@ -216,11 +232,20 @@ class MCPBridge:
         self._servers: dict[str, _MCPServerHandle] = {}
         self._tool_index: dict[str, MCPToolInfo] = {}  # namespaced_name → info
         self._lock = threading.Lock()
+        # One generation-bound, read-only projection feeds model-visible defs,
+        # pre-request search, and its content fingerprint. The authoritative
+        # mutable state remains ``_tool_index`` + ``_configs``.
+        self._tool_catalog_rows_cache: tuple[dict[str, Any], ...] | None = None
+        self._tool_catalog_fingerprint_cache = ''
+        self._tool_catalog_search_text_cache: Mapping[str, str] | None = None
 
         # Per-server reconnect serialization: prevents the reactive
         # (call_tool) and proactive (keepalive) recovery paths from
         # reconnecting the same server concurrently.
-        self._reconnect_locks: dict[str, threading.Lock] = {}
+        # A live holder/waiter keeps its lock strongly referenced. Historical
+        # server names do not: configs can churn at runtime, so a permanent
+        # name→Lock dict would grow for the full server-process lifetime.
+        self._reconnect_locks = WeakLockPool(threading.Lock)
 
         # Dedicated asyncio event loop for MCP sessions
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -286,6 +311,12 @@ class MCPBridge:
         # revision. Protected by ``self._lock``.
         self._probe_method: dict[str, str] = {}
 
+    def _invalidate_tool_catalog_projection_locked(self) -> None:
+        """Invalidate derived rows/fingerprint. Caller must hold ``_lock``."""
+        self._tool_catalog_rows_cache = None
+        self._tool_catalog_fingerprint_cache = ''
+        self._tool_catalog_search_text_cache = None
+
     def _replace_server_catalog(self, name: str, handle: _MCPServerHandle,
                                 tools: list, *, catalog_version: str = '') -> bool:
         """Atomically replace one allowed catalog; return whether it changed."""
@@ -321,6 +352,8 @@ class MCPBridge:
                     input_schema=_tool_input_schema(tool),
                     openai_def=self._tool_to_openai(name, tool),
                     read_only_hint=_extract_read_only_hint(tool),
+                    annotations=_extract_annotations(tool),
+                    output_schema=_extract_output_schema(tool),
                     meta=meta,
                     schema_hash=_schema_hash(tool),
                     catalog_version=str(catalog_version or ''),
@@ -328,6 +361,7 @@ class MCPBridge:
             handle.tools = list(tools or [])
             handle.catalog_version = str(catalog_version or '')
             handle.catalog_fingerprint = fingerprint
+            self._invalidate_tool_catalog_projection_locked()
         try:
             from lib.mcp.tool_search import invalidate_server_catalog
             invalidate_server_catalog(name)
@@ -430,16 +464,6 @@ class MCPBridge:
                     handle.name, 'catalog rebuilt' if changed else 'no-op',
                     len(response.tools or []))
         return changed
-
-    def refresh_tool_catalog(self, server_name: str) -> bool:
-        """Public/manual refresh seam used by notifications and tests."""
-        with self._lock:
-            handle = self._servers.get(server_name)
-        if handle is None:
-            raise ValueError(f'MCP server not connected: {server_name}')
-        return bool(self._run_async(
-            self._async_refresh_tool_catalog(handle),
-            timeout=MCP_CONNECT_TIMEOUT + 5))
 
     # ── Connection management ─────────────────────────────
 
@@ -700,7 +724,11 @@ class MCPBridge:
         status = 'unknown'
         detail = ''
         try:
-            result = self.call_tool(ns_name, dict(args))
+            result = self.call_tool(
+                ns_name,
+                dict(args),
+                timeout_override=MCP_CRED_PROBE_TIMEOUT,
+            )
             # PURE classifier owns the ok/expired verdict; a RAISED call (below)
             # is the only path to 'unknown' — a transport blip must never be
             # mislabelled as an expired credential.
@@ -758,6 +786,14 @@ class MCPBridge:
             if name in self._cred_probe_inflight:
                 return False
             self._cred_probe_inflight.add(name)
+        probe_slots = _cred_probe_slots
+        if not probe_slots.acquire(blocking=False):
+            with self._lock:
+                self._cred_probe_inflight.discard(name)
+            logger.debug(
+                '[MCP] credential probe for %s deferred; process slots busy '
+                '(%d)', name, MCP_CRED_PROBE_WORKERS)
+            return False
 
         def _worker():
             try:
@@ -767,6 +803,7 @@ class MCPBridge:
             finally:
                 with self._lock:
                     self._cred_probe_inflight.discard(name)
+                probe_slots.release()
 
         try:
             threading.Thread(target=_worker, name=f'mcp-credprobe-{name}',
@@ -774,6 +811,7 @@ class MCPBridge:
         except BaseException:
             with self._lock:
                 self._cred_probe_inflight.discard(name)
+            probe_slots.release()
             raise
         return True
 
@@ -810,7 +848,7 @@ class MCPBridge:
             # still be retried.
             srv_cfg = dict(old.config) if old is not None else self._configs.get(name)
             srv_cfg = dict(srv_cfg) if srv_cfg is not None else None
-            rlock = self._reconnect_locks.setdefault(name, threading.Lock())
+            rlock = self._reconnect_locks.lock_for(name)
         if srv_cfg is None:
             raise ValueError(f'cannot reconnect unknown MCP server: {name}')
 
@@ -1285,6 +1323,8 @@ class MCPBridge:
                              if v['server_name'] == name]
                 for k in to_remove:
                     del self._tool_index[k]
+                if to_remove:
+                    self._invalidate_tool_catalog_projection_locked()
             if forget:
                 self._breaker.pop(name, None)
                 self._configs.pop(name, None)
@@ -1384,6 +1424,7 @@ class MCPBridge:
             # in case a caller mutated _servers out from under us.
             self._servers.clear()
             self._tool_index.clear()
+            self._invalidate_tool_catalog_projection_locked()
             self._breaker.clear()
             self._configs.clear()
             self._cred_health.clear()
@@ -1466,13 +1507,34 @@ class MCPBridge:
         """
         names = sorted({t for t in (tool_names or []) if isinstance(t, str)})
         with self._lock:
+            previous_names = self._disabled_tools_for(server_name)
             row = self._configs.setdefault(server_name, {})
             row['disabled_tools'] = names
             handle = self._servers.get(server_name)
             if handle is not None and isinstance(getattr(handle, 'config', None), dict):
                 handle.config['disabled_tools'] = names
+            if frozenset(names) != previous_names:
+                self._invalidate_tool_catalog_projection_locked()
 
     # ── Tool discovery (for LLM) ──────────────────────────
+
+    def _tool_catalog_rows_locked(self) -> tuple[dict[str, Any], ...]:
+        """Return the generation-bound model-visible projection.
+
+        The caller must hold ``_lock`` and treat the returned rows as read-only.
+        Public callers receive fresh containers through the methods below.
+        """
+        cached = getattr(self, '_tool_catalog_rows_cache', None)
+        if cached is not None:
+            return cached
+        # MCPToolInfo already contains every field consumed by request-local
+        # retrieval. Cache only the stable order of authoritative references,
+        # not a second dictionary per tool.
+        rows = tuple(info for _ns, info in sorted(self._tool_index.items())
+            if info['tool_name']
+            not in self._disabled_tools_for(info['server_name']))
+        self._tool_catalog_rows_cache = rows
+        return rows
 
     def get_openai_tool_defs(self) -> list[dict[str, Any]]:
         """Get all MCP tools as OpenAI function-calling definitions.
@@ -1488,10 +1550,43 @@ class MCPBridge:
         identical across rounds.
         """
         with self._lock:
-            return [info['openai_def']
-                    for ns, info in sorted(self._tool_index.items())
-                    if info['tool_name']
-                    not in self._disabled_tools_for(info['server_name'])]
+            return [row['openai_def']
+                    for row in self._tool_catalog_rows_locked()]
+
+    def get_enabled_tool_summary(self) -> dict[str, Any]:
+        """Return a compact, deterministic count of model-visible MCP tools.
+
+        This is the browser/status projection of the live bridge, not another
+        discovery path: it never calls ``tools/list`` and never copies tool
+        descriptions or schemas.  Only servers with at least one enabled tool
+        are included, matching the set that can contribute a context-rail
+        chip.  Parked stdio servers remain present because their handles and
+        cached catalogs stay live for transparent reconnect.
+        """
+        with self._lock:
+            live_server_names = set(self._servers)
+            disabled_by_server = {
+                name: self._disabled_tools_for(name)
+                for name in live_server_names
+            }
+            counts = {name: 0 for name in live_server_names}
+            for info in self._tool_index.values():
+                server_name = info['server_name']
+                if (server_name not in live_server_names
+                        or info['tool_name']
+                        in disabled_by_server[server_name]):
+                    continue
+                counts[server_name] += 1
+
+            servers = [
+                {'name': name, 'count': counts[name]}
+                for name in sorted(counts)
+                if counts[name] > 0
+            ]
+            return {
+                'servers': servers,
+                'total': sum(row['count'] for row in servers),
+            }
 
     def get_tool_catalog_snapshot(self) -> list[dict[str, Any]]:
         """Return the cached allowed catalog plus private retrieval metadata.
@@ -1501,19 +1596,48 @@ class MCPBridge:
         """
         with self._lock:
             return [{
-                'server_id': info['server_name'],
-                'server_name': info['server_name'],
-                'tool_name': info['tool_name'],
-                'namespaced_name': ns,
-                'description': info.get('description', ''),
-                'openai_def': info['openai_def'],
-                'read_only_hint': bool(info.get('read_only_hint')),
-                'meta': dict(info.get('meta') or {}),
-                'schema_hash': str(info.get('schema_hash') or ''),
-                'catalog_version': str(info.get('catalog_version') or ''),
-            } for ns, info in sorted(self._tool_index.items())
-                if info['tool_name']
-                not in self._disabled_tools_for(info['server_name'])]
+                'server_id': row['server_name'],
+                'server_name': row['server_name'],
+                'tool_name': row['tool_name'],
+                'namespaced_name': row['namespaced_name'],
+                'description': row.get('description', ''),
+                'openai_def': row['openai_def'],
+                'read_only_hint': bool(row.get('read_only_hint')),
+                'annotations': dict(row.get('annotations') or {}),
+                'output_schema': dict(row.get('output_schema') or {}),
+                'meta': dict(row.get('meta') or {}),
+                'schema_hash': str(row.get('schema_hash') or ''),
+                'catalog_version': str(row.get('catalog_version') or ''),
+            } for row in self._tool_catalog_rows_locked()]
+
+    def get_tool_catalog_projection(
+        self,
+    ) -> tuple[str, tuple[dict[str, Any], ...]]:
+        """Return the internal read-only rows and their stable fingerprint.
+
+        This request-path API avoids rebuilding and hashing an identical public
+        snapshot every round. Callers must never mutate the returned rows.
+        """
+        with self._lock:
+            rows = self._tool_catalog_rows_locked()
+            fingerprint = getattr(
+                self, '_tool_catalog_fingerprint_cache', '')
+            if not fingerprint:
+                from lib.mcp.tool_search import catalog_snapshot_fingerprint
+                fingerprint = catalog_snapshot_fingerprint(rows)
+                self._tool_catalog_fingerprint_cache = fingerprint
+            return fingerprint, rows
+
+    def get_tool_catalog_search_text_projection(self) -> Mapping[str, str]:
+        """Return immutable private retrieval text for this catalog generation."""
+        with self._lock:
+            cached = getattr(self, '_tool_catalog_search_text_cache', None)
+            if cached is None:
+                from lib.mcp.tool_search import catalog_search_text_by_name
+                cached = MappingProxyType(catalog_search_text_by_name(
+                    self._tool_catalog_rows_locked()))
+                self._tool_catalog_search_text_cache = cached
+            return cached
 
     def get_tool_safety(self) -> dict[str, bool]:
         """Map every discovered MCP tool's namespaced name → read-only flag.
@@ -1586,12 +1710,20 @@ class MCPBridge:
 
     # ── Tool execution ────────────────────────────────────
 
-    def call_tool(self, namespaced_name: str, arguments: dict[str, Any]) -> str:
+    def call_tool(
+        self,
+        namespaced_name: str,
+        arguments: dict[str, Any],
+        *,
+        timeout_override: int | None = None,
+    ) -> str:
         """Execute an MCP tool call and return the result as a string.
 
         Args:
             namespaced_name: Full namespaced tool name (``mcp__{server}__{tool}``).
             arguments: Tool arguments dict.
+            timeout_override: Finite internal diagnostic deadline. Ordinary
+                user-owned calls omit it and retain the server/default policy.
 
         Returns:
             Tool result as a string (text content extracted from MCP response).
@@ -1646,7 +1778,15 @@ class MCPBridge:
             # registered with the original (possibly stuttering) name.
             tool_name = info['tool_name']
 
-        timeout = handle.config.get('timeout', MCP_CALL_TIMEOUT)
+        if timeout_override is not None:
+            if (not isinstance(timeout_override, int)
+                    or isinstance(timeout_override, bool)
+                    or timeout_override <= 0
+                    or timeout_override > 300):
+                raise ValueError('MCP timeout_override must be 1..300 seconds')
+            timeout = timeout_override
+        else:
+            timeout = handle.config.get('timeout', MCP_CALL_TIMEOUT)
 
         # ── Call-level health gate ──
         # If this server has already timed out MCP_DEGRADED_TIMEOUT_STREAK
@@ -1764,7 +1904,7 @@ class MCPBridge:
         handle: _MCPServerHandle,
         tool_name: str,
         arguments: dict[str, Any],
-        timeout: int,
+        timeout: int | None,
     ) -> str:
         """Async: call a tool on an MCP server and extract text result."""
         # SDK v1 takes ``datetime.timedelta`` here; v2 takes seconds.  The
@@ -1799,18 +1939,25 @@ class MCPBridge:
                         active_calls.pop(handle.name, None)
                     self._last_activity[handle.name] = time.monotonic()
 
-        # Extract text from the MCP CallToolResult
+        # Extract text from the MCP CallToolResult. Image blocks remain
+        # out-of-band on a string-compatible carrier until the owner-scoped
+        # task media boundary persists them; raw base64 never enters metadata.
         if _tool_result_is_error(result):
-            # MCP reports an error from the tool
             error_text = self._extract_text(result)
             return f'MCP Error: {error_text}'
 
-        text = self._extract_text(result)
+        image_contents = extract_mcp_image_contents(result)
+        text = self._merge_result_parts(
+            self._extract_text(result),
+            self._extract_structured_content(result),
+        )
 
-        # Truncate if too large
+        # Truncate if too large (single budget over the merged result)
         if len(text) > MCP_MAX_RESULT_CHARS:
             text = text[:MCP_MAX_RESULT_CHARS] + f'\n\n[Truncated: {len(text):,} chars total, showing first {MCP_MAX_RESULT_CHARS:,}]'
 
+        if image_contents:
+            return MCPToolResult(text, image_contents=image_contents)
         return text
 
     # ── Keepalive: proactive health-check + auto-reconnect ──
@@ -1844,8 +1991,7 @@ class MCPBridge:
         from lib.mcp.transport import is_stdio
 
         with self._lock:
-            reconnect_lock = self._reconnect_locks.setdefault(
-                name, threading.Lock())
+            reconnect_lock = self._reconnect_locks.lock_for(name)
         with reconnect_lock:
             now = time.monotonic()
             with self._lock:
@@ -2269,3 +2415,48 @@ class MCPBridge:
             else:
                 parts.append(str(block))
         return '\n'.join(parts)
+
+    @staticmethod
+    def _extract_structured_content(result) -> str | None:
+        """Extract MCP ``CallToolResult.structuredContent`` across SDK spellings.
+
+        Returns a stable JSON string, or None when the result carries no
+        structured payload (absent, or an empty object/array). The v2 SDK
+        renamed the field to snake_case (``structured_content``) — the same
+        hazard as ``is_error``/``isError`` and ``annotations.readOnlyHint``.
+        """
+        structured = None
+        for attr in ('structured_content', 'structuredContent'):
+            structured = getattr(result, attr, None)
+            if structured is not None:
+                break
+        if structured is None:
+            return None
+        try:
+            text = json.dumps(structured, ensure_ascii=False, sort_keys=True,
+                              default=str)
+        except (TypeError, ValueError):
+            text = str(structured)
+        if text in ('{}', '[]', ''):
+            return None
+        return text
+
+    @staticmethod
+    def _merge_result_parts(text: str, structured: str | None) -> str:
+        """Merge text content and structuredContent with one rule, no repeats.
+
+        Structured content is appended only when it adds information beyond the
+        text blocks. The dominant overlap is a server echoing the same payload
+        as both a text block and ``structuredContent``, so a substring check
+        keeps the merged result free of duplicates. The caller applies
+        ``MCP_MAX_RESULT_CHARS`` once over the merged string.
+        """
+        text = text or ''
+        structured = (structured or '').strip()
+        if not structured:
+            return text
+        if not text.strip():
+            return structured
+        if structured in text:
+            return text
+        return f'{text}\n\n[Structured result]\n{structured}'

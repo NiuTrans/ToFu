@@ -7,7 +7,6 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
-import re
 import socket
 import sys
 import tempfile
@@ -26,8 +25,9 @@ from .env_reexec import BASE_DIR
 # picker even when NO static/provider_templates/*.json file exists.
 #
 # At runtime we ALSO merge in static/provider_templates/*.json (same
-# mechanism as the main Settings UI) so corp-gateway templates like
-# meituan.json automatically appear in the bootstrap picker too.
+# mechanism as the main Settings UI) so deployment templates dropped
+# alongside (e.g. a corp-gateway template) automatically appear in the
+# bootstrap picker too.
 #
 # Keep this list short + curated — the goal is unblocking installation,
 # not replicating all of Settings.
@@ -142,8 +142,8 @@ _BUILTIN_PROVIDER_TEMPLATES = [
 def _load_provider_templates() -> list:
     """Return builtins merged with package-owned and deployment templates.
 
-    Extras from disk override builtins on key conflict (so e.g. meituan.json
-    replaces an inline stub of the same key). Called on every HTTP request
+    Extras from disk override builtins on key conflict (so a deployment
+    template replaces an inline stub of the same key). Called on every HTTP request
     so freshly-dropped template files appear without a restart.
     """
     out: list = [dict(t) for t in _BUILTIN_PROVIDER_TEMPLATES]
@@ -166,9 +166,19 @@ def _load_provider_templates() -> list:
                 sys.stderr.write(
                     f'[bootstrap] Could not read template {fname}: {e}\n')
                 continue
-            if not (isinstance(tpl, dict) and tpl.get('key')
-                    and tpl.get('models')):
+            if not isinstance(tpl, dict) or not tpl.get('key'):
                 continue
+            recipes = tpl.get('offering_recipes')
+            legacy_models = tpl.get('models')
+            if not isinstance(recipes, list):
+                recipes = legacy_models if isinstance(legacy_models, list) else []
+            if not recipes:
+                continue
+            # Internal stdlib projection only: authored files remain v1
+            # offering recipes and no legacy provider row is persisted.
+            tpl = dict(tpl)
+            tpl['models'] = [dict(row) for row in recipes
+                             if isinstance(row, dict)]
             key = tpl['key']
             if key in seen:
                 out[seen[key]] = tpl   # override builtin
@@ -389,7 +399,15 @@ def _bootstrap_data_root() -> str:
 def _bootstrap_persist_provider(base_url: str, api_key: str, models: list,
                                 templates: list | None = None,
                                 default_model: str = '') -> None:
-    """Merge the bootstrap catalogue into server_config.json atomically."""
+    """Stage a secret-free provider draft for model-routing v2 startup.
+
+    The repair UI already writes the credential to ``.env``. Duplicating it
+    inside legacy ``server_config.providers`` would leave plaintext routing
+    state outside the owner repository and cannot update an already-active v2
+    authority. This file carries only transport/model facts plus the name of
+    the credential environment variable; the full application consumes and
+    deletes it after the authenticated storage sidecar is available.
+    """
     if not models:
         return
     templates = (templates if templates is not None
@@ -406,50 +424,43 @@ def _bootstrap_persist_provider(base_url: str, api_key: str, models: list,
             config = {}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         config = {}
-    providers = config.get('providers')
-    if not isinstance(providers, list):
-        providers = config['providers'] = []
-    provider = next((p for p in providers if isinstance(p, dict)
-                     and str(p.get('base_url') or '').rstrip('/') == norm
-                     and p.get('oauth') not in ('claude', 'codex')
-                     and not isinstance(p.get('adapter'), dict)
-                     and not str(p.get('id') or '').startswith('adapter_')),
-                    None)
-    if provider is None:
-        safe_key = re.sub(r'[^a-z0-9_]+', '_',
-                          str(template.get('key') or 'bootstrap').lower())
-        base_id = (safe_key or 'bootstrap') + '_bootstrap'
-        used_ids = {p.get('id') for p in providers if isinstance(p, dict)}
-        provider_id = base_id
-        suffix = 2
-        while provider_id in used_ids:
-            provider_id = f'{base_id}_{suffix}'
-            suffix += 1
-        provider = {'id': provider_id}
-        providers.append(provider)
-    previous_keys = [k for k in (provider.get('api_keys') or [])
-                     if isinstance(k, str) and k]
-    catalog_models = list(models)
+    pending_path = os.path.join(
+        _bootstrap_data_root(), 'config', '.bootstrap-provider-pending.json')
+    try:
+        with open(pending_path, 'r', encoding='utf-8') as f:
+            previous_pending = json.load(f)
+        if not isinstance(previous_pending, dict):
+            previous_pending = {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        previous_pending = {}
+
+    catalog_models = [dict(row) for row in models[:1024]
+                      if isinstance(row, dict) and row.get('model_id')]
     live_ids = {m.get('model_id') for m in catalog_models if isinstance(m, dict)}
-    for old_model in (provider.get('models') or []):
+    previous_models = (
+        previous_pending.get('models')
+        if str(previous_pending.get('base_url') or '').rstrip('/') == norm
+        else [])
+    for old_model in (previous_models or []):
         if (isinstance(old_model, dict) and old_model.get('model_id')
                 and old_model.get('catalog_pinned') is True
                 and old_model['model_id'] not in live_ids):
-            catalog_models.append(old_model)
+            catalog_models.append(dict(old_model))
             live_ids.add(old_model['model_id'])
-    provider.update({
-        'name': template.get('name') or provider.get('name') or 'Bootstrap Provider',
-        'brand': template.get('brand') or provider.get('brand') or 'generic',
+
+    protocol = str(template.get('protocol') or 'openai').strip().lower()
+    if protocol in ('responses', 'openai-responses'):
+        protocol = 'openai_responses'
+    pending = {
+        'contract_version': 'tofu.bootstrap-provider-stage/v1',
+        'name': template.get('name') or 'Bootstrap Provider',
+        'brand': template.get('brand') or 'generic',
         'base_url': base_url,
-        'api_keys': list(dict.fromkeys([api_key] + previous_keys)),
-        'enabled': True,
+        'protocol': protocol,
         'models': catalog_models,
-        'model_catalog_sync': {'mode': 'auto'},
-    })
-    for field in ('balance_url', 'protocol', 'responses_profile', 'thinking_format',
-                  'extra_headers', 'faces'):
-        if template.get(field) and not provider.get(field):
-            provider[field] = template[field]
+        'credential_env': 'LLM_API_KEYS',
+        'default_model': default_model,
+    }
     if default_model:
         config.setdefault('presets', {})['opus'] = default_model
         config.setdefault('models', {})['LLM_MODEL'] = default_model
@@ -457,8 +468,8 @@ def _bootstrap_persist_provider(base_url: str, api_key: str, models: list,
 
     parent = os.path.dirname(config_path)
     os.makedirs(parent, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix='.bootstrap-config-', suffix='.tmp',
-                                    dir=parent)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix='.bootstrap-config-', suffix='.tmp', dir=parent)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
@@ -466,6 +477,26 @@ def _bootstrap_persist_provider(base_url: str, api_key: str, models: list,
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, config_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    fd, tmp_path = tempfile.mkstemp(
+        prefix='.bootstrap-provider-', suffix='.tmp', dir=parent)
+    try:
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(pending, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, pending_path)
     finally:
         try:
             if os.path.exists(tmp_path):

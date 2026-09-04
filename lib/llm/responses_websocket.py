@@ -208,7 +208,7 @@ def stream_responses_websocket(
                 acc.mark_aborted()
                 _close_session(key, reason='user abort')
                 raise AbortedError(
-                    f'User aborted while waiting on {plan.url}')
+                    f'User aborted while waiting on {plan.url}', url=plan.url)
             try:
                 remaining = progress.transport_remaining_seconds(
                     idle_timeout, now)
@@ -266,6 +266,13 @@ def stream_responses_websocket(
                 )
                 _close_session(key, reason='invalid JSON')
                 break
+            if not isinstance(event, dict):
+                acc.record_malformed_frames(
+                    1,
+                    ('invalid_shape: websocket event must be an object',),
+                )
+                _close_session(key, reason='invalid event shape')
+                break
             if event.get('type') == 'error':
                 event = {'type': 'response.error',
                          'error': event.get('error') or event}
@@ -279,19 +286,26 @@ def stream_responses_websocket(
             usage = dict(result.usage)
             usage['_failure_stage'] = 'midstream_close'
             result = result.with_usage(usage)
-        translator = plan.wire_translator
-        response_id = str(getattr(translator, 'response_id', '') or '')
-        if not response_id:
-            _close_session(key, reason='missing response id')
-        else:
-            session.previous_response_id = response_id
-            session.seen_external = current_counts
-            session.last_used = time.monotonic()
         _msg, finish, usage = result
-        if (finish != 'tool_calls'
-                and not (isinstance(usage, dict)
-                         and usage.get('_program_pending'))):
-            _close_session(key, reason='terminal assistant response')
+        if not result.is_verified_complete:
+            # An interrupted/malformed response is not a state checkpoint.
+            # In particular, a compatibility finish_reason of ``tool_calls``
+            # must not keep a socket alive or advance its incremental-input
+            # ledger after terminal provider evidence was missing.
+            _close_session(key, reason=f'unverified {result.state.value}')
+        else:
+            translator = plan.wire_translator
+            response_id = str(getattr(translator, 'response_id', '') or '')
+            if not response_id:
+                _close_session(key, reason='missing response id')
+            else:
+                session.previous_response_id = response_id
+                session.seen_external = current_counts
+                session.last_used = time.monotonic()
+            if (finish != 'tool_calls'
+                    and not (isinstance(usage, dict)
+                             and usage.get('_program_pending'))):
+                _close_session(key, reason='terminal assistant response')
         return result
     except (AbortedError, ResponsesWebSocketUnavailable):
         raise

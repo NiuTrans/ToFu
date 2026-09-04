@@ -20,10 +20,11 @@ There is NO master-review LLM call, NO synthesis LLM call, NO
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from lib.agent_core.task_runtime import _epoch_ms
 from lib.agent_inbox import consume as inbox_consume
@@ -39,7 +40,19 @@ from lib.swarm.protocol import (
     SubTaskSpec,
 )
 from lib.swarm.rate_limiter import RateLimiter
+from lib.swarm.resource_policy import (
+    swarm_max_agents_per_session,
+    swarm_max_parallel,
+    swarm_max_retries,
+)
 from lib.swarm.liveness import ProgressBeacon
+from lib.swarm.presentation_budget import (
+    SWARM_TOOL_ARGS_BRIEF_CHARS,
+    SWARM_TOOL_NAME_CHARS,
+    SWARM_TOOL_TIMELINE_DETAIL_CHARS,
+    SWARM_TOOL_TIMELINE_JSON_BYTES,
+    SWARM_TOOL_TIMELINE_ROW_LIMIT,
+)
 from lib.swarm.scheduler import StreamingScheduler
 
 logger = get_logger(__name__)
@@ -98,10 +111,90 @@ def _count_file_writes(tool_log: list) -> int:
                if isinstance(e, dict) and e.get('tool') in _FILE_WRITE_TOOLS)
 
 
-#: Max tool-call rows to persist per agent in the durable snapshot — mirrors
-#: the frontend's live 30-row cap (``_swarmAgents[].._toolCalls``) so a
-#: reloaded panel shows the same bounded timeline a live one did.
-_SNAPSHOT_TOOLCALLS_CAP = 30
+#: Compatibility aliases retained for focused contract tests and diagnostics.
+_SNAPSHOT_TOOLCALLS_CAP = SWARM_TOOL_TIMELINE_ROW_LIMIT
+_SNAPSHOT_TOOL_TIMELINE_BYTES = SWARM_TOOL_TIMELINE_JSON_BYTES
+
+
+def _timeline_json_bytes(tool_calls: list[dict]) -> int:
+    """Return a conservative serialized size for a durable tool timeline.
+
+    ``ensure_ascii=True`` upper-bounds ordinary compact UTF-8 JSON for CJK and
+    astral characters as well as ASCII.  This makes the ceiling independent of
+    which JSON adapter eventually writes the projection.
+    """
+    return len(json.dumps(
+        tool_calls, ensure_ascii=True, separators=(',', ':')))
+
+
+def _timeline_text(value) -> str:
+    if value is None:
+        return ''
+    return value if isinstance(value, str) else str(value)
+
+
+def _declared_full_chars(entry: dict, field: str, text: str) -> int:
+    """Preserve producer truncation evidence while tolerating legacy rows."""
+    try:
+        declared = int(entry.get(f'{field}_full_chars') or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    return max(len(text), declared)
+
+
+def _bounded_timeline_call(entry: dict, name: str) -> dict:
+    """Project one checkpoint row into a bounded, truthfully marked UI row."""
+    raw_args = _timeline_text(entry.get('args_brief'))
+    args_brief = raw_args[:SWARM_TOOL_ARGS_BRIEF_CHARS]
+    call = {
+        'toolName':  name[:SWARM_TOOL_NAME_CHARS],
+        'argsBrief': args_brief,
+        'status':    'done',
+        'preview':   '',
+        'error':     '',
+    }
+    if len(args_brief) < len(raw_args):
+        call['argsBriefTruncated'] = True
+        call['argsBriefFullChars'] = len(raw_args)
+
+    for field in ('preview', 'error'):
+        raw_text = _timeline_text(entry.get(field))
+        full_chars = _declared_full_chars(entry, field, raw_text)
+        visible = raw_text[:SWARM_TOOL_TIMELINE_DETAIL_CHARS]
+        call[field] = visible
+        if full_chars:
+            call[f'{field}FullChars'] = full_chars
+            call[f'{field}Truncated'] = bool(
+                entry.get(f'{field}_truncated')
+                or len(visible) < full_chars)
+    return call
+
+
+def _fit_timeline_byte_budget(tool_calls: list[dict], omitted: int):
+    """Prefer recent detail, then recent rows, under the hard JSON ceiling."""
+    calls = list(tool_calls)
+    while calls and _timeline_json_bytes(calls) > SWARM_TOOL_TIMELINE_JSON_BYTES:
+        stripped = False
+        # Oldest auxiliary detail is least valuable.  Keep the row identity so
+        # the user still sees that the tool ran, and mark every elision.
+        for call in calls:
+            for field in ('preview', 'error', 'argsBrief'):
+                text = call.get(field)
+                if not text:
+                    continue
+                full_key = f'{field}FullChars'
+                truncated_key = f'{field}Truncated'
+                call[full_key] = max(int(call.get(full_key) or 0), len(text))
+                call[truncated_key] = True
+                call[field] = ''
+                stripped = True
+                break
+            if stripped:
+                break
+        if not stripped:
+            calls.pop(0)
+            omitted += 1
+    return calls, omitted
 
 
 def _snapshot_tool_timeline(tool_log: list):
@@ -113,35 +206,31 @@ def _snapshot_tool_timeline(tool_log: list):
     recovered panel showed no tools at all. Rebuild both from the persisted
     ``tool_log`` (``[{round, tool, args_brief, timestamp}, ...]``).
 
-    Returns ``(tools, tool_calls)`` where ``tools`` is the unique tool-name
+    Returns ``(tools, tool_calls, omitted)`` where ``tools`` is the unique tool-name
     list (order preserved) and ``tool_calls`` matches the frontend row shape
-    ``{toolName, argsBrief, status}``. ``tool_log`` records only calls that
-    completed, so every row is ``status='done'``.
+    ``{toolName, argsBrief, status}``. ``omitted`` counts older rows excluded
+    by the row/byte budgets. ``tool_log`` records only calls that completed, so
+    every row is ``status='done'``.
     """
     if not tool_log:
-        return [], []
+        return [], [], 0
     tools: list = []
     tool_calls: list = []
     for e in tool_log:
         if not isinstance(e, dict):
             continue
-        name = e.get('tool')
+        name = _timeline_text(e.get('tool'))
         if not name:
             continue
+        name = name[:SWARM_TOOL_NAME_CHARS]
         if name not in tools:
             tools.append(name)
-        tool_calls.append({
-            'toolName':  name,
-            'argsBrief': e.get('args_brief') or '',
-            'status':    'done',
-            # Carry the result text so a RELOADED panel shows the same tool
-            # output the live one did. Legacy rows predate this field.
-            'preview':   e.get('preview') or '',
-            'error':     e.get('error') or '',
-        })
+        tool_calls.append(_bounded_timeline_call(e, name))
+    omitted = max(0, len(tool_calls) - _SNAPSHOT_TOOLCALLS_CAP)
     if len(tool_calls) > _SNAPSHOT_TOOLCALLS_CAP:
         tool_calls = tool_calls[-_SNAPSHOT_TOOLCALLS_CAP:]
-    return tools, tool_calls
+    tool_calls, omitted = _fit_timeline_byte_budget(tool_calls, omitted)
+    return tools, tool_calls, omitted
 
 
 # ═══════════════════════════════════════════════════════════
@@ -234,24 +323,31 @@ class MasterOrchestrator:
         self.on_progress = on_progress
         self.abort_check = abort_check or (lambda: False)
         self.all_tools = all_tools or []
-        self.max_parallel = max_parallel
-        self.max_retries = max_retries
+        parallel_ceiling = swarm_max_parallel()
+        retry_ceiling = swarm_max_retries()
+        try:
+            self.max_parallel = max(
+                1, min(int(max_parallel), parallel_ceiling))
+        except (TypeError, ValueError, OverflowError):
+            self.max_parallel = parallel_ceiling
+        try:
+            self.max_retries = max(
+                0, min(int(max_retries), retry_ceiling))
+        except (TypeError, ValueError, OverflowError):
+            self.max_retries = retry_ceiling
+        self.max_total_agents = swarm_max_agents_per_session()
 
         # Per-agent streaming output directory. Each sub-agent will stream
         # its raw tokens to ``<output_dir>/<agent_id>.log`` so the main
         # agent can fetch progress with a regular file read if it explicitly
-        # wants to.
+        # wants to. The directory is created lazily by SubAgent on its first
+        # real streamed chunk; no-output sessions leave no empty inode behind.
         self.output_dir = output_dir
-        if self.output_dir:
-            try:
-                os.makedirs(self.output_dir, exist_ok=True)
-            except OSError as e:
-                logger.warning('[Master:%s] Could not create output dir %r: %s',
-                               task_id, self.output_dir, e)
 
         logger.info('[Master:%s] Init — %d specs model=%s parallel=%d retries=%d output_dir=%s',
                     task_id, len(specs), model or '(default)',
-                    max_parallel, max_retries, self.output_dir or '(none)')
+                    self.max_parallel, self.max_retries,
+                    self.output_dir or '(none)')
         for i, s in enumerate(specs):
             logger.debug('[Master:%s]   Spec[%d] id=%s role=%s deps=%s obj=%.120s',
                          task_id, i, s.id, s.role, list(s.depends_on or []),
@@ -259,7 +355,10 @@ class MasterOrchestrator:
 
         # Shared state
         self.artifact_store = ArtifactStore()
-        self.rate_limiter = RateLimiter(max_concurrent=max_parallel)
+        self.rate_limiter = RateLimiter(
+            max_concurrent=self.max_parallel,
+            owner_key=user_id,
+        )
 
         self._agents: dict[str, SubAgent] = {}
         self._results: list[tuple[SubTaskSpec, SubAgentResult]] = []
@@ -288,6 +387,20 @@ class MasterOrchestrator:
 
         # Listeners woken when ANY agent completes (used by await_agents).
         self._completion_event = threading.Event()
+        # One no-progress timeout per logical wait-set is enough. Models often
+        # retry an identical await immediately; without this receipt the second
+        # call burns the entire hard cap despite learning no new fact. Values
+        # are the completed-id snapshot observed at the last timeout. The map is
+        # session-local and explicitly bounded.
+        self._await_timeout_progress: dict[
+            tuple[str, tuple[str, ...]], frozenset[str]
+        ] = {}
+        self._await_timeout_progress_capacity = 64
+        # Results already shown to the parent model, either synchronously by
+        # await/get_result or asynchronously through an inbox injection. This
+        # set is bounded by the finite session spec list. Explicit-id reads may
+        # still replay a result; no-id awaits consume only completion deltas.
+        self._delivered_result_ids: set[str] = set()
 
         # Parent task proxy used by SubAgent for tool dispatch. Most fields
         # are placeholders, but ``config`` MUST carry through fields that
@@ -299,6 +412,7 @@ class MasterOrchestrator:
             'id':           task_id,
             'convId':       conv_id,
             '_userId':      user_id,
+            '_tenant_id':   (parent_config or {}).get('_tenant_id'),
             'events_lock':  threading.Lock(),
             'events':       [],
             'toolRounds':   [],
@@ -360,7 +474,13 @@ class MasterOrchestrator:
         provider_id = self._parent_task_proxy['config'].get(
             '_pinned_provider_id', '')
         return resolve_model_for_tier(
-            tier, self.model, role=spec.role, provider_id=provider_id)
+            tier,
+            self.model,
+            role=spec.role,
+            provider_id=provider_id,
+            owner_user_id=self.user_id,
+            tenant_id=self._parent_task_proxy.get('_tenant_id'),
+        )
 
     # ── Agent factory used by StreamingScheduler ──────
 
@@ -466,7 +586,8 @@ class MasterOrchestrator:
                           else 'failed' if result.status == SubAgentStatus.FAILED.value
                           else result.status)
                 total_tokens += result.total_tokens or 0
-                _tools, _tool_calls = _snapshot_tool_timeline(result.tool_log)
+                _tools, _tool_calls, _tool_calls_omitted = (
+                    _snapshot_tool_timeline(result.tool_log))
                 agents.append({
                     'id':            spec.id,
                     'role':          spec.role,
@@ -484,6 +605,7 @@ class MasterOrchestrator:
                     'modifiedFiles': _count_file_writes(result.tool_log),
                     'tools':         _tools,
                     'toolCalls':     _tool_calls,
+                    'toolCallsOmitted': _tool_calls_omitted,
                     'error':         (result.error_message or '')
                                      if result.status != SubAgentStatus.COMPLETED.value
                                      else '',
@@ -804,6 +926,7 @@ class MasterOrchestrator:
             on_agent_complete=self._on_agent_complete_callback,
             on_retry=self._on_retry_callback,
             progress_beacon=self._beacon,
+            max_total_agents=self.max_total_agents,
         )
 
     # ── Non-blocking entry point ─────────────────────
@@ -1080,6 +1203,8 @@ class MasterOrchestrator:
                 with self._lock:
                     self._results.append((spec, result))
                     self._results_by_id[spec.id] = (spec, result)
+                    if a.get('delivered'):
+                        self._delivered_result_ids.add(spec.id)
                 preloaded += 1
                 if status == 'completed' and not a.get('delivered'):
                     self._reenqueue_swarm_update(spec, result)
@@ -1164,6 +1289,23 @@ class MasterOrchestrator:
 
     # ── await_agents (blocking) ──────────────────────
 
+    def mark_results_delivered(
+        self,
+        agent_ids: Iterable[str] | str | None,
+    ) -> None:
+        """Record results already projected to the parent model.
+
+        Unknown ids are ignored so malformed inbox metadata cannot grow the
+        session-local set beyond its authoritative completed-result map.
+        """
+        values = (agent_ids,) if isinstance(agent_ids, str) else (agent_ids or ())
+        wanted = {str(agent_id) for agent_id in values if agent_id}
+        if not wanted:
+            return
+        with self._lock:
+            self._delivered_result_ids.update(
+                wanted.intersection(self._results_by_id))
+
     def await_agents(self, *,
                      ids: list[str] | None = None,
                      mode: str = 'any',
@@ -1187,7 +1329,9 @@ class MasterOrchestrator:
         Caller-asked ids that have already completed (from previous rounds)
         are returned immediately as ``completed`` — the model gets the data
         even if it forgot it had been notified.  Unknown ids appear in
-        ``unknown`` so the model knows it asked for something invalid.
+        ``unknown`` so the model knows it asked for something invalid. A no-id
+        await is delta-oriented: results already delivered to the model count
+        as satisfied but are not returned again.
         """
         if mode not in ('any', 'all'):
             mode = 'any'
@@ -1207,6 +1351,7 @@ class MasterOrchestrator:
         # unknown      = caller-supplied ids unknown to this swarm session.
         with self._lock:
             done_ids = set(self._results_by_id.keys())
+            delivered_ids = set(self._delivered_result_ids)
             known_ids = {str(s.id) for s in self.specs}
 
             if ids:
@@ -1220,8 +1365,15 @@ class MasterOrchestrator:
                 # subset — yielding k/N < total while the panel shows N/N.
                 requested = known_ids | done_ids
             already_done = requested & done_ids
+            if not ids:
+                already_done -= delivered_ids
             to_wait = (requested & known_ids) - done_ids
             unknown = requested - known_ids - done_ids
+
+            await_signature = (mode, tuple(sorted(requested)))
+            prior_timeout_progress = self._await_timeout_progress.get(
+                await_signature)
+            current_progress = frozenset(requested & done_ids)
 
         # Critical trace: WHAT this await is blocking on, plus a snapshot of
         # the swarm state. When an await later reports timed_out, this ENTER
@@ -1230,11 +1382,11 @@ class MasterOrchestrator:
         logger.info(
             '[Master:%s] await_agents ENTER mode=%s timeout=%.0fs ids=%s — '
             'to_wait=%s already_done=%s unknown=%s '
-            '(snapshot: done=%d known=%d, hard_cap=%ss)',
+            '(snapshot: done=%d delivered=%d known=%d, hard_cap=%ss)',
             self.task_id, mode, timeout_seconds,
             (sorted(str(x) for x in ids) if ids else 'ALL'),
             sorted(to_wait), sorted(already_done), sorted(unknown),
-            len(done_ids), len(known_ids),
+            len(done_ids), len(delivered_ids), len(known_ids),
             int(timeout_seconds))
 
         # ── Special case: nothing to wait for ──────────────────────────
@@ -1242,19 +1394,29 @@ class MasterOrchestrator:
         # asked for "all in flight" but none are running. Return now with
         # a clear note so the LLM doesn't think the call was a no-op.
         if not to_wait:
+            with self._lock:
+                self._await_timeout_progress.pop(await_signature, None)
             note = ''
             # When caller asks for ALL (no ids) and no agents are running,
             # return EVERY completed agent (not just already_done snapshot)
             if not ids:
                 with self._lock:
-                    all_completed = set(self._results_by_id.keys())
+                    all_completed = (
+                        set(self._results_by_id)
+                        - self._delivered_result_ids
+                    )
                 completed = all_completed
             else:
                 completed = already_done
-                
+
             if completed:
                 note = (f'{len(completed)} agent(s) already completed; '
                         f'returning their results immediately.')
+            elif not ids and done_ids:
+                note = (
+                    'All completed agent results were already delivered. '
+                    'Use get_agent_result with explicit ids only when you '
+                    'need to reread a full result.')
             elif unknown:
                 note = (f'No matching agents — id(s) {sorted(unknown)} '
                         f'unknown to this swarm session.')
@@ -1268,6 +1430,30 @@ class MasterOrchestrator:
                 mode=mode,
                 timed_out=False,
                 note=note,
+            )
+
+        # Do not spend another full wait window until the underlying result set
+        # changes. Completion callbacks remain active and will deliver an inbox
+        # update; this only suppresses a redundant synchronous block.
+        if (
+            prior_timeout_progress is not None
+            and current_progress == prior_timeout_progress
+        ):
+            note = (
+                'An identical await already timed out and no requested agent '
+                'has completed since then. The redundant wait was skipped; '
+                'agents are still running in the background and their '
+                '<swarm-update> will arrive when progress occurs. Continue '
+                'useful local work instead of repeating this await unchanged.'
+            )
+            return self._build_await_response(
+                completed_ids=sorted(already_done),
+                still_running=sorted(to_wait),
+                unknown=sorted(unknown),
+                mode=mode,
+                timed_out=True,
+                note=note,
+                wait_suppressed=True,
             )
 
         # ── Wait loop ──────────────────────────────────────────────────
@@ -1307,7 +1493,10 @@ class MasterOrchestrator:
         # and any of to_wait that finished during the wait.
         with self._lock:
             done_now = set(self._results_by_id.keys())
+            delivered_now = set(self._delivered_result_ids)
         completed_set = (already_done | (to_wait & done_now))
+        if not ids:
+            completed_set -= delivered_now
         still_running = sorted(to_wait - done_now)
         terminated_note = ''
         if swarm_terminated and still_running:
@@ -1322,6 +1511,20 @@ class MasterOrchestrator:
                 f'(cancelled/aborted or dropped before running) and will NOT '
                 f'complete. Not waiting further. Re-spawn them with '
                 f'spawn_agents if you still need that work.')
+        with self._lock:
+            if timed_out:
+                if (
+                    await_signature not in self._await_timeout_progress
+                    and len(self._await_timeout_progress)
+                    >= self._await_timeout_progress_capacity
+                ):
+                    oldest = next(iter(self._await_timeout_progress))
+                    self._await_timeout_progress.pop(oldest, None)
+                self._await_timeout_progress[await_signature] = frozenset(
+                    requested & done_now
+                )
+            else:
+                self._await_timeout_progress.pop(await_signature, None)
         return self._build_await_response(
             completed_ids=sorted(completed_set),
             still_running=still_running,
@@ -1334,7 +1537,8 @@ class MasterOrchestrator:
     def _build_await_response(self, *, completed_ids: list[str],
                                still_running: list[str],
                                unknown: list[str],
-                               mode: str, timed_out: bool, note: str) -> dict:
+                               mode: str, timed_out: bool, note: str,
+                               wait_suppressed: bool = False) -> dict:
         """Materialize completed payloads from ``_results_by_id``."""
         completed_payloads: list[dict] = []
         with self._lock:
@@ -1379,6 +1583,8 @@ class MasterOrchestrator:
             'mode':          mode,
             'timed_out':     timed_out,
         }
+        if wait_suppressed:
+            out['wait_suppressed'] = True
         if unknown:
             out['unknown'] = unknown
         if note:
@@ -1388,7 +1594,12 @@ class MasterOrchestrator:
         # logged at WARNING (it's the symptom the user reports) and names the
         # agents that out-ran the window so the cause is grep-able without a
         # debugger; a clean satisfy is INFO.
-        if timed_out:
+        if wait_suppressed:
+            logger.info(
+                '[Master:%s] await_agents SKIPPED redundant no-progress wait '
+                'mode=%s still_running=%s',
+                self.task_id, mode, still_running or 'none')
+        elif timed_out:
             # Per-stuck-agent live state so the timeout line is SELF-CONTAINED:
             # an operator can see WHAT each still-running agent is doing (its
             # round count + model) without cross-referencing the LLM stream
@@ -1451,6 +1662,7 @@ class MasterOrchestrator:
         #    sees every completion exactly once — here, in the tool return.
         if completed_payloads:
             _delivered_ids = [p['agent_id'] for p in completed_payloads]
+            self.mark_results_delivered(_delivered_ids)
             try:
                 inbox_consume(self.inbox_key, _delivered_ids)
             except Exception as e:
@@ -1472,6 +1684,7 @@ class MasterOrchestrator:
         with self._lock:
             if agent_id in self._results_by_id:
                 spec, result = self._results_by_id[agent_id]
+                self._delivered_result_ids.add(agent_id)
                 payload = {
                     'found':         True,
                     'agent_id':      agent_id,
@@ -1585,9 +1798,6 @@ class MasterOrchestrator:
                     'error':      _err,
                 }
             return out
-
-    def get_artifacts(self) -> dict:
-        return self.artifact_store.get_all()
 
     def abort(self) -> None:
         """Signal abort. Best-effort — already-running agents complete on their own thread."""

@@ -24,101 +24,7 @@ presets) are installable from the Settings → Skills catalog.
 
 from __future__ import annotations
 
-from lib.motion_video._audio import (
-    NarrationAborted,
-    concat_narrations,
-    mux_audio_video,
-    synthesize_scene_narrations,
-)
-from lib.motion_video._audio_cues import (
-    AUDIO_CONTRACT_VERSION,
-    audio_plan_errors,
-    audio_plan_summary,
-    audio_plan_template,
-    load_audio_plan,
-    mix_audio_timeline,
-    normalise_audio_plan,
-    write_audio_attribution,
-)
-from lib.motion_video._concat import burn_in_subtitles, concat_mp4s
-from lib.motion_video._env import (
-    PINNED_HYPERFRAMES,
-    build_render_env,
-    chrome_bin,
-    ensure_ffmpeg,
-    ensure_ffprobe,
-    ensure_hyperframes,
-    ffmpeg_bin,
-    ffprobe_bin,
-    hyperframes_bin,
-    motion_root,
-    probe_env,
-)
-from lib.motion_video._fill import (
-    MAX_BOTTOM_DEAD_BAND,
-    MIN_VERTICAL_SPAN,
-    check_composition_fill,
-    findings_for_fill,
-    measure_fill,
-)
-from lib.motion_video._gates import (
-    NARRATION_CHARS_PER_SECOND,
-    check_composition_html,
-    check_scene_budget,
-    check_storyboard,
-    check_text_fidelity,
-    probe_video,
-    verify_spec,
-    visible_text,
-)
-from lib.motion_video._quality import (
-    GRAPHIC_EXTENSIONS,
-    asset_floor_findings,
-    count_scene_graphics,
-    film_quality_summary,
-    is_text_only_exempt,
-    scene_telemetry,
-)
-from lib.motion_video._render import (
-    ALL_CATEGORIES,
-    COMPOSITION_CATEGORIES,
-    INFRA_CATEGORIES,
-    check_project,
-    inspect_project,
-    is_infra_category,
-    lint_project,
-    render_project,
-    validate_project,
-)
-from lib.motion_video._srt import (
-    SrtEntry,
-    format_timestamp,
-    parse_srt,
-    parse_timestamp,
-    total_span,
-)
-from lib.motion_video._storyboard import build_storyboard
-from lib.motion_video._subtitle import (
-    MAX_LINES_PER_CUE,
-    SubtitleStyle,
-    build_ass,
-    safe_box,
-    style_for_frame,
-    wrap_line,
-)
-from lib.motion_video._template import (
-    MIN_FONT_PX,
-    fit_font_px,
-    on_screen_capacity,
-    render_scene_html,
-    scene_on_screen,
-)
-from lib.motion_video._timeline import (
-    TIMELINE_CONTRACT_VERSION,
-    normalise_timeline_contract,
-    timeline_contract_errors,
-    transition_plan,
-)
+from importlib import import_module
 
 __all__ = [
     'PINNED_HYPERFRAMES',
@@ -196,3 +102,114 @@ __all__ = [
     'scene_on_screen',
     'MIN_FONT_PX',
 ]
+
+
+# A focused import such as ``lib.motion_video.runtime`` establishes only the
+# durable task authority. Rendering recipes, binary probes, audio processing,
+# and visual-quality modules remain request/worker loaded. The historical
+# package-level API stays intact through explicit lazy attribute resolution.
+_EXPORT_MODULES = {
+    # Render-chain environment.
+    'PINNED_HYPERFRAMES': 'lib.motion_video._env',
+    'motion_root': 'lib.motion_video._env',
+    'probe_env': 'lib.motion_video._env',
+    'build_render_env': 'lib.motion_video._env',
+    'hyperframes_bin': 'lib.motion_video._env',
+    'ensure_hyperframes': 'lib.motion_video._env',
+    'ensure_ffmpeg': 'lib.motion_video._env',
+    'ensure_ffprobe': 'lib.motion_video._env',
+    'ffmpeg_bin': 'lib.motion_video._env',
+    'ffprobe_bin': 'lib.motion_video._env',
+    'chrome_bin': 'lib.motion_video._env',
+    # Source text and deterministic gates.
+    'SrtEntry': 'lib.motion_video._srt',
+    'parse_srt': 'lib.motion_video._srt',
+    'parse_timestamp': 'lib.motion_video._srt',
+    'format_timestamp': 'lib.motion_video._srt',
+    'total_span': 'lib.motion_video._srt',
+    'check_storyboard': 'lib.motion_video._gates',
+    'check_scene_budget': 'lib.motion_video._gates',
+    'NARRATION_CHARS_PER_SECOND': 'lib.motion_video._gates',
+    'check_composition_html': 'lib.motion_video._gates',
+    'check_text_fidelity': 'lib.motion_video._gates',
+    'visible_text': 'lib.motion_video._gates',
+    'probe_video': 'lib.motion_video._gates',
+    'verify_spec': 'lib.motion_video._gates',
+    'check_composition_fill': 'lib.motion_video._fill',
+    'findings_for_fill': 'lib.motion_video._fill',
+    'measure_fill': 'lib.motion_video._fill',
+    'MIN_VERTICAL_SPAN': 'lib.motion_video._fill',
+    'MAX_BOTTOM_DEAD_BAND': 'lib.motion_video._fill',
+    # Quality telemetry and renderer verdicts.
+    'GRAPHIC_EXTENSIONS': 'lib.motion_video._quality',
+    'count_scene_graphics': 'lib.motion_video._quality',
+    'asset_floor_findings': 'lib.motion_video._quality',
+    'scene_telemetry': 'lib.motion_video._quality',
+    'film_quality_summary': 'lib.motion_video._quality',
+    'is_text_only_exempt': 'lib.motion_video._quality',
+    'lint_project': 'lib.motion_video._render',
+    'validate_project': 'lib.motion_video._render',
+    'inspect_project': 'lib.motion_video._render',
+    'check_project': 'lib.motion_video._render',
+    'is_infra_category': 'lib.motion_video._render',
+    'INFRA_CATEGORIES': 'lib.motion_video._render',
+    'COMPOSITION_CATEGORIES': 'lib.motion_video._render',
+    'ALL_CATEGORIES': 'lib.motion_video._render',
+    'render_project': 'lib.motion_video._render',
+    # Video/audio assembly.
+    'concat_mp4s': 'lib.motion_video._concat',
+    'burn_in_subtitles': 'lib.motion_video._concat',
+    'NarrationAborted': 'lib.motion_video._audio',
+    'synthesize_scene_narrations': 'lib.motion_video._audio',
+    'concat_narrations': 'lib.motion_video._audio',
+    'mux_audio_video': 'lib.motion_video._audio',
+    'AUDIO_CONTRACT_VERSION': 'lib.motion_video._audio_cues',
+    'normalise_audio_plan': 'lib.motion_video._audio_cues',
+    'load_audio_plan': 'lib.motion_video._audio_cues',
+    'audio_plan_errors': 'lib.motion_video._audio_cues',
+    'audio_plan_summary': 'lib.motion_video._audio_cues',
+    'audio_plan_template': 'lib.motion_video._audio_cues',
+    'write_audio_attribution': 'lib.motion_video._audio_cues',
+    'mix_audio_timeline': 'lib.motion_video._audio_cues',
+    # Timeline, storyboard, subtitles, and HTML composition.
+    'TIMELINE_CONTRACT_VERSION': 'lib.motion_video._timeline',
+    'normalise_timeline_contract': 'lib.motion_video._timeline',
+    'timeline_contract_errors': 'lib.motion_video._timeline',
+    'transition_plan': 'lib.motion_video._timeline',
+    'build_storyboard': 'lib.motion_video._storyboard',
+    'SubtitleStyle': 'lib.motion_video._subtitle',
+    'style_for_frame': 'lib.motion_video._subtitle',
+    'safe_box': 'lib.motion_video._subtitle',
+    'wrap_line': 'lib.motion_video._subtitle',
+    'build_ass': 'lib.motion_video._subtitle',
+    'MAX_LINES_PER_CUE': 'lib.motion_video._subtitle',
+    'render_scene_html': 'lib.motion_video._template',
+    'on_screen_capacity': 'lib.motion_video._template',
+    'fit_font_px': 'lib.motion_video._template',
+    'scene_on_screen': 'lib.motion_video._template',
+    'MIN_FONT_PX': 'lib.motion_video._template',
+}
+
+_CHILD_MODULES = {
+    '_asset_preflight', '_assets', '_audio', '_audio_cues', '_concat',
+    '_craft', '_creative_plan', '_env', '_fill', '_fonts', '_gates',
+    '_quality', '_recipe', '_render', '_runtime_assets', '_scene_author',
+    '_shot_recipes', '_srt', '_storyboard', '_subtitle', '_template',
+    '_timeline', 'engine', 'runtime',
+}
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None and name in _CHILD_MODULES:
+        module_name = f'lib.motion_video.{name}'
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module = import_module(module_name)
+    value = module if name in _CHILD_MODULES else getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _CHILD_MODULES)

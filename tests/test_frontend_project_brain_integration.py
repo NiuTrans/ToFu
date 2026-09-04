@@ -10,15 +10,23 @@ Covers three regression classes that ACTUALLY happened:
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 import re
+import shutil
+import subprocess
 
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
-from tests._runtime_sections import runtime_section
+from tests._runtime_sections import native_module_path, runtime_section
 
 pytestmark = pytest.mark.unit
+
+ROOT = Path(__file__).resolve().parents[1]
+ICON_OWNER_JS = Path(native_module_path(
+    '.native/icons-project-integration.js', ROOT / 'frontend/src/icons.ts'))
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -65,20 +73,20 @@ window.ProjectBrainIntegration.renderIntegration({
     testCommandConfigured: false, stableCommandConfigured: false,
   },
   workspaces: [{
-    taskId: 'writer-1', title: 'Auth refresh', workspacePath: '/work/writer-1',
+    workId: 'writer-1', title: 'Auth refresh', workspacePath: '/work/writer-1',
     state: 'quarantined', checkpointSha: 'dddddddddddddddddddddddddddddddddddddddd',
     error: 'CONFLICT <unsafe>', dirty: { total: 3 }, updatedAt: '2026-08-08T08:00:00Z',
   }, {
-    taskId: 'merged-1', title: 'Already merged', workspacePath: '/work/merged-1',
+    workId: 'merged-1', title: 'Already merged', workspacePath: '/work/merged-1',
     state: 'merged', checkpointSha: 'ffffffffffffffffffffffffffffffffffffffff',
     error: '', dirty: { total: 0 }, updatedAt: '2026-08-08T08:02:00Z',
   }, {
-    taskId: 'ready-1', title: 'Queued safely', workspacePath: '/work/ready-1',
+    workId: 'ready-1', title: 'Queued safely', workspacePath: '/work/ready-1',
     state: 'ready', checkpointSha: '1111111111111111111111111111111111111111',
     error: '', dirty: { total: 0 }, updatedAt: '2026-08-08T08:03:00Z',
   }],
   events: [{
-    id: 1, taskId: 'writer-1', kind: 'quarantined',
+    id: 1, workId: 'writer-1', kind: 'quarantined',
     message: 'Checkpoint needs attention', detail: 'same file changed',
     createdAt: '2026-08-08T08:01:00Z',
   }],
@@ -137,7 +145,7 @@ window.ProjectBrainIntegration.renderIntegration({
   repo: { root: '/work/repo', canonicalClean: true, worktreesTotal: 1, dirty: { total: 0 } },
   refs: { candidate: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', stable: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', candidateInitialized: true, stableInitialized: true },
   counts: {}, server: {}, gates: { builtIn: [] },
-  workspaces: [{ taskId: 'w1', title: 'T', workspacePath: '/w1', state: 'quarantined', checkpointSha: 'dddddddddddd', dirty: { total: 0 } }],
+  workspaces: [{ workId: 'w1', title: 'T', workspacePath: '/w1', state: 'quarantined', checkpointSha: 'dddddddddddd', dirty: { total: 0 } }],
   events: [],
 });
 
@@ -177,8 +185,9 @@ def test_integration_center_uses_app_i18n_seam() -> None:
     )
 
 
-def test_integration_icons_exist_in_registry() -> None:
-    """Every Icon() name the panel requests must resolve in core/icons.js.
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_integration_icons_exist_in_typed_owner() -> None:
+    """Every icon requested by the panel resolves through the public owner.
 
     Anchor: 2026-08-21 audit — layers/gitMerge/shield/checkCircle/refreshCw
     were requested but absent from _PATHS, so pipeline stages and the
@@ -186,7 +195,6 @@ def test_integration_icons_exist_in_registry() -> None:
     for unknown names — silent by design, so only a source cross-check bites).
     """
     integration = runtime_section('project-brain-integration.js')
-    icons = runtime_section('core/icons.js')
     # Icon names reach _icon() three ways: direct calls, ternary branches
     # (_icon(clean ? 'a' : 'b', n)) and the pipeline stages array ('x'],).
     requested = (
@@ -199,8 +207,19 @@ def test_integration_icons_exist_in_registry() -> None:
     assert {'layers', 'clock', 'gitMerge', 'shield', 'checkCircle',
             'alertTriangle', 'save', 'refreshCw', 'plus'} <= requested, (
         f'extraction drifted — known call sites no longer covered: {sorted(requested)}')
-    registry = set(re.findall(r'^\s{4}([A-Za-z]+):', icons, re.M))
-    missing = requested - registry
+    script = ICON_OWNER_JS.read_text(encoding='utf-8') + r"""
+const names = JSON.parse(process.env.REQUESTED_ICON_NAMES);
+console.log(JSON.stringify(names.filter((name) => !hasIcon(name))));
+"""
+    process = subprocess.run(
+        [shutil.which('node'), '-e', script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, 'REQUESTED_ICON_NAMES': json.dumps(sorted(requested))},
+    )
+    assert process.returncode == 0, process.stderr
+    missing = set(json.loads(process.stdout.splitlines()[-1]))
     assert not missing, f'icon names requested but absent from the registry: {sorted(missing)}'
 
 

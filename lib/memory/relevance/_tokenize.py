@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from lib.log import get_logger
+from lib.memory.contracts import MEMORY_SEARCH_BODY_MAX_CHARS
 
 logger = get_logger(__name__)
 
@@ -99,6 +100,7 @@ def _build_memory_doc(mem: dict[str, Any], include_body: bool = False) -> list[s
     if include_body:
         body = mem.get('body', '')
         if body:
-            # Limit body to first 2000 chars to keep tokenization fast
-            parts.append(body[:2000])
+            # Search storage reads this same prefix lazily; keep one authority
+            # for ranking semantics and the per-record tokenization ceiling.
+            parts.append(body[:MEMORY_SEARCH_BODY_MAX_CHARS])
     return _tokenize(' '.join(parts))

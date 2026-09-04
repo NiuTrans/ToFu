@@ -164,7 +164,11 @@ def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
         for row in captured["start_kwargs"]["custom_tools"]
     } == {"custom__run_command", "custom__submit_result"}
     assert captured["start_kwargs"]["config"]["disableModelFallback"] is True
-    assert captured["runtime_kwargs"]["provider"].model == "kimi-k3"
+    access = captured["runtime_kwargs"]["model_routing"]
+    assert access.model == {"creator_id": "moonshot", "model_id": "kimi-k3"}
+    assert access.routing == {"preferred_provider_id": "harbor-kimi"}
+    assert captured["runtime_kwargs"]["model_routing_source"] == \
+        "harbor-formal-kimi"
     assert captured["guest_exec"] == {
         "command": "printf ready", "timeout_sec": 17,
     }

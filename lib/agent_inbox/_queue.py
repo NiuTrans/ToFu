@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading  # noqa: F401 — carried per repo convention (batch-18 lesson)
 import time
-from typing import Any
+from typing import Any, Callable
 
 from lib.log import get_logger
 
@@ -31,6 +31,21 @@ from ._state import (
 logger = get_logger(__name__)
 
 
+def _append_item_locked(task_id: str, item: dict[str, Any]) -> None:
+    """Append to the one bounded bucket while the caller owns ``_lock``."""
+    bucket = _inboxes.setdefault(task_id, [])
+    if len(bucket) >= MAX_PER_TASK:
+        logger.warning(
+            '[Inbox:%s] cap %d reached — dropping oldest item (mode=%s agent=%s)',
+            task_id, MAX_PER_TASK, item['mode'], item.get('agent_id', '?'))
+        drop_idx = next((
+            index for index, existing in enumerate(bucket)
+            if existing.get('priority') == 'later'
+        ), 0)
+        bucket.pop(drop_idx)
+    bucket.append(item)
+
+
 # ═══════════════════════════════════════════════════════════
 #  Public API
 # ═══════════════════════════════════════════════════════════
@@ -39,7 +54,7 @@ def enqueue(task_id: str, value: str, *,
             priority: str = 'later',
             mode: str = 'swarm-update',
             agent_id: str = '',
-            extra: dict | None = None) -> None:
+            extra: dict | None = None) -> bool:
     """Enqueue a notification for *task_id*.
 
     Thread-safe. Logs and drops the item if the per-task cap is exceeded.
@@ -56,7 +71,7 @@ def enqueue(task_id: str, value: str, *,
     """
     if not task_id:
         logger.warning('[Inbox] enqueue with empty task_id, dropping')
-        return
+        return False
     if priority not in _PRIORITY:
         logger.warning('[Inbox:%s] unknown priority %r, falling back to later',
                        task_id, priority)
@@ -81,26 +96,50 @@ def enqueue(task_id: str, value: str, *,
             logger.debug(
                 '[Inbox:%s] enqueue (mode=%s agent=%s) dropped — task ended',
                 task_id, mode, agent_id or '?')
-            return
-        bucket = _inboxes.setdefault(task_id, [])
-        if len(bucket) >= MAX_PER_TASK:
-            logger.warning(
-                '[Inbox:%s] cap %d reached — dropping oldest item (mode=%s agent=%s)',
-                task_id, MAX_PER_TASK, item['mode'], item.get('agent_id', '?'))
-            # Drop the oldest 'later'-priority item, falling back to oldest overall
-            drop_idx = -1
-            for i, it in enumerate(bucket):
-                if it.get('priority') == 'later':
-                    drop_idx = i
-                    break
-            if drop_idx == -1:
-                drop_idx = 0
-            bucket.pop(drop_idx)
-        bucket.append(item)
+            return False
+        _append_item_locked(task_id, item)
 
     logger.debug('[Inbox:%s] enqueued mode=%s priority=%s agent=%s len=%d (depth=%d)',
                  task_id, mode, priority, agent_id or '?', len(value),
                  len(_inboxes.get(task_id, [])))
+    return True
+
+
+def enqueue_after_durable_commit(
+    task_id: str,
+    value: str,
+    commit: Callable[[], Any],
+    *,
+    priority: str = 'later',
+    mode: str = 'swarm-update',
+    agent_id: str = '',
+    extra: dict | None = None,
+) -> tuple[bool, Any]:
+    """Commit durable authority, then expose its wakeup item to the worker.
+
+    The inbox lifecycle lock prevents a finalizer from tombstoning the slot
+    between the drainability decision and insertion. The callback runs before
+    the item is visible, which gives operator steer its durable-before-wakeup
+    ordering without teaching this process-local queue about storage.
+    """
+    if not task_id:
+        return False, None
+    normalized_priority = priority if priority in _PRIORITY else 'later'
+    item: dict[str, Any] = {
+        'value': value,
+        'priority': normalized_priority,
+        'mode': mode,
+        'agent_id': agent_id,
+        'enqueued': time.time(),
+    }
+    if extra:
+        item.update(extra)
+    with _lock:
+        if task_id in _tombstones:
+            return False, None
+        committed = commit()
+        _append_item_locked(task_id, item)
+    return True, committed
 
 
 def drain(task_id: str, *,

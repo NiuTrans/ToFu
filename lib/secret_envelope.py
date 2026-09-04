@@ -20,8 +20,7 @@ import json
 import os
 from pathlib import Path
 import threading
-
-from cryptography.fernet import Fernet, InvalidToken
+from typing import Protocol
 
 from lib.config_dir import config_path
 from lib.identity import require_user_id
@@ -35,8 +34,18 @@ _KEY_PATH = Path(config_path(".secret_encryption.key"))
 _ENVELOPE_VERSION = 1
 _STORAGE_PAYLOAD_VERSION = 1
 _lock = threading.RLock()
-_cached_fernet: Fernet | None = None
 _cached_key_fingerprint = ""
+
+
+class _FernetCipher(Protocol):
+    """Narrow structural port implemented by cryptography's Fernet codec."""
+
+    def encrypt(self, data: bytes) -> bytes: ...
+
+    def decrypt(self, token: bytes) -> bytes: ...
+
+
+_cached_fernet: _FernetCipher | None = None
 
 
 class SecretEnvelopeError(RuntimeError):
@@ -54,6 +63,8 @@ def secret_hint(value: str) -> str:
 
 
 def _read_or_create_personal_key() -> bytes:
+    from cryptography.fernet import Fernet
+
     _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         key = Fernet.generate_key()
@@ -91,7 +102,9 @@ def _key_material() -> bytes:
     return configured.encode("ascii") if configured else _read_or_create_personal_key()
 
 
-def _fernet() -> Fernet:
+def _fernet() -> _FernetCipher:
+    from cryptography.fernet import Fernet
+
     global _cached_fernet, _cached_key_fingerprint
     key = _key_material()
     fingerprint = hashlib.sha256(key).hexdigest()
@@ -149,6 +162,8 @@ def open_secret(
     record_id: str,
 ) -> str:
     """Decrypt only when the authenticated domain binding matches exactly."""
+    from cryptography.fernet import InvalidToken
+
     expected = _binding(
         purpose=purpose, owner_user_id=owner_user_id, record_id=record_id)
     try:
@@ -177,7 +192,7 @@ class BoundPayloadCipher:
 
     __slots__ = ("_cipher", "key_id")
 
-    def __init__(self, cipher: Fernet, key_id: str) -> None:
+    def __init__(self, cipher: _FernetCipher, key_id: str) -> None:
         self._cipher = cipher
         self.key_id = key_id
 
@@ -241,6 +256,8 @@ class BoundPayloadCipher:
         owner_user_id: int,
         record_id: str,
     ) -> str:
+        from cryptography.fernet import InvalidToken
+
         expected = self._binding(
             purpose=purpose,
             tenant_id=tenant_id,

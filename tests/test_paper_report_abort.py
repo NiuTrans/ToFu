@@ -19,9 +19,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+import pytest  # noqa: E402
 
 TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
+pytestmark = pytest.mark.unit
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'

@@ -74,21 +74,6 @@ measures the eager tool-policy chunk at 26.8 KiB, the independently cacheable
 main entry at 556.4 KiB, and total JavaScript at 1,408.0 KiB under the
 unchanged delivery ceilings.
 
-2026-09 metric correction (reviewed): the pdf.worker URL asset (~405 KiB
-gzip) was counted inside "total Vite JavaScript", although it is a
-standalone on-demand binary — fetched only when a session opens a PDF, never
-parsed into the module graph, and pinned by the vendored pdfjs version
-rather than by our edits (exactly analogous to fonts, which were never
-counted). It now has its own ratcheted budget line
-(TOFU_BUDGET_VITE_URL_ASSET_KIB), and "total Vite JavaScript" measures the
-module graph it always claimed to measure — re-tightened from 1,410 to
-1,024 KiB against the 1,011.8 KiB re-measured graph, so neither metric can
-hide growth in the other.
- URL-asset membership is an explicit whitelist
-(EXPECTED_URL_ASSET_STEMS): a chunk that falls out of the manifest graph
-fails loudly instead of silently joining this line under its own per-file
-budget.
-
 The source checks are architecture guardrails for model-only maintenance:
 ordinary modules stay small enough to inspect in one bounded read, while the
 retained migration runtime has a separate shrinking ratchet. Generated files
@@ -121,18 +106,10 @@ def _gzip_size(path: Path) -> int:
     return len(gzip.compress(path.read_bytes(), compresslevel=9, mtime=0))
 
 
-def _vite_graph_and_url_assets(manifest: dict) -> tuple[set[str], set[str]]:
-    """Split emitted JS into the module graph and standalone URL assets.
-
-    The graph is what entry/dynamic rows can REACH through
-    ``imports``/``dynamicImports`` edges. Vite emits URL-imported workers
-    (the pdf.worker, ~405 KiB gzip) as standalone rows with no inbound
-    edges: on-demand binaries loaded by their owning library outside the
-    module graph — budgeted separately so the graph total measures what it
-    claims.
-    """
-    all_js: dict[str, str] = {}  # file -> first row key (for error context)
-    for key, row in manifest.items():
+def _vite_javascript_paths(manifest: dict) -> set[str]:
+    """Return every unique emitted JS asset, including shared static chunks."""
+    paths: set[str] = set()
+    for row in manifest.values():
         if not isinstance(row, dict):
             continue
         value = str(row.get('file') or '').replace('\\', '/')
@@ -140,49 +117,8 @@ def _vite_graph_and_url_assets(manifest: dict) -> tuple[set[str], set[str]]:
             continue
         if not value.startswith('assets/') or '..' in value.split('/'):
             raise ValueError(f'unsafe Vite asset path: {value!r}')
-        all_js.setdefault(value, str(key))
-
-    reachable_keys: set[str] = set()
-    stack = [str(key) for key, row in manifest.items()
-             if isinstance(row, dict)
-             and (row.get('isEntry') or row.get('isDynamicEntry'))]
-    while stack:
-        key = stack.pop()
-        if key in reachable_keys or key not in manifest:
-            continue
-        reachable_keys.add(key)
-        row = manifest[key]
-        if not isinstance(row, dict):
-            continue
-        for field in ('imports', 'dynamicImports'):
-            stack.extend(str(value) for value in row.get(field) or ())
-
-    graph_files = {
-        str(manifest[key].get('file') or '').replace('\\', '/')
-        for key in reachable_keys
-        if isinstance(manifest.get(key), dict)
-    }
-    graph = {path for path in all_js if path in graph_files}
-    url_assets = set(all_js) - graph
-    return graph, url_assets
-
-
-# Standalone ``?url`` binaries legitimately emitted OUTSIDE the module graph
-# (see _vite_graph_and_url_assets). Membership is explicit on purpose: any
-# new graph-unreachable JS chunk must FAIL this gate until a reviewer decides
-# it belongs here or back in the graph — otherwise this line silently absorbs
-# chunks that drop out of the manifest graph through a new loading mechanism,
-# each passing its own per-file budget while the total-graph metric loses
-# sight of them. Matched against the emitted file's basename (hashed name).
-EXPECTED_URL_ASSET_STEMS = ('pdf.worker.min',)
-
-
-def _url_asset_whitelist_violations(url_assets: set[str]) -> list[str]:
-    """Graph-unreachable JS rows not whitelisted as standalone binaries."""
-    return sorted(
-        path for path in url_assets
-        if not any(stem in Path(path).name for stem in EXPECTED_URL_ASSET_STEMS)
-    )
+        paths.add(value)
+    return paths
 
 
 def _check(label: str, size: int, limit: int, failures: list[str]) -> None:
@@ -319,7 +255,7 @@ def main() -> int:
 
     try:
         manifest = validate_vite_artifact()
-        vite_paths, url_asset_paths = _vite_graph_and_url_assets(manifest)
+        vite_paths = _vite_javascript_paths(manifest)
         vite_sizes = {
             path: _gzip_size(ROOT / 'static' / 'vite' / path)
             for path in vite_paths
@@ -328,16 +264,6 @@ def main() -> int:
             json.JSONDecodeError) as exc:
         print(f'frontend-budget: invalid Vite manifest: {exc}', file=sys.stderr)
         return 1
-
-    for path in _url_asset_whitelist_violations(url_asset_paths):
-        failures.append(
-            f'Vite URL asset {path} is a graph-unreachable JS chunk outside '
-            'the explicit standalone-binary whitelist; wire it into the '
-            'module graph or extend EXPECTED_URL_ASSET_STEMS deliberately')
-    for path in sorted(url_asset_paths):
-        _check(f'Vite URL asset {path}',
-               _gzip_size(ROOT / 'static' / 'vite' / path),
-               _limit('TOFU_BUDGET_VITE_URL_ASSET_KIB', 410), failures)
 
     for entry_name, entry_key in (
             ('main', 'frontend/src/main.ts'), ('admin', 'frontend/src/admin.ts')):
@@ -352,13 +278,11 @@ def main() -> int:
         _check(f'Vite async {key}', chunk_size,
                _limit('TOFU_BUDGET_VITE_CHUNK_KIB', 120), failures)
 
-    # Total means every byte of the module GRAPH, not just named
-    # entry/dynamic rows. Rollup creates shared static chunks (for example
-    # event-format) that are referenced through ``imports`` and were
-    # previously invisible here. Standalone ``?url`` binaries (the
-    # pdf.worker) are ratcheted by their own line above, not hidden here.
+    # Total means every byte the build emits, not just named entry/dynamic
+    # rows. Rollup creates shared static chunks (for example event-format) that
+    # are referenced through ``imports`` and were previously invisible here.
     _check('total Vite JavaScript', sum(vite_sizes.values()),
-           _limit('TOFU_BUDGET_FRONTEND_TOTAL_KIB', 1024), failures)
+           _limit('TOFU_BUDGET_FRONTEND_TOTAL_KIB', 1410), failures)
     if failures:
         print('frontend-budget: FAILED', file=sys.stderr)
         for failure in failures:

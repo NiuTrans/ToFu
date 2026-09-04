@@ -244,11 +244,10 @@ def test_prefetch_cache_hit_settles_immediately(rec, slow_tools):
     _assert_settles_before_slow(rec, 'tc-pf', 'tc-slow', 'streaming-prefetch hit')
 
     ev = rec.find('tc-pf', 'tool_complete')
-    visible_result = json.loads(ev.get('toolContent', ''))
-    assert visible_result['contractVersion'] == 'tofu.tool-result/v2'
-    assert visible_result['summary'] == 'PREFETCHED BODY', (
-        'the prefetched content must reach the UI result envelope without '
-        'loss; got %r' % (visible_result,))
+    assert ev.get('toolContent') == 'PREFETCHED BODY'
+    assert ev['toolResultEvidence']['resultContractVersion'] == \
+        'tofu.tool-result/v2'
+    assert ev['toolResultEvidence']['projectionKind'] == 'text'
 
 
 def test_dedup_cache_hit_settles_immediately(rec, slow_tools):
@@ -783,6 +782,7 @@ def test_screenshot_message_and_ui_agree_on_the_vision_verdict(monkeypatch):
                 'model=%s has NO vision, so the model must receive the '
                 'placeholder — otherwise it is handed an image it cannot read '
                 'and keeps retrying; got %.80r' % (model, body))
+        assert '_pending_tool_result_envelopes' not in task
 
         # And the UI text must agree with what the model was told.
         assert sh[5].get('toolContent'), 'the round must carry display text'

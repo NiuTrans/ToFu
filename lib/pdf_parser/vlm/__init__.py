@@ -7,15 +7,14 @@ OpenAI-compatible API for transcription to high-quality Markdown, and
 manages background parse jobs via an async task registry.
 
 Layout:
-    _config.py — _env_int, _get_vlm_models, _VLM_SYSTEM_PROMPT
+    _config.py — legacy request-lowering knobs + model discovery
+    _policy.py — launch-probed task/page/call/deadline budgets
     _parse.py  — _vlm_call_pages, vlm_parse_pdf (synchronous parse)
-    _tasks.py  — ALL shared async-registry state (_vlm_tasks/_vlm_lock/
-                 _TASK_TTL) + start_vlm_task/get_vlm_task/
-                 find_vlm_tasks_by_filename/_cleanup_old_tasks
+    _tasks.py  — bounded owner-fair task/registry/cancellation lifecycle
 
 Speed knobs (env-tunable, all optional):
     PDF_VLM_BATCH_PAGES   — pages per VLM call (default 4).
-    PDF_VLM_MAX_WORKERS   — concurrent VLM calls (default = number of batches).
+    PDF_VLM_MAX_WORKERS   — optional lower call-concurrency cap.
     PDF_VLM_MAX_TOKENS    — output-token cap per call (default 16384).
 """
 
@@ -37,11 +36,20 @@ from lib.pdf_parser.vlm._tasks import (  # noqa: E402
     _cleanup_old_tasks,
     _vlm_lock,
     _vlm_tasks,
+    VlmTaskQueueFull,
+    cancel_vlm_task,
     find_vlm_tasks_by_filename,
     get_vlm_task,
     start_vlm_task,
+    vlm_task_snapshot,
 )
 
-# Public API — preserved verbatim from the original module.
-__all__ = ['vlm_parse_pdf', 'start_vlm_task', 'get_vlm_task',
-           'find_vlm_tasks_by_filename']
+__all__ = [
+    'VlmTaskQueueFull',
+    'cancel_vlm_task',
+    'find_vlm_tasks_by_filename',
+    'get_vlm_task',
+    'start_vlm_task',
+    'vlm_parse_pdf',
+    'vlm_task_snapshot',
+]

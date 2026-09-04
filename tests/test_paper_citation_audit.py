@@ -120,7 +120,8 @@ def _make_task(tid):
     # under test runs in the report pass.
     return _new_report_task(tid, 'phashaudit000000000000000000000', 'en', None,
                             client_title='Attention Is All You Need',
-                            config={'paperInsightEnabled': False,
+                            config={'responses': {'promptProfile': 'full'},
+                                      'paperInsightEnabled': False,
                                       'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
 
 

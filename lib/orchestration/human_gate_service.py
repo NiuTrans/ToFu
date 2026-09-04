@@ -21,18 +21,28 @@ from lib.orchestration.mutation_result import (
 from lib.orchestration.service_call import orchestration_dependency_call
 
 
-ApprovalResolver = Callable[[str, bool], Any]
-GuidanceResolver = Callable[[str, str], Any]
+ApprovalResolver = Callable[[str, bool, int], Any]
+GuidanceResolver = Callable[[str, str, int], Any]
 
 
-def _resolve_approval(request_id: str, approved: bool) -> Any:
+def _resolve_approval(
+    request_id: str,
+    approved: bool,
+    owner_user_id: int,
+) -> Any:
     from lib.tasks_pkg.approval import resolve_write_approval
-    return resolve_write_approval(request_id, approved)
+    return resolve_write_approval(
+        request_id, approved, owner_user_id=owner_user_id)
 
 
-def _resolve_guidance(request_id: str, response: str) -> Any:
+def _resolve_guidance(
+    request_id: str,
+    response: str,
+    owner_user_id: int,
+) -> Any:
     from lib.tasks_pkg.human_guidance import resolve_human_guidance
-    return resolve_human_guidance(request_id, response)
+    return resolve_human_guidance(
+        request_id, response, owner_user_id=owner_user_id)
 
 
 class OrchestrationHumanGateService:
@@ -59,13 +69,16 @@ class OrchestrationHumanGateService:
         self,
         request_id: str,
         approved: bool,
+        *,
+        owner_user_id: int,
     ) -> OrchestrationMutationResult:
         return resolved_mutation(
             MUTATION_ACTION_APPROVE_GATE,
             request_id,
             lambda: self._resolution_call(
                 'failed to resolve orchestration approval request',
-                lambda: self._approval_resolver(request_id, approved),
+                lambda: self._approval_resolver(
+                    request_id, approved, owner_user_id),
             ),
         )
 
@@ -73,13 +86,16 @@ class OrchestrationHumanGateService:
         self,
         request_id: str,
         response: str,
+        *,
+        owner_user_id: int,
     ) -> OrchestrationMutationResult:
         return resolved_mutation(
             MUTATION_ACTION_INPUT_GATE,
             request_id,
             lambda: self._resolution_call(
                 'failed to resolve orchestration input request',
-                lambda: self._guidance_resolver(request_id, response),
+                lambda: self._guidance_resolver(
+                    request_id, response, owner_user_id),
             ),
         )
 

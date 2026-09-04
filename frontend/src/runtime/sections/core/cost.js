@@ -2,7 +2,8 @@
 /* ═══════════════════════════════════════════════════════════════════
    core/cost.js — extracted from core.js (split 2026-05-28)
 
-   Per-message cost calculation: legacy preset migration, server-authoritative calcCostCny, _prefetchConvCosts batch, calcConversationCost rollup.
+   Per-message cost calculation: legacy preset migration and a bounded,
+   server-authoritative calcCostCny batch fallback.
 
    This file is concatenated by Vite's module graph AFTER the slim
    core.js shell — symbols share `window` scope so no exports needed.
@@ -24,7 +25,15 @@ if (!config.model || config.model === serverModel) {
   if (_oldPreset && _LEGACY_PRESET_TO_MODEL[_oldPreset]) {
     config.model = _LEGACY_PRESET_TO_MODEL[_oldPreset];
   }
-  if (!config.model) config.model = serverModel;
+  if (!config.model) {
+    /* Nothing stored anywhere: seed the pre-config placeholder as a PAINT
+     * value only. Marking it provisional keeps whole-config persists (see
+     * _configForPersist) from laundering a model the user never picked into
+     * storage — the hardcoded placeholder may not exist in this deployment's
+     * providers at all (aws.claude-opus-4.8 on a kimi-only deployment). */
+    config.model = serverModel;
+    config._modelIsProvisional = true;
+  }
 }
 // Migrate thinking depth from compound presets
 if (['medium','high','xhigh','max'].includes(config.preset) && !config.thinkingDepth) {
@@ -91,24 +100,25 @@ let autoApplyWrites = true;
 let _modelPricingCache = null;  // populated from /api/server-config (settings.js display)
 // ── Cost calculation (server-authoritative) ──
 //
-// Pricing policy lives in lib/cost.py + lib/pricing.py. Endpoints:
-//   POST /api/v1/messages/cost        → single-usage cost
-//   POST /api/v1/messages/cost/batch  → batch over a conv's messages
+// Pricing policy lives in lib/cost.py + lib/pricing.py. The browser uses only:
+//   POST /api/v1/messages/cost/batch  → one batch for synchronous render misses
 //
 // Render paths call calcCostCny(usage, model, provider) synchronously.
 // Behaviour:
 //   - Cache hit  → return cached cost dict immediately.
-//   - Cache miss → kick off async fetch, return null. Next render
-//                  picks up the cached entry on the next tick.
+//   - Cache miss → join the bounded micro-batch, return null. One
+//                  authoritative repaint picks up every landed entry.
 //   - Trivial 0  → return null (matches old behaviour).
 //
-// The conversation-cost rollup uses _prefetchConvCosts(conv) to fill
-// the cache in ONE batch round-trip before render, so per-message
-// calcCostCny() always hits the cache.
+// A Surface render is synchronous, so every miss in that call stack joins the
+// same microtask batch instead of creating one request per historical Turn.
 
 const _costCache = new Map();          // fp → cost dict (or null for "no charge")
-const _costPending = new Map();        // fp → Promise (in-flight dedup)
+const _costPending = new Set();        // fp values owned by an in-flight batch
+const _costBatchQueue = new Map();     // fp → one pending server item
 const _COST_CACHE_MAX = 512;
+const _COST_BATCH_MAX = 512;
+let _costBatchScheduled = false;
 
 function _costFingerprint(usage, modelId, providerId) {
   if (!usage) return '';
@@ -131,14 +141,69 @@ function _resolveModelId(modelOrPreset) {
 }
 
 function _capCostCache() {
-  if (_costCache.size > _COST_CACHE_MAX) {
-    // Drop the oldest ~128 entries (Map preserves insertion order).
-    let toDrop = 128;
-    for (const k of _costCache.keys()) {
-      _costCache.delete(k);
-      if (--toDrop <= 0) break;
-    }
+  // Map preserves insertion order. Keep the declared ceiling exact even if a
+  // whole render batch lands at once.
+  while (_costCache.size > _COST_CACHE_MAX) {
+    const oldest = _costCache.keys().next().value;
+    if (oldest === undefined) break;
+    _costCache.delete(oldest);
   }
+}
+
+async function _flushCostBatch() {
+  _costBatchScheduled = false;
+  const entries = Array.from(_costBatchQueue.entries());
+  _costBatchQueue.clear();
+  if (!entries.length) return;
+
+  for (const [fp] of entries) _costPending.add(fp);
+  let landed = false;
+  try {
+    const body = await Api.conversations.costBatch(
+      entries.map(([, item]) => item),
+    );
+    const costs = body && Array.isArray(body.costs) ? body.costs : null;
+    // An incomplete response is not authority for the omitted entries. Leave
+    // every miss retryable on a later natural render instead of caching it as
+    // a fabricated no-charge result.
+    if (!costs || costs.length !== entries.length) return;
+    for (let i = 0; i < entries.length; i++) {
+      _costCache.set(entries[i][0], costs[i] || null);
+    }
+    _capCostCache();
+    landed = true;
+  } catch (_) {
+    // Cost is display-only. A transport failure must not disturb the Turn;
+    // the missing entry remains retryable on a later render.
+  } finally {
+    for (const [fp] of entries) _costPending.delete(fp);
+  }
+
+  if (!landed) return;
+  const conversationId = typeof activeConvId !== 'undefined' ? activeConvId : null;
+  if (conversationId
+      && typeof runtimeScope.requestAuthoritativeConversationRender === 'function') {
+    runtimeScope.requestAuthoritativeConversationRender(
+      conversationId, { force: false, forceScroll: false },
+    );
+  }
+}
+
+function _queueCostLookup(fp, usage, modelId, providerId) {
+  if (!fp || _costCache.has(fp) || _costPending.has(fp)
+      || _costBatchQueue.has(fp)) return;
+  // ConversationSurface renders at most 80 Turns. The higher fixed ceiling
+  // also accommodates a lazily opened round breakdown while keeping both the
+  // queue and one request bounded. Overflow stays retryable after repaint.
+  if (_costBatchQueue.size >= _COST_BATCH_MAX) return;
+  _costBatchQueue.set(fp, {
+    usage,
+    model: modelId,
+    provider_id: providerId || null,
+  });
+  if (_costBatchScheduled) return;
+  _costBatchScheduled = true;
+  Promise.resolve().then(_flushCostBatch);
 }
 
 /**
@@ -163,142 +228,11 @@ function calcCostCny(usage, modelOrPreset, providerId) {
   const fp = _costFingerprint(usage, modelId, providerId);
   if (_costCache.has(fp)) return _costCache.get(fp);
   if (_costPending.has(fp)) return null;
-
-  const promise = (async () => {
-    try {
-      // Api.conversations.cost uses onError:'null' → null on HTTP/network error,
-      // matching the old !r.ok / catch paths.
-      const body = await Api.conversations.cost(usage, modelId, providerId);
-      if (!body) { _costCache.set(fp, null); return null; }
-      const result = body.no_charge ? null : body;
-      _costCache.set(fp, result);
-      _capCostCache();
-      return result;
-    } catch (_) {
-      _costCache.set(fp, null);
-      return null;
-    } finally {
-      _costPending.delete(fp);
-    }
-  })();
-  _costPending.set(fp, promise);
+  _queueCostLookup(fp, usage, modelId, providerId);
   return null;
 }
-
-/**
- * Batch-prefetch cost dicts for every message in a conversation that
- * has a usage record. Populates _costCache so subsequent calcCostCny()
- * calls hit the cache. Returns a Promise that resolves when the cache
- * is fresh.
- *
- * Called from renderConversationDetail(), the SSE 'done' handler, and
- * anywhere that triggers a cost-bar refresh — once per state change,
- * not per message.
- */
-/**
- * Returns true when the cache had to be populated (fresh entries
- * landed); false when everything was already cached. Render paths use
- * the return value to decide whether a re-render is needed.
- */
-async function _prefetchConvCosts(conv) {
-  const turns = runtimeScope.ConversationTurnRead?.ordered?.(conv) || [];
-  if (!conv || !turns.length) return false;
-  const convModel = conv.model || conv.preset || conv.effort || serverModel;
-  const items = [];
-  const fps = [];
-  const _seen = new Set();  // dedup fp across messages + rounds
-  const _push = (usage, modelId, providerId) => {
-    if (!usage) return;
-    const fp = _costFingerprint(usage, modelId, providerId);
-    if (!fp || _seen.has(fp) || _costCache.has(fp)) return;
-    _seen.add(fp);
-    items.push({ usage, model: modelId, provider_id: providerId });
-    fps.push(fp);
-  };
-  for (const turn of turns) {
-    const m = turn.projection || {};
-    if (!m.usage) continue;
-    const modelId = _resolveModelId(m.model || m.preset || m.effort || convModel);
-    const providerId = m.provider_id || m.providerId || null;
-    // Skip if the backend already stamped cost at sync time — no fetch needed.
-    if (!m.cost) _push(m.usage, modelId, providerId);
-    // Same for per-round entries.
-    if (Array.isArray(m.apiRounds)) {
-      for (const rd of m.apiRounds) {
-        if (!rd || !rd.usage || rd.cost) continue;
-        _push(rd.usage, modelId, rd.provider_id || rd.providerId || providerId);
-      }
-    }
-  }
-  if (!items.length) return false;
-  try {
-    const body = await Api.conversations.costBatch(items);
-    if (!body) return false;
-    const costs = Array.isArray(body.costs) ? body.costs : [];
-    for (let i = 0; i < fps.length; i++) {
-      _costCache.set(fps[i], costs[i] || null);
-    }
-    _capCostCache();
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-runtimeScope._prefetchConvCosts = _prefetchConvCosts;
 function formatCny(val) {
   if (val >= 1) return "¥" + val.toFixed(2);
   if (val >= 0.01) return "¥" + val.toFixed(3);
   return "¥" + val.toFixed(4);
-}
-function calcConversationCost(conv) {
-  let tc = 0,
-    tu = 0,
-    ti = 0,
-    to = 0,
-    tcw = 0,
-    tcr = 0,
-    cInp = 0,
-    cOut = 0,
-    cCw = 0,
-    cCr = 0,
-    tThink = 0,
-    tSav = 0;
-  const convModel = conv.model || conv.preset || conv.effort || serverModel;
-  for (const turn of runtimeScope.ConversationTurnRead?.ordered?.(conv) || []) {
-    const m = turn.projection || {};
-    if (m.usage) {
-      // Prefer cost from the authoritative settled-turn projection. The lazy
-      // calculation covers a live turn whose projection has not arrived yet.
-      const c = m.cost || calcCostCny(m.usage, m.model || m.preset || m.effort || convModel, m.provider_id || m.providerId);
-      if (c) {
-        tc += c.costCny;
-        tu += c.costUsd;
-        ti += c.inputTokens;
-        to += c.outputTokens;
-        tcw += c.cacheWriteTokens;
-        tcr += c.cacheReadTokens;
-        tThink += c.thinkingTokens;
-        cInp += c.inputCostCny;
-        cOut += c.outputCostCny;
-        cCw += c.cacheWriteCostCny;
-        cCr += c.cacheReadCostCny;
-        tSav += c.cacheSavingsCny || 0;
-      }
-    }
-  }
-  return {
-    totalCny: tc,
-    totalUsd: tu,
-    totalIn: ti,
-    totalOut: to,
-    totalCacheWrite: tcw,
-    totalCacheRead: tcr,
-    totalThinking: tThink,
-    inputCostCny: cInp,
-    outputCostCny: cOut,
-    cacheWriteCostCny: cCw,
-    cacheReadCostCny: cCr,
-    cacheSavingsCny: tSav,
-  };
 }

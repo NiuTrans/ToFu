@@ -36,7 +36,7 @@ def _emit(task: dict, event: dict) -> None:
 
 #: Task fields persisted so a crashed process can re-spawn this job.
 _MANIFEST_FIELDS = ('task_id', 'topic', 'lang', 'style', 'max_pages', 'size',
-                    'conv_id', 'workdir', 'model', 'user_id')
+                    'conv_id', 'workdir', 'model', 'creative_mode', 'user_id')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -47,19 +47,32 @@ def _write_manifest(task: dict, state: str) -> None:
 
 def run_slides_task(task: dict) -> None:
     """Worker entry — topic → editable PPTX + preview grid."""
+    from lib.production.stages import StageAborted, StageFailed
     from lib.slides.recipe import build_deck_from_topic
+    from lib.slides.readiness import (
+        SlidesRuntimeUnavailable,
+        ensure_slides_runtime_ready,
+    )
     from lib.slides.runtime import _slides_runtime
 
     task_id = task['task_id']
+    owner_user_id = int(task.get('user_id') or task.get('_userId') or 0)
+    if owner_user_id < 1:
+        raise ValueError('slides task requires an explicit owner user_id')
     try:
         _write_manifest(task, 'running')
         _slides_runtime.mark_running(task_id)
         _emit(task, build_phase(Phase.START, topic=task.get('topic', '')))
+        # Re-check inside the worker as well as at admission.  This protects
+        # crash-resumed manifests and future out-of-process worker adapters.
+        ensure_slides_runtime_ready()
         result = build_deck_from_topic(
             task['topic'], task['workdir'], lang=task.get('lang') or 'zh',
             style=task.get('style') or '', size=task.get('size') or (1280, 720),
             max_pages=int(task.get('max_pages') or 12),
+            creative_mode=task.get('creative_mode') or 'director',
             model=task.get('model') or None,
+            owner_user_id=owner_user_id,
             abort_event=task.get('abort_event'),
             emit=lambda ev: _emit(task, {'type': 'stage', **ev}))
         result['workdir'] = task['workdir']
@@ -69,11 +82,9 @@ def run_slides_task(task: dict) -> None:
         # 'done' by design; artifact_quality carries the truth.
         total = result.get('pages', 0)
         authored = result.get('authored_pages', 0)
-        degraded = bool(total and authored < total)
-        reason = ''
-        if degraded:
-            reason = (f'{total - authored} of {total} pages fell back to the '
-                      'minimal layout')
+        quality = result.get('quality') or {}
+        degraded = bool(quality.get('degraded'))
+        reason = str(quality.get('reason') or '')
         _write_manifest(task, 'degraded' if degraded else 'done')
         _emit(task, {'type': 'final', **result, 'degraded': degraded,
                      'degraded_reason': reason})
@@ -82,11 +93,40 @@ def run_slides_task(task: dict) -> None:
         logger.info('[Slides] %s %s — %d/%d pages authored, %d bytes',
                     task_id, 'degraded' if degraded else 'done',
                     authored, total, result.get('bytes', 0))
-    except InterruptedError:
+    except (InterruptedError, StageAborted):
         logger.info('[Slides] task %s aborted', task_id)
         _write_manifest(task, 'aborted')
         _slides_runtime.finish(task_id, error='aborted',
                                error_context='slides:abort')
+    except SlidesRuntimeUnavailable as e:
+        logger.error('[Slides] task %s has no render runtime: %s', task_id, e)
+        _write_manifest(task, 'error')
+        _slides_runtime.finish(task_id, error=e.error_envelope(),
+                               error_context='slides:runtime-readiness')
+    except StageFailed as e:
+        from lib.error_envelope import make_envelope
+        gate_detail = '; '.join(str(item) for item in e.errors[:4])
+        detail = f'{e.stage}: {gate_detail or e.detail}'
+        logger.error('[Slides] task %s stopped by quality gate: %s',
+                     task_id, detail)
+        _write_manifest(task, 'error')
+        _slides_runtime.finish(
+            task_id,
+            error=make_envelope(
+                'generic',
+                message='PPT 质量门禁未通过\nPPT quality gate did not pass',
+                detail=detail,
+                hint=(
+                    '流水线已保留通过校验的页面缓存。请稍后重试；系统只会重做'
+                    '失败页面，不会把兜底页、缺失预览或未解决的溢出当作成品。\n\n'
+                    'Validated page checkpoints were retained. Retry later; '
+                    'only failed pages will be re-authored, and fallback pages '
+                    'or unresolved layout defects will not be published.'),
+                context=f'slides:quality:{e.stage}',
+                source='lib.slides.engine',
+                retryable=True,
+            ),
+            error_context=f'slides:quality:{e.stage}')
     except Exception as e:
         logger.error('[Slides] task %s failed: %s', task_id, e, exc_info=True)
         _write_manifest(task, 'error')
@@ -109,6 +149,7 @@ def resume_interrupted_decks() -> int:
             max_pages=int(m.get('max_pages') or 12),
             size=tuple(m.get('size') or (1280, 720)),
             conv_id=m.get('conv_id') or '', model=m.get('model') or '',
+            creative_mode=m.get('creative_mode') or 'director',
             user_id=user_id)
         _slides_runtime.spawn(task_id, run_slides_task, task)
 
@@ -120,28 +161,51 @@ def resume_interrupted_decks() -> int:
 
 def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
                      max_pages: int = 12, size=(1280, 720),
-                     conv_id: str = '', model: str = '', user_id: int) -> dict:
+                     conv_id: str = '', model: str = '',
+                     creative_mode: str = 'director', user_id: int) -> dict:
     """Create + spawn a deck job; returns {task_id, deduped}."""
     from lib.slides.runtime import (
-        _cleanup_stale_slides_tasks, _new_slides_task,
-        _slides_index_get, _slides_index_register, _slides_runtime,
+        _claim_slides_task, _cleanup_stale_slides_tasks, _slides_runtime,
         _slides_task_id)
+    from lib.slides.contracts import (
+        normalise_slide_model,
+        normalise_slide_page_count,
+        normalise_slide_size,
+        normalise_slide_style,
+        normalise_slide_topic,
+    )
+    from lib.production.contracts import CREATIVE_MODES, normalise_creative_mode
 
     _cleanup_stale_slides_tasks()
-    key = (user_id, topic.strip(), lang, style.strip(), int(max_pages), tuple(size),
-           model.strip())
-    existing = _slides_index_get(key)
-    if existing:
-        return {'task_id': existing, 'deduped': True}
+    topic = normalise_slide_topic(topic)
+    style = normalise_slide_style(style)
+    model = normalise_slide_model(model)
+    creative_raw = str(creative_mode or '').strip().lower()
+    if creative_raw and creative_raw not in CREATIVE_MODES:
+        raise ValueError(
+            f'creative_mode must be one of {"|".join(CREATIVE_MODES)}')
+    creative_mode = normalise_creative_mode(creative_mode)
+    max_pages = normalise_slide_page_count(max_pages)
+    size = normalise_slide_size(size)
+    key = (user_id, topic, lang, style, max_pages, size, model, creative_mode)
+    # Fail before workdir creation, task registration, research, or LLM spend.
+    from lib.slides.readiness import ensure_slides_runtime_ready
+    ensure_slides_runtime_ready()
     tid = _slides_task_id()
     wd = os.path.join(slides_root(), 'jobs', tid)
-    os.makedirs(wd, exist_ok=True)
-    task = _new_slides_task(tid, topic=topic.strip(), workdir=wd, lang=lang,
-                            style=style.strip(), max_pages=int(max_pages),
-                            size=tuple(size), conv_id=conv_id,
-                            model=model.strip(), user_id=user_id)
-    _slides_index_register(key, tid)
+    task, existing = _claim_slides_task(
+        key, tid, topic=topic, workdir=wd, lang=lang, style=style,
+        max_pages=max_pages, size=size, conv_id=conv_id, model=model,
+        creative_mode=creative_mode, user_id=user_id)
+    if existing:
+        return {'task_id': existing, 'deduped': True}
+    try:
+        os.makedirs(wd, exist_ok=True)
+    except Exception as exc:
+        _slides_runtime.finish(tid, error=exc,
+                               error_context='slides:create-workdir')
+        raise
     _slides_runtime.spawn(tid, run_slides_task, task)
-    logger.info('[Slides] started %s topic=%r lang=%s pages=%d',
-                tid, topic[:60], lang, max_pages)
+    logger.info('[Slides] started %s topic=%r lang=%s pages=%d mode=%s',
+                tid, topic[:60], lang, max_pages, creative_mode)
     return {'task_id': tid, 'deduped': False}

@@ -78,7 +78,6 @@ from lib.orchestration_progress import (
 from lib.orchestration_runner_result import (
     OrchestrationAgentResult,
     OrchestrationAgentRunnerPort,
-    normalize_orchestration_agent_result,
 )
 from lib.orchestration_role_runtime import OrchestrationRoleRuntime
 from lib.orchestration_branch_runtime import OrchestrationBranchRuntime
@@ -87,7 +86,10 @@ from lib.orchestration_loop_runtime import (
     OrchestrationLoopAborted,
     OrchestrationLoopRuntime,
 )
-from lib.orchestration.loop_policy import DEFAULT_EXECUTOR_MAX_ITERATIONS
+from lib.orchestration.loop_policy import (
+    DEFAULT_EXECUTOR_MAX_ITERATIONS,
+    bounded_executor_iterations,
+)
 from lib.orchestration_parallel_runtime import (
     OrchestrationParallelAborted,
     OrchestrationParallelRuntime,
@@ -103,8 +105,6 @@ from lib.orchestration_trace import (
 )
 from lib.orchestration_transcript import (
     OrchestrationTranscript,
-    append_role_context,
-    subflow_deliverable,
 )
 
 logger = get_logger(__name__)
@@ -162,12 +162,14 @@ class FlowExecutor:
                  parent_task: dict | None = None,
                  all_tools: list | None = None,
                  model: str = '',
+                 model_routing_policy: str = 'role_tier',
                  project_path: str = '',
                  system_prompt_base: str = '',
                  thinking_enabled: bool = True,
                  subflow_resolver: Callable | None = None,
                  human_gate_ports: HumanGateRequestPorts | None = None,
                  human_gate_scope: str = '',
+                 human_gate_owner_user_id: int | None = None,
                  _agent_budget: OrchestrationAgentBudget | None = None,
                  _human_gate_identity: HumanGateRequestIdentity | None = None,
                  _subflow_depth: int = 0):
@@ -194,13 +196,14 @@ class FlowExecutor:
         # Nested executors share the root budget; expose its canonical ceiling
         # in diagnostics even if a caller supplied a different local value.
         self.max_agents = self._agent_budget.limit
-        self.max_iterations = max(1, int(max_iterations))
+        self.max_iterations = bounded_executor_iterations(max_iterations)
         self.max_parallel = max(1, int(max_parallel))
 
         self._default_runner_config = OrchestrationAgentRunnerConfig(
             parent_task=parent_task,
             all_tools=all_tools or [],
             model=model,
+            model_routing_policy=model_routing_policy,
             project_path=project_path,
             # Chat-launched flows inherit the resolved worker prompt. The
             # adapter must not silently drop project/system instructions.
@@ -223,6 +226,26 @@ class FlowExecutor:
         self._subflow_resolver = subflow_resolver
         self._subflow_depth = int(_subflow_depth)
         self._human_gate_ports = human_gate_ports
+        parent_owner_user_id = None
+        if isinstance(parent_task, dict) and parent_task.get('_userId') is not None:
+            from lib.tasks_pkg.manager import task_user_id
+            parent_owner_user_id = task_user_id(parent_task)
+        if human_gate_owner_user_id is not None:
+            from lib.identity import require_user_id
+            human_gate_owner_user_id = require_user_id(
+                human_gate_owner_user_id,
+                context='orchestration human gate owner',
+            )
+        if (parent_owner_user_id is not None
+                and human_gate_owner_user_id is not None
+                and parent_owner_user_id != human_gate_owner_user_id):
+            raise ValueError(
+                'orchestration human gate owner does not match parent task')
+        self._human_gate_owner_user_id = (
+            parent_owner_user_id
+            if parent_owner_user_id is not None
+            else human_gate_owner_user_id
+        )
         parent_task_id = (str(parent_task.get('id') or '')
                           if isinstance(parent_task, dict) else '')
         self._human_gate_identity = (
@@ -322,6 +345,7 @@ class FlowExecutor:
             abort_check=self._abort_check,
             ports=human_gate_ports,
             identity=self._human_gate_identity,
+            owner_user_id=self._human_gate_owner_user_id,
         )
         self._execution_runtime = OrchestrationExecutionRuntime(
             definition=self.defn,
@@ -478,28 +502,11 @@ class FlowExecutor:
             **self._default_runner_config.executor_options(),
             subflow_resolver=self._subflow_resolver,
             human_gate_ports=self._human_gate_ports,
+            human_gate_owner_user_id=self._human_gate_owner_user_id,
             _agent_budget=self._agent_budget,
             _human_gate_identity=self._human_gate_identity,
             _subflow_depth=self._subflow_depth + 1,
         )
-
-    @staticmethod
-    def _subflow_deliverable(result: dict) -> str:
-        """Extract the value an isolated subflow exports across its membrane.
-
-        A child engine's ``final`` is its accumulated context — it carries
-        inner ``[role]`` block labels and may end on a verifier verdict
-        (e.g. a critic's ``VERDICT: STOP``), neither of which should leak to
-        the parent. The black box's real output is its last *producer*
-        (non-verifier) turn. Falls back to the raw ``final`` when the child
-        had no producer turn (e.g. an empty or all-verifier flow).
-        """
-        return subflow_deliverable(result, verifier_roles=VERIFIER_ROLES)
-
-    def _count_deliverables(self, res) -> tuple:
-        """Compatibility proxy for the normalized runner usage contract."""
-        return normalize_orchestration_agent_result(
-            res).tool_usage.engine_tuple()
 
     def _aggregate_iter_producers(self) -> dict:
         """Compatibility proxy for the extracted producer progress ledger."""
@@ -531,10 +538,6 @@ class FlowExecutor:
     @_last_producer_snapshot.setter
     def _last_producer_snapshot(self, snapshot: dict) -> None:
         self._progress.replace_latest(snapshot)
-
-    def _compose_shared_context(self, nid: str, upstream: str) -> str:
-        """Compatibility proxy for the extracted feedback state channel."""
-        return self._feedback.compose_shared_context(nid, upstream)
 
     @property
     def _node_memory(self) -> dict[str, str]:
@@ -601,10 +604,6 @@ class FlowExecutor:
         return self._replan_runtime.run(
             planner_id, context, defect, replan)
 
-    def _build_progress_summary(self) -> str:
-        """Compatibility proxy for the extracted replan progress projector."""
-        return self._replan_runtime.progress_summary()
-
     def _run_branch(self, bid: str, context: str) -> str | None:
         """Compatibility bridge to the focused one-of-many router."""
         return self._branch_runtime.run(bid, context)
@@ -644,12 +643,6 @@ class FlowExecutor:
 
     # ── verdict / context ───────────────────────────────────────────
 
-    def _last_verifier_output(self) -> str:
-        return self._transcript_ledger.last_verifier_output(VERIFIER_ROLES)
-
-    def _last_verifier_role(self) -> str:
-        return self._transcript_ledger.last_verifier_role(VERIFIER_ROLES)
-
     def _classify_verdict(self, text: str, *, verifier_role: str = '') -> tuple:
         """Classify a verifier's output into ``(phase, plan_defect)``.
 
@@ -669,25 +662,6 @@ class FlowExecutor:
         res = _classify_verdict_core(
             text, verifier_role=verifier_role, loose_fallback=True)
         return res['phase'], res['plan_defect']
-
-    def _detect_stuck(self, *, verifier_role: str = '') -> bool:
-        """True if consecutive verifier feedbacks are >_STUCK_JACCARD similar.
-
-        Delegates to the shared :func:`lib.agent_verdict.detect_stuck` — a
-        repeating verifier means the loop is not converging; the loop breaks
-        out rather than burning iterations.
-
-        The window depends on the verifier: a ``virtual_user`` uses
-        :data:`AUTOPILOT_STUCK_WINDOW` (3) — parity with the standalone
-        autopilot loop, where two near-identical VU nudges can be a legitimate
-        "you didn't do it, try again" and only three-in-a-row is genuinely
-        stuck. Any other verifier (critic / reviewer) keeps the default
-        window (2) so existing Studio-flow semantics are byte-unchanged.
-        """
-        return self._feedback.detects_stuck(verifier_role=verifier_role)
-
-    def _append_context(self, context: str, role: str, out: str) -> str:
-        return append_role_context(context, role, out)
 
     # ── compatibility patch point for the extracted default adapter ─────
 

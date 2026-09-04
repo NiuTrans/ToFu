@@ -47,7 +47,13 @@ _SQLITE_CONNECT_ALLOWLIST = {
     'scripts/migrate_pg_to_sqlite.py',
     'scripts/migrate_sqlite_to_postgres.py',
 }
-_TRANSCRIPT_ARCHIVE_ADMIN_ALLOWLIST: set[str] = set()
+_TRANSCRIPT_ARCHIVE_ADMIN_ALLOWLIST = {
+    # Explicit stopped-server maintenance only: holds ProjectLease and reads
+    # the frozen array solely to prove legacy array ↔ normalized rows ↔
+    # Sidecar archive parity before retiring redundant mirrors. It never
+    # returns archive content to application code or writes current authority.
+    'scripts/storage_deep_clean.py',
+}
 _EXPLICIT_MAINTENANCE_AUTHORITY_ALLOWLIST = {
     'debug/_standalone_guard.py',
     'debug/backfill_search_text_originalcontent.py',

@@ -21,6 +21,7 @@ Bare-CI-safe: pure in-process objects, no DB / node / network.
 import importlib
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -416,7 +417,7 @@ async def test_chat_sse_slot_is_keyed_by_owner_and_refusal_has_retry_after(
 
 
 @pytest.mark.anyio
-async def test_chat_stream_heartbeat_refreshes_and_close_releases_slot(
+async def test_chat_stream_close_releases_observer_slot_without_aborting_task(
         monkeypatch):
     from types import SimpleNamespace
 
@@ -441,8 +442,9 @@ async def test_chat_stream_heartbeat_refreshes_and_close_releases_slot(
     monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
     monkeypatch.setattr(chat, 'unregister_waiter', unregistered.append)
 
+    task = {'id': 'stream-task', 'status': 'running', 'aborted': False}
     stream = chat._stream_generator(
-        {'id': 'stream-task', 'status': 'running'},
+        task,
         'test-model',
         'completion-id',
         sse_slot_token='owner-slot',
@@ -452,33 +454,64 @@ async def test_chat_stream_heartbeat_refreshes_and_close_releases_slot(
     await stream.aclose()
     assert released == ['owner-slot']
     assert unregistered == ['stream-task']
+    assert task['status'] == 'running'
+    assert task['aborted'] is False
 
 
 @pytest.mark.anyio
 async def test_chat_completion_admission_refusal_releases_stream_slot(
         flask_app, monkeypatch):
+    from types import SimpleNamespace
+    from lib.agent_core.execution_session import ExecutionSession
+
     import lib.tasks_pkg.manager as task_manager
     import routes.api_v1.chat as chat
 
     monkeypatch.setattr(
         task_manager,
         'create_task',
-        lambda *_args, **_kwargs: {'id': 'refused-task', 'status': 'running'},
+        lambda *_args, **_kwargs: {
+            'id': 'refused-task',
+            'status': 'pending',
+            '_executionSession': ExecutionSession(
+                execution_id='refused-task', kind='chat', owner_user_id=1),
+        },
     )
-    monkeypatch.setattr(chat.controller, 'try_acquire', lambda: False)
+    monkeypatch.setattr(chat.controller, 'acquire', lambda: None)
     monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
     released = []
     monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
+    # This backpressure contract is deliberately storage-free. Supply the
+    # already-authorized route-group seam so the test reaches admission while
+    # still sending the native structured model shape.
+    route_group = SimpleNamespace(pin_id='test-route')
+    selection = SimpleNamespace(
+        model=SimpleNamespace(public_dict=lambda: {
+            'creator_id': 'tofu-test', 'model_id': 'stub-model',
+        }),
+        provider_offering=None,
+    )
+    monkeypatch.setattr(
+        chat, 'mint_native_request_route',
+        lambda *_args, **_kwargs: ('stub-model', selection, route_group),
+    )
+    monkeypatch.setattr(
+        chat, 'guard_model_relay_or_dispose', lambda _group: None)
+    disposed = []
+    monkeypatch.setattr(
+        chat, 'dispose_routed_slot_group', disposed.append)
 
     response = await flask_app.test_client().post(
         '/api/v1/chat/completions',
         json={
+            'model': {'creator_id': 'tofu-test', 'model_id': 'stub-model'},
             'messages': [{'role': 'user', 'content': 'bounded'}],
             'stream': True,
         },
     )
     assert response.status_code == 503
     assert released == ['slot']
+    assert disposed == [route_group]
 
 
 @pytest.mark.anyio
@@ -490,12 +523,29 @@ async def test_direct_chat_stream_releases_admission_and_sse_slots(
     async def frames():
         yield 'data: [DONE]\n\n'
 
+    route_group = SimpleNamespace(pin_id='direct-route')
+    selection = SimpleNamespace(
+        model=SimpleNamespace(public_dict=lambda: {
+            'creator_id': 'tofu-test', 'model_id': 'stub-model',
+        }),
+        provider_offering=None,
+    )
+    monkeypatch.setattr(
+        direct, 'mint_native_request_route',
+        lambda *_args, **_kwargs: ('stub-model', selection, route_group),
+    )
+    monkeypatch.setattr(
+        direct, 'guard_model_relay_or_dispose', lambda _group: None)
+    disposed = []
+    monkeypatch.setattr(
+        direct, 'dispose_routed_slot_group', disposed.append)
+
     monkeypatch.setattr(direct, 'run_direct_stream',
                         lambda *_args, **_kwargs: frames())
-    monkeypatch.setattr(direct.controller, 'try_acquire', lambda: True)
+    monkeypatch.setattr(direct.controller, 'acquire', lambda: 'admission-lease')
     admission_releases = []
     monkeypatch.setattr(direct.controller, 'release',
-                        lambda: admission_releases.append(True))
+                        lambda lease: admission_releases.append(lease) or True)
     monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
     refreshed = []
     released = []
@@ -504,13 +554,106 @@ async def test_direct_chat_stream_releases_admission_and_sse_slots(
 
     response = await flask_app.test_client().post(
         '/api/v1/chat/stream-direct',
-        json={'messages': [{'role': 'user', 'content': 'bounded'}]},
+        json={
+            'model': {'creator_id': 'tofu-test', 'model_id': 'stub-model'},
+            'messages': [{'role': 'user', 'content': 'bounded'}],
+        },
     )
     assert response.status_code == 200
     assert await response.get_data(as_text=True) == 'data: [DONE]\n\n'
     assert refreshed == ['slot']
     assert released == ['slot']
-    assert admission_releases == [True]
+    assert admission_releases == ['admission-lease']
+    assert disposed == [route_group]
+
+
+@pytest.mark.anyio
+async def test_direct_chat_terminal_settles_usage_billing_and_route_once(
+        flask_app, monkeypatch):
+    import routes.api_v1.chat as chat
+    import routes.api_v1.chat_direct as direct
+    from lib.llm.stream_result import ProviderStreamResult
+
+    auth = SimpleNamespace(
+        owner_user_id=1, tenant_id=None, account_user_id='account-1',
+        key_id='key-1', name='test-key',
+    )
+    route_group = SimpleNamespace(pin_id='direct-billed-route')
+    selection = SimpleNamespace(
+        model=SimpleNamespace(public_dict=lambda: {
+            'creator_id': 'tofu-test', 'model_id': 'stub-model',
+        }),
+        provider_offering=None,
+    )
+    monkeypatch.setattr(direct, 'current_auth', lambda: auth)
+    monkeypatch.setattr(
+        direct, 'mint_native_request_route',
+        lambda *_args, **_kwargs: ('stub-model', selection, route_group),
+    )
+    monkeypatch.setattr(
+        direct, 'guard_model_relay_or_dispose', lambda _group: None)
+
+    reservations = []
+    monkeypatch.setattr(
+        direct, 'reserve_for_task',
+        lambda task, **kwargs: reservations.append((task['id'], kwargs)) or 17,
+    )
+    settlements = []
+
+    def settle(task, **kwargs):
+        settlements.append((dict(task['usage']), kwargs))
+        return {'cost_micro': 3, 'reserved_micro': 17}
+
+    monkeypatch.setattr(direct, 'settle_task', settle)
+    disposed = []
+    monkeypatch.setattr(
+        direct, 'dispose_routed_slot_group', disposed.append)
+    monkeypatch.setattr(direct, 'record_tokens', lambda *_args: None)
+    monkeypatch.setattr(direct, 'record_usage', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(direct.controller, 'acquire', lambda: 'admission-lease')
+    admission_releases = []
+    monkeypatch.setattr(
+        direct.controller, 'release',
+        lambda lease: admission_releases.append(lease) or True)
+    monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
+    monkeypatch.setattr(chat.sse_limiter, 'refresh', lambda _token: None)
+    monkeypatch.setattr(chat.sse_limiter, 'release', lambda _token: None)
+
+    async def frames(*_args, **kwargs):
+        kwargs['on_dispatch_started']()
+        kwargs['dispatch_terminal']['result'] = ProviderStreamResult.from_legacy(
+            {'content': 'ok'}, 'stop', {
+                'prompt_tokens': 4,
+                'completion_tokens': 2,
+                '_dispatch': {'provider_id': 'provider-1'},
+            },
+        )
+        await kwargs['on_dispatch_settled']()
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(direct, 'run_direct_stream', frames)
+
+    response = await flask_app.test_client().post(
+        '/api/v1/chat/stream-direct',
+        json={
+            'model': {'creator_id': 'tofu-test', 'model_id': 'stub-model'},
+            'messages': [{'role': 'user', 'content': 'bounded'}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert await response.get_data(as_text=True) == 'data: [DONE]\n\n'
+    assert len(reservations) == 1
+    assert len(settlements) == 1
+    settled_usage, settled_identity = settlements[0]
+    assert settled_usage['prompt_tokens'] == 4
+    assert settled_usage['completion_tokens'] == 2
+    assert settled_usage['_dispatch']['provider_id'] == 'provider-1'
+    assert settled_identity == {
+        'user_id': 'account-1', 'model': 'stub-model',
+        'raise_on_error': True}
+    assert disposed == [route_group]
+    assert admission_releases == ['admission-lease']
 
 
 if __name__ == '__main__':

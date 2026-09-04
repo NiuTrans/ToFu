@@ -12,8 +12,8 @@ def runtime_capabilities(runtime=None) -> dict:
         from lib.version import __version__ as version
     except ImportError:  # pragma: no cover
         version = 'unknown'
-    default_model = str(getattr(runtime, 'default_model', '') or '')
-    provider = getattr(runtime, 'provider', None)
+    default_model = getattr(runtime, 'default_model', None)
+    model_routing = getattr(runtime, 'model_routing', None)
     return {
         'tofu_version': version,
         'api_version': 'v1',
@@ -32,23 +32,25 @@ def runtime_capabilities(runtime=None) -> dict:
             'durable_memory': False,
             'durable_scheduler': False,
             'cross_conversation_state': False,
-            'provider_setup_ui': True,
+            'model_routing_setup_ui': True,
         },
         'state': {
             'authority': 'process-memory',
             'survives_restart': False,
             'resume_scope': 'current process lifetime',
         },
-        'provider': {
-            'modes': ['managed-default', 'runtime-default', 'request-override'],
-            'required_fields': ['base_url', 'model'],
-            'optional_fields': ['api_key', 'extra_headers', 'thinking_format'],
-            'api_key_may_be_empty_for_local_engines': True,
-            'configured': provider is not None,
-            'source': str(getattr(runtime, 'provider_source', '') or 'runtime'),
-            'default': provider.public_dict() if provider is not None else None,
+        'model_routing': {
+            'contract_version': 'tofu.model-routing/v2',
+            'modes': ['runtime-default', 'request-override'],
+            'required_fields': [
+                'model_routing', 'model', 'credential_secrets'],
+            'configured': model_routing is not None,
+            'source': str(getattr(
+                runtime, 'model_routing_source', '') or 'runtime'),
+            'default': (model_routing.public_dict()
+                        if model_routing is not None else None),
         },
-        'models': ([{'id': default_model, 'default': True}]
+        'models': ([{'ref': dict(default_model), 'default': True}]
                    if default_model else []),
         'config_schema': {
             'thinking': sorted(THINKING_DEPTHS),

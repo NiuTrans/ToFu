@@ -8,6 +8,7 @@ import time
 import pytest
 
 pytestmark = pytest.mark.unit
+pytest.importorskip('websockets', reason='optional websockets dependency not installed')
 
 
 class _FakeConnection:
@@ -111,6 +112,21 @@ def test_websocket_reuses_response_id_and_sends_only_new_tool_output(
     assert connection.closed is True
 
 
+def test_incremental_input_preserves_excess_occurrences_not_set_membership():
+    from lib.llm import responses_websocket as ws
+
+    item = {
+        'type': 'function_call_output', 'call_id': 'recycled-call',
+        'output': 'same receipt',
+    }
+    session = ws._Session(connection=None)
+    session.seen_external[ws._external_key(item)] = 1
+
+    delta = ws._incremental_input(session, [dict(item), dict(item)])
+
+    assert delta == [item]
+
+
 def test_websocket_protocol_activity_outlives_stream_idle_window(
         monkeypatch):
     from lib.llm._sse_core import prepare_request
@@ -197,4 +213,100 @@ def test_websocket_transport_silence_finalizes_as_premature_close(monkeypatch):
     assert result.state is ProviderStreamState.PREMATURE_CLOSE
     assert result.usage['_failure_stage'] == 'midstream_close'
     assert result.usage['_missing_done'] is True
+    assert connection.closed is True
+
+
+def test_unverified_partial_tool_response_never_advances_socket_state(
+        monkeypatch):
+    from dataclasses import replace
+
+    from lib.llm._sse_core import prepare_request
+    from lib.llm import responses_websocket as ws
+    from lib.llm.stream_result import ProviderStreamState
+
+    class PartialToolConnection:
+        def __init__(self):
+            self.events = []
+            self.closed = False
+
+        def send(self, _payload):
+            self.events = [{
+                'type': 'response.output_item.added', 'output_index': 0,
+                'item': {
+                    'type': 'function_call', 'id': 'partial-item',
+                    'call_id': 'partial-call', 'name': 'read_files',
+                    'arguments': '{}',
+                },
+            }]
+
+        def recv(self, timeout=None):
+            if self.events:
+                return json.dumps(self.events.pop(0))
+            time.sleep(float(timeout or 0))
+            raise TimeoutError
+
+        def close(self):
+            self.closed = True
+
+    ws._sessions().clear()
+    connection = PartialToolConnection()
+    monkeypatch.setattr(
+        'websockets.sync.client.connect', lambda *args, **kwargs: connection)
+    monkeypatch.setattr('lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.08)
+    original_finalize = ws.SSEAccumulator.finalize
+
+    def compatibility_tool_finish(accumulator, *args, **kwargs):
+        result = original_finalize(accumulator, *args, **kwargs)
+        return replace(result, compatibility_finish_reason='tool_calls')
+
+    monkeypatch.setattr(ws.SSEAccumulator, 'finalize', compatibility_tool_finish)
+    plan = prepare_request(
+        _canonical_body(with_tool_output=False), api_key='key',
+        base_url='https://api.openai.com/v1', api_protocol='responses')
+    # Exercise the dangerous compatibility shape directly: partial tools plus
+    # a stale/non-terminal response token must still never keep the session.
+    plan.wire_translator.response_id = 'resp-partial'
+
+    result = ws.stream_responses_websocket(plan)
+
+    assert result.state is ProviderStreamState.PREMATURE_CLOSE
+    assert result.finish_reason == 'tool_calls'
+    assert connection.closed is True
+    assert ws._sessions() == {}
+
+
+def test_non_object_websocket_event_is_typed_malformed_stream(monkeypatch):
+    from lib.llm._sse_core import prepare_request
+    from lib.llm import responses_websocket as ws
+    from lib.llm.stream_result import ProviderStreamState
+
+    class InvalidShapeConnection:
+        def __init__(self):
+            self.closed = False
+            self.sent = False
+
+        def send(self, _payload):
+            self.sent = True
+
+        def recv(self, timeout=None):
+            if self.sent:
+                self.sent = False
+                return json.dumps(['not', 'an', 'event'])
+            raise TimeoutError
+
+        def close(self):
+            self.closed = True
+
+    ws._sessions().clear()
+    connection = InvalidShapeConnection()
+    monkeypatch.setattr(
+        'websockets.sync.client.connect', lambda *args, **kwargs: connection)
+    plan = prepare_request(
+        _canonical_body(with_tool_output=False), api_key='key',
+        base_url='https://api.openai.com/v1', api_protocol='responses')
+
+    result = ws.stream_responses_websocket(plan)
+
+    assert result.state is ProviderStreamState.MALFORMED_STREAM
+    assert result.evidence.malformed_frame_count == 1
     assert connection.closed is True

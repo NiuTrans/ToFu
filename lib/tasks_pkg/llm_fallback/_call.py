@@ -14,17 +14,22 @@ The reactive-compaction retry state (``_reactive_compact_attempts`` /
 
 from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.cgroup_guard import MemoryPressureError, approx_body_bytes
-from lib.llm import AbortedError, build_body
+from lib.llm import AbortedError, build_body, model_supports_vision
 from lib.llm.stream_result import ensure_provider_stream_result
 from lib.llm_error_format import format_llm_error_for_user
 from lib.llm_errors import _ERR_BODY_LIMIT
 from lib.log import audit_log, get_logger
 from lib.llm_dispatch.retry_i18n import display_model_name as _display_model_name
 from lib.tasks_pkg.llm_fallback._retry import (
+    _fallback_max_429_attempts,
     _flag_empty_stop_for_retry,
     _get_fallback_model,
+    _get_pool_rescue_model,
 )
-from lib.tasks_pkg.llm_fallback._usage import _emit_round_usage
+from lib.tasks_pkg.llm_fallback._usage import (
+    _emit_round_usage,
+    project_usage_for_round_record,
+)
 from lib.tasks_pkg.manager._events import append_event
 from lib.tasks_pkg.manager._stream import stream_llm_response
 
@@ -130,15 +135,17 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
     vendor rejected) — the turn used to die with a "check your API keys"
     envelope even though other models could have completed it. This helper
     makes ONE more dispatch attempt across every remaining (key, model)
-    slot: ``pool_wide=True`` (non-strict, no preferred model) and
-    ``exclude_models`` skips the models already proven dead in this chain,
-    so the rescue cannot re-enter their failure / 429 wall.
+    slot: ``pool_wide=True`` stays non-strict, but softly prefers the configured
+    default model before score-ranked catalogue alternatives.
+    ``exclude_models`` skips the models already proven dead in this chain, so
+    the rescue cannot re-enter their failure / 429 wall.
 
     Returns the standard OK result dict on rescue success, else ``None``
     (the caller then surfaces the original error envelope unchanged).
     """
     tid = task['id'][:8]
     failed_models = {m for m in (failed_models or set()) if m}
+    rescue_prefer_model = _get_pool_rescue_model(failed_models)
 
     # ── Gate: is there anything healthy BEYOND the failed models? ──
     # A probe failure must not suppress the rescue attempt (the attempt is
@@ -184,7 +191,9 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
         stream_result = ensure_provider_stream_result(stream_llm_response(
             task, _rescue_body, tag=f'R{round_num+1}-RESCUE',
             on_tool_call_ready=on_tool_call_ready,
-            pool_wide=True, exclude_models=failed_models))
+            pool_wide=True, exclude_models=failed_models,
+            pool_prefer_model=rescue_prefer_model or None,
+            max_429_attempts=_fallback_max_429_attempts(task)))
         assistant_msg, finish_reason, usage = stream_result
     except Exception as e3:
         if isinstance(e3, AbortedError):
@@ -228,7 +237,8 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
             if isinstance(v, (int, float)):
                 accumulated_usage[k] = accumulated_usage.get(k, 0) + v
         api_rounds.append({'round': round_num + 1, 'model': _rescue_model,
-                           'usage': dict(usage), 'tag': f'R{round_num+1}-RESCUE'})
+                           'usage': project_usage_for_round_record(usage),
+                           'tag': f'R{round_num+1}-RESCUE'})
         _emit_round_usage(task, round_num + 1, _rescue_model, usage,
                           tag=f'R{round_num+1}-RESCUE')
         for _bill in (usage.get('_extra_billing_rounds') or []):
@@ -239,12 +249,14 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
             api_rounds.append({
                 'round': round_num + 1,
                 'model': _bill.get('model') or _rescue_model,
-                'usage': dict(_bu),
+                'usage': project_usage_for_round_record(_bu),
                 'tag': _bill.get('tag') or f'R{round_num+1}-RESCUE-DISCARDED',
+                'responseAuthoring': False,
             })
             _emit_round_usage(task, round_num + 1,
                               _bill.get('model') or _rescue_model, _bu,
-                              tag=_bill.get('tag') or f'R{round_num+1}-RESCUE-DISCARDED')
+                              tag=_bill.get('tag') or f'R{round_num+1}-RESCUE-DISCARDED',
+                              response_authoring=False)
 
     audit_log('model_fallback', old=original_model, new=_rescue_model,
               reason=f'pool-rescue: {_rk_kind}: {_rk_detail[:160]}',
@@ -301,7 +313,8 @@ def _learn_context_limit_from_overflow(task, model, error, tid):
 
 
 def _prepare_reactive_retry_body(task, body, model, messages, tool_list,
-                                 preset, thinking_enabled, cause, tid):
+                                 preset, thinking_enabled, cause, tid,
+                                 *, vision_fallback_from=''):
     """Compact derived context and rebuild one same-model retry body.
 
     Compaction/body rebuilding are recovery mechanics. If either mechanic has
@@ -328,6 +341,7 @@ def _prepare_reactive_retry_body(task, body, model, messages, tool_list,
             tools=tool_list,
             response_format=body.get('response_format'),
             stream=True,
+            vision_fallback_from=vision_fallback_from,
         )
     except Exception as prep_error:
         logger.error(
@@ -352,7 +366,7 @@ def _record_reactive_usage(task, usage, model, round_num,
     api_rounds.append({
         'round': round_num + 1,
         'model': model,
-        'usage': dict(usage),
+        'usage': project_usage_for_round_record(usage),
         'tag': f'R{round_num+1}-REACTIVE',
     })
     _emit_round_usage(
@@ -368,17 +382,20 @@ def _record_reactive_usage(task, usage, model, round_num,
         api_rounds.append({
             'round': round_num + 1,
             'model': billed_model,
-            'usage': dict(billed_usage),
+            'usage': project_usage_for_round_record(billed_usage),
             'tag': tag,
+            'responseAuthoring': False,
         })
         _emit_round_usage(
-            task, round_num + 1, billed_model, billed_usage, tag=tag)
+            task, round_num + 1, billed_model, billed_usage, tag=tag,
+            response_authoring=False)
 
 
 def _attempt_request_payload_recovery(
         task, body, model, round_num, tool_list, messages, preset,
         thinking_enabled, accumulated_usage, api_rounds,
-        on_tool_call_ready, cause):
+        on_tool_call_ready, cause, *, max_429_attempts=None,
+        vision_fallback_from=''):
     """Shrink a locally-derived request and retry the same model once.
 
     Returns ``(success_result, next_error, retry_body)``. ``next_error`` is
@@ -411,7 +428,7 @@ def _attempt_request_payload_recovery(
 
     retry_body = _prepare_reactive_retry_body(
         task, body, model, messages, tool_list, preset, thinking_enabled,
-        cause, tid)
+        cause, tid, vision_fallback_from=vision_fallback_from)
     if retry_body is None:
         return None, cause, None
 
@@ -440,7 +457,8 @@ def _attempt_request_payload_recovery(
     try:
         stream_result = ensure_provider_stream_result(stream_llm_response(
             task, retry_body, tag=f'R{round_num+1}-REACTIVE',
-            on_tool_call_ready=on_tool_call_ready))
+            on_tool_call_ready=on_tool_call_ready,
+            max_429_attempts=max_429_attempts))
         assistant_msg, finish_reason, usage = stream_result
     except Exception as retry_error:
         if isinstance(retry_error, AbortedError):
@@ -495,6 +513,48 @@ def _clear_failed_fallback_stamp(task):
     for key in ('_fallback_model', '_fallback_from',
                 '_fallback_reason', '_fallback_kind'):
         task.pop(key, None)
+
+
+def _settle_failed_fallback(task, error, *, original_model, fallback_model,
+                            preset, thinking_enabled, round_num):
+    """Return a normal loop break carrying a typed terminal fallback error.
+
+    A configured fallback is already an inner recovery attempt. Once it (and
+    any bounded pool rescue) fails, raising into a separate fatal path makes
+    client settlement depend on exception plumbing and permits whole-turn
+    retries to reset the same wait budget. Normal loop finalization guarantees
+    one ``done`` event with ``done.error``; ``autoRetryExhausted`` keeps the
+    bounded failure bounded while preserving manual Retry.
+    """
+    envelope = format_llm_error_for_user(
+        error,
+        model=fallback_model,
+        context=f'both-failed ({original_model}→{fallback_model})',
+        source='llm-fallback',
+    )
+    envelope.update({
+        'autoRetryExhausted': True,
+        'fallbackFailed': True,
+        'fallbackFrom': original_model,
+        'fallbackModel': fallback_model,
+    })
+    for field in ('attempts', 'limit',
+                  'credential_delivery_anomaly_attempts',
+                  'credential_delivery_anomaly_limit'):
+        value = getattr(error, field, None)
+        if value is not None:
+            envelope[field] = value
+    task['error'] = envelope
+    return {
+        'assistant_msg': {'role': 'assistant', 'content': ''},
+        'finish_reason': 'error',
+        'usage': None,
+        'model': fallback_model,
+        'preset': preset,
+        'thinking_enabled': thinking_enabled,
+        '_loop_action': 'break',
+        '_loop_exit_reason': f'both_models_failed_round_{round_num}',
+    }
 
 
 def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
@@ -614,7 +674,8 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 if isinstance(v, (int, float)):
                     accumulated_usage[k] = accumulated_usage.get(k, 0) + v
             api_rounds.append({'round': round_num + 1, 'model': model,
-                               'usage': dict(usage), 'tag': f'R{round_num+1}'})
+                               'usage': project_usage_for_round_record(usage),
+                               'tag': f'R{round_num+1}'})
             _emit_round_usage(task, round_num + 1, model, usage, tag=f'R{round_num+1}')
             # HONEST ACCOUNTING: bill every DISCARDED FloorRetry attempt the
             #   gateway processed. Each was a real request the provider charged
@@ -630,13 +691,15 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 api_rounds.append({
                     'round': round_num + 1,
                     'model': _bill.get('model') or model,
-                    'usage': dict(_bill_usage),
+                    'usage': project_usage_for_round_record(_bill_usage),
                     'tag': _bill.get('tag') or f'R{round_num+1}-DISCARDED',
+                    'responseAuthoring': False,
                 })
                 _emit_round_usage(task, round_num + 1,
                                   _bill.get('model') or model,
                                   _bill_usage,
-                                  tag=_bill.get('tag') or f'R{round_num+1}-DISCARDED')
+                                  tag=_bill.get('tag') or f'R{round_num+1}-DISCARDED',
+                                  response_authoring=False)
             if _extra:
                 logger.warning('[%s] conv=%s billed %d discarded FloorRetry '
                                'attempt(s) into api_rounds/accumulated_usage — '
@@ -940,6 +1003,12 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                        tid, original_model, _FALLBACK_MODEL,
                        _fb_reason[:200])
 
+        _vision_fallback_from = (
+            original_model
+            if (model_supports_vision(original_model)
+                and not model_supports_vision(_FALLBACK_MODEL))
+            else ''
+        )
         fallback_body = build_body(
             _FALLBACK_MODEL, messages,
             max_tokens=max_tokens,
@@ -950,6 +1019,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             tools=tool_list,
             response_format=body.get('response_format'),
             stream=True,
+            vision_fallback_from=_vision_fallback_from,
         )
         # Preserve the session-stable TTL latch key on the fallback body
         #   too (see reactive-compact rebuild above). The fallback model is a
@@ -960,7 +1030,8 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         try:
             stream_result = ensure_provider_stream_result(
                 stream_llm_response(
-                    task, fallback_body, tag=f'R{round_num+1}-FALLBACK'))
+                    task, fallback_body, tag=f'R{round_num+1}-FALLBACK',
+                    max_429_attempts=_fallback_max_429_attempts(task)))
             assistant_msg, finish_reason, usage = stream_result
             last_finish_reason = finish_reason
 
@@ -986,8 +1057,12 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 for k, v in usage.items():
                     if isinstance(v, (int, float)):
                         accumulated_usage[k] = accumulated_usage.get(k, 0) + v
-                api_rounds.append({'round': round_num + 1, 'model': _FALLBACK_MODEL,
-                                   'usage': dict(usage), 'tag': f'R{round_num+1}-FALLBACK'})
+                api_rounds.append({
+                    'round': round_num + 1,
+                    'model': _FALLBACK_MODEL,
+                    'usage': project_usage_for_round_record(usage),
+                    'tag': f'R{round_num+1}-FALLBACK',
+                })
                 _emit_round_usage(task, round_num + 1, _FALLBACK_MODEL, usage,
                                    tag=f'R{round_num+1}-FALLBACK')
                 # Honest accounting (same as primary path)
@@ -999,14 +1074,16 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                     api_rounds.append({
                         'round': round_num + 1,
                         'model': _bill.get('model') or _FALLBACK_MODEL,
-                        'usage': dict(_bu),
+                        'usage': project_usage_for_round_record(_bu),
                         'tag': _bill.get('tag') or f'R{round_num+1}-FALLBACK-DISCARDED',
+                        'responseAuthoring': False,
                     })
                     _emit_round_usage(task, round_num + 1,
                                       _bill.get('model') or _FALLBACK_MODEL,
                                       _bu,
                                       tag=_bill.get('tag') or
-                                      f'R{round_num+1}-FALLBACK-DISCARDED')
+                                      f'R{round_num+1}-FALLBACK-DISCARDED',
+                                      response_authoring=False)
 
             _log_stream_attempt_outcome(
                 task,
@@ -1044,7 +1121,9 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 _recovered, e2, _retry_body = _attempt_request_payload_recovery(
                     task, fallback_body, _FALLBACK_MODEL, round_num,
                     tool_list, messages, 'medium', True,
-                    accumulated_usage, api_rounds, on_tool_call_ready, e2)
+                    accumulated_usage, api_rounds, on_tool_call_ready, e2,
+                    max_429_attempts=_fallback_max_429_attempts(task),
+                    vision_fallback_from=_vision_fallback_from)
                 if _retry_body is not None:
                     fallback_body = _retry_body
                 if _recovered is not None:
@@ -1081,28 +1160,16 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             # fallback happened; claiming one that failed is a lie. (A
             # successful pool-rescue above re-stamps with its own values.)
             _clear_failed_fallback_stamp(task)
-            if tool_call_happened:
-                _user_err = format_llm_error_for_user(
-                    e2, model=_FALLBACK_MODEL,
-                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})',
-                    source='llm-fallback')
-                task['error'] = _user_err
-                logger.warning('[%s] 🛑 Both %s and fallback failed — giving up',
-                               tid, original_model, exc_info=True)
-                return {
-                    'assistant_msg': {'role': 'assistant', 'content': ''},
-                    'finish_reason': 'error', 'usage': None,
-                    'model': _FALLBACK_MODEL, 'preset': 'medium',
-                    'thinking_enabled': True,
-                    '_loop_action': 'break',
-                    '_loop_exit_reason': f'both_models_failed_round_{round_num}',
-                }
-            # Attach typed envelope for top-level FATAL handler.
-            try:
-                e2._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
-                    e2, model=_FALLBACK_MODEL,
-                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})',
-                    source='llm-fallback')
-            except Exception as _attr_err:
-                logger.debug('[%s] Could not attach _user_message: %s', tid, _attr_err)
-            raise
+            logger.warning(
+                '[%s] 🛑 Both %s and fallback %s failed — settling normal '
+                'DONE(error) (prior_tool_calls=%s)',
+                tid, original_model, _FALLBACK_MODEL, tool_call_happened)
+            return _settle_failed_fallback(
+                task,
+                e2,
+                original_model=original_model,
+                fallback_model=_FALLBACK_MODEL,
+                preset='medium',
+                thinking_enabled=True,
+                round_num=round_num,
+            )

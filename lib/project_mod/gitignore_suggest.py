@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 _PROBE_BUDGET_S = 5.0            # hard wall for the depth-1 scan
 _MIN_ENTRY_COUNT = 1000          # only suggest dirs this size or bigger
 _MAX_SUGGESTIONS_PER_BASE = 5    # registry cap per project
+_MAX_BASES = 128                  # distinct project roots retained process-wide
 _SUGGESTION_TTL_S = 24 * 3600    # suggestions expire after 24 h
 _TOP_N = 2                       # keep at most this many suggestions per timeout
 
@@ -44,6 +45,34 @@ _SOURCE_DIR_WHITELIST = frozenset({
 _lock = threading.RLock()
 # base_abs → [{'dir': str, 'entry_count': int, 'detected_at': float, 'reason': str}]
 _registry: dict[str, list[dict]] = {}
+
+
+def _prune_registry_locked(now: float) -> None:
+    """Remove expired/empty roots; caller holds ``_lock``."""
+    for registered_base, bucket in list(_registry.items()):
+        fresh = [
+            item for item in bucket
+            if now - float(item.get('detected_at') or 0) < _SUGGESTION_TTL_S
+        ]
+        if fresh:
+            _registry[registered_base] = fresh
+        else:
+            _registry.pop(registered_base, None)
+
+
+def _admit_base_locked(base: str) -> None:
+    """Make room for one cosmetic root without touching user files."""
+    if base in _registry or len(_registry) < _MAX_BASES:
+        return
+    oldest = min(
+        _registry,
+        key=lambda registered_base: max(
+            (float(item.get('detected_at') or 0)
+             for item in _registry[registered_base]),
+            default=0.0,
+        ),
+    )
+    _registry.pop(oldest, None)
 
 
 def _gitignore_dir_names(base: str) -> set[str]:
@@ -142,23 +171,40 @@ def record_timeout_and_probe(base: str, reason: str = 'grep_timeout') -> list[di
     now = time.time()
     new_entries = 0
     with _lock:
-        bucket = _registry.setdefault(base, [])
-        # Expire stale entries
-        bucket[:] = [s for s in bucket if now - s['detected_at'] < _SUGGESTION_TTL_S]
-        existing_dirs = {s['dir'] for s in bucket}
+        _prune_registry_locked(now)
+        bucket = list(_registry.get(base, []))
+        existing = {item['dir']: item for item in bucket}
         for cand in candidates[:_TOP_N]:
-            if cand['dir'] in existing_dirs:
+            current = existing.get(cand['dir'])
+            if current is not None:
+                # A repeated timeout is fresh evidence. Refreshing the row
+                # keeps active projects warm while the global cap evicts only
+                # the least-recently observed cosmetic suggestion set.
+                current.update({
+                    'entry_count': cand['entry_count'],
+                    'detected_at': now,
+                    'reason': reason,
+                })
                 continue
-            bucket.append({
+            item = {
                 'dir': cand['dir'],
                 'entry_count': cand['entry_count'],
                 'detected_at': now,
                 'reason': reason,
-            })
+            }
+            bucket.append(item)
+            existing[cand['dir']] = item
             new_entries += 1
         if len(bucket) > _MAX_SUGGESTIONS_PER_BASE:
             bucket.sort(key=lambda s: s['entry_count'], reverse=True)
             del bucket[_MAX_SUGGESTIONS_PER_BASE:]
+        if bucket:
+            _admit_base_locked(base)
+            _registry[base] = bucket
+        else:
+            # The old setdefault path retained one empty key for every timed
+            # out root even when the probe found nothing worth suggesting.
+            _registry.pop(base, None)
         snapshot = [dict(s) for s in bucket]
 
     if new_entries:
@@ -176,11 +222,8 @@ def get_suggestions(base: str) -> list[dict]:
     base = os.path.abspath(base)
     now = time.time()
     with _lock:
-        bucket = _registry.get(base, [])
-        fresh = [dict(s) for s in bucket if now - s['detected_at'] < _SUGGESTION_TTL_S]
-        if len(fresh) != len(bucket):
-            _registry[base] = [s for s in bucket if now - s['detected_at'] < _SUGGESTION_TTL_S]
-        return fresh
+        _prune_registry_locked(now)
+        return [dict(item) for item in _registry.get(base, [])]
 
 
 def format_footer(suggestions: list[dict]) -> str:
@@ -204,8 +247,12 @@ def _dismiss_one(base: str, dirs: list[str]) -> int:
     with _lock:
         bucket = _registry.get(base, [])
         before = len(bucket)
-        _registry[base] = [s for s in bucket if s['dir'] not in set(dirs)]
-        removed = before - len(_registry[base])
+        retained = [s for s in bucket if s['dir'] not in set(dirs)]
+        if retained:
+            _registry[base] = retained
+        else:
+            _registry.pop(base, None)
+        removed = before - len(retained)
     return removed
 
 

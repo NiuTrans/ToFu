@@ -39,6 +39,7 @@ from typing import Any, Callable, Hashable, Optional
 import weakref
 
 from lib.log import get_logger
+from lib.weak_lock_pool import WeakLockPool
 
 logger = get_logger(__name__)
 
@@ -95,9 +96,10 @@ class TTLCache:
         # Each value is (timestamp, payload).
         self._data: OrderedDict[Hashable, tuple[float, Any]] = OrderedDict()
         self._lock = threading.Lock()
-        # Per-key locks for get_or_compute serialisation — created lazily.
-        self._key_locks: dict[Hashable, threading.Lock] = {}
-        self._key_locks_mutex = threading.Lock()
+        # Active holders/waiters retain their per-key lock; historical keys
+        # do not. A strong dict needed delicate eviction cleanup and could
+        # permanently retain a lock when eviction crossed an active holder.
+        self._key_locks = WeakLockPool(threading.Lock)
         # Stats
         self._hits = 0
         self._misses = 0
@@ -118,52 +120,18 @@ class TTLCache:
         if self.max_size is None:
             return
         while len(self._data) > self.max_size:
-            evicted_key, _ = self._data.popitem(last=False)  # LRU drop
+            self._data.popitem(last=False)  # LRU drop
             self._size_evicts += 1
-            self._drop_key_lock(evicted_key)
 
     def _key_lock(self, key: Hashable) -> threading.Lock:
-        """Return the per-key lock for serialising get_or_compute calls.
-
-        Locks are pruned by ``_drop_key_lock`` when the entry is evicted
-        (size, TTL, invalidate, or clear) so this dict can't grow without
-        bound for caches that see many distinct keys over their lifetime.
-        """
-        with self._key_locks_mutex:
-            lk = self._key_locks.get(key)
-            if lk is None:
-                lk = threading.Lock()
-                self._key_locks[key] = lk
-            return lk
-
-    def _drop_key_lock(self, key: Hashable) -> None:
-        """Drop the per-key lock for ``key`` if it is currently idle.
-
-        Called on eviction. We must NOT drop a lock that another thread is
-        holding (or waiting on): if we did, the next ``get_or_compute`` for
-        the same key would mint a *fresh* Lock and run ``fn()`` concurrently
-        with the in-flight holder — defeating the per-key serialisation this
-        cache promises. So we only remove the lock when we can acquire it
-        non-blocking (proving it is unheld); otherwise we leave it in place
-        and a later eviction reclaims it once it goes idle.
-        """
-        with self._key_locks_mutex:
-            lk = self._key_locks.get(key)
-            if lk is None:
-                return
-            if lk.acquire(blocking=False):
-                try:
-                    self._key_locks.pop(key, None)
-                finally:
-                    lk.release()
-            # else: held by another thread — keep it; reclaim on a later evict.
+        """Return the live lock serialising one cache-key computation."""
+        return self._key_locks.lock_for(key)
 
     # ── Public API ────────────────────────────────────────────────
 
     def get(self, key: Hashable, default: Any = None) -> Any:
         """Return the cached value for ``key``, or ``default`` if missing/expired."""
         now = time.time()
-        evicted = False
         with self._lock:
             entry = self._data.get(key)
             if entry is None:
@@ -175,14 +143,11 @@ class TTLCache:
                 self._data.pop(key, None)
                 self._expired_evicts += 1
                 self._misses += 1
-                evicted = True
             else:
                 # Touch for LRU
                 self._data.move_to_end(key)
                 self._hits += 1
                 return payload
-        if evicted:
-            self._drop_key_lock(key)
         return default
 
     def set(self, key: Hashable, value: Any) -> None:
@@ -196,7 +161,6 @@ class TTLCache:
     def has(self, key: Hashable) -> bool:
         """True if ``key`` is present AND not expired. Lazily evicts expired."""
         now = time.time()
-        evicted = False
         with self._lock:
             entry = self._data.get(key)
             if entry is None:
@@ -204,19 +168,14 @@ class TTLCache:
             if self._is_expired(entry[0], now):
                 self._data.pop(key, None)
                 self._expired_evicts += 1
-                evicted = True
             else:
                 return True
-        if evicted:
-            self._drop_key_lock(key)
         return False
 
     def invalidate(self, key: Hashable) -> bool:
         """Drop the entry for ``key``. Returns True if it existed."""
         with self._lock:
             existed = self._data.pop(key, None) is not None
-        if existed:
-            self._drop_key_lock(key)
         return existed
 
     def clear(self) -> int:
@@ -224,8 +183,6 @@ class TTLCache:
         with self._lock:
             n = len(self._data)
             self._data.clear()
-        with self._key_locks_mutex:
-            self._key_locks.clear()
         return n
 
     def cleanup_stale(self) -> int:
@@ -240,8 +197,6 @@ class TTLCache:
             for k in stale_keys:
                 self._data.pop(k, None)
                 self._expired_evicts += 1
-        for k in stale_keys:
-            self._drop_key_lock(k)
         return len(stale_keys)
 
     def get_or_compute(self, key: Hashable, fn: Callable[[], Any]) -> Any:

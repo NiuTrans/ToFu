@@ -111,12 +111,36 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     _conv_messages: list | None = None
     _conv_dirty = False
     _conv_index_loaded = False
+    _ambiguous_round_ids: set[str] = set()
+
+    def _index_round_owner(
+        tool_call_id: str, round_entry: dict, owner: dict | None = None,
+    ) -> None:
+        """Index only identities safe for durable placeholder write-back.
+
+        Old positional-id transcripts may contain several execution facts with
+        one truthy id.  A single-value index cannot know which round owns an
+        API-form tool result, so ambiguity must disable persistence instead of
+        overwriting an arbitrary earlier round.
+        """
+        if tool_call_id in _ambiguous_round_ids:
+            return
+        if tool_call_id in _round_index:
+            _round_index.pop(tool_call_id, None)
+            _conv_owned_ids.discard(tool_call_id)
+            _conv_owner_by_tcid.pop(tool_call_id, None)
+            _ambiguous_round_ids.add(tool_call_id)
+            return
+        _round_index[tool_call_id] = round_entry
+        if owner is not None:
+            _conv_owned_ids.add(tool_call_id)
+            _conv_owner_by_tcid[tool_call_id] = owner
 
     if task is not None:
         for _r in task.get('toolRounds') or []:
             _tcid = _r.get('toolCallId')
             if _tcid:
-                _round_index[_tcid] = _r
+                _index_round_owner(str(_tcid), _r)
 
     owner_id = None
     if task is not None:
@@ -156,10 +180,8 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
                             continue
                         for _r in (_m.get('toolRounds') or []):
                             _tcid = _r.get('toolCallId')
-                            if _tcid and _tcid not in _round_index:
-                                _round_index[_tcid] = _r
-                                _conv_owned_ids.add(_tcid)
-                                _conv_owner_by_tcid[_tcid] = _m
+                            if _tcid:
+                                _index_round_owner(str(_tcid), _r, _m)
         except Exception as _e:
             logger.debug('[L1] conv-side _round_index load failed conv=%s: %s',
                          conv_id[:8] if conv_id else '?', _e)

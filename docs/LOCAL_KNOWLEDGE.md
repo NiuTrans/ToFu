@@ -47,11 +47,20 @@ use the read-only `search_knowledge` tool.
    back the unit; file candidates are cleaned without racing concurrent writers.
 
 Ingestion is bounded to 50 MB per file, 20 files and 200 MB per HTTP batch by
-the management API. Extracted text and OCR page limits are configurable through
-`TOFU_KNOWLEDGE_MAX_TEXT_CHARS` and `TOFU_KNOWLEDGE_OCR_MAX_PAGES`. Visual work
-is separately bounded by `TOFU_KNOWLEDGE_VISUAL_MAX_PAGES`,
+the management API. A PDF holds one process-wide classic-parser lease across
+validation, text, OCR, visual/source persistence, and the atomic repository
+commit; the 8 GiB reference admits three such pipelines. OCR stops as soon as
+the retained text budget is full. Extracted
+text and OCR page limits are configurable through
+`TOFU_KNOWLEDGE_MAX_TEXT_CHARS` and `TOFU_KNOWLEDGE_OCR_MAX_PAGES`. OCR and
+visual page overrides may lower but cannot exceed the launch-derived classic
+PDF page ceiling. Visual work is separately bounded by `TOFU_KNOWLEDGE_VISUAL_MAX_PAGES`,
 `TOFU_KNOWLEDGE_MAX_VISUAL_ASSETS`, `TOFU_KNOWLEDGE_MAX_VISUAL_BYTES`,
 `TOFU_KNOWLEDGE_MAX_ASSET_BYTES`, and `TOFU_KNOWLEDGE_MAX_IMAGE_PIXELS`.
+Defaults preserve 80 OCR pages, 80 visual pages, 160 assets / 160 MiB per
+document, 25 MiB per asset, and 40 million decoded pixels per image. Thus the
+reference aggregate retains at most 150 MiB of compressed sources plus 480 MiB
+of accepted visual candidates before parser-native transient state.
 
 ## Large-corpus management
 
@@ -98,7 +107,11 @@ instead be rebuilt from the retained source bytes.
 ## Multimodal retrieval
 
 The backend-neutral inverted index stores normalized word tokens plus CJK
-bi/tri-grams. Candidate selection is index-backed and ranks chunks matching
+bi/tri-grams.
+ Individual search terms are bounded to
+128 characters; longer uninterrupted runs (base64 blobs, watermarks, embedded
+URLs) are dropped at ingest rather than failing the whole transaction.
+ Candidate selection is index-backed and ranks chunks matching
 more distinct query terms before applying a hard response bound; it never scans
 or serializes the complete corpus into an application process. Application
 reranking combines token coverage, exact compact phrases, deterministic intent
@@ -134,6 +147,27 @@ Model tool availability is fail-closed and conditional on both an enabled flag
 and a non-empty corpus. The management preview endpoint intentionally bypasses
 only the enabled flag so a user can test evidence before granting model access.
 
+## Chat attachment projection
+
+Chat uploads share this store (scope `attachment`/`draft`). Projection into a
+model request is bounded and honest about partial coverage:
+
+- The per-attachment excerpt budget scales with the chat model's context
+  window (12% of the window in estimated characters, floored at 48k and
+  clamped at 240k via `lib.media_attachments.document_text_budget`); one
+  request-wide allowance (2×) is shared fairly across all attachments.
+- When the full text does not fit, the attachment header states exactly how
+  many of the document's characters were injected, whether the excerpt was
+  chosen by relevance search or — annotated explicitly when search matched
+  nothing — from the document head, and instructs the model to page for more.
+- `read_files` resolves the stable `att_media_<id>` ref as a virtual
+  line-paged text file (owner-scoped; legacy `att_txt_<hash>` refs scan the
+  task's stored messages). Whole reads above one bounded page return a
+  continuation hint with the exact `start_line` to resume from, so a long
+  document is a sliding window away instead of being truncated forever.
+- Tool-round titles and per-file result projections render the user's exact
+  original filename, marked as an uploaded attachment — never the raw ref.
+
 ## Management API
 
 - `GET /api/v1/knowledge` — status, bounded documents, totals, type facets,
@@ -152,6 +186,10 @@ only the enabled flag so a user can test evidence before granting model access.
 - `DELETE /api/v1/knowledge/documents/:id` — remove index and stored source
 
 All endpoints require the normal API authentication policy.
+
+Upload, reindex, and delete return bounded metadata projections only; parsed
+body text is always read back through the bounded content endpoint. Composer
+attachment previews fetch it on demand instead of holding client-side copies.
 
 ## Verification
 

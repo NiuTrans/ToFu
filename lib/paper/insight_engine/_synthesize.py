@@ -6,11 +6,13 @@ persistence live in sibling modules.
 
 import hashlib
 
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
 from lib.llm.json_extract import extract_first_json_object
+from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
+from lib.paper.agent_usage import PaperAgentUsageMeter
 
 from ._config import (
     _INSIGHT_TEMPERATURE,
@@ -162,6 +164,8 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
             logger.debug('[Paper:Insight] usage accumulate failed (non-fatal): %s', e)
 
     model_name = model or None
+    _agent_usage = PaperAgentUsageMeter.for_stage(
+        'insight', fallback_model=model_name or '')
 
     def _dispatch(rnd, tools):
         _round['content'] = ''
@@ -207,7 +211,9 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
         on_tool_event=on_tool_event, log_prefix='[Paper:Insight]',
         contract_documents_for_round=contracts_by_round.get)
 
-    run_agent_loop(
+    run_guarded_paper_agent_loop(
+        context='Paper Insight agent',
+        usage_meter=_agent_usage,
         abort=abort_signal,
         round_tools=paper_tools,
         dispatch=_dispatch,
@@ -227,6 +233,7 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
         # tests monkeypatching this seam return plain dicts without it, which
         # the caller treats as unknown usage.
         parsed['_usage'] = dict(_usage_acc)
+        parsed['_agentUsageV1'] = _agent_usage.snapshot()
         return parsed
 
     # The final content wasn't parseable JSON (prose-wrapped / truncated / fenced
@@ -237,4 +244,5 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
                                   abort_signal=abort_signal)
     if isinstance(repaired, dict):
         repaired['_usage'] = dict(_usage_acc)
+        repaired['_agentUsageV1'] = _agent_usage.snapshot()
     return repaired

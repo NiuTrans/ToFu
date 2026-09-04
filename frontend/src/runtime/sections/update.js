@@ -695,16 +695,23 @@ function _renderDepsFailed(b) {
 // phase's cap but never reaches 100% on its own — it can only *under*-report
 // progress, never claim "done" before the server actually is.
 var _RESTART_PHASES = [
-  { key: 'shutdown', dur: 1.5, to: 12 },  // graceful drain + os.execv
-  { key: 'reload',   dur: 3.0, to: 34 },  // re-import core modules
-  { key: 'db',       dur: 2.5, to: 52 },  // init_db / warmup
-  { key: 'imports',  dur: 3.0, to: 72 },  // critical-import validation
-  { key: 'services', dur: 3.0, to: 86 },  // background workers / MCP
-  { key: 'bind',     dur: 6.0, to: 94 },  // _wait_port_free + Hypercorn bind
+  { key: 'shutdown', dur: 1.5, to: 32 },  // graceful drain + os.execv
+  { key: 'reload',   dur: 3.0, to: 48 },  // re-import core modules
+  { key: 'db',       dur: 2.5, to: 63 },  // init_db / warmup
+  { key: 'imports',  dur: 3.0, to: 77 },  // critical-import validation
+  { key: 'services', dur: 3.0, to: 89 },  // background workers / MCP
+  { key: 'bind',     dur: 6.0, to: 96 },  // _wait_port_free + Hypercorn bind
 ];
+var _RESTART_PREPARE_FLOOR = 3;
+var _RESTART_PREPARE_CAP = 18;
 var _restartT0 = 0;
+var _restartAcceptedAt = 0;
+var _restartLastPct = 0;
 var _restartRaf = null;
 var _restartPoll = null;
+var _restartPollStartTimer = null;
+var _restartHealthProbeActive = false;
+var _restartAttemptGeneration = 0;
 var _restartDone = false;
 // The server's bootId captured BEFORE we trigger the restart. The re-exec
 // mints a fresh bootId (os.execv keeps the PID + start-time, so bootId is the
@@ -730,7 +737,7 @@ var _restartActive = false;
  *  phase). The final phase holds at its cap if the server overruns, so a
  *  slow boot looks "still working" rather than falsely complete. */
 function _restartProgress(elapsed) {
-  var from = 0, acc = 0;
+  var from = _RESTART_PREPARE_CAP, acc = 0;
   for (var i = 0; i < _RESTART_PHASES.length; i++) {
     var ph = _RESTART_PHASES[i];
     var last = (i === _RESTART_PHASES.length - 1);
@@ -741,46 +748,226 @@ function _restartProgress(elapsed) {
     }
     acc += ph.dur; from = ph.to;
   }
-  return { pct: 94, key: 'bind' };
+  return { pct: 96, key: 'bind' };
 }
 
-/** Render the restart progress card into the dialog body. */
+/** A slow synchronous frontend-artifact preflight must still look alive. The
+ *  preparation band advances continuously but cannot enter the shutdown band
+ *  until the backend has accepted (or may have accepted) the request. */
+function _restartPreparingProgress(elapsed) {
+  return _RESTART_PREPARE_FLOOR +
+    (_RESTART_PREPARE_CAP - _RESTART_PREPARE_FLOOR) *
+    (1 - Math.exp(-Math.max(0, elapsed) / 10));
+}
+
+function _restartSetControlsBusy(busy) {
+  const restartNow = document.getElementById('updateRestartNowBtn');
+  const restartAfterUpdate = document.getElementById('updateRestartBtn');
+  const shutdown = document.getElementById('updateShutdownBtn');
+  [restartNow, restartAfterUpdate, shutdown].forEach(function (button) {
+    if (!button) return;
+    button.disabled = !!busy;
+    if (busy) button.setAttribute('aria-busy', 'true');
+    else button.removeAttribute('aria-busy');
+  });
+  if (restartNow) {
+    const label = restartNow.querySelector('span');
+    if (label) label.textContent = busy ? t('update.restarting') : t('update.restartNow');
+  }
+}
+
+function _restartStopTimers() {
+  if (_restartRaf !== null) cancelAnimationFrame(_restartRaf);
+  if (_restartPoll !== null) clearInterval(_restartPoll);
+  if (_restartPollStartTimer !== null) clearTimeout(_restartPollStartTimer);
+  _restartRaf = null;
+  _restartPoll = null;
+  _restartPollStartTimer = null;
+}
+
+function _restartBeginAvailabilityScope() {
+  try {
+    const restartScope = runtimeScope.BackendAvailabilityRestartScope;
+    if (restartScope && typeof restartScope.begin === 'function') {
+      restartScope.begin();
+    }
+  } catch (error) {
+    if (typeof debugLog === 'function') {
+      debugLog('[Update] could not pause generic availability alarms: ' +
+        (error && error.message), 'warning');
+    }
+  }
+}
+
+function _restartEndAvailabilityScope(backendReachable) {
+  try {
+    const restartScope = runtimeScope.BackendAvailabilityRestartScope;
+    if (restartScope && typeof restartScope.end === 'function') {
+      restartScope.end(!!backendReachable);
+    }
+  } catch (error) {
+    if (typeof debugLog === 'function') {
+      debugLog('[Update] could not restore generic availability alarms: ' +
+        (error && error.message), 'warning');
+    }
+  }
+}
+
+/** Render the one restart card used from the first click through reload. */
 function _renderRestartProgress() {
   const body = document.getElementById('updateModalBody');
   if (!body) return;
   body.innerHTML =
-    '<div class="upd-restart" id="updRestartCard">' +
+    '<div class="upd-restart is-preparing" id="updRestartCard" role="status" aria-live="polite">' +
       '<div class="upd-restart-head">' +
         '<span class="upd-restart-spin" id="updRestartSpin"></span>' +
         '<div class="upd-restart-headtext">' +
-          '<div class="upd-restart-title" id="updRestartTitle">' + escapeHtml(t('update.restartTitle')) + '</div>' +
-          '<div class="upd-restart-sub">' + escapeHtml(t('update.restartSub')) + '</div>' +
+          '<div class="upd-restart-title" id="updRestartTitle">' + escapeHtml(t('update.restartPreparingTitle')) + '</div>' +
+          '<div class="upd-restart-sub" id="updRestartSub">' + escapeHtml(t('update.restartPreparingSub')) + '</div>' +
         '</div>' +
       '</div>' +
-      '<div class="upd-restart-bar"><div class="upd-restart-fill" id="updRestartFill"></div></div>' +
+      '<div class="upd-restart-bar" id="updRestartBar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="3">' +
+        '<div class="upd-restart-fill" id="updRestartFill" style="width:3%"></div></div>' +
       '<div class="upd-restart-foot">' +
-        '<span class="upd-restart-phase" id="updRestartPhase">' + escapeHtml(t('update.phase.shutdown')) + '</span>' +
-        '<span class="upd-restart-pct" id="updRestartPct">0%</span>' +
+        '<span class="upd-restart-phase" id="updRestartPhase">' + escapeHtml(t('update.phase.prepare')) + '</span>' +
+        '<span class="upd-restart-pct" id="updRestartPct">3%</span>' +
       '</div>' +
     '</div>';
 }
 
-/** Animation frame: advance the bar from the phase timeline. */
-function _restartAnimate() {
-  if (_restartDone) return;
-  const elapsed = (Date.now() - _restartT0) / 1000;
-  const p = _restartProgress(elapsed);
+function _paintRestartProgress(progress, totalElapsed) {
+  const bounded = Math.min(96, Math.max(_restartLastPct, progress.pct));
+  _restartLastPct = bounded;
   const fill = document.getElementById('updRestartFill');
   const pctEl = document.getElementById('updRestartPct');
   const phaseEl = document.getElementById('updRestartPhase');
-  if (fill) fill.style.width = p.pct.toFixed(1) + '%';
-  if (pctEl) pctEl.textContent = Math.round(p.pct) + '%';
+  const bar = document.getElementById('updRestartBar');
+  if (fill) fill.style.width = bounded.toFixed(1) + '%';
+  if (pctEl) pctEl.textContent = Math.round(bounded) + '%';
+  if (bar) bar.setAttribute('aria-valuenow', String(Math.round(bounded)));
   if (phaseEl) {
-    const label = t('update.phase.' + p.key);
-    const secs = ' · ' + t('update.restartElapsed').replace('%s', String(Math.round(elapsed)));
+    const label = t('update.phase.' + progress.key);
+    const secs = ' · ' + t('update.restartElapsed').replace(
+      '%s', String(Math.round(totalElapsed)));
     phaseEl.textContent = label + secs;
   }
+}
+
+/** Animation frame: paint preparation immediately, then accepted boot phases. */
+function _restartAnimate() {
+  if (_restartDone) return;
+  const totalElapsed = Math.max(0, (Date.now() - _restartT0) / 1000);
+  const progress = _restartAcceptedAt > 0
+    ? _restartProgress((Date.now() - _restartAcceptedAt) / 1000)
+    : { pct: _restartPreparingProgress(totalElapsed), key: 'prepare' };
+  _paintRestartProgress(progress, totalElapsed);
   _restartRaf = requestAnimationFrame(_restartAnimate);
+}
+
+function _restartBeginExperience() {
+  _restartStopTimers();
+  _restartAttemptGeneration += 1;
+  _restartHealthProbeActive = false;
+  _restartActive = true;
+  _restartDone = false;
+  _restartT0 = Date.now();
+  _restartAcceptedAt = 0;
+  _restartLastPct = _RESTART_PREPARE_FLOOR;
+  // Retire checks before the first await: even the synchronous backend
+  // preflight can take tens of seconds and owns the modal during that time.
+  _updateCheckGeneration += 1;
+  const modal = document.getElementById('updateModal');
+  if (modal) modal.classList.add('open');
+  _renderRestartProgress();
+  _restartSetControlsBusy(true);
+  _restartBeginAvailabilityScope();
+  _restartRaf = requestAnimationFrame(_restartAnimate);
+}
+
+function _restartMarkAccepted(reason) {
+  if (_restartDone) return;
+  _restartAcceptedAt = Date.now();
+  const card = document.getElementById('updRestartCard');
+  const title = document.getElementById('updRestartTitle');
+  const sub = document.getElementById('updRestartSub');
+  if (card) card.classList.remove('is-preparing');
+  if (title) title.textContent = t('update.restartTitle');
+  if (sub) sub.textContent = t('update.restartSub');
+  _paintRestartProgress(
+    { pct: _RESTART_PREPARE_CAP, key: 'shutdown' },
+    Math.max(0, (Date.now() - _restartT0) / 1000),
+  );
+  if (typeof debugLog === 'function') {
+    debugLog('[Update] restart accepted; verifying new boot (' + reason + ')', 'info');
+  }
+  // Wait out the backend's pre-exec grace period, then probe immediately and
+  // continue at a bounded cadence. bootId remains the completion authority.
+  _restartPollStartTimer = setTimeout(function () {
+    _restartPollStartTimer = null;
+    _restartPoll = setInterval(_restartCheckHealth, 1500);
+    _restartCheckHealth();
+  }, 2500);
+}
+
+function _restartRetryHtml() {
+  return '<div class="upd-restart-actions">' +
+    '<button class="upd-retry-btn" data-tofu-action="restartServer()">' +
+      escapeHtml(t('update.retry')) + '</button></div>';
+}
+
+function _restartErrorMessage(error) {
+  const body = error && error.body;
+  return (error && error.message) ||
+    (body && (body.message || body.error)) || t('update.errUnknown');
+}
+
+/** A typed HTTP response proves no restart was scheduled: stop immediately
+ *  instead of entering the ambiguous 80-second new-boot wait. */
+function _restartFailBeforeStart(error, backendReachable) {
+  if (_restartDone) return;
+  _restartDone = true;
+  _restartActive = false;
+  _restartStopTimers();
+  _restartEndAvailabilityScope(backendReachable);
+  _restartSetControlsBusy(false);
+  const card = document.getElementById('updRestartCard');
+  const spin = document.getElementById('updRestartSpin');
+  const title = document.getElementById('updRestartTitle');
+  const sub = document.getElementById('updRestartSub');
+  const phase = document.getElementById('updRestartPhase');
+  const pct = document.getElementById('updRestartPct');
+  const bar = document.getElementById('updRestartBar');
+  if (card) {
+    card.classList.remove('is-preparing');
+    card.classList.add('is-error');
+  }
+  if (spin) spin.classList.add('is-error');
+  if (title) title.textContent = t('update.restartNotStartedTitle');
+  if (sub) sub.textContent = _restartErrorMessage(error);
+  if (phase) phase.textContent = backendReachable
+    ? t('update.restartNotStartedHint') : t('update.errBackend');
+  if (pct) pct.textContent = '—';
+  if (bar) {
+    bar.removeAttribute('aria-valuenow');
+    bar.setAttribute('aria-valuetext', t('update.restartNotStartedTitle'));
+  }
+  if (card) card.insertAdjacentHTML('beforeend', _restartRetryHtml());
+}
+
+function _restartCancelPreparation() {
+  _restartDone = true;
+  _restartActive = false;
+  _restartStopTimers();
+  _restartEndAvailabilityScope(true);
+  _restartSetControlsBusy(false);
+  if (_updateDoneResult) {
+    _ensureUpdateScaffold();
+    _renderDoneCard(_updateDoneResult);
+  } else if (_updateState) {
+    _renderUpdateDialogBody(_updateState);
+  } else {
+    _runUpdateCheck();
+  }
 }
 
 /** Snap to 100% "Back online · vX", then reload the page. */
@@ -788,17 +975,22 @@ function _restartSucceed(version, info) {
   if (_restartDone) return;
   _restartDone = true;
   _restartActive = false;
-  if (_restartRaf) cancelAnimationFrame(_restartRaf);
-  if (_restartPoll) clearInterval(_restartPoll);
+  _restartStopTimers();
+  _restartEndAvailabilityScope(true);
   const fill = document.getElementById('updRestartFill');
   const pctEl = document.getElementById('updRestartPct');
   const phaseEl = document.getElementById('updRestartPhase');
   const spin = document.getElementById('updRestartSpin');
   const card = document.getElementById('updRestartCard');
-  if (card) card.classList.add('is-online');
+  if (card) {
+    card.classList.remove('is-preparing', 'is-error');
+    card.classList.add('is-online');
+  }
   if (spin) spin.classList.add('is-done');
   if (fill) fill.style.width = '100%';
   if (pctEl) pctEl.textContent = '100%';
+  const bar = document.getElementById('updRestartBar');
+  if (bar) bar.setAttribute('aria-valuenow', '100');
   if (phaseEl) {
     phaseEl.textContent = t('update.phase.online') +
       (version ? ' · v' + version : '');
@@ -824,12 +1016,25 @@ function _restartTimeout() {
   if (_restartDone) return;
   _restartDone = true;
   _restartActive = false;
-  if (_restartRaf) cancelAnimationFrame(_restartRaf);
-  if (_restartPoll) clearInterval(_restartPoll);
+  _restartStopTimers();
+  _restartEndAvailabilityScope(false);
+  _restartSetControlsBusy(false);
+  const card = document.getElementById('updRestartCard');
+  const title = document.getElementById('updRestartTitle');
   const phaseEl = document.getElementById('updRestartPhase');
+  const pctEl = document.getElementById('updRestartPct');
+  const bar = document.getElementById('updRestartBar');
   const spin = document.getElementById('updRestartSpin');
+  if (card) card.classList.add('is-error');
   if (spin) spin.classList.add('is-error');
+  if (title) title.textContent = t('update.restartTimeout');
   if (phaseEl) phaseEl.textContent = t('update.restartTimeout');
+  if (pctEl) pctEl.textContent = '—';
+  if (bar) {
+    bar.removeAttribute('aria-valuenow');
+    bar.setAttribute('aria-valuetext', t('update.restartTimeout'));
+  }
+  if (card) card.insertAdjacentHTML('beforeend', _restartRetryHtml());
   showToast('⚠️', t('update.restartTimeout'), '', 6000);
 }
 
@@ -843,13 +1048,7 @@ async function restartServer(opts) {
   // post-pull button could be double-clicked) so we never spawn a second
   // poll loop or reset the progress timeline.
   if (_restartActive) return;
-  _restartActive = true;
-  const btn = document.getElementById('updateRestartBtn')
-    || document.getElementById('updateRestartNowBtn');
-  const _restoreBtn = function () {
-    if (btn) { btn.disabled = false; btn.textContent = t('update.restartBtn'); }
-  };
-  if (btn) { btn.disabled = true; btn.textContent = t('update.restarting'); }
+  _restartBeginExperience();
 
   // Human-approval gate (): a restart POST without an
   // approvalId only REGISTERS a pending request (202). The human's click on
@@ -858,11 +1057,17 @@ async function restartServer(opts) {
   // for the operator while agent shells (no UI, no gesture) stay gated.
   // A pre-approved id (from the pending-approvals card) rides in via opts.
   var _approvalId = (opts && opts.approvalId) || '';
+  var _sentExecutableRequest = false;
+  // Our own conversation id — the backend excludes it when counting in-flight
+  // tasks, so the count reflects only OTHER conversations a restart interrupts.
+  var _ownConv = '';
+  try { _ownConv = runtimeScope.activeConvId || ''; } catch (_e) { _ownConv = ''; }
   async function _requestRestart(forceFlag) {
     const payload = { convId: _ownConv };
     if (forceFlag) payload.force = true;
     if (_approvalId) payload.approvalId = _approvalId;
-    const r = await Api.update.restart(payload);
+    if (_approvalId) _sentExecutableRequest = true;
+    const r = await Api.update.restart(payload, { timeout: 120000 });
     if (r && r.pendingApproval) {
       _approvalId = r.pendingApproval.id;
       await Api.update.decideLifecycleApproval(_approvalId, true);
@@ -879,18 +1084,12 @@ async function restartServer(opts) {
   _restartPreBootId = null;
   _restartPreFingerprint = null;
   try {
-    const pre = await Api.health.info();
+    const pre = await Api.health.info({ timeout: 4000 });
     if (pre && pre.bootId) _restartPreBootId = pre.bootId;
     if (pre && pre.codeFingerprint && pre.codeFingerprint.digest) {
       _restartPreFingerprint = pre.codeFingerprint.digest;
     }
   } catch (e) { _restartPreBootId = null; _restartPreFingerprint = null; }
-
-  // Our own conversation id — the backend excludes it when counting in-flight
-  // tasks, so the running-task count reflects only OTHER conversations a
-  // restart would interrupt (never counts our own idle conv against us).
-  var _ownConv = '';
-  try { _ownConv = activeConvId || ''; } catch (_e) { _ownConv = ''; }
 
   // Two-stage informed restart. Stage 1: request WITHOUT force. The backend
   // 409s with {needsForce, runningTasks} only when OTHER conversations have
@@ -899,28 +1098,11 @@ async function restartServer(opts) {
   // themed confirm NAMING the running-task count and, on explicit consent,
   // retry WITH force. This replaces the old blind generic pre-flight confirm
   // (so there is no double-confirm) and never silently kills sibling tasks.
-  var _triggered = false;
   try {
     await _requestRestart(false);
-    _triggered = true;
+    _restartMarkAccepted('acknowledged');
+    return;
   } catch (e) {
-    if (e && e.status === 429) {
-      // Cooldown: the server was restarted moments ago — surface the
-      // remaining seconds and stay put (NO progress card, nothing fired).
-      const secs = (e.body && e.body.retryAfterSec) || '?';
-      showToast('⏳', t('update.restartCooldown').replace('%s', String(secs)), '', 6000);
-      _restartActive = false;
-      _restoreBtn();
-      return;
-    }
-    if (e && (e.status === 400 || e.status === 403 || e.status === 404)) {
-      // Approval rejected/expired — definitive refusal, nothing is scheduled.
-      showToast('⚠️', (e && e.message) || t('update.errUnknown'), '', 6000);
-      if (typeof debugLog === 'function') debugLog('[Update] restart refused: HTTP ' + e.status + ' ' + (e && e.message), 'warning');
-      _restartActive = false;
-      _restoreBtn();
-      return;
-    }
     if (e && e.status === 409 && e.body && e.body.needsForce) {
       const count = (e.body.runningTasks || []).length;
       const ok = await showConfirm(
@@ -932,39 +1114,54 @@ async function restartServer(opts) {
         if (_approvalId) {
           try { await Api.update.decideLifecycleApproval(_approvalId, false); } catch (_e) { /* best effort */ }
         }
-        _restartActive = false;
-        _restoreBtn();
+        _restartCancelPreparation();
         return;
       }
       try {
         await _requestRestart(true);
       } catch (e2) {
-        if (typeof debugLog === 'function') debugLog('[Update] forced restart request failed: ' + (e2 && e2.message), 'warning');
+        if (e2 && Number(e2.status) > 0) {
+          if (typeof debugLog === 'function') debugLog('[Update] forced restart refused: HTTP ' + e2.status + ' ' + (e2 && e2.message), 'warning');
+          _restartFailBeforeStart(e2, true);
+          return;
+        }
+        if (!_sentExecutableRequest) {
+          _restartFailBeforeStart(e2, false);
+          return;
+        }
+        if (typeof debugLog === 'function') debugLog('[Update] forced restart acknowledgement lost: ' + (e2 && e2.message), 'warning');
+        _restartMarkAccepted('acknowledgement-lost');
+        return;
       }
-      // The re-exec is scheduled server-side (daemon thread) before the
-      // response, so even a read error on the response means it is underway.
-      _triggered = true;
-    } else {
-      // Non-guard error (e.g. a network blip while the backend already
-      // scheduled the fire-and-forget re-exec). Proceed to the health-poll
-      // rather than abort — the poll is the source of truth for "came back".
-      if (typeof debugLog === 'function') debugLog('[Update] restart request failed: ' + (e && e.message), 'warning');
-      _triggered = true;
+      _restartMarkAccepted('forced-acknowledged');
+      return;
     }
+    if (e && Number(e.status) > 0) {
+      // Every HTTP error is a definitive refusal. In particular,
+      // restartPreflightFailed=409 promises that the current server remains
+      // online and must never be converted into an 80-second fake restart.
+      if (e.status === 429) {
+        const secs = (e.body && e.body.retryAfterSec) || '?';
+        showToast('⏳', t('update.restartCooldown').replace('%s', String(secs)), '', 6000);
+      } else if (e.status === 400 || e.status === 403 || e.status === 404) {
+        showToast('⚠️', _restartErrorMessage(e), '', 6000);
+      }
+      if (typeof debugLog === 'function') debugLog('[Update] restart refused: HTTP ' + e.status + ' ' + (e && e.message), 'warning');
+      _restartFailBeforeStart(e, true);
+      return;
+    }
+    if (_sentExecutableRequest) {
+      // The approved POST may have scheduled re-exec before its response was
+      // lost. Only this genuinely ambiguous case advances to bootId polling.
+      if (typeof debugLog === 'function') debugLog('[Update] restart acknowledgement lost: ' + (e && e.message), 'warning');
+      _restartMarkAccepted('acknowledgement-lost');
+      return;
+    }
+    // A request without an approval token can only register approval; it
+    // cannot schedule restart. A network failure here is a real not-started
+    // result and normal liveness monitoring resumes immediately.
+    _restartFailBeforeStart(e, false);
   }
-  if (!_triggered) { _restartActive = false; _restoreBtn(); return; }
-
-  // Retire any version check that began before this accepted restart. Merely
-  // testing _restartActive when the request settles is insufficient: health
-  // can already have cleared that flag during the short pre-reload window.
-  _updateCheckGeneration += 1;
-  _renderRestartProgress();
-  _restartDone = false;
-  _restartT0 = Date.now();
-  _restartRaf = requestAnimationFrame(_restartAnimate);
-  // Wait out the backend's 0.6s pre-exec sleep before the first probe so we
-  // never mistake the still-alive OLD process for a successful restart.
-  setTimeout(function () { _restartPoll = setInterval(_restartCheckHealth, 1500); }, 2500);
 }
 
 /** Manual graceful shutdown — writes the manual-shutdown marker so the next
@@ -1082,11 +1279,25 @@ async function _lcDecide(btn, approved) {
  *  overall timeout. */
 async function _restartCheckHealth() {
   if (_restartDone) return;
-  if ((Date.now() - _restartT0) / 1000 > 80) { _restartTimeout(); return; }
+  const waitingSince = _restartAcceptedAt || _restartT0;
+  if ((Date.now() - waitingSince) / 1000 > 80) {
+    _restartTimeout();
+    return;
+  }
+  if (_restartHealthProbeActive) return;
+  const attemptGeneration = _restartAttemptGeneration;
+  _restartHealthProbeActive = true;
   let info = null;
   try {
-    info = await Api.health.info();  // parsed JSON → carries version + bootId
-  } catch (e) { info = null; }
+    info = await Api.health.info({ timeout: 4000 });
+  } catch (e) {
+    info = null;
+  } finally {
+    if (attemptGeneration === _restartAttemptGeneration) {
+      _restartHealthProbeActive = false;
+    }
+  }
+  if (_restartDone || attemptGeneration !== _restartAttemptGeneration) return;
   if (!info || !info.ok) return;
   // Preferred, robust path: we know the old bootId AND the server reports one.
   if (_restartPreBootId && info.bootId) {

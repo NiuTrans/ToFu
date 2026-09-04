@@ -1,36 +1,26 @@
-"""routes/api_v1/research.py — durable read path for auto-research artifacts.
+"""Owner-scoped HTTP boundary for durable research artifacts and programs.
 
-WHY THIS BLUEPRINT EXISTS (, second half)
------------------------------------------------------------------
-Persisting the research artifacts gave them a durable home; this gives them a
-door. Without it the artifacts sat in ``paper_reports`` with no way for the
-product to ask for them, which is the same orphan shape the persistence layer
-itself was fixing.
-
-**Why this is not served by ``GET /api/v1/tasks/<id>``.** That endpoint resolves
-against the in-memory ``TaskRuntime`` registry, so it 404s the moment
-``cleanup_stale()`` sweeps the finished task (TTL 7200s) or the process
-restarts — exactly the window durable storage exists to cover. It is also
-addressed by TASK id, while a persisted research row is addressed by
-DIRECTION: the same direction re-researched later is the same row. So this is a
-structurally different lookup, not a duplicate of the generic task surface, and
-the two are complementary:
-
-    live job, progress + abort   → /api/v1/tasks/<id>
-    finished work, any time later → /api/v1/research/lookup?direction=…
-
-``found: false`` is a normal 200 answer, not a 404: the re-attach path calls
-this on every open, and "this direction has not been researched" is information,
-not an error.
+The blueprint serves immutable auto-research results plus the versioned
+Research Foundry program, live provider-neutral capability catalog, safe LaTeX
+scaffolding, and source ZIP export. Live execution remains on the generic task
+API; persistence and normalization stay in ``lib.research``. An unknown
+direction is a normal empty/``found=false`` result rather than an HTTP error.
 """
 
 from __future__ import annotations
 
-from quart import Blueprint, request
+from quart import Blueprint, Response, request
 
-from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.api_response import (
+    api_bad_request,
+    api_conflict,
+    api_internal_error,
+    api_ok,
+)
+from lib.storage.errors import StorageError
 from lib.log import get_logger
 from lib.openapi import api_meta
+from lib.request_parser import BadRequest, async_parse_body
 
 from .auth import request_user_id, require_auth
 
@@ -109,6 +99,185 @@ def research_list():
         return api_internal_error('internal_error')
     logger.info('[api_v1.research] list → %d direction(s)', len(items))
     return api_ok({'items': items, 'total': len(items)})
+
+
+@api_v1_research_bp.route('/api/v1/research/workspace', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Load a versioned Research Foundry production workspace',
+    description=(
+        'Returns the direction-scoped experiment protocol, run ledger, '
+        'claim/evidence map and manuscript plan. A new direction returns the '
+        'canonical empty workspace with revision zero.'),
+    tags=['research'],
+    parameters=[
+        {'name': 'direction', 'in': 'query', 'required': True,
+         'schema': {'type': 'string'}},
+        {'name': 'lang', 'in': 'query',
+         'schema': {'type': 'string', 'default': 'en'}},
+    ])
+def research_workspace_get():
+    direction = (request.args.get('direction') or '').strip()
+    if not direction:
+        return api_bad_request("'direction' is required and must be non-empty")
+    lang = (request.args.get('lang') or 'en').strip() or 'en'
+    try:
+        from lib.research.program import readiness
+        from lib.research.workspace import load_workspace
+        workspace = load_workspace(
+            direction, lang, user_id=int(request_user_id()))
+    except Exception as exc:
+        logger.error('[api_v1.research] workspace lookup failed: %s',
+                     exc, exc_info=True)
+        return api_internal_error('internal_error')
+    return api_ok({'workspace': workspace, 'readiness': readiness(workspace)})
+
+
+@api_v1_research_bp.route('/api/v1/research/workspace', methods=['PUT'])
+@require_auth
+@api_meta(
+    summary='Commit one Research Foundry workspace revision',
+    description=(
+        'Optimistic compare-and-swap. expected_revision must match the '
+        'currently stored revision; stale writers receive HTTP 409 and must '
+        'reload rather than overwriting newer experiment evidence.'),
+    tags=['research'])
+async def research_workspace_put():
+    try:
+        body = await async_parse_body(strict=True)
+    except BadRequest as exc:
+        return api_bad_request(str(exc))
+    direction = str(body.get('direction') or '').strip()
+    workspace = body.get('workspace')
+    expected_revision = body.get('expected_revision')
+    if not direction or not isinstance(workspace, dict):
+        return api_bad_request('direction and workspace are required')
+    if (isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0):
+        return api_bad_request('expected_revision must be a non-negative integer')
+    try:
+        from lib.research.workspace import save_workspace
+        saved = save_workspace(
+            direction, str(body.get('lang') or 'en'), workspace,
+            expected_revision=expected_revision,
+            user_id=int(request_user_id()),
+        )
+    except ValueError as exc:
+        return api_bad_request(str(exc))
+    except StorageError as exc:
+        if exc.code == 'database_conflict':
+            return api_conflict('research_workspace_stale')
+        logger.error('[api_v1.research] workspace storage failed: %s',
+                     exc, exc_info=True)
+        return api_internal_error('internal_error')
+    except Exception as exc:
+        logger.error('[api_v1.research] workspace commit failed: %s',
+                     exc, exc_info=True)
+        return api_internal_error('internal_error')
+    from lib.research.program import readiness
+    return api_ok({'workspace': saved, 'readiness': readiness(saved)})
+
+
+@api_v1_research_bp.route('/api/v1/research/capabilities', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Discover live provider-neutral research capabilities',
+    description=(
+        'Projects every enabled MCP tool into a common research capability '
+        'catalog. Suggestions are descriptive only; execution requires an '
+        'exact capability binding saved in the owner-scoped workspace.'),
+    tags=['research'])
+def research_capabilities_get():
+    try:
+        from lib.research.capabilities import build_capability_catalog
+        catalog = build_capability_catalog(user_id=int(request_user_id()))
+    except Exception as exc:
+        logger.error('[api_v1.research] capability discovery failed: %s',
+                     exc, exc_info=True)
+        return api_internal_error('internal_error')
+    return api_ok({'catalog': catalog})
+
+
+@api_v1_research_bp.route('/api/v1/research/manuscript/scaffold', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Create a bounded conference-paper LaTeX source tree',
+    description=(
+        'Adds missing source files without overwriting edited files, then '
+        'commits with the same optimistic revision guard as workspace PUT.'),
+    tags=['research'])
+async def research_manuscript_scaffold():
+    try:
+        body = await async_parse_body(strict=True)
+    except BadRequest as exc:
+        return api_bad_request(str(exc))
+    direction = str(body.get('direction') or '').strip()
+    workspace = body.get('workspace')
+    expected_revision = body.get('expected_revision')
+    if not direction or not isinstance(workspace, dict):
+        return api_bad_request('direction and workspace are required')
+    if (isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0):
+        return api_bad_request('expected_revision must be a non-negative integer')
+    try:
+        from lib.research.manuscript import scaffold_source_files
+        from lib.research.program import readiness
+        from lib.research.workspace import save_workspace
+        draft = dict(workspace)
+        draft['source_files'] = scaffold_source_files(draft)
+        draft['stage'] = 'writing'
+        saved = save_workspace(
+            direction, str(body.get('lang') or 'en'), draft,
+            expected_revision=expected_revision,
+            user_id=int(request_user_id()),
+        )
+    except ValueError as exc:
+        return api_bad_request(str(exc))
+    except StorageError as exc:
+        if exc.code == 'database_conflict':
+            return api_conflict('research_workspace_stale')
+        logger.error('[api_v1.research] manuscript scaffold storage failed: %s',
+                     exc, exc_info=True)
+        return api_internal_error('internal_error')
+    except Exception as exc:
+        logger.error('[api_v1.research] manuscript scaffold failed: %s',
+                     exc, exc_info=True)
+        return api_internal_error('internal_error')
+    return api_ok({'workspace': saved, 'readiness': readiness(saved)})
+
+
+@api_v1_research_bp.route('/api/v1/research/manuscript/source.zip', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Export the current normalized LaTeX source tree as ZIP',
+    description='Streams only safe relative source paths from the owner workspace.',
+    tags=['research'])
+def research_manuscript_export():
+    direction = (request.args.get('direction') or '').strip()
+    if not direction:
+        return api_bad_request("'direction' is required and must be non-empty")
+    lang = (request.args.get('lang') or 'en').strip() or 'en'
+    try:
+        from lib.research.manuscript import export_source_zip
+        from lib.research.workspace import load_workspace
+        workspace = load_workspace(
+            direction, lang, user_id=int(request_user_id()))
+        if not workspace.get('source_files'):
+            return api_bad_request('manuscript source tree is empty')
+        archive = export_source_zip(workspace)
+    except Exception as exc:
+        logger.error('[api_v1.research] manuscript export failed: %s',
+                     exc, exc_info=True)
+        return api_internal_error('internal_error')
+    return Response(
+        archive,
+        status=200,
+        content_type='application/zip',
+        headers={'Content-Disposition':
+                 'attachment; filename="tofu-research-source.zip"'},
+    )
 
 
 __all__ = ['api_v1_research_bp']

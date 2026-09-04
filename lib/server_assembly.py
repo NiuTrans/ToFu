@@ -221,6 +221,14 @@ def _init_database():
         )
         _start_log_aggregate_runtime_after_recovery()
         return
+
+    # Project Brain has no compatibility runtime. Readiness on the authority
+    # owner stays closed until the backup-backed cutover verifies. A declared
+    # distributed read-only preview must never attempt the mutating migration.
+    from lib.conversations.project_brain_startup import (
+        ensure_project_brain_cutover,
+    )
+    ensure_project_brain_cutover()
     if not process_role_has(
             _DEPLOYMENT_CONFIGURATION.process_role, CAPABILITY_TASK_RECOVERY):
         _server_log.info(
@@ -244,6 +252,10 @@ def _init_database():
         lambda: recover_stale_tasks_on_startup(
             prev_shutdown=previous_shutdown),
     )
+    from lib.conversations.project_brain_startup import recover_active_work_items
+    # Unlike reconstructible enrichment, ownership recovery is readiness
+    # critical: an orphaned active item must never look claimable after boot.
+    recover_active_work_items()
     _run_boot_recovery_step(
         'superseded-attempt cleanup', cleanup_superseded_attempts)
 
@@ -275,5 +287,10 @@ def _init_database():
         rehydrate_swarms_on_startup()
     except Exception as exc:
         _server_log.warning('Swarm rehydration failed: %s', exc)
+    try:
+        from lib.swarm.integration import start_swarm_output_cleanup
+        start_swarm_output_cleanup()
+    except Exception as exc:
+        _server_log.warning('Swarm output cleanup failed to start: %s', exc)
 
     _start_log_aggregate_runtime_after_recovery()

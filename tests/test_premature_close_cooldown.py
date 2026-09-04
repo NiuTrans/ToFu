@@ -1,4 +1,4 @@
-"""Premature-close → per-upstream health-scoring edge (lib/llm_dispatch/api.py).
+"""Premature-close → per-upstream health-scoring edge (lib/llm_dispatch/_api_stream.py; facade lib/llm_dispatch/api.py).
 
 ``lib/llm/_sse_core.py::SSEAccumulator.finalize`` retains missing-``[DONE]`` as
 a compatibility diagnostic while the closed stream state decides whether the

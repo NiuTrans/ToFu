@@ -1,5 +1,7 @@
 import { invokeFeatureEntry, type FeatureCallable } from '../runtime-bridge';
-import './settings/provider-surfaces.css';
+import './settings/devices.css';
+import './settings/tools-inventory.css';
+import './settings/settings-comfort.css';
 import { setRuntimeService } from '../runtime/app-runtime.js';
 import { featureRegistry } from '../feature-registry';
 import { modelPricePresentation } from './settings/model-price-localization';
@@ -9,43 +11,46 @@ import './settings/browser-access';
 import './settings/devices';
 import './settings/speech';
 import './settings/credentials-vault';
-import './settings/auto-setup';
-import './settings/balance';
 import './settings/auth-sources';
-import './settings/key-stats';
 import './settings/tools-inventory';
+import '../runtime/settings-presenters.generated.js';
 
 const settingsCompatibility = featureRegistry;
 setRuntimeService('modelPricePresentation', modelPricePresentation);
 
-// The centralized Models panel is a lazy chunk: retained Settings reaches it
-// through this bridge and the panel publishes its real seams once evaluated.
+// Creator/Model is a lazy, typed, read-only Settings owner. The retained
+// adapter passes only the v2 document; the feature's public type intentionally
+// omits every Provider/Offering/Deployment field.
 let modelCatalogPanel: Promise<typeof import('./model-catalog/panel')> | null = null;
 
 function ensureModelCatalogPanel() {
-  if (!modelCatalogPanel) {
-    modelCatalogPanel = import('./model-catalog/panel');
-  }
+  if (!modelCatalogPanel) modelCatalogPanel = import('./model-catalog/panel');
   return modelCatalogPanel;
 }
 
-function renderModelCatalogPanel(): void {
-  void ensureModelCatalogPanel().then((owner) => owner.renderModelCatalogPanel());
+function renderModelCatalogPanel(documentValue: unknown): void {
+  void ensureModelCatalogPanel().then((owner) => {
+    owner.renderModelCatalogPanel(documentValue as Parameters<typeof owner.renderModelCatalogPanel>[0]);
+  });
+}
+
+function setModelCatalogSearch(value: unknown): void {
+  void ensureModelCatalogPanel().then((owner) => owner.setModelCatalogSearch(value));
 }
 
 function destroyModelCatalogPanel(): void {
-  void ensureModelCatalogPanel().then((owner) => owner.destroyModelCatalogPanel());
+  if (!modelCatalogPanel) return;
+  void modelCatalogPanel.then((owner) => owner.destroyModelCatalogPanel());
 }
 
 setRuntimeService('_renderModelCatalogPanel', renderModelCatalogPanel);
+setRuntimeService('_setModelCatalogSearchOwner', setModelCatalogSearch);
 setRuntimeService('_destroyModelCatalogPanel', destroyModelCatalogPanel);
+
 for (const name of [
-  '_startBalancePolling', '_stopBalancePolling', '_loadKeyStats',
-  '_startModelHealthPolling', '_stopModelHealthPolling',
   '_destroyPrivateHosts', '_destroyBrowserAccess', '_destroyDevicesTab',
   '_destroySpeechTab',
-  '_destroyCredentialsVault', '_destroyAutoSetup', '_destroyAuthSources',
-  '_destroyKeyStats',
+  '_destroyCredentialsVault', '_destroyAuthSources',
 ] as const) {
   const service = settingsCompatibility[name];
   if (typeof service === 'function') setRuntimeService(name, service);
@@ -61,9 +66,7 @@ window.addEventListener('tofu:language-change', () => {
     }
   }
   if (modelCatalogPanel) {
-    void modelCatalogPanel.then((owner) => {
-      try { owner.repaintModelCatalogPanel(); } catch { /* not mounted yet */ }
-    });
+    void modelCatalogPanel.then((owner) => owner.repaintModelCatalogPanel());
   }
 });
 

@@ -4,8 +4,8 @@ Replaces the per-feature ``/api/paper/poll``, ``/api/translate/poll``, etc.
 for headless callers (legacy paths remain). One uniform shape:
 
   GET  /api/v1/tasks                 — list (filter by kind/status)
-  GET  /api/v1/tasks/{id}            — full state snapshot
-  GET  /api/v1/tasks/{id}/events     — long-poll cursor replay
+  GET  /api/v1/tasks/{id}            — current state + replay cursor summary
+  GET  /api/v1/tasks/{id}/events     — bounded long-poll cursor replay
   GET  /api/v1/tasks/{id}/stream     — SSE event replay
   POST /api/v1/tasks/start           — START a production job (kind-dispatched)
   POST /api/v1/tasks/{id}/abort      — graceful stop
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import nullcontext
 
 from quart import Blueprint, request
 
@@ -30,6 +31,17 @@ from lib.api_response import (
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import optional_bool, parse_body, require_str
+from lib.task_replay import (
+    TASK_REPLAY_TERMINAL_EVENT_TYPES,
+    TASK_REPLAY_TERMINAL_STATUSES,
+    project_bounded_replay_payload,
+    task_event_base_cursor,
+)
+from lib.tools.tool_env import (
+    MAX_CUSTOM_TOOL_CALL_ID_CHARS,
+    MAX_CUSTOM_TOOL_RESULT_CHARS,
+    resolve_client_tool_result,
+)
 from routes.task_http import task_replay_cursor, task_replay_parameters
 
 from .auth import current_auth, request_user_id, require_scope
@@ -75,6 +87,7 @@ def _registries() -> dict:
         ('lib.paper.podcast_runtime', '_podcast_runtime'),
         ('lib.longform.runtime', '_longform_runtime'),
         ('lib.research.runtime', '_research_runtime'),
+        ('lib.research.action_runtime', '_research_action_runtime'),
         ('lib.slides.runtime', '_slides_runtime'),
     ):
         try:
@@ -135,10 +148,13 @@ def _starters() -> dict:
     for mod_path, attr, kind, field, params in (
         ('lib.research.api', 'produce_research', 'research', 'direction',
          ('lang', 'n_ideas', 'seed_arxiv_ids')),
+        ('lib.research.action', 'start_research_action', 'research-action',
+         'direction', ('action', 'lang', 'expected_revision',
+                       'confirm_external_writes', 'model')),
         ('lib.longform.api', 'start_report_job', 'longform-report', 'topic',
          ('lang', 'depth')),
         ('lib.slides.api', 'start_slides_job', 'slides-deck', 'topic',
-         ('lang', 'style', 'max_pages', 'size', 'model')),
+         ('lang', 'style', 'max_pages', 'size', 'model', 'creative_mode')),
     ):
         try:
             mod = __import__(mod_path, fromlist=[attr])
@@ -154,7 +170,7 @@ def _starters() -> dict:
 @api_v1_tasks_bp.route('/api/v1/tasks/start', methods=['POST'])
 @require_scope('tasks')
 @api_meta(
-    summary='Start a production job (research / long-form report)',
+    summary='Start a registered production job',
     description=(
         'Launch a "one sentence → finished product" job WITHOUT going through '
         'the LLM tool path. Poll it with GET /api/v1/tasks/{id}, watch it with '
@@ -165,12 +181,33 @@ def _starters() -> dict:
     request_body={'required': True, 'content': {'application/json': {
         'schema': {'type': 'object', 'required': ['kind'], 'properties': {
             'kind': {'type': 'string',
-                     'description': "'research' | 'longform-report'"},
+                     'description': (
+                         "Registered kind, including 'research', "
+                         "'research-action', and 'longform-report'.")},
             'direction': {'type': 'string',
-                          'description': "research: the direction to mine"},
+                          'description': (
+                              'research/research-action: the direction to mine '
+                              'or advance')},
             'topic': {'type': 'string',
                       'description': 'longform-report: the report topic'},
             'lang': {'type': 'string'},
+            'action': {
+                'type': 'string',
+                'description': (
+                    "research-action: 'experiment', 'analyze', 'manuscript', "
+                    "'compile', or 'publish'")},
+            'expected_revision': {
+                'type': 'integer', 'minimum': 0,
+                'description': 'research-action workspace CAS revision'},
+            'confirm_external_writes': {
+                'type': 'boolean',
+                'description': 'Explicit authority for write-class actions'},
+            'model': {'type': 'string'},
+            'creative_mode': {
+                'type': 'string', 'enum': ['director', 'standard'],
+                'description': (
+                    'slides-deck: director candidate-and-critic planning '
+                    '(default) or standard single-plan A/B control')},
             'conv_id': {'type': 'string'},
         }}}}})
 def start_task():
@@ -205,7 +242,7 @@ def start_task():
 
     try:
         res = spec['start'](value.strip(), **kwargs) or {}
-    except TypeError as e:
+    except (TypeError, ValueError) as e:
         # A caller-supplied param the capability does not accept — a client
         # bug, not a server fault, so report it as such with the real reason.
         logger.warning('[api_v1.tasks] start %s rejected params %s: %s',
@@ -249,6 +286,21 @@ def _public_task(task: dict) -> dict:
         if k == 'messages':
             # Don't dump the full prompt back; clients already have it.
             out['msg_count'] = len(v) if isinstance(v, list) else 0
+            continue
+        if k == 'events':
+            # Event history has its own cursor replay endpoint. Embedding the
+            # same retained window here made a status refresh duplicate tens
+            # of megabytes for long tasks. Publish only enough producer-owned
+            # cursor metadata for a client to attach safely.
+            lock = task.get('events_lock')
+            with (lock if lock is not None else nullcontext()):
+                retained = v if isinstance(v, (list, tuple)) else []
+                base_cursor = task_event_base_cursor(task, retained)
+                out['event_replay'] = {
+                    'retained_count': len(retained),
+                    'base_cursor': base_cursor,
+                    'next_cursor': base_cursor + len(retained),
+                }
             continue
         out[k] = v
     return out
@@ -306,11 +358,47 @@ def list_tasks():
 
 
 def _find_task(task_id: str, *, user_id: int):
+    foreign_present = False
     for rt in _registries().values():
         t = rt.get_owned(task_id, user_id=user_id)
         if t is not None:
-            return rt, t
-    return None, None
+            return rt, t, False
+        try:
+            foreign_present = foreign_present or rt.get(task_id) is not None
+        except Exception as e:
+            logger.debug(
+                '[api_v1.tasks] live presence probe failed task=%s: %s',
+                task_id[:8], e)
+    return None, None, foreign_present
+
+
+def _task_accessible(task_id: str, *, user_id: int) -> bool:
+    """Owner check for the read-only Request Inspector endpoints.
+
+    A live-registry miss is NOT "unknown task": after a server restart or a
+    registry TTL/capacity eviction the in-memory dict is gone while the
+    durable event log (6h TTL) and the ``task_results`` row still exist.
+    404ing there made the drawer report every finished run as "records
+    cleaned up" when they were not. Fall back to the persisted row's
+    ``user_id`` (swarm-agent ids ``parent#agent:<id>`` check their parent's
+    row); only a truly unknown or foreign task 404s.
+    """
+    _runtime, task, foreign_present = _find_task(
+        task_id, user_id=user_id)
+    if task is not None:
+        return True
+    if foreign_present:
+        return False
+    try:
+        from lib.tasks_pkg.durable_chat_replay import (
+            persisted_chat_task_owner_matches,
+        )
+        return persisted_chat_task_owner_matches(
+            task_id, user_id=user_id)
+    except Exception as e:
+        logger.debug('[api_v1.tasks] persisted owner check failed for '
+                     'task=%s: %s', task_id[:8], e)
+        return False
 
 
 @api_v1_tasks_bp.route('/api/v1/tasks/<task_id>', methods=['GET'])
@@ -322,29 +410,77 @@ def _find_task(task_id: str, *, user_id: int):
               '404': {'description': 'Not Found'},
           })
 def get_task(task_id):
-    rt, task = _find_task(task_id, user_id=int(request_user_id()))
+    owner_user_id = int(request_user_id())
+    rt, task, foreign_present = _find_task(
+        task_id, user_id=owner_user_id)
     if task is None:
-        return api_not_found('Task not found')
+        if foreign_present:
+            return api_not_found('Task not found')
+        try:
+            from lib.tasks_pkg.durable_chat_replay import (
+                load_durable_chat_task,
+            )
+            snapshot = load_durable_chat_task(
+                task_id, user_id=owner_user_id)
+        except Exception as e:
+            logger.error(
+                '[api_v1.tasks] durable state failed task=%s: %s',
+                task_id[:8], e, exc_info=True)
+            return api_internal_error('internal_error')
+        if snapshot is None:
+            return api_not_found('Task not found')
+        task = snapshot.public_task()
     return api_ok(_public_task(task))
 
 
 @api_v1_tasks_bp.route('/api/v1/tasks/<task_id>/events', methods=['GET'])
 @require_scope('tasks')
 @api_meta(summary='Cursor-based event replay (long-poll)',
+          description='Returns a bounded, lossless page. Continue with '
+                      'next_cursor until caught_up=true; terminal result '
+                      'fields are emitted only on the caught-up page.',
           tags=['tasks'], scope='tasks',
           parameters=_TASK_REPLAY_PARAMETERS)
 def task_events(task_id):
     cursor = task_replay_cursor(request.args)
-    rt, task = _find_task(task_id, user_id=int(request_user_id()))
+    owner_user_id = int(request_user_id())
+    rt, task, foreign_present = _find_task(
+        task_id, user_id=owner_user_id)
     if task is None:
-        return api_not_found('Task not found')
-    return api_ok(rt.poll(task_id, cursor=cursor))
+        if foreign_present:
+            return api_not_found('Task not found')
+        try:
+            from lib.tasks_pkg.durable_chat_replay import (
+                load_durable_chat_replay,
+            )
+            snapshot = load_durable_chat_replay(
+                task_id, user_id=owner_user_id)
+            if snapshot is None:
+                return api_not_found('Task not found')
+            _snapshot, payload = snapshot.bounded_replay_payload(cursor)
+        except Exception as e:
+            logger.error(
+                '[api_v1.tasks] durable replay failed task=%s: %s',
+                task_id[:8], e, exc_info=True)
+            return api_internal_error('internal_error')
+        return api_ok(payload)
+    return api_ok(project_bounded_replay_payload(
+        rt.poll(task_id, cursor=cursor)))
 
 
 @api_v1_tasks_bp.route('/api/v1/tasks/by-conv/<conv_id>', methods=['GET'])
 @require_scope('tasks')
 @api_meta(summary='Request Inspector: task rows for a conversation',
-          tags=['tasks'], scope='tasks')
+          tags=['tasks'], scope='tasks',
+          parameters=[
+              {'name': 'limit', 'in': 'query',
+               'schema': {'type': 'integer', 'default': 30, 'maximum': 100}},
+              {'name': 'before', 'in': 'query',
+               'schema': {'type': 'integer'},
+               'description': 'Exclusive createdAt-ms cursor paging OLDER '
+                              'persisted rows (live rows are first-page '
+                              'only). From the previous page\'s oldest row.'},
+          ])
 def tasks_by_conv(conv_id):
     """Task rows for the Request Inspector drawer (live registry +
     task_results + exact kind-counted snapshot tallies)."""
@@ -356,7 +492,19 @@ def tasks_by_conv(conv_id):
             include_messages=False) is None:
         return api_not_found('Conversation not found')
     try:
-        return api_ok(list_conv_tasks(conv_id, user_id=owner_user_id))
+        limit = max(1, min(int(request.args.get('limit') or 30), 100))
+    except (ValueError, TypeError):
+        limit = 30
+    before_raw = request.args.get('before')
+    before = None
+    if before_raw:
+        try:
+            before = max(0, int(before_raw))
+        except (ValueError, TypeError):
+            return api_bad_request('before must be an integer ms cursor')
+    try:
+        return api_ok(list_conv_tasks(
+            conv_id, user_id=owner_user_id, limit=limit, before=before))
     except Exception as e:
         logger.error('[api_v1.tasks] by-conv failed for conv=%s: %s',
                      conv_id[:8], e, exc_info=True)
@@ -375,7 +523,7 @@ def task_requests(task_id):
     Returns 200 with ``eventsAvailable:false`` for expired (>6h) or
     unknown tasks so the UI can show an honest empty state."""
     from lib.tasks_pkg.request_inspector import fold_request_log
-    if _find_task(task_id, user_id=int(request_user_id()))[1] is None:
+    if not _task_accessible(task_id, user_id=int(request_user_id())):
         return api_not_found('Task not found')
     try:
         return api_ok(fold_request_log(task_id))
@@ -390,16 +538,31 @@ def task_requests(task_id):
 @api_meta(summary='Turn Trace: per-task timing span fold',
           tags=['tasks'], scope='tasks')
 def task_trace(task_id):
-    """Fold the task's persisted event log into the timing span tree
-    (turn → round → llm/tool/wait/compaction + explicit gaps + the
-    declared-budget over-run list). Contract: docs/TURN_TRACE_CONTRACT.md.
-    Returns 200 with ``eventsAvailable:false`` for expired (>6h) or
-    unknown tasks so the UI can show an honest empty state."""
-    from lib.tasks_pkg.turn_trace import fold_task_trace
-    if _find_task(task_id, user_id=int(request_user_id()))[1] is None:
+    """Return live event-derived or permanent attempt-owned timing evidence."""
+    from lib.tasks_pkg.turn_trace import (
+        fold_task_trace,
+        merge_client_trace_evidence,
+        read_persisted_task_trace,
+    )
+    owner_user_id = int(request_user_id())
+    durable = read_persisted_task_trace(task_id, user_id=owner_user_id)
+    if not _task_accessible(task_id, user_id=owner_user_id) and durable is None:
         return api_not_found('Task not found')
     try:
-        return api_ok(fold_task_trace(task_id))
+        # A terminal attempt snapshot is the permanent authority. In particular,
+        # prefer it once the 6-hour streaming tier starts disappearing while
+        # 30-day structural rows still make a raw fold look superficially
+        # non-empty.
+        if durable is not None and durable.get('running') is False \
+                and isinstance(durable.get('summary'), dict):
+            return api_ok(durable)
+        live = fold_task_trace(task_id)
+        if durable is not None:
+            live = merge_client_trace_evidence(
+                live, durable, task_id=task_id)
+        if live.get('eventsAvailable'):
+            return api_ok(live)
+        return api_ok(durable or live)
     except Exception as e:
         logger.error('[api_v1.tasks] trace fold failed for task=%s: %s',
                      task_id[:8], e, exc_info=True)
@@ -418,12 +581,13 @@ def task_request_payload(task_id, round_num):
     404 when the round has no matching snapshot (expired, wrong kind, or
     unknown)."""
     from lib.tasks_pkg.request_inspector import get_request_payload
-    if _find_task(task_id, user_id=int(request_user_id()))[1] is None:
+    if not _task_accessible(task_id, user_id=int(request_user_id())):
         return api_not_found('Task not found')
     try:
         payload = get_request_payload(
             task_id, round_num, turn=request.args.get('turn', ''),
-            kind=request.args.get('kind', 'request'))
+            kind=request.args.get('kind', 'request'),
+            user_id=int(request_user_id()))
     except Exception as e:
         logger.error('[api_v1.tasks] request payload failed for task=%s '
                      'round=%s: %s', task_id[:8], round_num, e, exc_info=True)
@@ -431,6 +595,40 @@ def task_request_payload(task_id, round_num):
     if payload is None:
         return api_not_found('Round snapshot not found')
     return api_ok(payload)
+
+
+@api_v1_tasks_bp.route(
+    '/api/v1/tasks/<task_id>/raw-archives/<archive_id>/<part>',
+    methods=['GET'])
+@require_scope('tasks')
+@api_meta(summary='Request Inspector: bounded raw provider archive chunk',
+          tags=['tasks'], scope='tasks')
+def task_raw_archive_chunk(task_id, archive_id, part):
+    """Lazily hydrate one bounded request/response body chunk."""
+    owner_user_id = int(request_user_id())
+    if not _task_accessible(task_id, user_id=owner_user_id):
+        return api_not_found('Task not found')
+    if part not in {'request', 'response'}:
+        return api_bad_request('part must be request or response')
+    try:
+        offset = max(0, int(request.args.get('offset') or 0))
+        limit = max(1, min(1024 * 1024,
+                           int(request.args.get('limit') or 256 * 1024)))
+    except (TypeError, ValueError, OverflowError):
+        return api_bad_request('offset and limit must be integers')
+    try:
+        from lib.tasks_pkg.request_inspector import get_raw_archive_chunk
+
+        chunk = get_raw_archive_chunk(
+            task_id, archive_id, part, user_id=owner_user_id,
+            offset=offset, limit=limit)
+    except Exception as exc:
+        logger.error('[api_v1.tasks] raw archive read failed task=%s: %s',
+                     task_id[:8], exc, exc_info=True)
+        return api_internal_error('internal_error')
+    if chunk is None:
+        return api_not_found('Raw archive not found')
+    return api_ok(chunk)
 
 
 @api_v1_tasks_bp.route('/api/v1/tasks/<task_id>/stream', methods=['GET'])
@@ -446,31 +644,95 @@ def task_request_payload(task_id, round_num):
           })
 def task_stream(task_id):
     cursor = task_replay_cursor(request.args)
-    rt, task = _find_task(task_id, user_id=int(request_user_id()))
+    owner_user_id = int(request_user_id())
+    rt, task, foreign_present = _find_task(
+        task_id, user_id=owner_user_id)
+    durable_snapshot = None
     if task is None:
-        return api_not_found('Task not found')
+        if foreign_present:
+            return api_not_found('Task not found')
+        try:
+            from lib.tasks_pkg.durable_chat_replay import (
+                load_durable_chat_replay,
+            )
+            durable_snapshot = load_durable_chat_replay(
+                task_id, user_id=owner_user_id)
+        except Exception as e:
+            logger.error(
+                '[api_v1.tasks] durable stream lookup failed task=%s: %s',
+                task_id[:8], e, exc_info=True)
+            return api_internal_error('internal_error')
+        if durable_snapshot is None:
+            return api_not_found('Task not found')
 
     def gen():
-        nonlocal cursor
+        nonlocal cursor, durable_snapshot
         from lib.task_replay import task_memory_replay_page
         last_heartbeat = time.time()
         while True:
-            page = task_memory_replay_page(task, cursor)
-            new_events = page.events
-            cursor = page.next_cursor
-            for event_id, ev in page.frames:
+            if task is not None:
+                page = task_memory_replay_page(task, cursor)
+                new_events = page.events
+                cursor = page.next_cursor
+                frames = page.frames
+                terminal = task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
+                terminal_payload = {
+                    'type': 'done',
+                    'status': str(task.get('status') or ''),
+                }
+            else:
+                durable_snapshot, payload = (
+                    durable_snapshot.bounded_replay_payload(cursor))
+                new_events = payload['events']
+                cursor = int(payload['next_cursor'])
+                frames = [
+                    (int(event['seq']), event) for event in new_events
+                ]
+                terminal = bool(
+                    payload.get('done') and payload.get('caught_up'))
+                terminal_payload = {
+                    'type': 'done',
+                    'status': str(payload.get('status') or ''),
+                }
+                for field in (
+                    'content', 'thinking', 'error', 'finishedAt',
+                ):
+                    if field in payload:
+                        terminal_payload[field] = payload[field]
+                finish_reason = durable_snapshot.metadata.get('finishReason')
+                if finish_reason:
+                    terminal_payload['finishReason'] = finish_reason
+
+            for event_id, ev in frames:
                 yield f'id: {event_id}\n'
                 yield f'data: {json.dumps(ev, ensure_ascii=False)}\n\n'
-                if ev.get('type') in ('done', 'error', 'aborted'):
+                if ev.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES:
                     return
-            if task.get('status') in ('done', 'error', 'aborted') and not new_events:
-                yield 'data: {"type":"done","status":"' + str(task['status']) + '"}\n\n'
+            if terminal and not new_events:
+                yield 'data: ' + json.dumps(
+                    terminal_payload, ensure_ascii=False) + '\n\n'
                 return
             now = time.time()
             if now - last_heartbeat > 15:
                 yield ': heartbeat\n\n'
                 last_heartbeat = now
-            time.sleep(0.05)
+            if task is not None:
+                time.sleep(0.05)
+                continue
+
+            # A cold non-terminal row can belong to a worker in another
+            # process. Refresh storage at a bounded cadence; terminal rows are
+            # immutable and simply drain their already-captured event window.
+            if not durable_snapshot.terminal:
+                time.sleep(0.5)
+                from lib.tasks_pkg.durable_chat_replay import (
+                    load_durable_chat_replay,
+                )
+                refreshed = load_durable_chat_replay(
+                    task_id, user_id=owner_user_id)
+                if refreshed is None:
+                    return
+                durable_snapshot = refreshed
 
     return sse_response(gen())
 
@@ -480,10 +742,11 @@ def task_stream(task_id):
 @api_meta(summary='Abort a task', tags=['tasks'], scope='tasks')
 def task_abort(task_id):
     owner_user_id = int(request_user_id())
-    rt, task = _find_task(task_id, user_id=owner_user_id)
+    rt, task, _foreign_present = _find_task(
+        task_id, user_id=owner_user_id)
     if task is None:
         return api_not_found('Task not found')
-    if task.get('status') in ('done', 'error', 'aborted'):
+    if task.get('status') in TASK_REPLAY_TERMINAL_STATUSES:
         return api_ok(taskId=task_id, status=task['status'],
                        note='already finished')
     rt.abort_owned(task_id, user_id=owner_user_id)
@@ -508,22 +771,31 @@ def task_abort(task_id):
     request_body={'required': True, 'content': {'application/json': {
         'schema': {'type': 'object', 'required': ['call_id', 'content'],
                    'properties': {
-                       'call_id': {'type': 'string'},
-                       'content': {'type': 'string'},
+                       'call_id': {
+                           'type': 'string',
+                           'maxLength': MAX_CUSTOM_TOOL_CALL_ID_CHARS,
+                       },
+                       'content': {
+                           'type': 'string',
+                           'maxLength': MAX_CUSTOM_TOOL_RESULT_CHARS,
+                       },
                        'is_error': {'type': 'boolean'}}}}}})
 def task_tool_result(task_id):
     owner_user_id = int(request_user_id())
-    _, task = _find_task(task_id, user_id=owner_user_id)
+    _, task, _foreign_present = _find_task(
+        task_id, user_id=owner_user_id)
     if task is None:
         return api_not_found('Task not found')
     body = parse_body()
     try:
-        call_id = require_str(body, 'call_id')
-        content = require_str(body, 'content', allow_empty=True)
+        call_id = require_str(
+            body, 'call_id', max_len=MAX_CUSTOM_TOOL_CALL_ID_CHARS)
+        content = require_str(
+            body, 'content', allow_empty=True,
+            max_len=MAX_CUSTOM_TOOL_RESULT_CHARS)
     except ValueError as e:
         return api_bad_request(str(e))
     is_error = optional_bool(body, 'is_error', default=False)
-    from lib.tools.tool_env import resolve_client_tool_result
     ok = resolve_client_tool_result(
         call_id,
         content,
@@ -547,7 +819,8 @@ def task_tool_result(task_id):
           tags=['tasks'], scope='admin')
 def task_delete(task_id):
     owner_user_id = int(request_user_id())
-    rt, task = _find_task(task_id, user_id=owner_user_id)
+    rt, task, _foreign_present = _find_task(
+        task_id, user_id=owner_user_id)
     if task is None:
         return api_not_found('Task not found')
     if not rt.remove_owned(task_id, user_id=owner_user_id):

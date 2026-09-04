@@ -172,6 +172,19 @@ async def handle_uncaught(error: BaseException):
             f'<h2>{status}</h2><p>Storage is unavailable. '
             f'Request ID: <code>{request_id}</code></p>', status)
 
+    # Field/body validation failures from lib.request_parser are client
+    # errors, not internal ones — routes without @safe_route (e.g. the v3
+    # conversation-sync blueprint) otherwise surface them as a redacted 500.
+    from lib.request_parser import BadRequest
+    if isinstance(error, BadRequest):
+        logger.warning('[%s] 400 Bad Request: %s %s: %s',
+                       request_id, method, path, error)
+        if path.startswith('/api/'):
+            from lib.api_response import api_bad_request
+            extras = {'field': error.field} if error.field else {}
+            return api_bad_request(str(error), **extras)
+        return await make_response(
+            f'<h2>400</h2><p>Request ID: <code>{request_id}</code></p>', 400)
     logger.error('[%s] Uncaught: %s %s: %s',
                  request_id, method, path, error,
                  exc_info=_explicit_exception_info(error))

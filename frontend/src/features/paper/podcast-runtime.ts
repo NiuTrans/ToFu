@@ -33,9 +33,17 @@ function translate(key: I18nKey, fallback: string): string {
   return typeof fn === 'function' ? String(fn(key, fallback)) : fallback;
 }
 
-function render(): void { globals()._pcRender?.(); }
-function renderProgress(): void { globals()._pcRenderProgress?.(); }
-function renderActivity(): void { globals()._pcRenderActivity?.(); }
+function requiredPresentationPort(name: string): (...args: any[]) => any {
+  const port = globals()[name];
+  if (typeof port !== 'function') {
+    throw new Error(`Podcast presentation port ${name} is unavailable`);
+  }
+  return port;
+}
+
+function render(): void { requiredPresentationPort('_pcRender')(); }
+function renderProgress(): void { requiredPresentationPort('_pcRenderProgress')(); }
+function renderActivity(): void { requiredPresentationPort('_pcRenderActivity')(); }
 
 export function resetPodcastRun(): void {
   const state = podcast();
@@ -103,7 +111,7 @@ export async function initPodcastTab(_force?: boolean): Promise<void> {
     return;
   }
   seedMediaModel('podcast');
-  globals()._pcSeedOptions?.();
+  requiredPresentationPort('_pcSeedOptions')();
   state.status = 'loading';
   render();
   try {
@@ -298,7 +306,7 @@ export async function generatePodcast(force = false): Promise<void> {
   state.mode = mode?.value || state.mode;
   state.lang = lang?.value || state.lang;
   state.voice = voice?.value.trim() || state.voice;
-  globals()._pcPersistOptions?.();
+  requiredPresentationPort('_pcPersistOptions')();
   seedMediaModel('podcast');
   state.artifactModel = state.model || '';
   state.status = 'generating';

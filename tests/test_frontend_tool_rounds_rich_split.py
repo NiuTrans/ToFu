@@ -1,14 +1,17 @@
-"""Guards for pt_3879f00e sub-part 4 — split tool_rounds.js (261KB, the
-largest non-i18n file in the core bundle): move the conv-meta rich-render
-family (~40KB) + the timer-watcher block (~18KB) + its 1 Hz ticker into
-ui/tool_rounds_rich.js (_CLASSIC_ASSET_FILES).
+"""Guards for the retained tool-round core/rich presentation boundary.
 
-Census (2026-08-01, all grep-verified):
-  * the WHOLE public surface (renderToolRoundsHTML /
-    renderSegmentTimelineHTML / renderMcpLoginHintHtml /
-    renderTurnProvenanceHtml / renderPreferenceLearnedHtml) is called
-    from the shared selector adapter and auxiliary branch views —
-    an overall manifest move is impossible (ledger ruling 2026-08-01),
+The original split moved the conv-meta rich-render family (~40KB) and the
+timer-watcher block (~18KB) into ``ui/tool_rounds_rich.js``. Command and Timer
+Watcher clocks now share one typed, demand-scoped presentation ticker.
+
+Census (2026-08-28, all grep-verified):
+  * the retained tool surface (renderToolRoundsHTML /
+    renderSegmentTimelineHTML) is called from the shared selector adapter and
+    auxiliary branch views, so this increment moves only its optional rich
+    sub-renderers,
+  * Turn provenance and its safe inline-Markdown policy now live in the typed
+    conversation presentation owner; the rich board title consumes only the
+    narrow lexical inline-Markdown bridge,
   * `_renderConvMetaBlock` has exactly ONE caller
     (_renderUnifiedToolLine:2005) whose control flow ALREADY degrades
     gracefully (`if (convMetaHtml) return …` else generic ptool-line),
@@ -16,25 +19,20 @@ Census (2026-08-01, all grep-verified):
     (_renderUnifiedToolLine:1913); adding a typeof guard makes absence
     fall through to the same generic line,
   * zero external users of any family helper outside tool_rounds.js,
-  * `_localizeInspectOps` is the ONE cross-boundary helper (called by
-    the boot-critical image-tiles renderer at L2798) — it STAYS,
-  * `_isRoundConvMeta` + `_CONV_META_TOOLS` STAY (used by _getToolSvg),
-  * `_cmdTimerTicker` STAYS (run_command chips are core cold-render);
-    only `_timerCountdownTicker` moves with the timer-watcher block.
+  * conversation-metadata classification lives in the typed presentation
+    owner shared by both retained render adapters,
+  * command and Timer Watcher clocks share the typed, demand-scoped
+    `ToolElapsedTicker`; neither section owns a boot interval.
 
-The structured checklist card is also deferred; its revision projection stays
-in core because both grouped and timeline renderers use it. Core-only mode
-falls back to the generic tool row until the rich module's upgrade pass runs.
-
-Degradation window: the idle prefetch lands the rich module ~2s after
-boot; before that, conv-meta / checklist / timer rounds render as the generic
-one-line summary. The module's load-time upgrade pass re-renders the
-active conversation once IF it contains such rounds (skipped while a
-stream is live — the stream re-renders itself).
+The structured checklist renderer stays in the adjacent rich section; its
+revision projection remains in core because grouped and timeline renderers both
+consume it. Core-only materialization is an explicit fault-tolerance/test seam,
+not a production loading phase, so no boot-time upgrade pass is permitted.
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 
@@ -50,6 +48,7 @@ INDEX_HTML = ROOT / 'index.html'
 TR_CORE = pathlib.Path(runtime_section_path('ui/tool_rounds.js'))
 TR_RICH = pathlib.Path(runtime_section_path('ui/tool_rounds_rich.js'))
 FEATURE_LOADER = pathlib.Path(runtime_section_path('feature-bridge.js'))
+RUNTIME_MANIFEST = ROOT / 'frontend/src/runtime/sections/manifest.json'
 
 MOVED_SYMBOLS = (
     '_convMetaHeadLabel', '_convMetaPurpose', '_renderConvDigest',
@@ -66,15 +65,12 @@ MOVED_SYMBOLS = (
 
 
 def _manifest():
-    """Migration-aware manifest view (the js_bundler manifest is gone with
-    ``static/js``): the retained Vite runtime's logical section list stands
-    in for both file lists, and the deferred entry points come from the
-    migrated feature-bridge.js section."""
+    """Return the retained section order and compatibility entry points."""
     files = runtime_section_names()
     source = FEATURE_LOADER.read_text()
     match = re.search(r'_FEATURE_ENTRY_POINTS\s*=\s*\[([^\]]*)\]', source)
     entries = set(re.findall(r"'([^']+)'", match.group(1))) if match else set()
-    return files, files, entries, set()
+    return files, entries
 
 
 def _core_src():
@@ -88,23 +84,27 @@ def _rich_src():
 # ---------------------------------------------------------------------------
 # 1. manifest (failing-first drivers)
 # ---------------------------------------------------------------------------
-def test_rich_module_in_deferred_files():
-    _bf, deferred, _ep, _crit = _manifest()
-    assert 'ui/tool_rounds_rich.js' in deferred, (
-        "'ui/tool_rounds_rich.js' must be in _CLASSIC_ASSET_FILES — the rich "
-        'conv-meta + timer-watcher renderers (~58KB) out of the core boot '
-        'bundle')
+def test_rich_module_is_retained_and_not_lazy():
+    manifest = json.loads(RUNTIME_MANIFEST.read_text(encoding='utf-8'))
+    retained = [row['source'] for row in manifest['sections']]
+    lazy = [
+        row['source']
+        for bundle in manifest['lazyBundles']
+        for row in bundle['sections']
+    ]
+    assert 'ui/tool_rounds_rich.js' in retained
+    assert 'ui/tool_rounds_rich.js' not in lazy
 
 
 def test_rich_module_not_in_core_bundle_files():
-    bundle, _df, _ep, _crit = _manifest()
+    bundle, _entries = _manifest()
     assert bundle.count('ui/tool_rounds_rich.js') == 1, (
         "'ui/tool_rounds_rich.js' must occur exactly once in the retained "
-        'Vite runtime (a duplicate would double its ticker and upgrade pass)')
+        'Vite runtime (a duplicate would duplicate every rich renderer)')
 
 
 def test_rich_module_follows_core_owner_in_runtime_order():
-    bundle, _df, _ep, _crit = _manifest()
+    bundle, _entries = _manifest()
     core_index = bundle.index('ui/tool_rounds.js')
     assert bundle[core_index + 1] == 'ui/tool_rounds_rich.js', (
         'the structured renderers must immediately follow their core dispatch '
@@ -131,33 +131,26 @@ def test_moved_symbols_present_in_rich_file():
         f'ui/tool_rounds_rich.js is missing moved symbols: {missing}')
 
 
-def test_ticker_moved_cmd_ticker_stays():
+def test_timer_families_share_one_demand_scoped_ticker():
     core, rich = _core_src(), _rich_src()
-    assert '_timerCountdownTicker' not in core, (
-        'the timer-countdown ticker must move with the timer-watcher block')
-    assert '_timerCountdownTicker' in rich, (
-        'the timer-countdown ticker must live in the rich module')
-    assert '_cmdTimerTicker' in core, (
-        'the run_command cmd ticker is core cold-render — it must STAY')
+    assert '_cmdTimerTicker' not in core
+    assert '_timerCountdownTicker' not in rich
+    assert 'const ToolElapsedTicker = ' \
+        'createDemandScopedPresentationTicker({' in core
+    assert '_demandToolElapsedTicker();' in core
+    assert '_demandToolElapsedTicker();' in rich
+    assert 'setInterval(' not in core
+    assert 'setInterval(' not in rich
 
 
 # ---------------------------------------------------------------------------
-# 3. cross-boundary dependencies that must STAY (controls)
+# 3. retired cross-boundary compatibility must not return
 # ---------------------------------------------------------------------------
-def test_localize_inspect_ops_stays_in_core():
-    assert re.search(r'(?m)^function _localizeInspectOps\b', _core_src()), (
-        '_localizeInspectOps is called by the boot-critical image-tiles '
-        'renderer (L2798) — it must STAY in the core file')
-    assert not re.search(r'(?m)^function _localizeInspectOps\b', _rich_src()), (
-        '_localizeInspectOps must not be duplicated into the rich module')
-
-
-def test_conv_meta_predicate_stays_in_core():
-    src = _core_src()
-    assert re.search(r'(?m)^function _isRoundConvMeta\b', src), (
-        '_isRoundConvMeta is used by _getToolSvg (core) — it must STAY')
-    assert re.search(r'(?m)^const _CONV_META_TOOLS\b', src), (
-        '_CONV_META_TOOLS backs the core predicate — it must STAY')
+def test_retired_localize_inspect_ops_helper_is_not_reintroduced():
+    combined = _core_src() + _rich_src()
+    assert '_localizeInspectOps' not in combined, (
+        'the retired classic cross-boundary helper must not return; image '
+        'inspection localization no longer consumes it')
 
 
 # ---------------------------------------------------------------------------
@@ -183,31 +176,26 @@ def test_todo_dispatch_guarded():
     assert re.search(
         r"typeof\s+_renderTodoBlock\s*===\s*['\"]function['\"]",
         _core_src()), (
-        'the checklist-card dispatch must be typeof-guarded so the deferred '
-        'rich module can be absent without breaking tool-round rendering')
+        'the checklist-card dispatch must remain safe in a core-only '
+        'materialization')
 
 
 # ---------------------------------------------------------------------------
-# 5. upgrade pass + no-stub + dev-fallback (controls)
+# 5. no boot upgrade pass + no compatibility stub
 # ---------------------------------------------------------------------------
-def test_upgrade_hook_present():
+def test_retained_rich_section_has_no_boot_upgrade_scan():
     src = _rich_src()
-    for needle in ('_upgradeDegradedToolRounds', 'getActiveConv',
-                   'requestAuthoritativeConversationRender', 'convIsBusy',
-                   'todo_write'):
-        assert needle in src, (
-            f'the rich module must carry the load-time upgrade pass '
-            f'(missing {needle}) — otherwise rounds rendered during the '
-            'prefetch window stay degraded until the next full render')
+    assert '_upgradeDegradedToolRounds' not in src
+    assert 'requestAuthoritativeConversationRender(' not in src
 
 
 def test_no_stub_entries_for_moved_symbols():
-    _bf, _df, entry_points, _crit = _manifest()
+    _bundle, entry_points = _manifest()
     for name in ('_renderConvMetaBlock', '_renderTimerWatcherBlock',
                  'renderToolRoundsHTML'):
         assert name not in entry_points, (
-            f'{name} must NOT be a deferred entry point — core callers use '
-            'typeof-guarded degradation, not the stub loader')
+            f'{name} must NOT be a feature entry point — the retained sections '
+            'compose them directly')
     loader = FEATURE_LOADER.read_text()
     for name in ('_renderConvMetaBlock', '_renderTimerWatcherBlock'):
         assert f"'{name}'" not in loader, (

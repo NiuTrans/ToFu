@@ -8,6 +8,10 @@ OPERATIONS = {
         "query", False, ops._knowledge_document_list),
     "knowledge.document.get": ops.OperationSpec(
         "query", False, ops._knowledge_document_get),
+    "knowledge.document.metadata": ops.OperationSpec(
+        "query", False, ops._knowledge_document_metadata),
+    "knowledge.document.assets": ops.OperationSpec(
+        "query", False, ops._knowledge_document_assets),
     "knowledge.document.content": ops.OperationSpec(
         "query", False, ops._knowledge_document_content),
     "knowledge.document.find_digest": ops.OperationSpec(
@@ -16,6 +20,8 @@ OPERATIONS = {
         "command", True, ops._knowledge_document_create),
     "knowledge.document.replace": ops.OperationSpec(
         "command", True, ops._knowledge_document_replace),
+    "knowledge.document.patch": ops.OperationSpec(
+        "command", True, ops._knowledge_document_patch),
     "knowledge.document.delete": ops.OperationSpec(
         "command", True, ops._knowledge_document_delete),
     "knowledge.settings.get": ops.OperationSpec(

@@ -22,6 +22,7 @@ ERROR_CODES = frozenset({
     'turn_in_progress',
     'turn_parent_invalid',
     'turn_lane_advanced',
+    'turn_superseded_by_human',
     # A normalized conversation already owns its transcript through Turn rows;
     # accepting a legacy message-array replacement would create a second
     # authority.  Keep this distinct from optimistic-CAS conflicts so clients
@@ -46,6 +47,7 @@ class StorageError(RuntimeError):
     retryable: bool = False
     retry_after_ms: int | None = None
     operation_id: str = ''
+    request_not_dispatched: bool = False
 
     def __post_init__(self) -> None:
         RuntimeError.__init__(self, self.message)
@@ -53,15 +55,21 @@ class StorageError(RuntimeError):
             self.code = 'database_internal'
         if self.retry_after_ms is not None:
             self.retry_after_ms = max(0, int(self.retry_after_ms))
+        # This bit unlocks command replay, so truthy strings/integers must not
+        # widen authority across a malformed or older wire implementation.
+        self.request_not_dispatched = self.request_not_dispatched is True
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             'code': self.code,
             'message': self.message,
             'retryable': bool(self.retryable),
             'retry_after_ms': self.retry_after_ms,
             'operation_id': self.operation_id,
         }
+        if self.request_not_dispatched:
+            payload['request_not_dispatched'] = True
+        return payload
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> 'StorageError':
@@ -71,6 +79,8 @@ class StorageError(RuntimeError):
             retryable=bool(payload.get('retryable', False)),
             retry_after_ms=payload.get('retry_after_ms'),
             operation_id=str(payload.get('operation_id') or ''),
+            request_not_dispatched=(
+                payload.get('request_not_dispatched') is True),
         )
 
 
@@ -85,7 +95,7 @@ def http_status_for_storage_error(error: StorageError) -> int:
     if error.code in {
         'database_conflict', 'conversation_authority_conflict',
         'turn_projection_stale', 'turn_in_progress', 'turn_parent_invalid',
-        'turn_lane_advanced',
+        'turn_lane_advanced', 'turn_superseded_by_human',
     }:
         return 409
     if error.code in {

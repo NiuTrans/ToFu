@@ -7,8 +7,7 @@ tests/test_bundle_corruption_guard.py):
 
   export.py's opensource sanitizer did a blind
   ``content.replace('meituan', 'your-provider')`` on every non-brand-asset
-  file. Brand registries like ``static/js/settings/branding.js`` and
-  ``static/js/settings/visibility_defaults.js`` carry ``meituan`` as an
+  file. Historical retained brand registries carried ``meituan`` as an
   UNQUOTED object key (``meituan: '<svg…>'`` / ``meituan:'Meituan'``). The
   rewrite turned it into ``your-provider:`` which JS parses as subtraction
   (``your - provider``) → "Uncaught SyntaxError: Unexpected token '-'",
@@ -37,6 +36,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,23 +46,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 pytest.importorskip('export', reason='export.py is not shipped in opensource builds')
 
 _NODE = shutil.which('node')
-
-# The brand-registry files that carry `meituan` as an unquoted object key —
-# the exact files orphaned by the settings.js split. Kept explicit so the test
-# names the known offenders; test_all_js_with_meituan_key_sanitizes_clean below
-# additionally sweeps the WHOLE tree so a newly-orphaned file can't slip by.
-#
-# HISTORICAL NOTE (measured 2026-07-31): `visibility_defaults.js` no longer
-# contains the token at all — the 0d3293da brand-grouping refactor moved the
-# per-provider visibility map to a shape that does not name providers as
-# unquoted keys. It stays listed because the per-file test SKIPS a file that is
-# absent and its precondition assert (`'meituan' not in sanitized`) would
-# otherwise pass vacuously; keeping the name records that this file WAS a
-# carrier, so a refactor re-introducing the key here is covered from day one.
-# The authoritative coverage is the tree-wide sweep below, which DISCOVERS
-# carriers instead of trusting this list.
-_KNOWN_KEY_FILES = ['frontend/src/runtime/app-runtime.js']
-_AUDIT_SYNTHETIC_REPO_PATHS = {'static/js/settings/branding.js'}
 
 # ── The instrument itself, hoisted to module scope so it can be ASSERTED ON ──
 # Matches an UNQUOTED `meituan:` object key anywhere — deliberately NOT anchored
@@ -91,40 +75,16 @@ def _sanitize(rel: str) -> str:
 
 
 @pytest.mark.skipif(_NODE is None, reason='node not installed')
-@pytest.mark.parametrize('rel', _KNOWN_KEY_FILES)
-def test_known_brand_registry_sanitizes_to_valid_js(rel, tmp_path):
-    """The known brand-registry files must still parse after sanitization."""
-    if not os.path.exists(os.path.join(ROOT, rel)):
-        pytest.skip(f'{rel} absent in this tree')
-    src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
-    # The precondition must be checked on the SOURCE, not only the output.
-    # `assert 'meituan' not in sanitized` alone is satisfied both by "the
-    # sanitizer did its job" AND by "the token was never here" — measured
-    # 2026-07-31: visibility_defaults.js stopped carrying the token entirely
-    # (0d3293da), so this case was passing while asserting nothing about the
-    # sanitizer. A file with nothing to rewrite is a skip, not a green tick.
-    if 'meituan' not in src:
-        pytest.skip(
-            f'{rel} no longer contains the brand token, so there is nothing for '
-            'the sanitizer to rewrite here — the tree-wide sweep is what keeps '
-            'coverage honest when a carrier moves')
-    sanitized = _sanitize(rel)
-    # Now non-vacuous: the token WAS present, so its absence proves the rewrite.
-    assert 'meituan' not in sanitized, f'{rel}: sanitizer left raw brand token'
-    ok, detail = _node_check(sanitized, tmp_path, os.path.basename(rel))
-    assert ok, f'sanitized {rel} FAILED node --check: {detail}'
-
-
-@pytest.mark.skipif(_NODE is None, reason='node not installed')
 def test_no_hyphenated_bareword_key_after_sanitize(tmp_path):
     """Belt-and-braces class assertion: the replacement token must be a valid
     identifier, so no ``<token>:`` bareword key can be hyphenated. Directly
     encodes the fix (independent of node) AND node-checks the output."""
     from export import _sanitize_source_opensource
     # A minimal object literal with meituan as an unquoted key — the exact
-    # shape branding.js / visibility_defaults.js use.
+    # shape the former retained brand registries used.
     src = "const M = {\n  meituan: '<svg></svg>',\n  meituan_alt:'Meituan',\n};\n"
-    out = _sanitize_source_opensource(src, 'static/js/settings/branding.js')
+    out = _sanitize_source_opensource(
+        src, 'frontend/src/runtime/sections/core.js')
     assert 'your-provider' not in out, (
         'replacement token must not be the hyphenated form (invalid bareword key)'
     )
@@ -133,7 +93,7 @@ def test_no_hyphenated_bareword_key_after_sanitize(tmp_path):
 
 
 @pytest.mark.skipif(_NODE is None, reason='node not installed')
-def test_all_js_with_meituan_key_sanitizes_clean(tmp_path):
+def test_any_remaining_js_with_meituan_key_sanitizes_clean(tmp_path):
     """Tree-wide sweep: EVERY static/js file containing an unquoted ``meituan``
     key must sanitize to valid JS. Catches a file the settings.js split (or a
     future refactor) newly orphaned from any exclusion.
@@ -142,7 +102,7 @@ def test_all_js_with_meituan_key_sanitizes_clean(tmp_path):
 
     1. **The pattern was anchored to the start of a line** (``^\\s*meituan\\s*:``
        with re.MULTILINE), so it could only see a key that opens its own line.
-       It therefore could NOT see ``static/js/core/model_group.js:54``, which
+       It therefore could NOT see the former retained model-group owner, which
        packs the brand map several keys to a line::
 
            mistral: 'Mistral', glm: 'GLM', meituan: 'Meituan', kimi: 'Kimi',
@@ -165,7 +125,6 @@ def test_all_js_with_meituan_key_sanitizes_clean(tmp_path):
     silently becoming a no-op.
     """
     js_root = os.path.join(ROOT, 'frontend', 'src')
-    swept = []
     for dirpath, _, filenames in os.walk(js_root):
         for fn in sorted(filenames):
             if not fn.endswith('.js') or fn.startswith('bundle-'):
@@ -174,23 +133,14 @@ def test_all_js_with_meituan_key_sanitizes_clean(tmp_path):
             src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
             if not _UNQUOTED_KEY_RE.search(src):
                 continue
-            swept.append(rel)
             sanitized = _sanitize(rel)
             ok, detail = _node_check(sanitized, tmp_path, fn)
             assert ok, f'sanitized {rel} FAILED node --check: {detail}'
 
-    # LIVENESS, not a layout assertion: the sweep must still be looking at
-    # something. If the brand token is renamed everywhere this guard becomes a
-    # vacuous pass, and a vacuous pass is how the whole class quietly stops
-    # being covered — so require at least one carrier, WITHOUT caring which
-    # files or how many. Deleting every carrier is a real event that should be
-    # noticed once, not silently absorbed.
-    assert swept, (
-        'no frontend source carries an unquoted `meituan:` key any more, so this '
-        'sweep asserted nothing. If the brand token was renamed, retarget '
-        '_UNQUOTED_KEY_RE at the new token; if the keys were all quoted, say so '
-        'and delete this guard deliberately rather than leaving it vacuously green.'
-    )
+    # The typed brand registries are TypeScript inputs now, so zero retained
+    # JavaScript carriers is the desired state. The fixed synthetic unit below
+    # keeps the sanitizer failure class live even when this discovery set is
+    # empty; every carrier that does remain is still checked above.
 
 
 def test_the_key_pattern_sees_a_midline_key():

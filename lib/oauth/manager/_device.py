@@ -15,15 +15,21 @@ poll thread. CLIProxyAPI parity: sdk/auth/codex_device.go.
 
 import threading
 import time
+import uuid
 
 from lib.log import get_logger
 
-from lib.oauth.manager._state import _active_flows, _flows_lock
+from lib.oauth.manager._state import (
+    _active_flows,
+    _flow_is_current,
+    _flows_lock,
+    _update_active_flow,
+)
 
 logger = get_logger(__name__)
 
 
-def start_device_flow(provider: str, user_id: str = '') -> dict:
+def start_device_flow(provider: str, *, owner_user_id: int) -> dict:
     """Start a device-authorization login flow.
 
     Mints a user code from OpenAI and spawns the background poll thread;
@@ -32,7 +38,8 @@ def start_device_flow(provider: str, user_id: str = '') -> dict:
     Args:
         provider: Only 'codex' — OpenAI is the only supported provider with
             a deviceauth API.
-        user_id: caller's tenant for egress routing.
+        owner_user_id: Authenticated repository owner. The worker captures
+            this value once and never infers identity in its background thread.
 
     Returns:
         dict with 'user_code', 'verification_url', 'interval',
@@ -40,6 +47,11 @@ def start_device_flow(provider: str, user_id: str = '') -> dict:
     """
     if provider != 'codex':
         return {'error': f'Device login is not available for {provider}'}
+
+    from lib.identity import require_user_id
+    owner_user_id = require_user_id(
+        owner_user_id, context='OAuth device flow owner')
+    user_id = str(owner_user_id)
 
     from lib.oauth.codex import (
         CODEX_OAUTH_CONFIG,
@@ -62,9 +74,11 @@ def start_device_flow(provider: str, user_id: str = '') -> dict:
 
     timeout = CODEX_OAUTH_CONFIG['device_flow_timeout']
     cancel = threading.Event()
+    flow_id = uuid.uuid4().hex
     verification_url = CODEX_OAUTH_CONFIG['device_verification_url']
     with _flows_lock:
         _active_flows[provider] = {
+            'flow_id': flow_id,
             'status': 'started',
             'flow_type': 'device',
             'auth_url': verification_url,
@@ -74,6 +88,7 @@ def start_device_flow(provider: str, user_id: str = '') -> dict:
             'expires_at': time.time() + timeout,
             'error': None,
             'email': None,
+            'owner_user_id': owner_user_id,
             'redirect_uri': '',
             'redirect_mode': 'device',
             'exchange': None,
@@ -89,7 +104,7 @@ def start_device_flow(provider: str, user_id: str = '') -> dict:
     thread = threading.Thread(
         target=_device_poll_loop,
         args=(provider, req['device_auth_id'], req['user_code'],
-              req['interval'], cancel),
+              req['interval'], cancel, flow_id),
         kwargs={'user_id': user_id},
         daemon=True,
         name=f'oauth-device-{provider}',
@@ -117,15 +132,14 @@ def stop_device_flow(provider: str) -> None:
         logger.info('[OAuth] Signalled %s device flow to stop', provider)
 
 
-def _mark(provider: str, status: str, error: str = '') -> None:
-    with _flows_lock:
-        if provider in _active_flows:
-            _active_flows[provider]['status'] = status
-            _active_flows[provider]['error'] = error
+def _mark(provider: str, flow_id: str, status: str,
+          error: str = '') -> None:
+    _update_active_flow(
+        provider, flow_id, status=status, error=error)
 
 
 def _device_poll_loop(provider: str, device_auth_id: str, user_code: str,
-                      interval: int, cancel: threading.Event, *,
+                      interval: int, cancel: threading.Event, flow_id: str, *,
                       user_id: str = '') -> None:
     """Poll the device-token endpoint until authorized / timeout / cancel."""
     from lib.oauth.codex import (
@@ -136,7 +150,7 @@ def _device_poll_loop(provider: str, device_auth_id: str, user_code: str,
     from lib.oauth.token_store import OAuthExchangeError
 
     deadline = time.time() + CODEX_OAUTH_CONFIG['device_flow_timeout']
-    _mark(provider, 'waiting_callback')
+    _mark(provider, flow_id, 'waiting_callback')
     try:
         while time.time() < deadline and not cancel.is_set():
             try:
@@ -152,11 +166,17 @@ def _device_poll_loop(provider: str, device_auth_id: str, user_code: str,
                     continue
                 logger.error('[OAuth] %s device poll rejected: %s',
                              provider, e)
-                _mark(provider, 'error', str(e))
+                _mark(provider, flow_id, 'error', str(e))
                 return
             if result is None:
                 cancel.wait(interval)
                 continue
+
+            # A new login may have replaced this flow while the network poll
+            # was in flight. Never redeem its authorization code into the
+            # process-global credential after ownership/generation changed.
+            if cancel.is_set() or not _flow_is_current(provider, flow_id):
+                return
 
             # Authorized — the device flow's PKCE verifier is issued BY the
             # server in the poll response, and the exchange must echo the
@@ -170,20 +190,22 @@ def _device_poll_loop(provider: str, device_auth_id: str, user_code: str,
             except OAuthExchangeError as e:
                 logger.error('[OAuth] %s device exchange failed: %s',
                              provider, e)
-                _mark(provider, 'error', str(e))
+                _mark(provider, flow_id, 'error', str(e))
                 return
             if not token:
-                _mark(provider, 'error', 'Token exchange failed')
+                _mark(provider, flow_id, 'error', 'Token exchange failed')
                 return
             from lib.oauth.manager._exchange import _finalize_login_success
-            _finalize_login_success(provider, token, via='device_flow')
+            _finalize_login_success(
+                provider, token, via='device_flow', flow_id=flow_id,
+                owner_user_id=int(user_id))
             logger.info('[OAuth] %s device flow completed', provider)
             return
 
         if not cancel.is_set():
             logger.warning('[OAuth] %s device flow timed out', provider)
-            _mark(provider, 'timeout', 'Timeout — device code expired')
+            _mark(provider, flow_id, 'timeout', 'Timeout — device code expired')
     except Exception as e:
         logger.error('[OAuth] %s device poll loop crashed: %s',
                      provider, e, exc_info=True)
-        _mark(provider, 'error', 'Device login failed unexpectedly')
+        _mark(provider, flow_id, 'error', 'Device login failed unexpectedly')

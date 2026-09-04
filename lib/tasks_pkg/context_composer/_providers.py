@@ -6,13 +6,93 @@ placement, deduplication, budgeting, and observability belong to the renderer.
 
 from __future__ import annotations
 
-from concurrent.futures import Future
+import copy
+import json
+import time
+import threading
+from concurrent.futures import FIRST_COMPLETED, Future, InvalidStateError, wait
+from dataclasses import replace
 
 from lib.log import get_logger
 from lib.tasks_pkg import system_prompt_cc
 from lib.tasks_pkg.context_composer._models import ComposeRequest, ContextBlock
+from lib.tasks_pkg.context_composer._provider_executor import (
+    context_provider_executor as _CONTEXT_PROVIDER_EXECUTOR,
+)
 
 logger = get_logger(__name__)
+
+# Context acquisition is on the first-token critical path. The providers are
+# best-effort inputs, so one wedged filesystem/database adapter must not hold
+# the entire request forever. This is a single deadline for the whole batch,
+# not eight additive per-provider timeouts.
+_CONTEXT_PROVIDER_DEADLINE_SECONDS = 15.0
+_CONTEXT_PROVIDER_ABORT_POLL_SECONDS = 0.05
+_CONTEXT_PROVIDER_NAMES = (
+    "static", "project_rules", "profile", "memory", "skills", "vault",
+    "swarm", "project",
+)
+_CONTEXT_PROVIDER_SIDE_EFFECT_OWNERS = {
+    "_appliedPreferences": "profile",
+    "_skillsIndexSnapshot": "skills",
+    # Cursor confirmation is owned by the live task after the provider has
+    # frozen a page on its request-local task copy.
+    "_projectNarrativeDelivery": "project",
+}
+
+# Per-conversation baselines for tail-block TRANSITION detection. The
+# environment and mcp_tools_delta blocks re-render every turn; the
+# model-facing note and the turn-provenance chip must fire only when the
+# rendered situation actually changed (project path moved, MCP tools
+# appeared/disappeared), not on every steady-state turn. In-memory only,
+# keyed by the MCP selection scope (conversation-scoped): a process restart
+# simply re-baselines on the next turn and never fires a false transition.
+_TAIL_TRANSITION_MAX_SCOPES = 256
+_tail_transition_lock = threading.Lock()
+_tail_transition_store: dict[str, dict[str, object]] = {}
+
+
+def _tail_transition(scope: str, key: str, current: object) -> tuple[object, bool]:
+    """Return ``(previous, changed)`` and learn ``current`` as the baseline.
+
+    First sight never fires (there is no baseline to diff against); a steady
+    state never fires. Callers pass a falsy ``scope`` to skip tracking.
+    """
+    if not scope:
+        return None, False
+    with _tail_transition_lock:
+        if (len(_tail_transition_store) >= _TAIL_TRANSITION_MAX_SCOPES
+                and scope not in _tail_transition_store):
+            _tail_transition_store.pop(next(iter(_tail_transition_store)))
+        entry = _tail_transition_store.setdefault(scope, {})
+        previous = entry.get(key)
+        changed = key in entry and previous != current
+        entry[key] = current
+        return previous, changed
+
+
+def _reset_tail_transitions_for_tests() -> None:
+    """Test hook: clear every stored transition baseline."""
+    with _tail_transition_lock:
+        _tail_transition_store.clear()
+
+def _tail_transition_scope(request: ComposeRequest) -> str:
+    task = request.task or {}
+    try:
+        from lib.mcp.tool_search import mcp_selection_scope_id
+
+        return mcp_selection_scope_id(
+            task_id=str(task.get("id") or ""),
+            conv_id=str(request.conv_id or task.get("convId") or ""),
+            owner_user_id=int(request.user_id or 0),
+        )
+    except Exception as exc:
+        logger.debug(
+            '[ContextComposer] MCP selection scope unavailable: %s',
+            exc,
+            exc_info=True,
+        )
+        return ""
 
 
 def _block(
@@ -64,23 +144,33 @@ def _last_user_text(messages: list[dict]) -> str:
     return _extract_current_user_request(messages)
 
 
-def _future_value(task: dict | None, key: str):
-    future = (task or {}).get(key)
-    if not isinstance(future, Future) or not future.done():
-        return None
-    try:
-        return future.result(timeout=0)
-    except Exception as exc:
-        logger.debug("[ContextComposer] future %s failed: %s", key, exc)
-        return None
-
-
 def _project_rules(request: ComposeRequest) -> str:
     if not (request.project_enabled and request.project_path):
         return ""
-    prefetched = _future_value(request.task, "_prefetch_project")
-    if prefetched is not None:
-        return prefetched or ""
+    prefetched = (request.task or {}).get("_prefetch_project")
+    if isinstance(prefetched, Future):
+        try:
+            # Reuse the one task-owned read even while it is still running.
+            # Falling through to a second synchronous read races the same FUSE
+            # tree and was a measurable source of preparation-tail latency.
+            return (
+                prefetched.result(
+                    timeout=_CONTEXT_PROVIDER_DEADLINE_SECONDS
+                )
+                or ""
+            )
+        except TimeoutError:
+            logger.warning(
+                "[ContextComposer] project-rules prefetch exceeded %.1fs; "
+                "the duplicate fallback read was suppressed",
+                _CONTEXT_PROVIDER_DEADLINE_SECONDS,
+            )
+            return ""
+        except Exception as exc:
+            logger.warning(
+                "[ContextComposer] project-rules prefetch failed: %s", exc
+            )
+            return ""
     try:
         from lib.project_mod import get_context_for_prompt
 
@@ -172,12 +262,21 @@ def _memory_guidance(request: ComposeRequest) -> str:
             build_memory_context,
         )
 
-        hint = (
-            build_memory_context(
-                request.project_path if request.project_enabled else None
-            )
-            or ""
-        )
+        known_available = None
+        prefetch_state = (request.task or {}).get("_memoryPrefetch")
+        if isinstance(prefetch_state, dict):
+            if prefetch_state.get("phase") == "done":
+                known_available = True
+            elif (prefetch_state.get("phase") == "skipped"
+                  and prefetch_state.get("reason") == "no_memories"):
+                known_available = False
+        context_kwargs = {}
+        if known_available is not None:
+            context_kwargs["known_available"] = known_available
+        hint = build_memory_context(
+            request.project_path if request.project_enabled else None,
+            **context_kwargs,
+        ) or ""
         return "\n\n".join(
             x for x in (hint, MEMORY_ACCUMULATION_INSTRUCTIONS_COMPACT) if x
         )
@@ -200,165 +299,48 @@ def _swarm_guidance(request: ComposeRequest, query: str) -> str:
     except Exception as exc:
         logger.debug("[ContextComposer] swarm task-shape gate failed: %s", exc)
         return ""
-    try:
-        from lib.swarm.registry import format_role_catalogue
-
-        roles = format_role_catalogue()
-    except Exception as exc:
-        logger.debug("[ContextComposer] swarm catalogue fallback: %s", exc)
-        roles = "general — independent bounded work"
-    return f"""<parallel_execution>
-Use spawn_agents for two or more genuinely independent investigations, large
-search/read branches, or an independent review. Keep sequential work local.
-Spawn all parallel agents in one call, give each a bounded objective and
-expected output, never fabricate results, and use await_agents only when there
-is no useful local work left. Available roles:
-
-{roles}
+    return """<parallel_execution>
+For two or more independent branches, use one spawn_agents call; keep sequential
+work local. The tool schema is the sole authority for roles and their live
+tools. Give self-contained bounded objectives, never fabricate results, and
+call await_agents only when no useful local work remains.
 </parallel_execution>"""
 
 
 def _project_blocks(request: ComposeRequest, query: str) -> list[ContextBlock]:
+    del query
     if not (request.project_enabled and request.project_path):
         return []
     task_config = (request.task or {}).get('config') or {}
     if task_config.get('_storageFreeRuntime'):
         return []
-    out: list[ContextBlock] = []
-    path = request.project_path
     try:
-        from lib.conversations.project_charter import render_charter_injection_block
-
-        charter = render_charter_injection_block(
-            path, user_id=request.user_id)
-    except Exception as exc:
-        logger.debug("[ContextComposer] charter unavailable: %s", exc)
-        charter = ""
-    out.append(
-        _block(
-            "project_charter",
-            "project.charter",
-            charter,
-            authority="project",
-            placement="tail",
-            stability="turn",
-            lifecycle="task",
-            priority=10,
-            max_tokens=1200,
-            reason="" if charter else "empty",
-            layer="objective_constraints",
-            required=True,
-            recovery_handle="tool:project_charter_read",
-        )
-    )
-    try:
-        from lib.conversations.project_watch import render_goals_injection_block
-
-        goals = render_goals_injection_block(path, user_id=request.user_id)
-    except Exception as exc:
-        logger.debug("[ContextComposer] goals unavailable: %s", exc)
-        goals = ""
-    out.append(
-        _block(
-            "project_goals",
-            "project.goals",
-            goals,
-            authority="project",
-            placement="tail",
-            stability="turn",
-            lifecycle="task",
-            priority=20,
-            max_tokens=800,
-            reason="" if goals else "empty",
-            layer="objective_constraints",
-            required=True,
-            recovery_handle="tool:project_goals_read",
-        )
-    )
-
-    # The board is ambient only when an active claim/lease can change what
-    # this agent should touch. Open/done backlog remains pull-based.
-    board = ""
-    active = 0
-    try:
-        from lib.conversations.project_board import (
-            read_board,
-            render_board_injection_block,
-        )
-
-        board_snapshot = read_board(path, user_id=request.user_id) or {}
-        rows = board_snapshot.get("tasks") or []
-        active = sum(1 for row in rows if row.get("status") == "claimed")
-        if active:
-            board = render_board_injection_block(
-                path,
-                current_conv_id=request.conv_id or "",
-                user_id=request.user_id,
-                board_snapshot=board_snapshot,
-            )
-    except Exception as exc:
-        logger.debug("[ContextComposer] board unavailable: %s", exc)
-    out.append(
-        _block(
-            "project_board",
-            "project.board",
-            board,
-            authority="ambient",
-            placement="tail",
-            stability="turn",
-            lifecycle="task",
-            priority=40,
-            max_tokens=900,
-            reason="" if board else "no_active_claims",
-            provenance={"activeClaims": active},
-            layer="evidence",
-            recovery_handle="tool:project_board_read",
-        )
-    )
-
-    digest = ""
-    try:
-        from lib.conversations.project_summary import (
-            build_project_digest_projection,
-        )
-
-        has_tools = bool(
-            {"list_conversations", "get_conversation"} & set(request.tool_names)
-        )
-        projection = build_project_digest_projection(
-            path,
+        from lib.conversations.project_brain import prepare_project_context
+        context = prepare_project_context(
+            request.project_path,
+            request.conv_id or '',
             user_id=request.user_id,
-            current_conv_id=request.conv_id or None,
-            conv_tools_available=has_tools,
-            query=query,
+            task=request.task,
         )
-        digest = projection.text
-        if digest and request.task is not None:
-            entries = [dict(entry) for entry in projection.entries]
-            request.task["_relatedConversations"] = {
-                "count": len(entries),
-                "items": entries,
-                "toolsAvailable": has_tools,
-            }
     except Exception as exc:
-        logger.debug("[ContextComposer] related conversations unavailable: %s", exc)
-    out.append(
+        logger.debug('[ContextComposer] Project Context unavailable: %s', exc)
+        context = ''
+    return [
         _block(
-            "related_conversations",
-            "project.conversations",
-            digest,
-            authority="ambient",
-            placement="tail",
-            stability="turn",
-            lifecycle="task",
-            priority=50,
-            max_tokens=800,
-            reason="" if digest else "no_relevant_conversations",
-            layer="evidence",
-            recovery_handle="tool:get_conversation",
+            'project_context',
+            'project.brain',
+            context,
+            authority='project',
+            placement='tail',
+            stability='turn',
+            lifecycle='task',
+            priority=10,
+            max_tokens=1800,
+            reason='' if context else 'empty',
+            layer='objective_constraints',
+            required=True,
         )
-    )
-    return out
+    ]
 
 
 def _plan_mode_block(request: ComposeRequest) -> str:
@@ -379,11 +361,34 @@ def _plan_mode_block(request: ComposeRequest) -> str:
         return ""
 
 
+def _tool_search_guidance_available(request: ComposeRequest) -> bool:
+    """Return whether this frozen task can discover hidden tool schemas."""
+    if not request.has_real_tools:
+        return False
+    if 'search_tools' in request.tool_names:
+        return True
+    task = request.task if isinstance(request.task, dict) else {}
+    mode = str(task.get('_toolSearchMode') or '').strip().lower()
+    if not mode or mode == 'off':
+        return False
+    try:
+        searchable_count = max(0, int(task.get('_toolSearchableCount') or 0))
+        catalog_size = max(0, int(task.get('_toolSearchCatalogSize') or 0))
+    except (TypeError, ValueError):
+        return False
+    from lib.tools.gateway import LOCAL_TOOL_SEARCH_MIN_FUNCTIONS
+    return (
+        searchable_count > 0
+        and catalog_size >= LOCAL_TOOL_SEARCH_MIN_FUNCTIONS
+    )
+
+
 def collect_context_blocks(
     messages: list[dict], request: ComposeRequest
 ) -> list[ContextBlock]:
     """Collect every ambient context source in one deterministic pass."""
     query = _last_user_text(messages)
+    tool_search_available = _tool_search_guidance_available(request)
     blocks: list[ContextBlock] = []
     role = (request.task or {}).get("_contextRoleBlock") or {}
     if isinstance(role, dict):
@@ -395,7 +400,9 @@ def collect_context_blocks(
     existing_system = ""
     if messages and messages[0].get("role") == "system":
         existing_system = str(messages[0].get("content") or "").strip()
-    replace = request.system_prompt_mode == "replace" and bool(existing_system)
+    replace_mode = (
+        request.system_prompt_mode == "replace" and bool(existing_system)
+    )
 
     try:
         from lib.context_experiment_flags import normalize_context_experiment_flags
@@ -413,7 +420,7 @@ def collect_context_blocks(
     )
 
     def _build_static() -> tuple[str, str]:
-        if replace:
+        if replace_mode:
             return "", "replace_mode"
         try:
             import os
@@ -426,8 +433,12 @@ def collect_context_blocks(
                 has_real_tools=request.has_real_tools,
                 is_code_context=request.project_enabled,
                 tool_names=set(request.tool_names) or None,
+                tool_search_available=tool_search_available,
                 disabled_blocks=set(request.disabled_blocks) or None,
                 include_date=False,
+                # Rendered as the per-turn ``environment`` tail block below,
+                # so a project-path change never rewrites the cached prefix.
+                include_environment=False,
                 profile=resolved_prompt_profile,
             )
             return content, "" if content else "empty"
@@ -446,36 +457,178 @@ def collect_context_blocks(
             logger.debug("[ContextComposer] vault index unavailable: %s", exc)
             return ""
 
-    # Independent providers run concurrently (mirrors the orchestrator's
-    # _prefetch pool seam). Values are joined BEFORE any block is appended, so
-    # output order and task side effects stay byte-identical to the serial path.
-    from concurrent.futures import ThreadPoolExecutor
+    # Providers get a detached task snapshot. A callable that outlives the
+    # request deadline can finish safely, but it cannot mutate the live task or
+    # create a mixed-time context snapshot after composition has moved on.
+    live_task = request.task if isinstance(request.task, dict) else None
+    provider_task = None
+    if live_task is not None:
+        provider_task = dict(live_task)
+        raw_config = live_task.get("config")
+        if isinstance(raw_config, dict):
+            provider_task["config"] = dict(raw_config)
+    provider_request = replace(request, task=provider_task)
 
-    with ThreadPoolExecutor(
-        max_workers=6, thread_name_prefix="context-provider"
-    ) as _pool:
-        _f_static = _pool.submit(_build_static)
-        _f_rules = _pool.submit(_project_rules, request)
-        _f_profile = _pool.submit(_profile_block, request)
-        _f_memory = _pool.submit(_memory_guidance, request)
-        _f_skills = _pool.submit(_skill_index, request)
-        _f_vault = _pool.submit(_build_vault)
-        _f_swarm = _pool.submit(_swarm_guidance, request, query)
-        _f_project = _pool.submit(_project_blocks, request, query)
+    defaults = {
+        "static": ("", "provider_timeout"),
+        "project_rules": "",
+        "profile": "",
+        "memory": "",
+        "skills": "",
+        "vault": "",
+        "swarm": "",
+        "project": [],
+    }
 
-        static, static_reason = _f_static.result()
-        rules = _f_rules.result()
-        user_context = _f_profile.result()
-        memory = _f_memory.result()
-        skills = _f_skills.result()
-        vault = _f_vault.result()
-        swarm = _f_swarm.result()
-        project_blocks = _f_project.result()
+    def _run_provider(name, fn, *args):
+        started = time.monotonic()
+        try:
+            return True, fn(*args), (time.monotonic() - started) * 1000, ""
+        except Exception as exc:
+            logger.warning("[ContextComposer] provider %s failed: %s", name, exc)
+            return False, defaults[name], (time.monotonic() - started) * 1000, str(exc)
+
+    specs = {
+        "static": (_build_static, ()),
+        "profile": (_profile_block, (provider_request,)),
+        "memory": (_memory_guidance, (provider_request,)),
+        "skills": (_skill_index, (provider_request,)),
+        "vault": (_build_vault, ()),
+        "swarm": (_swarm_guidance, (provider_request, query)),
+        "project": (_project_blocks, (provider_request, query)),
+    }
+    submitted_at = time.monotonic()
+    futures = {
+        name: _CONTEXT_PROVIDER_EXECUTOR.submit(
+            _run_provider, name, fn, *args
+        )
+        for name, (fn, args) in specs.items()
+    }
+    prefetched_project = (provider_task or {}).get("_prefetch_project")
+    if isinstance(prefetched_project, Future):
+        # Do not spend another provider worker merely waiting on a Future that
+        # already owns the read. With a lean two-worker pool, one wedged
+        # project read plus one waiter would otherwise starve every unrelated
+        # provider until the batch deadline.
+        project_proxy = Future()
+
+        def _settle_project_proxy(source: Future) -> None:
+            if project_proxy.done():
+                return
+            duration_ms = (time.monotonic() - submitted_at) * 1000
+            try:
+                value = source.result() or ""
+                outcome = (True, value, duration_ms, "")
+            except Exception as exc:
+                logger.warning(
+                    "[ContextComposer] provider project_rules failed: %s", exc
+                )
+                outcome = (False, "", duration_ms, str(exc))
+            try:
+                project_proxy.set_result(outcome)
+            except InvalidStateError:
+                # The request deadline may cancel the proxy between the
+                # done-check and settlement; the detached source remains safe.
+                pass
+
+        prefetched_project.add_done_callback(_settle_project_proxy)
+        futures["project_rules"] = project_proxy
+    else:
+        futures["project_rules"] = _CONTEXT_PROVIDER_EXECUTOR.submit(
+            _run_provider,
+            "project_rules",
+            _project_rules,
+            provider_request,
+        )
+    pending = set(futures.values())
+    aborted = False
+    try:
+        deadline = submitted_at + _CONTEXT_PROVIDER_DEADLINE_SECONDS
+        while pending:
+            abort_event = (live_task or {}).get("abort_event")
+            if bool((live_task or {}).get("aborted")) or (
+                abort_event is not None
+                and callable(getattr(abort_event, "is_set", None))
+                and abort_event.is_set()
+            ):
+                aborted = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = wait(
+                pending,
+                timeout=min(_CONTEXT_PROVIDER_ABORT_POLL_SECONDS, remaining),
+                return_when=FIRST_COMPLETED,
+            )
+            del done
+    finally:
+        for future in pending:
+            future.cancel()
+
+    values = dict(defaults)
+    statuses: dict[str, str] = {}
+    timings: list[dict] = []
+    elapsed_ms = (time.monotonic() - submitted_at) * 1000
+    for name in _CONTEXT_PROVIDER_NAMES:
+        future = futures[name]
+        detail = ""
+        if future.done() and not future.cancelled():
+            try:
+                ok, value, duration_ms, detail = future.result(timeout=0)
+                values[name] = value
+                status = "ok" if ok else "error"
+            except Exception as exc:
+                duration_ms = elapsed_ms
+                detail = str(exc)
+                status = "error"
+                logger.debug(
+                    "[ContextComposer] completed provider %s raised while "
+                    "collecting its result: %s",
+                    name,
+                    exc,
+                )
+        else:
+            duration_ms = elapsed_ms
+            status = "aborted" if aborted else "timeout"
+        statuses[name] = status
+        timing = {
+            "provider": name,
+            "status": status,
+            "durationMs": round(max(0.0, duration_ms), 3),
+        }
+        if detail:
+            timing["detail"] = detail[:240]
+        timings.append(timing)
+
+    if live_task is not None:
+        live_task["_contextProviderTimings"] = timings
+        for key, owner in _CONTEXT_PROVIDER_SIDE_EFFECT_OWNERS.items():
+            if statuses.get(owner) == "ok" and key in (provider_task or {}):
+                live_task[key] = copy.deepcopy(provider_task[key])
+    degraded = [row for row in timings if row["status"] != "ok"]
+    if degraded:
+        logger.warning(
+            "[ContextComposer] provider batch degraded after %.1fms: %s",
+            elapsed_ms,
+            ", ".join(
+                f"{row['provider']}={row['status']}" for row in degraded
+            ),
+        )
+
+    static, static_reason = values["static"]
+    rules = values["project_rules"]
+    user_context = values["profile"]
+    memory = values["memory"]
+    skills = values["skills"]
+    vault = values["vault"]
+    swarm = values["swarm"]
+    project_blocks = values["project"]
 
     from lib.context_telemetry import build_prompt_profile_evidence
 
     prompt_status = (
-        "applied" if static else "suppressed" if replace else
+        "applied" if static else "suppressed" if replace_mode else
         "error" if static_reason == "build_failed" else "empty"
     )
     prompt_evidence = build_prompt_profile_evidence(
@@ -615,7 +768,7 @@ def collect_context_blocks(
             stability="static",
             lifecycle="conversation",
             priority=50,
-            max_tokens=1000,
+            max_tokens=128,
             reason="" if swarm else "empty",
             layer="cold_history",
         )
@@ -708,6 +861,74 @@ def collect_context_blocks(
             required=True,
         )
     )
+    environment = ""
+    environment_reason = "disabled"
+    env_cwd = request.project_path if request.project_enabled else ""
+    if "environment" not in request.disabled_blocks:
+        environment_reason = "empty"
+        try:
+            import os
+
+            environment = system_prompt_cc.section_environment(
+                cwd=env_cwd,
+                is_git=bool(env_cwd and os.path.isdir(os.path.join(env_cwd, ".git"))),
+                model=request.model,
+                has_real_tools=request.has_real_tools,
+            )
+            environment_reason = "" if environment else "empty"
+        except Exception as exc:
+            environment_reason = "build_failed"
+            logger.warning("[ContextComposer] environment block failed: %s", exc)
+    task = request.task or {}
+    previous_path, path_changed = _tail_transition(
+        _tail_transition_scope(request), "project_path", env_cwd)
+    if path_changed:
+        task["_projectPathChange"] = {
+            "from": str(previous_path or ""), "to": env_cwd}
+        if environment:
+            shown_old = str(previous_path or "") or "(none)"
+            shown_new = env_cwd or "(none)"
+            environment += (
+                f"\n\nNote: the project path changed from \"{shown_old}\" to "
+                f"\"{shown_new}\" since your previous turn. Use the new path "
+                "for file operations; absolute paths in earlier tool results "
+                "may be stale.")
+    else:
+        task.pop("_projectPathChange", None)
+    blocks.append(
+        _block(
+            "environment",
+            "platform.environment",
+            environment,
+            authority="platform",
+            placement="tail",
+            stability="turn",
+            lifecycle="task",
+            priority=80,
+            max_tokens=400,
+            reason=environment_reason,
+            layer="hot_tail",
+            required=True,
+        )
+    )
+    mcp_delta, mcp_delta_reason, mcp_delta_provenance = _mcp_tools_delta(request)
+    blocks.append(
+        _block(
+            "mcp_tools_delta",
+            "mcp.catalog",
+            mcp_delta,
+            authority="workflow",
+            placement="tail",
+            stability="turn",
+            lifecycle="task",
+            priority=40,
+            max_tokens=2000,
+            reason=mcp_delta_reason,
+            provenance=mcp_delta_provenance,
+            layer="evidence",
+            recovery_handle="tool:search_tools",
+        )
+    )
     date = system_prompt_cc.section_current_date()
     blocks.append(
         _block(
@@ -725,5 +946,96 @@ def collect_context_blocks(
     )
     return blocks
 
+
+def _mcp_tools_delta(request: ComposeRequest) -> tuple[str, str, dict]:
+    """Render connected-but-not-on-wire MCP tools as a per-turn tail block.
+
+    The MCP wire freezes at the conversation's first tool assembly (see
+    ``lib.mcp.tool_search.select_active_mcp_tools``), so a server that
+    connects or reconnects afterwards can no longer enter the tools array
+    without invalidating the whole provider prefix cache. Its schemas are
+    surfaced here instead; ``execute_tools`` already holds execution
+    authority for the full connected catalog, and the block refreshes on
+    every turn (a mid-turn reconnect becomes visible next turn).
+    """
+    task = request.task or {}
+    try:
+        from lib.mcp.tool_search import (
+            frozen_wire_tool_names,
+            mcp_selection_scope_id,
+        )
+
+        scope = mcp_selection_scope_id(
+            task_id=str(task.get("id") or ""),
+            conv_id=str(request.conv_id or task.get("convId") or ""),
+            owner_user_id=int(request.user_id or 0),
+        )
+        wire_names, frozen = frozen_wire_tool_names(scope)
+    except Exception as exc:
+        logger.debug("[ContextComposer] mcp wire state unavailable: %s", exc)
+        return "", "state_unavailable", {}
+    if not frozen:
+        # First turn: the wire is assembled after composition, so there is
+        # nothing frozen to diff against yet.
+        return "", "wire_not_frozen", {}
+    try:
+        from lib.mcp import get_bridge
+
+        bridge = get_bridge()
+        defs = bridge.get_openai_tool_defs() if bridge.connected else []
+    except Exception as exc:
+        logger.debug("[ContextComposer] mcp bridge unavailable: %s", exc)
+        return "", "bridge_unavailable", {}
+    wire = set(wire_names)
+    delta: list[tuple[str, str, dict]] = []
+    for tool in defs or ():
+        fn = tool.get("function") or {}
+        name = str(fn.get("name") or "")
+        if name and name not in wire:
+            delta.append((
+                name,
+                str(fn.get("description") or ""),
+                fn.get("parameters") or fn.get("input_schema") or {},
+            ))
+    names = sorted(row[0] for row in delta)
+    previous_names, delta_changed = _tail_transition(scope, "mcp_delta", names)
+    if delta_changed:
+        current = set(names)
+        previous = set(previous_names or [])
+        task["_mcpToolsDelta"] = {
+            "added": sorted(current - previous)[:8],
+            "removed": sorted(previous - current)[:8],
+            "total": len(names),
+        }
+    else:
+        task.pop("_mcpToolsDelta", None)
+    if not delta:
+        return "", "no_delta", {"wire": len(wire)}
+    delta.sort(key=lambda row: row[0])
+    shown = delta[:8]
+    lines = [
+        "<available_mcp_tools>",
+        "These MCP tools are connected now but are NOT in this conversation's "
+        "frozen tool declarations (their server connected or reconnected "
+        "after the first turn). Call any of them through execute_tools with "
+        "the exact name and arguments matching input_schema; search_tools "
+        "rediscovers them too. This list refreshes every turn — a tool that "
+        "disappears means its server disconnected.",
+        "",
+    ]
+    for name, description, schema in shown:
+        desc = " ".join(description.split())[:160]
+        schema_text = json.dumps(
+            schema, ensure_ascii=False, separators=(",", ":"))
+        if len(schema_text) > 1200:
+            schema_text = schema_text[:1200] + "…"
+        lines.append(f"- {name}" + (f" — {desc}" if desc else ""))
+        lines.append(f"  input_schema: {schema_text}")
+    overflow = len(delta) - len(shown)
+    if overflow > 0:
+        lines.append(f"…and {overflow} more; discover them with search_tools.")
+    lines.append("</available_mcp_tools>")
+    return ("\n".join(lines), "",
+            {"delta": len(delta), "shown": len(shown), "wire": len(wire)})
 
 __all__ = ["collect_context_blocks"]

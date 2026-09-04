@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """tests/test_adapter_transport.py — the ``adapter`` provider marker rides the relay.
 
-A provider carrying ``adapter: {'agent_id': …, 'port': …}`` is a CLIProxyAPI
+A v2 Connection carrying ``adapter: {'agent_id': …, 'port': …}`` is a CLIProxyAPI
 sidecar on the user's desktop agent. Its base_url is loopback-ON-THE-AGENT,
 so the server can NEVER reach it directly: every request must ride
 ``lib.desktop.adapter.relay_stream`` / ``relay_http`` — no route_request, no
 direct fallback. This suite pins that chain end to end:
 
-  provider card → dispatcher → Slot.adapter → api.py kwargs → transport
+  owner-scoped ProviderAccess → routed Slot.adapter → api.py kwargs → transport
   (stream / async stream / non-stream chat) → probe.
 
 Run:
@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -82,20 +83,8 @@ def _no_direct_route(url, **kwargs):
 
 
 # ═══════════════════════════════════════════════════════════
-#  1. Provider card → dispatcher → Slot.adapter
+#  1. ProviderAccess → request-routed Slot.adapter
 # ═══════════════════════════════════════════════════════════
-
-def _adapter_card():
-    return {
-        'id': 'adapter_agentxy',
-        'name': '订阅适配器',
-        'base_url': BASE_URL,
-        'enabled': True,
-        'adapter': dict(MARKER),
-        'api_keys': ['ta_deadbeef'],
-        'protocol': 'openai',
-        'models': [{'model_id': 'claude-sub', 'capabilities': ['text']}],
-    }
 
 
 def test_slot_adapter_defaults_to_empty_dict():
@@ -104,25 +93,57 @@ def test_slot_adapter_defaults_to_empty_dict():
     assert s.adapter == {}
 
 
-def test_dispatcher_carries_the_adapter_marker_onto_the_slot():
-    from lib.llm_dispatch.dispatcher import LLMDispatcher
-    d = LLMDispatcher()
-    d.slots = []
-    d._build_slots_from_providers([_adapter_card()])
-    got = [s for s in d.slots if s.model == 'claude-sub']
-    assert got, 'no slot built for the adapter provider'
-    for s in got:
-        assert s.adapter == MARKER, s
+def test_v2_adapter_provider_mints_owner_routed_slot(monkeypatch):
+    from lib.desktop import adapter as adapter_service
+    from lib.llm_dispatch.slot import Slot
+    from lib.model_routing import (
+        InMemoryModelRoutingRepository,
+        OwnerBoundary,
+        empty_document,
+        mint_routed_slot_group,
+        resolve_compatible_model,
+    )
+    import lib.model_routing.dispatch_adapter as dispatch_adapter
 
+    repository = InMemoryModelRoutingRepository()
+    boundary = OwnerBoundary.create(17)
+    repository.compare_and_swap(
+        boundary, empty_document(), expected_revision=0)
+    monkeypatch.setattr('lib.llm_dispatch.reset_dispatcher', lambda: None)
+    adapter_service.provision_provider(
+        MARKER['agent_id'], 'desk', MARKER['port'], 'ta_deadbeef',
+        ['claude-sub'], user_id=17, repository=repository)
+    authority = repository.get(boundary)
+    selection = resolve_compatible_model(
+        authority.document,
+        'claude-sub',
+        preferred_provider_id='adapter_agent-xy',
+    )
+    captured = {}
 
-def test_dispatcher_leaves_normal_providers_markerless():
-    from lib.llm_dispatch.dispatcher import LLMDispatcher
-    card = _adapter_card()
-    del card['adapter']
-    d = LLMDispatcher()
-    d.slots = []
-    d._build_slots_from_providers([card])
-    assert all(s.adapter == {} for s in d.slots)
+    def _mint(**kwargs):
+        captured.update(kwargs)
+        slot = Slot(
+            key_name='routed-adapter',
+            api_key=kwargs['api_key'],
+            model=kwargs['wire_model_id'],
+            logical_model=kwargs['model_id'],
+            capabilities=set(kwargs['capabilities']),
+            base_url=kwargs['base_url'],
+            provider_id=kwargs['provider_pin_id'],
+            adapter=dict(kwargs['adapter']),
+        )
+        return SimpleNamespace(slot=slot)
+
+    monkeypatch.setattr(dispatch_adapter, 'mint_ephemeral_slot', _mint)
+    group = mint_routed_slot_group(
+        repository, boundary, selection, owner_tag='owner:17')
+
+    assert len(group.handles) == 1
+    assert group.primary.slot.adapter == MARKER
+    assert captured['api_key'] == 'ta_deadbeef'
+    assert captured['base_url'] == BASE_URL
+    assert captured['wire_model_id'] == 'claude-sub'
 
 
 # ═══════════════════════════════════════════════════════════
@@ -291,8 +312,9 @@ def test_probe_cell_multi_forwards_adapter():
     orig = pp.probe_one_cell
 
     def _spy(base_url, api_key, model_id, extra_headers, timeout,
-             protocol='openai', oauth='', adapter=None):
-        seen.append(adapter)
+             protocol='openai', oauth='', adapter=None,
+             owner_user_id=None):
+        seen.append((adapter, owner_user_id))
         return 'ok', 'HTTP 200'
 
     pp.probe_one_cell = _spy
@@ -302,7 +324,7 @@ def test_probe_cell_multi_forwards_adapter():
     finally:
         pp.probe_one_cell = orig
     assert status == 'ok'
-    assert seen == [MARKER]
+    assert seen == [(MARKER, None)]
 
 
 def test_run_cell_probe_task_threads_marker_from_task_key():
@@ -312,8 +334,9 @@ def test_run_cell_probe_task_threads_marker_from_task_key():
     orig_persist = pp.persist_probe_task
 
     def _spy(base_url, api_key, model_id, extra_headers, timeout,
-             protocol='openai', oauth='', adapter=None):
-        seen.append(adapter)
+             protocol='openai', oauth='', adapter=None,
+             owner_user_id=None):
+        seen.append((adapter, owner_user_id))
         return 'ok', 'HTTP 200'
 
     task = {
@@ -322,7 +345,7 @@ def test_run_cell_probe_task_threads_marker_from_task_key():
         'cells': {}, 'summary': {'ok': 0, 'disable': 0}, 'error': None,
         'attempts': 1, '_abort': False, '_base_url': BASE_URL,
         '_extra_headers': {}, '_protocol': 'openai', '_oauth': '',
-        '_adapter': dict(MARKER),
+        '_adapter': dict(MARKER), '_owner_user_id': 41,
     }
     work = [(0, 'ta_deadbeef', 'claude-sub', 'claude-sub', ['text'])]
     pp.probe_one_cell = _spy
@@ -332,7 +355,7 @@ def test_run_cell_probe_task_threads_marker_from_task_key():
     finally:
         pp.probe_one_cell = orig
         pp.persist_probe_task = orig_persist
-    assert seen == [MARKER], seen
+    assert seen == [(MARKER, 41)], seen
 
 
 if __name__ == '__main__':

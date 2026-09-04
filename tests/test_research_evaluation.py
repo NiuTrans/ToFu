@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -111,6 +112,44 @@ def test_invalid_judges_return_explicit_degraded_result(monkeypatch):
     assert got['overall_score'] is None
     assert len(got['errors']) == 2
     assert got['usage']['calls'] == 2
+
+
+def test_primary_judges_overlap_with_a_two_worker_ceiling(monkeypatch):
+    import lib.research.evaluation as ev
+
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_FANOUT', '2')
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', '3')
+    lock = threading.Lock()
+    first_pair = threading.Barrier(2)
+    state = {'issued': 0, 'active': 0, 'peak': 0}
+
+    def dispatch(messages, *, on_content, **kwargs):
+        assert kwargs['max_retries'] == 2
+        assert kwargs['max_429_attempts'] == 3
+        with lock:
+            index = state['issued']
+            state['issued'] += 1
+            state['active'] += 1
+            state['peak'] = max(state['peak'], state['active'])
+        try:
+            if index < 2:
+                first_pair.wait(timeout=2)
+            body = json.dumps(_judgement(3.0 + index / 10, True))
+            on_content(body)
+            return {'content': body}, 'stop', {
+                'prompt_tokens': 100, 'completion_tokens': 20,
+                '_dispatch': {'model': f'judge-{index}', 'provider_id': 'test'},
+            }
+        finally:
+            with lock:
+                state['active'] -= 1
+
+    monkeypatch.setattr(ev, 'dispatch_stream', dispatch)
+    got = ev.evaluate_research_result('direction', _result(), judges=3)
+
+    assert got['judge_count'] == 3 and got['attempted_judges'] == 3
+    assert got['usage']['calls'] == 3
+    assert state == {'issued': 3, 'active': 0, 'peak': 2}
 
 
 def test_text_false_is_not_coerced_to_true_and_unknown_text_is_invalid():

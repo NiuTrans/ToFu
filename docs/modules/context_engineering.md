@@ -1,9 +1,6 @@
 # Context engineering
 
-This domain turns durable conversation state, project state, memory, tool history,
-and model limits into the bounded message sequence sent to an LLM. It also owns
-automatic and user-requested compaction. The durable transcript authority is
-[`../STORAGE.md`](../STORAGE.md).
+This domain turns durable conversation/project state, memory, tool history, and model limits into bounded LLM messages, and owns automatic/user-requested compaction. Durable transcript authority is [`../STORAGE.md`](../STORAGE.md).
 
 ## Ownership
 
@@ -11,157 +8,69 @@ automatic and user-requested compaction. The durable transcript authority is
 |---|---|
 | Context assembly and provider ordering | `lib/tasks_pkg/context_composer/` |
 | System/project/user context sources | `lib/tasks_pkg/context_composer/_providers.py` |
+| Bounded provider read execution | `lib/tasks_pkg/context_composer/_provider_executor.py` |
 | Model context-window policy | `lib/context_limits/` |
 | Token counting | `lib/token_counter/` |
 | Automatic compaction | `lib/tasks_pkg/compaction/` |
 | Rebuildable task-state projection | `lib/tasks_pkg/context_composer/task_state.py` |
 | Persistent manual compaction | `lib/tasks_pkg/compaction/_manual.py`, `_persist/` |
-| Long-term memory retrieval/injection | `lib/memory/` |
+| Long-term memory retrieval/injection; My Context proposal/undo UI | `lib/memory/`; `frontend/src/features/memory/preference-actions.ts` |
 | Conversation message construction | `lib/tasks_pkg/conv_message_builder/` |
 | Cost experiments and trace | `lib/cost_experiments.py`, context trace modules |
+| Price tiers and per-round cost aggregation | `lib/pricing/`, `lib/cost.py` |
 
 ## Assembly flow
 
 1. A task receives an immutable view of authenticated conversation and project state.
-2. `context_composer` invokes declared providers in deterministic order, records provenance, and reuses one owner-scoped, storage-filtered snapshot across request-local views.
+2. `context_composer` invokes declared providers in deterministic order behind
+   one 15-second request deadline, records per-provider status/timing, and
+   reuses the exact task-owned project-prefetch future rather than launching a
+   duplicate storage read. Timed-out providers operate on a detached carrier,
+   so late completion cannot mutate the live task or its prompt.
 3. Memory prefetch selects bounded evidence; it does not mutate the transcript.
 4. The token counter resolves the model-specific counter, with an explicit heuristic fallback when no exact counter exists.
 5. Context-limit policy computes the usable input budget after output and safety reserves.
 6. Compaction removes, folds, or summarizes only through registered steps.
 7. The final request body is built once by the LLM body builder.
 
-Tool-round continuations must preserve the provider/model binding and stable
-prefix ordering from round zero. Providers do not silently reread mutable
-globals on later rounds.
+Tool-round continuations preserve round-zero provider/model binding and stable prefix order; providers do not silently reread mutable globals later.
 
-`ContextPlanV2` is the request-local global budget authority. It classifies blocks
-as objective/constraints, structured task state, evidence/recovery, hot tail, or
-recoverable cold history. Required blocks are locked first; optional blocks are
-selected deterministically by permission, priority, freshness, access value, and
-token cost. Its manifest records each selection, suppression, hash, token count,
-recovery handle, stable segment hashes, and cache epoch. A block's own
-`max_tokens` remains a hard ceiling but cannot bypass the global budget.
+Cache-stable prefix layout: the cached head (tools manifest + `platform_static`) is kept byte-stable within a session, and everything that can legitimately change between turns renders as a per-turn TAIL block instead.
+- `environment` (cwd / is-git / platform / model) ships as a tail block, never inside `platform_static`, so changing the project path does not rewrite the cached prefix. The model perceives the path from that block each turn; on the one turn where the path actually moved, the block additionally carries a short note (old → new, earlier absolute paths may be stale) and the turn projection gains a `projectPathChange` provenance chip. First sight and steady state never fire; baselines are in-memory, conversation-scoped, and bounded (256 scopes), so a restart re-baselines without false transitions.
+- The wire `tools` array freezes at the session's first tool selection: MCP server disconnects/reconnects and newly discovered tools no longer mutate it. Schemas of tools that appear after the freeze are injected at the tail `mcp_tools_delta` block (name + description + input schema, bounded) and are callable through `execute_tools`; the block refreshes every turn, so a dropped server simply empties it. Turns where the reachable set actually changed vs the frozen wire carry a `mcpToolsDelta` provenance chip (added/removed names, capped at 8 each).
+Both transition chips ride the existing task-sidecar → turn-projection `provenance` lane (declared in `contracts/conversation_sync_v3.yaml`) and render in the turn-provenance strip (`frontend/src/conversation/presentation/turn-provenance.ts`); they appear only on the turn that observed the change.
 
-`TaskStateSnapshotV1` is rebuilt from turn and tool events. It contains the goal,
-hard constraints, decisions, completed work, files, tests, errors, open questions,
-TODOs, evidence IDs, observation time and world version. It is a request projection,
-never a second transcript authority; assistant prose cannot mark work complete.
+Provider reads share one lazy process-wide daemon pool sized from the launch-probed Agent worker budget (`min(8, 2 × agent workers)`). Its pending queue is `max(8, 3 × provider workers)`; saturation degrades optional context with typed timing evidence instead of creating another thread or unbounded queue entry. A permanently wedged adapter can therefore consume only this fixed budget, not one new pool per request.
 
-The static prompt profile is resolved once at this boundary. Kimi `auto` remains
-the full control contract; `lean` and named ablations require an explicit
-experiment policy. Every request stamps bounded `tofu.prompt-profile/v1`
-evidence—requested, resolved and effective profile, status/reason, model,
-character/token counts, SHA-256 and disabled blocks—on the task,
-`platform_static` provenance and each round snapshot. Replace mode records an
-empty effective profile instead of claiming the selected contract reached the model.
+`ContextPlanV2` is the request-local global budget authority. It classifies objective/constraints, structured task state, evidence/recovery, hot tail, and recoverable cold history.
+Required blocks lock first; permission, priority, freshness, access value, and token cost deterministically select optional blocks.
+Its manifest records selection/suppression, hashes, token counts, recovery handles, stable segment hashes, and cache epoch. Per-block `max_tokens` remains a hard ceiling but cannot bypass the global budget. Multi-agent task shapes receive only a 128-token trigger/discipline block; the live role/tool catalogue has one prompt owner in the `spawn_agents` schema and is never duplicated into system context.
+
+`TaskStateSnapshotV1` is rebuilt from turn/tool events: goal, hard constraints, decisions, completed work, files, tests, errors, open questions, TODOs, evidence IDs, observation time, and world version.
+It is a request projection, never a second transcript authority; assistant prose cannot mark work complete.
+
+The static prompt profile resolves once here. Kimi `auto` remains the full control contract; `lean` and named ablations require explicit experiment policy.
+Every request stamps bounded `tofu.prompt-profile/v1` evidence—requested/resolved/effective profile, status/reason, model, character/token counts, SHA-256, and disabled blocks—on the task, `platform_static` provenance, and each round snapshot.
+Replace mode records an empty effective profile instead of claiming the selected contract reached the model.
 
 ## Automatic versus persistent compaction
 
-Automatic compaction is request preparation: it produces a bounded working view
-without rewriting durable turns. Manual compaction is an explicit conversation
-mutation: it writes a persistent summary boundary through the conversation
-authority with concurrency protection against intervening turns.
-
-The per-round L1 pass is incremental at the authority boundary. A no-op does not
-load the transcript merely to rediscover compact placeholders; settled-turn
-ownership resolves lazily only when a real tool or image mutation needs a durable
-stamp. Image-tail and text-tool placeholders update the same settled Turn
-projection, so base64 payloads do not return on the next request rebuild.
-
-Both paths may share summarization and token-budget primitives, but they do not
-share persistence semantics. A request-local summary must never be mistaken for
-the stored transcript, and a persistent compaction must never bypass the
-conversation command service.
-
-Turn-native manual compaction persists one canonical public `compaction` block
-through the Sidecar operation. Private runtime markers are never transcript
-authority; the read-only legacy projection adapter reconstructs the v1 marker
-fields for old consumers. This keeps old readers compatible without creating a
-second stored representation of the summary boundary.
-
-The first real user anchor and required system/project policy remain available
-after compaction. Tool-call/result pairing stays valid; orphan results or
-reordered tool IDs are contract violations.
-
-Automatic L2 and manual `/compact` select the newest contiguous complete
-tool-round suffix under the same preservation token budget used for turns. The
-configured hot-round count is a maximum, not an unlimited entitlement: an
-oversized recent read is folded while the newest complete call/result pair
-remains recoverable. Their summary is a compact state receipt (objective,
-binding constraints, verified work, current state, blockers, next steps); the
-objective and a bounded recent instruction set are retained verbatim outside
-that lossy receipt, and reconstructible `data/tool-results` paths are never
-promoted to durable working files. The model targets 800–1,600 receipt tokens
-with a hard 2,200-token dispatch ceiling.
-
-Proactive cache economics include a conservative summary-call estimate before
-dispatch. Once a summary has been generated, that cost is sunk and adoption
-compares only the future prefix rewrite with future input savings. Archive and
-UI token counters are explicitly heuristic (`tokenCountKind=estimated`), not
-provider-billed usage.
-
-The local token authority reuses exact-ish counts for byte-identical text above
-4 KiB. Cache keys contain only tokenizer encoding, character length, and a
-SHA-256 digest; prompt/schema text is never retained. Capacity comes from the
-launch resource profile (`TOFU_TOKEN_COUNT_CACHE_CAPACITY`) and is hard-capped
-at 4,096 entries. On an 80,099-byte production tool catalog, a warmed tokenizer
-took 6.13 ms per uncached count versus 0.059 ms for a digest hit (about 104×),
-while short or changing text stays uncached.
-
-Each automatic L2 preflight produces two deliberately distinct measurements:
-the request gate includes tool schemas, while the message-only estimate retains
-the retry, archive, analytics, and reminder contract. The message estimate is
-reused through the synchronous no-mutation path; any L2/advanced mutation
-invalidates it and forces a count of the resulting context. Cache economics use
-the durable previous-turn warm-read baseline across one or two cold observations.
-At the existing third consecutive verifiably-cold round, current-task evidence
-supersedes that stale fallback so a dead cache cannot permanently block useful
-compaction.
-
-Within the request gate, the broad heuristic prefilter is lazy. A usage-cache
-hit or successful local tokenizer returns without paying for a discarded
-request-wide heuristic scan. Network counters still use that prefilter at the
-same threshold, and a later heuristic fallback reuses the already-computed
-value. A usage-cache hit verifies only the bounded recorded-prefix tail instead
-of copying the complete historical message list.
-
-Adaptive L2 compaction is opt-in. It compares projected Kimi cache-adjusted input
-savings with compaction-call and evidence-loss cost; context-window safety remains
-an unconditional hard gate. Generated state is checked against pending work and
-the evidence ledger; failed validation retains a deterministic bounded view.
-`remainingRoundsMedian` is also the horizon for exact pre/post-summary checks.
-Fixed compaction starts at one round, then earns horizons 2/3/4/5/6 after
-completing 4/8/16/32/64 rounds, capped by the remaining API-round budget.
-Adaptive candidates are no longer admitted then silently vetoed by a fixed gate.
-
-An automatic economic decline records the optimistic token-growth lower bound
-at which the candidate could first repay its cache rewrite or meet the minimum
-reduction. Until that bound, later rounds reuse the preflight veto instead of
-rebuilding the same fold candidate. A lower warm-cache witness or a newly
-earned fixed-policy horizon invalidates the veto immediately; explicit/reactive
-compaction and the hard window gate always bypass it.
-
-Pre-compaction transcript archives remain exact audit snapshots. Archive
-metadata/summary is fetched independently of the potentially multi-megabyte
-message payload; clients load raw messages only on explicit inspection, copy,
-or download. A separate bounded `tofu.compaction-receipt/v1` describes what the
-compactor actually did: strategy and fallback, preserved anchors/turns/tool
-rounds/files, summary time and normalized token usage, cache payback, evidence
-counts, and recovery truncation. This user-facing receipt is stored with the
-archive and is never injected into model context; enriching inspection cannot
-make the next provider request larger.
+Automatic, manual, and provider-native compaction share token and summarization
+primitives but not persistence authority. Their preservation rules, cache
+economics, bounded receipts, and owner-scoped summary routing are specified in
+[`../CONTEXT_COMPACTION.md`](../CONTEXT_COMPACTION.md).
 
 ## Memory boundary
 
-Memory retrieval is precision-first and bounded; retrieval returns evidence to
+Memory retrieval is precision-first and bounded: metadata-only prefetch hydrates selected evidence only, explicit search streams one 2,000-character body prefix at a time, and BM25 retains query-term statistics rather than corpus tokens. It returns evidence to
 the composer and injection owns formatting. Stored memories, My Context facts,
 and session context stay distinct. After a clean interactive turn, one bounded
 learner accepts at most two concise items backed by verbatim real-user evidence.
-It rejects uncertain, one-off, synthetic, assistant, or tool content; every accepted change is undoable.
+It rejects uncertain, one-off, synthetic, assistant, or tool content; every accepted change is undoable. As reconstructible background work, it honors billing stops and active shared contention before transport, with at most one actual upstream 429 for an admitted request; skips and failures leave the profile unchanged, and only a later eligible turn retries.
 
-Memory is not a fallback transcript store. It may summarize reusable facts, but
-must not become an alternate source of conversation truth or owner identity.
-Every persisted memory access carries the authenticated owner boundary.
+Memory is not a fallback transcript store or source of owner identity. New writes share one bounded payload contract and reject before corpus scans or mutation; one directory sidecar serializes ID selection and atomic publication across threads/cooperating POSIX processes, and suffix collisions use one directory snapshot. Direct-ID CRUD probes the canonical store/root order without enumerating the corpus and hydrates only the target when required. Update/delete/toggle/clear/merge re-resolve under sorted directory-local mutation locks (at most 16 shards per directory), so cooperating writers are linearizable while unrelated shards remain parallel; non-cooperating edits retain revision-conflict protection. Bounded merge probes only its sources. Existing durable files remain readable and are never pruned by this policy.
+Each corpus directory uses one closed `scandir` snapshot; flat-entry stat revisions are reused and packages are not enumerated a second time. Retrieval retains a ten-field summary view, hydrates selected IDs by exact canonical probes, and reuses the current prefetch's known availability for Composer guidance rather than rebuilding the corpus.
+A bounded launch-probed LRU may retain recursively frozen parsed frontmatter only; matching fingerprints newer than 2.1 seconds are conservatively re-read because valid coarse-clock filesystems can preserve every stat field across a same-size edit. It exposes unstable misses and unfreezable bypasses separately, while each list rebuilds provenance and eligibility and every access carries its authenticated owner.
 
 ## Failure semantics
 
@@ -169,8 +78,8 @@ Every persisted memory access carries the authenticated owner boundary.
   provenance; do not pretend the count is exact.
 - Context over budget: compact through registered stages, then return a typed
   context-limit failure if the irreducible payload still does not fit.
-- Summarizer/provider failure: retain a safe non-summarized tail or fail the
-  request explicitly; never persist a partial manual compaction.
+- Final-admission summary failure: use a bounded transcript-derived recovery
+  receipt; retain usable model text after shaping faults. Manual compaction stays atomic.
 - Concurrent manual compaction: reject/retry from a fresh transcript revision.
 - Invalid tool history: fail or repair at the single message-construction
   boundary, with diagnostics.
@@ -179,18 +88,26 @@ Every persisted memory access carries the authenticated owner boundary.
 
 - One context-window authority and one token-counter resolution API.
 - Deterministic provider order and observable segment provenance.
-- Durable messages are never mutated by request-local preparation.
+- Durable messages are never mutated by request-local preparation; same-role diagnostics classify original pair boundaries using short-lived producer identity that is deleted before provider/debug wire output, so synthetic carriers and relocated objective anchors stay silent while naked real-to-real duplicates still warn.
 - Persistent compaction is atomic and revision-guarded.
 - Turn-native compaction authority stores the public block once; private v1
   markers exist only in the compatibility projection.
 - System, project, identity, and safety instructions retain declared priority.
 - Tool call/result pairs remain adjacent and correctly identified.
-- Memory retrieval is owner-scoped, bounded, and optional; failure cannot erase
-  the base conversation.
+- Memory retrieval is owner-scoped and bounded; My Context review uses the latest real user turn, strict optional billing/contention admission, and at most one actual upstream 429; skips and failures cannot erase base context.
 - Prompt-cache decisions stay stable for the lifetime of one task.
+- Economic working sets derive from provider/model price tiers without model
+  name checks; explicit overrides remain authoritative.
+- Turn cost aggregates per API round under that round's model/provider/tier,
+  and the UI exposes total, uncached, and cache-read tokens together.
 - Required `ContextPlanV2` blocks cannot be evicted by optional evidence.
 - Mutable facts carry observation/world-version metadata and are revalidated
   before a claim depends on their freshness.
+- Per-round measurement uses the shared local token authority. Its bounded
+  digest entries carry encoding-scoped BPE and entropy counts without prompt
+  text under a launch-probed 4,096-entry ceiling. Admission may hand off 4,096
+  text identities, one schema integer, and one exact digest synchronously;
+  identical list/model/ordered schema objects are required; none is serialized.
 
 ## Change routing
 
@@ -208,13 +125,9 @@ Every persisted memory access carries the authenticated owner boundary.
 
 ```bash
 pytest -q tests/test_context_composer.py tests/test_context_limits_selfheal.py
-pytest -q tests/test_token_counter_heuristic.py \
-  tests/test_compaction_invariants.py tests/test_compaction_anchor.py \
-  tests/test_compaction_receipt.py
-pytest -q tests/test_manual_compaction_engine.py \
-  tests/test_manual_compaction_route.py
-pytest -q tests/test_memory_prefetch_local.py \
-  tests/test_memory_global_server_store.py
+pytest -q tests/test_token_counter_heuristic.py tests/test_compaction_invariants.py tests/test_compaction_anchor.py tests/test_compaction_receipt.py
+pytest -q tests/test_manual_compaction_engine.py tests/test_manual_compaction_route.py
+pytest -q tests/test_memory_prefetch_local.py tests/test_memory_global_server_store.py tests/test_memory_create_allocation.py tests/test_memory_direct_lookup.py tests/test_memory_mutation_concurrency.py
 pytest -q tests/test_long_agent_v2_contracts.py -k 'context_plan or task_state or adaptive_compaction'
 pytest -q tests/test_prompt_profile_adoption.py
 ```

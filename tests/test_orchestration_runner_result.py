@@ -6,6 +6,7 @@ import pytest
 
 from lib.orchestration_runner_result import (
     OrchestrationAgentResult,
+    OrchestrationModelRoute,
     normalize_orchestration_agent_result,
 )
 from lib.orchestration_tool_usage import OrchestrationToolUsage
@@ -35,7 +36,26 @@ def test_legacy_mapping_normalizes_every_result_axis_once():
             exploratory_tools=('read_file',),
             reported=True,
         ),
+        tool_log=({'tool': 'write_file'}, {'tool': 'read_file'}),
     )
+
+
+def test_tool_log_rows_survive_only_as_plain_dict_copies():
+    result = normalize_orchestration_agent_result({
+        'output': 'done',
+        'toolLog': [
+            {'tool': 'run_command', 'preview': 'ok'},
+            'not-a-mapping',
+            {'tool': 'read_files'},
+        ],
+    })
+
+    assert result.tool_log == (
+        {'tool': 'run_command', 'preview': 'ok'},
+        {'tool': 'read_files'},
+    )
+    assert normalize_orchestration_agent_result(
+        {'output': 'done'}).tool_log == ()
 
 
 def test_typed_result_is_idempotent_and_none_keeps_legacy_empty_success():
@@ -44,6 +64,27 @@ def test_typed_result_is_idempotent_and_none_keeps_legacy_empty_success():
     assert normalize_orchestration_agent_result(typed) is typed
     assert normalize_orchestration_agent_result(None) == OrchestrationAgentResult()
     assert normalize_orchestration_agent_result({}) == OrchestrationAgentResult()
+
+
+def test_mapping_normalizes_selected_to_resolved_model_route():
+    result = normalize_orchestration_agent_result({
+        'output': 'done',
+        'modelRoute': {
+            'selectedModel': 'kimi-k3',
+            'resolvedModel': 'deepseek-v4-pro',
+            'role': 'worker',
+            'tier': 'heavy',
+            'kind': 'role_tier',
+        },
+    })
+
+    assert result.model_route == OrchestrationModelRoute(
+        selected_model='kimi-k3',
+        resolved_model='deepseek-v4-pro',
+        role='worker',
+        tier='heavy',
+        kind='role_tier',
+    )
 
 
 def test_invalid_top_level_shape_becomes_an_explicit_failed_node_result():

@@ -38,7 +38,6 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_TS = ROOT / 'frontend/src/features/settings/credentials-vault.ts'
 ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
-SAFE_HTML = runtime_section_path('core/safe_html.js')
 SAVE_EXPORT = runtime_section_path('settings/save_export.js')
 
 _BODY = r'''
@@ -56,9 +55,7 @@ let confirmAnswer = true;
 const { window, document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="credentialsVaultList"></div></body>',
-  // safe_html.js is the REAL template engine the module renders through;
-  // eval'ing it (rather than stubbing safeHtml) keeps escaping honest.
-  targets: [process.argv[4], process.argv[2]],
+  targets: [process.argv[2]],
   globals: {
     confirm: (msg) => { confirmCalls.push(msg); return confirmAnswer; },
     // setup() neuters setTimeout to a no-op; override AFTER that so the
@@ -251,7 +248,6 @@ def test_credentials_vault_frontend(tmp_path):
     built = _compile_credentials_vault(tmp_path)
     run_harness(
         target_js=str(built),
-        extra_targets=[SAFE_HTML],
         body_js=_BODY,
         expect_pass=28,
         label='credentials-vault',
@@ -263,7 +259,6 @@ def test_vite_credentials_vault_matches_privacy_contract(tmp_path):
     built = _compile_credentials_vault(tmp_path)
     run_harness(
         target_js=str(built),
-        extra_targets=[SAFE_HTML],
         body_js=_BODY,
         expect_pass=28,
         label='vite credentials-vault',

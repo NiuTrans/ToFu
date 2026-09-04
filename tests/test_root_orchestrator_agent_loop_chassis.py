@@ -70,7 +70,7 @@ def test_root_wires_every_control_boundary_to_the_chassis(chassis_delegation):
     adapter, request, _state, captured, _outcome, _result = chassis_delegation
     call = captured[0]
     required = {
-        'abort', 'before_round', 'dispatch', 'decide_round',
+        'abort', 'dispatch', 'decide_round',
         'on_tool_round', 'before_tools', 'execute_tools',
         'max_consecutive_tool_timeouts', 'on_tool_timeout_state',
         'after_tools', 'on_round_end', 'on_abort',
@@ -151,3 +151,25 @@ def test_flow_work_turn_delegates_to_root_run_task(monkeypatch):
         'error': None,
     }
     assert '_flow_managed' not in task
+
+
+def test_flow_work_turn_preserves_outer_goal_flow_ownership(monkeypatch):
+    import lib.tasks_pkg.orchestrator._turn as turn_module
+
+    def fake_run_task(task):
+        assert task['_flow_managed'] is True
+        task['content'] = 'one inner turn'
+        task['finishReason'] = 'stop'
+
+    monkeypatch.setattr(turn_module, 'run_task', fake_run_task)
+    task = {
+        'id': 'goal-flow-root-task',
+        'content_lock': threading.Lock(),
+        'messages': [],
+        '_flow_managed': True,
+    }
+
+    turn_module._run_single_turn(
+        task, [{'role': 'user', 'content': 'continue goal'}])
+
+    assert task['_flow_managed'] is True

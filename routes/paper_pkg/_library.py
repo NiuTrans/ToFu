@@ -51,9 +51,50 @@ from routes.paper_pkg._common import (
 # small files — plausible truncation stubs like the 15-byte ``%PDF-1.4`` header
 # — are validity-checked. Generous vs the ~15-byte stubs actually seen.
 _GHOST_PDF_MAX_STUB_BYTES = 2048
+_FILE_SNAPSHOT_NOT_PROVIDED = object()
+_FILE_SIZE_MISSING = object()
+_FILE_SIZE_UNKNOWN = object()
 
 
-def _is_ghost_library_row(paper):
+def _paper_file_size_snapshot(papers):
+    """Read requested PDF sizes in one directory pass.
+
+    ``None`` means the directory snapshot was not authoritative, so callers
+    must fail open. A per-name unknown sentinel means only that file's stat
+    failed. Missing names are authoritative only after a complete traversal.
+    """
+    wanted = {
+        os.path.basename(str(paper.get("pdfFilename") or "").strip())
+        for paper in papers
+        if str(paper.get("pdfFilename") or "").strip()
+    }
+    if not wanted:
+        return {}
+    sizes = {}
+    try:
+        with os.scandir(PAPER_DIR) as iterator:
+            for directory_entry in iterator:
+                if directory_entry.name not in wanted:
+                    continue
+                try:
+                    sizes[directory_entry.name] = directory_entry.stat().st_size
+                except OSError:
+                    sizes[directory_entry.name] = _FILE_SIZE_UNKNOWN
+                if len(sizes) == len(wanted):
+                    break
+    except OSError as error:
+        logger.debug(
+            "[Paper:Library] PDF directory snapshot failed: %s", error)
+        return None
+    return sizes
+
+
+def _is_ghost_library_row(
+    paper,
+    *,
+    file_sizes=_FILE_SNAPSHOT_NOT_PROVIDED,
+    stub_validity=None,
+):
     """A bookshelf row is a GHOST (non-viewable) when it has no usable PDF:
     an empty ``pdfFilename``, or a filename whose file is missing from
     PAPER_DIR. Left by the OLD fire-and-forget persistence (a client PUT that
@@ -70,42 +111,63 @@ def _is_ghost_library_row(paper):
         if (paper.get("arxivId") or "").strip():
             return False
         return True
-    try:
-        path = os.path.join(PAPER_DIR, os.path.basename(fn))
-        if not os.path.exists(path):
-            return True
-        # File is present — but a truncated / aborted upload leaves a stub
-        # (e.g. a 15-byte ``%PDF-1.4`` header) that EXISTS yet is not an
-        # openable PDF. Such a row dead-ends the reader on "load a PDF first",
-        # so treat a present-but-unopenable PDF as a ghost too. Only stubs small
-        # enough to be a plausible truncation are validated (a large real PDF is
-        # never re-opened on every listing — that would be needless work and a
-        # transient FUSE read error must not hide a real paper).
+    filename = os.path.basename(fn)
+    path = os.path.join(PAPER_DIR, filename)
+    if file_sizes is _FILE_SNAPSHOT_NOT_PROVIDED:
         try:
             size = os.path.getsize(path)
-        except OSError:
+        except FileNotFoundError:
+            return True
+        except OSError as error:
+            logger.debug(
+                "[Paper:Library] pdf stat failed for %s: %s",
+                (paper.get("id") or "")[:16],
+                error,
+            )
             return False  # transient stat error — never hide a real paper
-        if size < _GHOST_PDF_MAX_STUB_BYTES:
-            from lib.pdf_parser.text import validate_pdf_bytes
+    elif file_sizes is None:
+        return False  # an unavailable directory snapshot is never evidence
+    else:
+        size = file_sizes.get(filename, _FILE_SIZE_MISSING)
+        if size is _FILE_SIZE_MISSING:
+            return True
+        if size is _FILE_SIZE_UNKNOWN:
+            return False
 
+    # A truncated / aborted upload leaves a small present-but-invalid stub.
+    # Large PDFs are never opened merely to render the bookshelf.
+    if size < _GHOST_PDF_MAX_STUB_BYTES:
+        cached_validity = (
+            stub_validity.get(filename, _FILE_SIZE_MISSING)
+            if stub_validity is not None else _FILE_SIZE_MISSING
+        )
+        if cached_validity is not _FILE_SIZE_MISSING:
+            return cached_validity is False
+        from lib.pdf_parser.text import validate_pdf_bytes
+
+        try:
             with open(path, "rb") as f:
                 ok, _pages, _err = validate_pdf_bytes(f.read())
-            if not ok:
-                logger.debug(
-                    "[Paper:Library] row %s has a present-but-invalid PDF "
-                    "(%d bytes) — treating as ghost",
-                    (paper.get("id") or "")[:16],
-                    size,
-                )
-                return True
-        return False
-    except OSError as e:
-        logger.debug(
-            "[Paper:Library] pdf existence check failed for %s: %s",
-            (paper.get("id") or "")[:16],
-            e,
-        )
-        return False
+        except OSError as error:
+            if stub_validity is not None:
+                stub_validity[filename] = None
+            logger.debug(
+                "[Paper:Library] pdf validation read failed for %s: %s",
+                (paper.get("id") or "")[:16],
+                error,
+            )
+            return False
+        if stub_validity is not None:
+            stub_validity[filename] = bool(ok)
+        if not ok:
+            logger.debug(
+                "[Paper:Library] row %s has a present-but-invalid PDF "
+                "(%d bytes) — treating as ghost",
+                (paper.get("id") or "")[:16],
+                size,
+            )
+            return True
+    return False
 
 
 def _is_broken_stub_row(paper):
@@ -178,7 +240,11 @@ def _persist_ingested_library_row(
     owner_user_id = require_user_id(
         user_id, context="paper library ingest persist")
     paper_id = (paper_id or "").strip()
-    if not paper_id or len(paper_id) > 128 or not re.fullmatch(r"[\w.\-]+", paper_id):
+    if (
+        not paper_id
+        or len(paper_id) > 128
+        or not re.fullmatch(r"[\w.\-]+", paper_id)
+    ):
         logger.warning(
             "[Paper:Ingest] Skip library persist — bad paper_id: %.60s", paper_id
         )
@@ -315,7 +381,7 @@ def upload_paper():
     text_length = 0
     parse_error = ""
     try:
-        from lib.pdf_parser.core import parse_pdf as _parse_pdf
+        from lib.pdf_parser.pool import parse_pdf_pooled as _parse_pdf
 
         t0 = time.time()
         result = _parse_pdf(pdf_bytes, max_text_chars=0, max_images=0)
@@ -380,18 +446,36 @@ def upload_paper():
 # ══════════════════════════════════════════════════════
 
 
+def _viewable_library_papers(entries, *, summaries):
+    """Project each row once and omit entries whose source is not viewable."""
+    projected = [
+        (
+            entry.to_summary_projection()
+            if summaries else entry.to_projection()
+        )
+        for entry in entries
+    ]
+    file_sizes = _paper_file_size_snapshot(projected)
+    stub_validity = {}
+    return [
+        paper for paper in projected
+        if not _is_ghost_library_row(
+            paper,
+            file_sizes=file_sizes,
+            stub_validity=stub_validity,
+        )
+    ]
+
+
 @api_v1_paper_bp.route("/api/v1/paper/library", methods=["GET"])
 @safe_route
 async def list_library():
-    """Return the current owner's viewable bookshelf entries, newest first."""
+    """Return complete rows for compatibility with pre-summary clients."""
     owner_user_id = int(request_user_id())
     repository = PaperLibraryRepository(owner_user_id)
     entries = await asyncio.to_thread(repository.list_entries)
-    papers = [
-        entry.to_projection()
-        for entry in entries
-        if not _is_ghost_library_row(entry.to_projection())
-    ]
+    papers = await asyncio.to_thread(
+        _viewable_library_papers, entries, summaries=False)
     hidden_count = len(entries) - len(papers)
     if hidden_count:
         logger.info(
@@ -400,6 +484,44 @@ async def list_library():
             hidden_count,
         )
     return api_ok({"papers": papers})
+
+
+@api_v1_paper_bp.route("/api/v1/paper/library/summaries", methods=["GET"])
+@safe_route
+async def list_library_summaries():
+    """Return owner-visible bookshelf metadata, newest first."""
+    owner_user_id = int(request_user_id())
+    repository = PaperLibraryRepository(owner_user_id)
+    entries = await asyncio.to_thread(repository.list_summaries)
+    papers = await asyncio.to_thread(
+        _viewable_library_papers, entries, summaries=True)
+    hidden_count = len(entries) - len(papers)
+    if hidden_count:
+        logger.info(
+            "[Paper:Library] Hid %d summary entry(s) whose PDF is not "
+            "currently viewable; storage rows were left untouched",
+            hidden_count,
+        )
+    return api_ok({"papers": papers})
+
+
+@api_v1_paper_bp.route("/api/v1/paper/library/<paper_id>", methods=["GET"])
+@safe_route
+async def get_library_entry(paper_id):
+    """Return one complete owner-visible bookshelf entry."""
+    owner_user_id = int(request_user_id())
+    paper_id = (paper_id or "").strip()
+    if not paper_id or len(paper_id) > 128 or not re.fullmatch(r"[\w.\-]+", paper_id):
+        return api_bad_request("invalid id")
+    repository = PaperLibraryRepository(owner_user_id)
+    entry = await asyncio.to_thread(repository.reader_detail, paper_id)
+    if entry is None:
+        return api_not_found("not_found")
+    paper = entry.to_projection()
+    paper.pop("babelCache", None)
+    if await asyncio.to_thread(_is_ghost_library_row, paper):
+        return api_not_found("not_found")
+    return api_ok({"paper": paper})
 
 
 @api_v1_paper_bp.route("/api/v1/paper/library/<paper_id>", methods=["PUT"])
@@ -548,10 +670,10 @@ async def prune_broken_library_rows():
     """
     owner_user_id = int(request_user_id())
     repository = PaperLibraryRepository(owner_user_id)
-    entries = await asyncio.to_thread(repository.list_entries)
+    entries = await asyncio.to_thread(repository.list_summaries)
     pruned_ids = []
     for entry in entries:
-        paper = entry.to_projection()
+        paper = entry.to_summary_projection()
         if not _is_broken_stub_row(paper):
             continue
         deleted = await asyncio.to_thread(

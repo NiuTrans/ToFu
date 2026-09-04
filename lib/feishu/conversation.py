@@ -10,20 +10,9 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 
-from lib.feishu._state import (
-    DEFAULT_PROJECT_PATH,
-    MAX_HISTORY,
-    _conv_lock,
-    _conversations,
-    _user_conv_ids,
-    _user_models,
-    _user_modes,
-    _user_pending,
-    _user_projects,
-    _user_state_lock,
-)
+from lib.feishu import _state as feishu_state
+from lib.feishu.user_state import feishu_user_sessions
 from lib.log import get_logger
 
 
@@ -32,34 +21,25 @@ logger = get_logger(__name__)
 
 def get_history(user_id: str) -> list:
     """Return a copy of the bounded model-context cache."""
-    with _conv_lock:
-        return list(_conversations.setdefault(user_id, []))
+    return feishu_user_sessions.history(user_id)
 
 
 def append_message(user_id: str, role: str, content: str) -> None:
     """Append one prompt-cache message and enforce its explicit bound."""
-    with _conv_lock:
-        history = _conversations.setdefault(user_id, [])
-        history.append({"role": role, "content": content})
-        del history[:-MAX_HISTORY]
+    feishu_user_sessions.append_message(user_id, role, content)
 
 
 def clear_history(user_id: str) -> None:
-    with _conv_lock:
-        _conversations[user_id] = []
+    feishu_user_sessions.clear_history(user_id)
 
 
 def new_conv_id(user_id: str) -> str:
     """Start a new durable conversation identity for one Feishu user."""
-    conversation_id = str(uuid.uuid4())
-    with _user_state_lock:
-        _user_conv_ids[user_id] = conversation_id
-    return conversation_id
+    return feishu_user_sessions.new_conversation_id(user_id)
 
 
 def get_conv_id(user_id: str) -> str:
-    with _user_state_lock:
-        return _user_conv_ids.setdefault(user_id, str(uuid.uuid4()))
+    return feishu_user_sessions.conversation_id(user_id)
 
 
 def resolve_owner_user_id(feishu_user_id: str) -> int | None:
@@ -102,6 +82,7 @@ def persist_exchange(
     """Append one completed Feishu exchange through canonical turn lifecycle."""
     from lib.turn_lifecycle import (
         LifecycleConflict,
+        attempt_dispatch_lock,
         bind_task,
         claim_attempt_start,
         create_turn_pair,
@@ -157,42 +138,49 @@ def persist_exchange(
         return False
 
     attempt_id = result["attempt"]["attemptId"]
-    attempt = get_attempt(attempt_id, user_id=owner_id)
-    if attempt.get("status") == "completed":
-        return True
-    if not claim_attempt_start(attempt_id, user_id=owner_id):
-        logger.warning(
-            "[Feishu] exchange attempt is not claimable attempt=%s status=%s",
-            attempt_id[:12],
-            attempt.get("status"),
-        )
-        return False
+    with attempt_dispatch_lock(attempt_id):
+        attempt = get_attempt(attempt_id, user_id=owner_id)
+        if attempt.get("status") == "completed":
+            return True
+        if not claim_attempt_start(attempt_id, user_id=owner_id):
+            logger.warning(
+                "[Feishu] exchange attempt is not claimable "
+                "attempt=%s status=%s",
+                attempt_id[:12],
+                attempt.get("status"),
+            )
+            return False
 
-    synthetic_task_id = f"feishu:{attempt_id}"
-    if bind_task(attempt_id, synthetic_task_id, user_id=owner_id) is None:
-        logger.error("[Feishu] could not bind exchange attempt=%s", attempt_id[:12])
-        return False
-    task = {
-        "id": synthetic_task_id,
-        "convId": conversation_id,
-        "_turnId": result["turn"]["turnId"],
-        "_attemptId": attempt_id,
-        "_userId": owner_id,
-        "config": config,
-        "content": str(answer.get("content") or ""),
-        "thinking": str(answer.get("thinking") or ""),
-        "segments": list(answer.get("segments") or []),
-        "toolRounds": list(answer.get("toolRounds") or []),
-        "model": model,
-        "status": "done",
-        "finishReason": "stop",
-    }
-    applied = record_task_event(
-        task, {"type": "done", "finishReason": "stop"}
-    )
-    if not applied:
-        logger.error("[Feishu] terminal exchange write was rejected attempt=%s", attempt_id[:12])
-        return False
+        synthetic_task_id = f"feishu:{attempt_id}"
+        if bind_task(attempt_id, synthetic_task_id, user_id=owner_id) is None:
+            logger.error(
+                "[Feishu] could not bind exchange attempt=%s", attempt_id[:12]
+            )
+            return False
+        task = {
+            "id": synthetic_task_id,
+            "convId": conversation_id,
+            "_turnId": result["turn"]["turnId"],
+            "_attemptId": attempt_id,
+            "_userId": owner_id,
+            "config": config,
+            "content": str(answer.get("content") or ""),
+            "thinking": str(answer.get("thinking") or ""),
+            "segments": list(answer.get("segments") or []),
+            "toolRounds": list(answer.get("toolRounds") or []),
+            "model": model,
+            "status": "done",
+            "finishReason": "stop",
+        }
+        applied = record_task_event(
+            task, {"type": "done", "finishReason": "stop"}
+        )
+        if not applied:
+            logger.error(
+                "[Feishu] terminal exchange write was rejected attempt=%s",
+                attempt_id[:12],
+            )
+            return False
     try:
         from lib.conversations import notify_conv_changed
 
@@ -208,49 +196,42 @@ def persist_exchange(
 
 def get_model(user_id: str) -> str:
     from lib import LLM_MODEL
-
-    with _user_state_lock:
-        return _user_models.get(user_id, LLM_MODEL)
+    return feishu_user_sessions.model(user_id, LLM_MODEL)
 
 
 def set_model(user_id: str, model: str) -> None:
-    with _user_state_lock:
-        _user_models[user_id] = model
+    feishu_user_sessions.set_model(user_id, model)
 
 
 def get_mode(user_id: str) -> str:
-    with _user_state_lock:
-        return _user_modes.get(user_id, "chat")
+    return feishu_user_sessions.mode(user_id)
 
 
 def set_mode(user_id: str, mode: str) -> None:
-    with _user_state_lock:
-        _user_modes[user_id] = mode
+    feishu_user_sessions.set_mode(user_id, mode)
 
 
 def get_project(user_id: str) -> str:
-    with _user_state_lock:
-        return _user_projects.get(user_id, DEFAULT_PROJECT_PATH)
+    # Runtime config can replace the default without restarting the bot; read
+    # the scalar from its owner rather than retaining an import-time copy.
+    return feishu_user_sessions.project(
+        user_id, feishu_state.DEFAULT_PROJECT_PATH)
 
 
 def set_project(user_id: str, path: str) -> None:
-    with _user_state_lock:
-        _user_projects[user_id] = path
+    feishu_user_sessions.set_project(user_id, path)
 
 
 def get_pending(user_id: str):
-    with _user_state_lock:
-        return _user_pending.get(user_id)
+    return feishu_user_sessions.pending(user_id)
 
 
 def set_pending(user_id: str, value) -> None:
-    with _user_state_lock:
-        _user_pending[user_id] = value
+    feishu_user_sessions.set_pending(user_id, value)
 
 
 def clear_pending(user_id: str) -> None:
-    with _user_state_lock:
-        _user_pending.pop(user_id, None)
+    feishu_user_sessions.clear_pending(user_id)
 
 
 __all__ = [

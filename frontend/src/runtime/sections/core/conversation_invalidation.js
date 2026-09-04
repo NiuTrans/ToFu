@@ -28,8 +28,11 @@ function _applyRemoteConvDeleted(conversationId) {
   if (index < 0) return;
   conversations.splice(index, 1);
   if (activeConvId === conversationId) {
-    if (conversations.length > 0) loadConversation(conversations[0].id);
-    else newChat();
+    if (conversations.length > 0) {
+      loadConversation(conversations[Math.min(index, conversations.length - 1)].id);
+    } else {
+      newChat();
+    }
   } else {
     renderConversationList();
   }
@@ -56,13 +59,26 @@ runtimeScope._acquireBootLoad = _acquireBootLoad;
 runtimeScope._releaseBootLoad = _releaseBootLoad;
 runtimeScope._isBootLoadHeld = _bootLoadHeld;
 
-let _conversationListRefreshTimer = 0;
-function _scheduleConvListRefresh() {
-  clearTimeout(_conversationListRefreshTimer);
-  _conversationListRefreshTimer = setTimeout(() => {
-    if (document.visibilityState !== 'visible') return;
-    void loadConversationCatalog();
-  }, 150);
+const _conversationCatalogRevisionGate = createConversationCatalogRevisionGate({
+  readRevision(conversationId) {
+    const conversation = conversations.find((item) => item?.id === conversationId);
+    if (!conversation) return null;
+    const stateRevision = runtimeScope.ConversationTurnRead
+      ?.state?.(conversation)?.conversationRevision;
+    const shellRevision = conversation._serverRev;
+    return Math.max(
+      Number.isSafeInteger(stateRevision) ? stateRevision : -1,
+      Number.isSafeInteger(shellRevision) ? shellRevision : -1,
+    );
+  },
+  refreshCatalog: () => loadConversationCatalog(),
+  isVisible: () => document.visibilityState === 'visible',
+  warn: (message) => debugLog(`[conversation-catalog] ${message}`, 'warn'),
+});
+retainedCompositionLifecycle.add(() => _conversationCatalogRevisionGate.destroy());
+
+function _scheduleConvListRefresh(conversationId, revision) {
+  _conversationCatalogRevisionGate.schedule(conversationId, revision);
 }
 
 function _onConvNotifyPush(frame) {
@@ -77,9 +93,11 @@ function _onConvNotifyPush(frame) {
   }
   const conversation = conversations.find((item) => item?.id === conversationId);
   if (conversation) {
+    if (Number.isSafeInteger(frame.rev) && frame.rev > 0
+        && _conversationCatalogRevisionGate.reached(conversationId, frame.rev)) return;
     runtimeScope.ConversationTurnStore?.invalidateConversation?.(conversationId);
   }
-  _scheduleConvListRefresh();
+  _scheduleConvListRefresh(conversationId, frame.rev);
 }
 
 function _onConversationInvalidation(frame) {
@@ -151,15 +169,15 @@ function _handleCrossTabMsg(message) {
     runtimeScope.ConversationTurnStore?.invalidateConversation?.(message.convId);
   }
   if (message.type === 'conv_saved' || message.type === 'conv_restored') {
-    _scheduleConvListRefresh();
+    _scheduleConvListRefresh(message.convId, null);
   }
 }
 
-function _activeConversationHydrate() {
+function _activeConversationWake() {
   if (!activeConvId) return Promise.resolve(null);
   const conversation = conversations.find((item) => item?.id === activeConvId);
   if (!conversation) return Promise.resolve(null);
-  return runtimeScope.ConversationTurnStore?.hydrateConversation?.(conversation)
+  return runtimeScope.ConversationTurnStore?.wakeConversation?.(conversation)
     || Promise.resolve(null);
 }
 
@@ -169,7 +187,7 @@ function _revalidateOnResume(trigger) {
     ? initCurrentUserId() : Promise.resolve(null);
   void Promise.resolve(identityRefresh)
     .then(() => loadConversationCatalog())
-    .then(() => _activeConversationHydrate())
+    .then(() => _activeConversationWake())
     .catch((error) =>
       debugLog(`[conversation-sync] ${trigger} recovery failed: ${error?.message || error}`,
                'warn'))
@@ -194,9 +212,13 @@ async function _recoverOfflineConversations() {
     || ['degraded', 'offline'].includes(
       conversation?._conversationSyncHealth?.state,
     ));
-  const results = await Promise.allSettled(targets.map((conversation) =>
-    runtimeScope.ConversationTurnStore.hydrateConversation(conversation)));
-  return results.filter((result) => result.status === 'fulfilled').length;
+  const result = await runWithConcurrency(
+    targets,
+    (conversation) =>
+      runtimeScope.ConversationTurnStore.wakeConversation(conversation),
+    DEFAULT_ASYNC_POOL_CONCURRENCY,
+  );
+  return result.completed - result.errors.length;
 }
 
 const _RECONCILE_MS_PUSH_UP = 300000;

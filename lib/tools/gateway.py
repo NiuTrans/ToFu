@@ -25,6 +25,8 @@ from lib.tools.contracts import (
     ToolContractError,
     validate_tool_arguments_from_documents,
 )
+from lib.tools.discovery_vocabulary import CAPABILITY_SEARCH_CONCEPTS
+from lib.tools.resource_policy import tool_search_term_cache_capacity
 
 
 logger = get_logger(__name__)
@@ -36,7 +38,23 @@ GATEWAY_TOOL_NAMES = frozenset({SEARCH_TOOLS_NAME, EXECUTE_TOOLS_NAME})
 LOCAL_TOOL_SEARCH_MIN_FUNCTIONS = 12
 LOCAL_TOOL_SEARCH_DEFAULT_LIMIT = 8
 LOCAL_TOOL_SEARCH_MAX_LIMIT = 20
-LOCAL_GATEWAY_MAX_TOKENS = 500
+LOCAL_TOOL_SEARCH_MAX_QUERY_CHARS = 512
+LOCAL_TOOL_SEARCH_MAX_NAMESPACE_CHARS = 128
+LOCAL_TOOL_SEARCH_MAX_CURSOR_CHARS = 128
+# LRU keys retain their original strings. Long catalog descriptions still
+# receive full-fidelity tokenization, but bypass this process-wide cache so a
+# plugin or request cannot turn an item-count bound into an arbitrary byte
+# residency budget.
+LOCAL_TOOL_SEARCH_TERM_CACHE_MAX_INPUT_CHARS = 1024
+# Model-facing retrieval output is a directory, not a dump of every owning
+# contract. Keep it bounded even when a plugin contributes a very wide schema.
+LOCAL_TOOL_SEARCH_MAX_RESULT_CHARS = 24_000
+# Authoring contract for the full search/execute gateway pair. The pair is
+# never compacted at runtime (rewriting its bytes breaks the provider
+# prompt-cache prefix); this target is enforced by tests and drift past it
+# only logs a warning. Measured at ~522-544 tokens across supported
+# tokenizers.
+LOCAL_GATEWAY_MAX_TOKENS = 600
 CODE_CORE_DIRECT_TOOL_NAMES = frozenset({
     'read_files', 'grep_search', 'find_files', 'edit_file', 'run_command',
 })
@@ -44,26 +62,33 @@ CODE_CORE_DIRECT_TOOL_NAMES = frozenset({
 ToolIsolationReporter = Callable[[dict[str, Any]], None]
 
 
-def search_tools_schema(*, compact: bool = False) -> dict[str, Any]:
-    description = (
-        'Find tools; run a result with execute_tools.' if compact else
-        'Find task-available tools by capability. This only finds '
-        'tools. To run a result, call execute_tools; copy its exact '
-        'name and provide arguments matching arguments_schema.')
+def search_tools_schema() -> dict[str, Any]:
     return {
         'type': 'function',
         'function': {
             'name': SEARCH_TOOLS_NAME,
-            'description': description,
+            'description': (
+                'Find task-available tools absent from this request. This '
+                "only finds tools; call execute_tools with a result's exact "
+                'name and arguments_schema.'),
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'query': {'type': 'string', 'minLength': 1},
-                    'namespace': {'type': 'string'},
+                    'query': {
+                        'type': 'string', 'minLength': 1,
+                        'maxLength': LOCAL_TOOL_SEARCH_MAX_QUERY_CHARS,
+                    },
+                    'namespace': {
+                        'type': 'string',
+                        'maxLength': LOCAL_TOOL_SEARCH_MAX_NAMESPACE_CHARS,
+                    },
                     'limit': {'type': 'integer', 'minimum': 1,
                               'maximum': LOCAL_TOOL_SEARCH_MAX_LIMIT,
                               'default': LOCAL_TOOL_SEARCH_DEFAULT_LIMIT},
-                    'cursor': {'type': 'string'},
+                    'cursor': {
+                        'type': 'string',
+                        'maxLength': LOCAL_TOOL_SEARCH_MAX_CURSOR_CHARS,
+                    },
                 },
                 'required': ['query'],
                 'additionalProperties': False,
@@ -73,48 +98,52 @@ def search_tools_schema(*, compact: bool = False) -> dict[str, Any]:
 
 
 def execute_tools_schema(*, include_program: bool = True,
-                         ptc_note: str = '',
-                         compact: bool = False) -> dict[str, Any]:
+                         ptc_note: str = '') -> dict[str, Any]:
     """Return the ``execute_tools`` gateway schema.
 
-    Default output is byte-identical to the historical shape and exposes the
-    full ToolScript surface to every model.  ``include_program=False`` is the
+    Output is byte-identical to the historical shape and exposes the full
+    ToolScript surface to every model.  ``include_program=False`` is the
     explicit ``TOFU_PTC_TIER=batch`` operator/benchmark override shape (the
     model batches parallel ``calls`` instead of authoring ToolScript), and
-    ``ptc_note`` (the bounded read-only routing contract) is spliced into the
-    description so the policy travels with the schema the model sees.
+    ``ptc_note`` (the bounded local routing contract) is spliced into the
+    description so the policy travels with the schema the model sees.  The
+    schema is never compacted at runtime: rewriting description bytes between
+    rounds breaks the provider prompt-cache prefix.
     """
-    if compact:
+    description = (
+            'Run task-available tools with calls or program; search_tools is '
+            'optional when the exact name and schema are already known. Use '
+            'calls for ordinary or independent work; program only for '
+            'data-dependent calls. Do not wrap a call you also invoke '
+            'directly in the same response; choose one lane per action. '
+            'ToolScript is bounded, not JavaScript. '
+            'ToolScript supports '
+            'let/const, return, if/else, for..of, while, arrays, objects, '
+            'lambdas, operators; catalog.search; tools.call, tools.callMany, '
+            'tools.parallel; '
+            'array map/filter/reduce/slice/join/push/includes; string '
+            'includes/startsWith/endsWith/slice/split/trim/case conversion; '
+            'JSON.parse/stringify; Object.keys/values. Calls are synchronous; '
+            'no await, destructuring, template literals, optional chaining, '
+            'try/catch, async, or class; no eval, import, filesystem, process, or '
+            'direct network except tools.*.')
+    if not include_program:
         description = (
-            'Run exact tool names from search_tools with calls; use program '
-            'for dependent reads.' if include_program else
-            'Run exact tool names from search_tools with calls.')
-    else:
-        description = (
-            'Run task-available tools found with search_tools. Provide '
-            'calls or program. Use calls for ordinary or independent '
-            'work. Use program only when later calls depend on earlier '
-            'results. ToolScript supports '
-            'catalog.search(query, namespace?, limit?, cursor?), '
-            'tools.call(name, arguments, callId?), '
-            'tools.callMany(calls, execution?), and tools.parallel(calls). '
-            'It has no eval, imports, filesystem, process, or network '
-            'access except through those tools.')
-    if not include_program and not compact:
-        description = (
-            'Run task-available tools found with search_tools. Provide calls '
+            'Run task-available tools; search_tools is optional when the exact '
+            'name and schema are already known. Provide calls '
             'for one or more independent tool invocations; prefer a single '
             'batched call with execution=parallel over issuing tools one per '
-            'turn.')
-    if ptc_note and not compact:
+            'turn. Do not wrap a call you also invoke directly in the '
+            'same response; choose one lane per action.')
+    if ptc_note:
         description = f'{description} {ptc_note}'
     calls_property: dict[str, Any] = {
-        'type': 'array', 'maxItems': 16,
+        'type': 'array',
+        'maxItems': 16,
+        'description': (
+            'Tool calls. Use a task-executable exact name and arguments that '
+            'match its schema; search_tools is optional.'),
     }
-    if not compact:
-        calls_property['description'] = (
-            'Tool calls. Copy each exact name from search_tools '
-            'and match its arguments_schema.')
     calls_property['items'] = {
         'type': 'object',
         'properties': {
@@ -136,13 +165,12 @@ def execute_tools_schema(*, include_program: bool = True,
     if include_program:
         properties['program'] = {
             'type': 'string',
+            'description': (
+                'Bounded ToolScript (not JavaScript) for data-dependent '
+                'search, synchronous calls, filtering, parsing, and compact '
+                'aggregation. Use only the grammar and built-ins listed in '
+                'this tool description.'),
         }
-        if not compact:
-            properties['program']['description'] = (
-                'JavaScript-like bounded ToolScript for '
-                'data-dependent search, calls, filtering, and '
-                'aggregation. Calls are synchronous; do not use '
-                'await.')
     schema = {
         'type': 'function',
         'function': {
@@ -240,6 +268,637 @@ _SCHEMA_SINGLE_SCHEMA_KEYS = frozenset({
     'items', 'not', 'propertyNames', 'then', 'unevaluatedItems',
     'unevaluatedProperties',
 })
+_JSON_SCHEMA_INSTANCE_TYPES = frozenset({
+    'array', 'boolean', 'integer', 'null', 'number', 'object', 'string',
+})
+
+
+def _schema_type_names(value: Any, *, path: str) -> tuple[tuple[str, ...], str]:
+    """Return one validated JSON-Schema type union in declaration order."""
+    if isinstance(value, str):
+        candidates = (value,)
+    elif isinstance(value, (list, tuple)) and value:
+        candidates = tuple(value)
+    else:
+        return (), f'{path}.type must be a type name or non-empty type array'
+    if any(not isinstance(name, str) for name in candidates):
+        return (), f'{path}.type must contain only type names'
+    invalid = [
+        name for name in candidates if name not in _JSON_SCHEMA_INSTANCE_TYPES
+    ]
+    if invalid:
+        return (), f'{path}.type contains unknown names: {", ".join(invalid)}'
+    return tuple(dict.fromkeys(candidates)), ''
+
+
+def _intersect_schema_types(
+    parent_types: tuple[str, ...], branch_types: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Intersect two JSON-Schema type unions, including integer ⊂ number."""
+    parent = set(parent_types)
+    branch = set(branch_types)
+    result = [
+        name for name in ('null', 'boolean', 'object', 'array', 'string')
+        if name in parent and name in branch
+    ]
+    parent_accepts_number = 'number' in parent
+    branch_accepts_number = 'number' in branch
+    parent_accepts_integer = parent_accepts_number or 'integer' in parent
+    branch_accepts_integer = branch_accepts_number or 'integer' in branch
+    if parent_accepts_number and branch_accepts_number:
+        result.append('number')
+    elif parent_accepts_integer and branch_accepts_integer:
+        result.append('integer')
+    return tuple(result)
+
+
+def _schema_allows_object(
+    schema: Mapping[str, Any], *, path: str,
+) -> tuple[bool, str]:
+    """Return whether a schema can accept a JSON object."""
+    if 'type' not in schema:
+        return True, ''
+    type_names, error = _schema_type_names(schema.get('type'), path=path)
+    if error:
+        return False, error
+    return 'object' in type_names, ''
+
+
+def _project_moonshot_root_object(
+    schema: Mapping[str, Any], *, path: str,
+) -> tuple[Mapping[str, Any], tuple[str, ...], str]:
+    """Project a function-argument root into MFJS's mandatory object shape.
+
+    Function arguments are JSON objects on every supported transport, but a
+    full JSON Schema may express that object as a root ``anyOf``/``oneOf`` or
+    ``allOf``. MFJS both requires ``parameters.type == 'object'`` and rejects a
+    root ``type`` beside ``anyOf``. Those constraints make a strict root union
+    unrepresentable. Preserve the canonical schema for execution validation
+    and send a sound *relaxation* on the Kimi wire: the union of properties,
+    plus only requirements that hold for every alternative. ``allOf`` keeps
+    the union of its unconditional requirements. Any model call admitted by
+    the canonical schema is therefore admitted by this projection; the
+    request-owned ToolContract remains the final execution authority.
+    """
+    allows_object, error = _schema_allows_object(schema, path=path)
+    if error:
+        return schema, (), error
+    if not allows_object:
+        return schema, (), f'{path}.type must allow object for tool arguments'
+
+    combinators = [
+        key for key in ('anyOf', 'oneOf', 'allOf') if key in schema
+    ]
+    if len(combinators) > 1:
+        # Multiple applicators are an intersection in full JSON Schema, but
+        # MFJS cannot represent that root shape. Retaining the direct object
+        # constraints and dropping every root applicator is a sound
+        # relaxation; the canonical execution contract remains authoritative.
+        projected = {'type': 'object'}
+        projected.update({
+            key: value for key, value in schema.items()
+            if key != 'type' and key not in combinators
+        })
+        return projected, tuple(f'{path}.{key}' for key in combinators), ''
+
+    if not combinators:
+        if schema.get('type') == 'object':
+            return schema, (), ''
+        projected = {'type': 'object'}
+        projected.update({key: value for key, value in schema.items()
+                          if key != 'type'})
+        return projected, (path,), ''
+
+    combinator = combinators[0]
+    branches = schema.get(combinator)
+    if not isinstance(branches, list) or not branches:
+        return (
+            schema,
+            (),
+            f'{path}.{combinator} must be a non-empty schema array',
+        )
+
+    viable: list[Mapping[str, Any]] = []
+    for index, branch in enumerate(branches):
+        branch_path = f'{path}.{combinator}[{index}]'
+        if branch is False:
+            if combinator == 'allOf':
+                projected = {'type': 'object'}
+                projected.update({
+                    key: value for key, value in schema.items()
+                    if key not in {'type', combinator}
+                })
+                return projected, (f'{path}.{combinator}',), ''
+            continue
+        if branch is True:
+            viable.append({})
+            continue
+        if not isinstance(branch, Mapping):
+            return schema, (), f'{branch_path} must be an object schema'
+        branch_allows_object, error = _schema_allows_object(
+            branch, path=branch_path)
+        if error:
+            return schema, (), error
+        if combinator == 'allOf' and not branch_allows_object:
+            return (
+                schema,
+                (),
+                f'{branch_path}.type is incompatible with object arguments',
+            )
+        if branch_allows_object:
+            viable.append(branch)
+    if not viable:
+        return (
+            schema,
+            (),
+            f'{path}.{combinator} has no object-compatible branch',
+        )
+
+    parent_properties = schema.get('properties')
+    if parent_properties is not None and not isinstance(
+            parent_properties, Mapping):
+        return schema, (), f'{path}.properties must be an object'
+    merged_properties: dict[str, Any] = dict(parent_properties or {})
+    branch_property_candidates: dict[str, list[Any]] = {}
+    branch_property_presence: dict[str, int] = {}
+    for index, branch in enumerate(viable):
+        properties = branch.get('properties')
+        if properties is not None and not isinstance(properties, Mapping):
+            return (
+                schema,
+                (),
+                f'{path}.{combinator}[{index}].properties must be an object',
+            )
+        for name, child in (properties or {}).items():
+            if name not in merged_properties:
+                property_name = str(name)
+                branch_property_candidates.setdefault(
+                    property_name, []).append(child)
+                branch_property_presence[property_name] = (
+                    branch_property_presence.get(property_name, 0) + 1)
+    for name, candidates in branch_property_candidates.items():
+        unique: list[Any] = []
+        for candidate in candidates:
+            if not any(candidate == previous for previous in unique):
+                unique.append(candidate)
+        if combinator in ('anyOf', 'oneOf'):
+            if branch_property_presence[name] < len(viable):
+                # An alternative that omits this property may accept any
+                # value for it. An unconstrained child keeps the projection a
+                # true relaxation instead of accidentally narrowing it.
+                merged_properties[name] = {}
+            elif len(unique) > 1:
+                merged_properties[name] = {'anyOf': unique}
+            else:
+                merged_properties[name] = unique[0]
+        else:
+            # For allOf, retaining any one conflicting constraint is a sound
+            # relaxation: every canonical value had to satisfy that branch.
+            merged_properties[name] = unique[0]
+
+    parent_required = list(schema.get('required') or ())
+    branch_required = [list(branch.get('required') or ()) for branch in viable]
+    if combinator == 'allOf':
+        unconditional = {
+            name for names in branch_required for name in names
+        }
+    else:
+        unconditional = set(branch_required[0])
+        for names in branch_required[1:]:
+            unconditional.intersection_update(names)
+    merged_required = list(dict.fromkeys([
+        *parent_required,
+        *(name for names in branch_required for name in names
+          if name in unconditional),
+    ]))
+
+    projected: dict[str, Any] = {'type': 'object'}
+    for key, value in schema.items():
+        if key not in {'type', combinator, 'properties', 'required'}:
+            projected[key] = value
+    if merged_properties or parent_properties is not None:
+        projected['properties'] = merged_properties
+    if merged_required:
+        projected['required'] = merged_required
+    if ('additionalProperties' not in schema
+            and all(branch.get('additionalProperties') is False
+                    for branch in viable)):
+        projected['additionalProperties'] = False
+    return projected, (f'{path}.{combinator}',), ''
+
+
+def _normalize_provider_schema_anyof_types(
+    schema: Mapping[str, Any], *, path: str,
+) -> tuple[Mapping[str, Any], tuple[str, ...], str]:
+    """Normalize recursive schemas into Moonshot's MFJS applicator shape.
+
+    Standard JSON Schema treats ``type`` plus ``anyOf`` on one node as an
+    intersection. Moonshot's function-tool dialect rejects that valid shape
+    and requires the type on each branch instead. Distributing the parent type
+    over every branch is logically equivalent. ``oneOf`` is relaxed to
+    supported ``anyOf``; scalar ``const`` is represented by ``enum``; type
+    arrays become typed ``anyOf`` branches. The canonical schema remains the
+    execution authority, so the two deliberate relaxations cannot authorize a
+    call. The rewrite is copy-on-write so clean schemas retain identity.
+    """
+    result: Mapping[str, Any] = schema
+    repairs: list[str] = []
+
+    if 'allOf' in schema:
+        if 'anyOf' in schema or 'oneOf' in schema:
+            # Full JSON Schema intersects sibling applicators. MFJS exposes
+            # only anyOf, so keep that supported constraint (or the oneOf that
+            # will become anyOf below) and remove allOf as a safe relaxation.
+            result = {key: value for key, value in schema.items()
+                      if key != 'allOf'}
+            repairs.append(f'{path}.allOf')
+        else:
+            all_of = schema.get('allOf')
+            if not isinstance(all_of, list) or not all_of:
+                return schema, (), f'{path}.allOf must be a non-empty schema array'
+            merged: dict[str, Any] = {
+                key: value for key, value in schema.items() if key != 'allOf'
+            }
+            for index, branch in enumerate(all_of):
+                if branch is True:
+                    continue
+                if branch is False:
+                    merged = {
+                        key: value for key, value in schema.items()
+                        if key != 'allOf'
+                    }
+                    break
+                if not isinstance(branch, Mapping):
+                    return (
+                        schema,
+                        (),
+                        f'{path}.allOf[{index}] must be an object schema',
+                    )
+                for key, value in branch.items():
+                    if key not in merged:
+                        merged[key] = value
+                        continue
+                    current = merged[key]
+                    if current == value:
+                        continue
+                    if key == 'required' and isinstance(current, (list, tuple)) \
+                            and isinstance(value, (list, tuple)):
+                        merged[key] = list(dict.fromkeys([*current, *value]))
+                    elif key == 'properties' and isinstance(current, Mapping) \
+                            and isinstance(value, Mapping):
+                        combined = dict(current)
+                        for name, child in value.items():
+                            combined.setdefault(name, child)
+                        merged[key] = combined
+                    elif key == 'type':
+                        left, error = _schema_type_names(current, path=path)
+                        if error:
+                            return schema, tuple(repairs), error
+                        right, error = _schema_type_names(value, path=path)
+                        if error:
+                            return schema, tuple(repairs), error
+                        intersection = _intersect_schema_types(left, right)
+                        if not intersection:
+                            return (
+                                schema,
+                                tuple(repairs),
+                                f'{path}.allOf has incompatible type constraints',
+                            )
+                        merged[key] = (
+                            intersection[0] if len(intersection) == 1
+                            else list(intersection)
+                        )
+                    elif key == 'additionalProperties' \
+                            and (current is False or value is False):
+                        merged[key] = False
+                    # Other conflicting constraints retain the first one.
+                    # Every canonical instance satisfied it, so this is a
+                    # safe relaxation; execution still uses the original.
+            result = merged
+            repairs.append(f'{path}.allOf')
+
+    if 'oneOf' in result:
+        if 'anyOf' in result:
+            result = {key: value for key, value in result.items()
+                      if key != 'oneOf'}
+        else:
+            one_of = result.get('oneOf')
+            if not isinstance(one_of, list) or not one_of:
+                return schema, (), f'{path}.oneOf must be a non-empty schema array'
+            result = {
+                ('anyOf' if key == 'oneOf' else key): value
+                for key, value in result.items()
+            }
+        repairs.append(f'{path}.oneOf')
+
+    if 'const' in result:
+        constant = result.get('const')
+        converted = dict(result)
+        converted.pop('const', None)
+        if isinstance(constant, (str, int, float)) and not isinstance(
+                constant, bool):
+            converted.setdefault('enum', [constant])
+        elif isinstance(constant, bool):
+            converted.setdefault('type', 'boolean')
+        elif constant is None:
+            converted.setdefault('type', 'null')
+        elif isinstance(constant, Mapping):
+            converted.setdefault('type', 'object')
+        elif isinstance(constant, list):
+            converted.setdefault('type', 'array')
+        result = converted
+        repairs.append(f'{path}.const')
+
+    if isinstance(result.get('type'), (list, tuple)) and 'anyOf' not in result:
+        type_names, error = _schema_type_names(result.get('type'), path=path)
+        if error:
+            return schema, tuple(repairs), error
+        converted = {
+            key: value for key, value in result.items() if key != 'type'
+        }
+        converted['anyOf'] = [{'type': name} for name in type_names]
+        result = converted
+        repairs.append(f'{path}.type')
+
+    if 'type' in result and 'anyOf' in result:
+        any_of = result.get('anyOf')
+        if not isinstance(any_of, list) or not any_of:
+            return schema, (), f'{path}.anyOf must be a non-empty schema array'
+        parent_types, error = _schema_type_names(
+            result.get('type'), path=path)
+        if error:
+            return schema, (), error
+
+        normalized_branches: list[Mapping[str, Any]] = []
+        for index, branch in enumerate(any_of):
+            branch_path = f'{path}.anyOf[{index}]'
+            if branch is False:
+                continue
+            if branch is True:
+                normalized_branches.append({
+                    'type': copy.deepcopy(result.get('type')),
+                })
+                continue
+            if not isinstance(branch, Mapping):
+                return (
+                    schema,
+                    (),
+                    f'{branch_path} must be an object schema',
+                )
+            if 'type' not in branch:
+                normalized_branch = {
+                    'type': copy.deepcopy(result.get('type')),
+                    **branch,
+                }
+            else:
+                branch_types, error = _schema_type_names(
+                    branch.get('type'), path=branch_path)
+                if error:
+                    return schema, (), error
+                intersection = _intersect_schema_types(
+                    parent_types, branch_types)
+                if not intersection:
+                    # This branch was already impossible under the parent
+                    # intersection. Omitting it preserves accepted instances.
+                    continue
+                normalized_type: Any = (
+                    intersection[0] if len(intersection) == 1
+                    else list(intersection)
+                )
+                if normalized_type == branch.get('type'):
+                    normalized_branch = branch
+                else:
+                    normalized_branch = dict(branch)
+                    normalized_branch['type'] = normalized_type
+            normalized_branches.append(normalized_branch)
+        if not normalized_branches:
+            result = {
+                key: value for key, value in result.items()
+                if key != 'anyOf'
+            }
+            repairs.append(f'{path}.anyOf')
+            return result, tuple(repairs), ''
+
+        distributed: dict[str, Any] = {}
+        for key, value in result.items():
+            if key == 'type':
+                continue
+            distributed[key] = (
+                normalized_branches if key == 'anyOf' else value
+            )
+        result = distributed
+        repairs.append(path)
+
+    if 'anyOf' in result:
+        # MFJS also rejects an object applicator declared BOTH beside an
+        # anyOf AND inside its branches ("conflicting keywords found in
+        # anyOf with parent"). Standard JSON Schema treats parent-side
+        # properties / required / additionalProperties as an intersection
+        # with every branch, so folding them into each object branch — and
+        # dropping them from the parent — is logically equivalent. Branches
+        # that cannot be objects stay untouched: those keywords are vacuous
+        # on non-object instances, so the fold is exact there too. On a
+        # property-name conflict the branch's own constraint wins (a sound
+        # relaxation; the canonical schema remains the execution
+        # authority).
+        sibling_keys = [
+            key for key in ('properties', 'required', 'additionalProperties')
+            if key in result
+        ]
+        any_of = result.get('anyOf')
+        if sibling_keys and isinstance(any_of, list) and any_of \
+                and all(isinstance(branch, Mapping) for branch in any_of):
+            folded: list[Mapping[str, Any]] = []
+            for branch in any_of:
+                if 'type' in branch:
+                    branch_types, error = _schema_type_names(
+                        branch.get('type'), path=path)
+                    if error:
+                        return schema, tuple(repairs), error
+                    if 'object' not in branch_types:
+                        folded.append(branch)
+                        continue
+                merged_branch = dict(branch)
+                parent_properties = result.get('properties')
+                if isinstance(parent_properties, Mapping) \
+                        and parent_properties:
+                    combined = dict(parent_properties)
+                    combined.update(merged_branch.get('properties') or {})
+                    merged_branch['properties'] = combined
+                parent_required = result.get('required')
+                if isinstance(parent_required, (list, tuple)) \
+                        and parent_required:
+                    merged_branch['required'] = list(dict.fromkeys([
+                        *parent_required,
+                        *(merged_branch.get('required') or ()),
+                    ]))
+                parent_additional = result.get('additionalProperties')
+                if parent_additional is False:
+                    merged_branch['additionalProperties'] = False
+                elif parent_additional is not None \
+                        and 'additionalProperties' not in merged_branch:
+                    merged_branch['additionalProperties'] = parent_additional
+                folded.append(merged_branch)
+            result = {
+                key: (folded if key == 'anyOf' else value)
+                for key, value in result.items()
+                if key not in sibling_keys
+            }
+            repairs.append(path)
+
+    def replace_child(key: str, value: Any) -> None:
+        nonlocal result
+        if result is schema:
+            result = dict(schema)
+        result[key] = value
+
+    for key in _SCHEMA_MAP_OF_SCHEMAS_KEYS:
+        children = result.get(key)
+        if not isinstance(children, Mapping):
+            continue
+        normalized_children: Mapping[str, Any] = children
+        for name, child in children.items():
+            if not isinstance(child, Mapping):
+                continue
+            normalized_child, child_repairs, error = (
+                _normalize_provider_schema_anyof_types(
+                    child, path=f'{path}.{key}.{name}')
+            )
+            if error:
+                return schema, tuple(repairs), error
+            repairs.extend(child_repairs)
+            if normalized_child is not child:
+                if normalized_children is children:
+                    normalized_children = dict(children)
+                normalized_children[name] = normalized_child
+        if normalized_children is not children:
+            replace_child(key, normalized_children)
+
+    for key in _SCHEMA_LIST_OF_SCHEMAS_KEYS:
+        children = result.get(key)
+        if not isinstance(children, list):
+            continue
+        normalized_children: list[Any] | None = None
+        for index, child in enumerate(children):
+            if not isinstance(child, Mapping):
+                continue
+            normalized_child, child_repairs, error = (
+                _normalize_provider_schema_anyof_types(
+                    child, path=f'{path}.{key}[{index}]')
+            )
+            if error:
+                return schema, tuple(repairs), error
+            repairs.extend(child_repairs)
+            if normalized_child is not child:
+                if normalized_children is None:
+                    normalized_children = list(children)
+                normalized_children[index] = normalized_child
+        if normalized_children is not None:
+            replace_child(key, normalized_children)
+
+    for key in _SCHEMA_SINGLE_SCHEMA_KEYS:
+        child = result.get(key)
+        if isinstance(child, Mapping):
+            normalized_child, child_repairs, error = (
+                _normalize_provider_schema_anyof_types(
+                    child, path=f'{path}.{key}')
+            )
+            if error:
+                return schema, tuple(repairs), error
+            repairs.extend(child_repairs)
+            if normalized_child is not child:
+                replace_child(key, normalized_child)
+        elif isinstance(child, list):
+            normalized_children: list[Any] | None = None
+            for index, item in enumerate(child):
+                if not isinstance(item, Mapping):
+                    continue
+                normalized_item, item_repairs, error = (
+                    _normalize_provider_schema_anyof_types(
+                        item, path=f'{path}.{key}[{index}]')
+                )
+                if error:
+                    return schema, tuple(repairs), error
+                repairs.extend(item_repairs)
+                if normalized_item is not item:
+                    if normalized_children is None:
+                        normalized_children = list(child)
+                    normalized_children[index] = normalized_item
+            if normalized_children is not None:
+                replace_child(key, normalized_children)
+
+    return result, tuple(repairs), ''
+
+
+def _normalize_provider_tool_schema(
+    tool: Mapping[str, Any], *, model: str = '',
+) -> tuple[Mapping[str, Any], tuple[str, ...], str]:
+    """Return the model-specific provider projection for one tool schema."""
+    from lib.model_info import is_kimi
+
+    if not is_kimi(model):
+        return tool, (), ''
+    function = tool.get('function')
+    if isinstance(function, Mapping):
+        schema_key = 'parameters'
+        parameters = function.get(schema_key)
+        path = '$.function.parameters'
+    else:
+        function = None
+        schema_key = 'input_schema'
+        parameters = tool.get(schema_key)
+        path = '$.input_schema'
+        if parameters is None:
+            schema_key = 'parameters'
+            parameters = tool.get(schema_key)
+            path = '$.parameters'
+    if parameters is None and function is not None:
+        normalized_tool = dict(tool)
+        normalized_function = dict(function)
+        normalized_function[schema_key] = {
+            'type': 'object',
+            'properties': {},
+        }
+        normalized_tool['function'] = normalized_function
+        return normalized_tool, (path,), ''
+    if parameters is True:
+        normalized = {'type': 'object'}
+        normalized_tool = dict(tool)
+        if function is not None:
+            normalized_function = dict(function)
+            normalized_function[schema_key] = normalized
+            normalized_tool['function'] = normalized_function
+        else:
+            normalized_tool[schema_key] = normalized
+        return normalized_tool, (path,), ''
+    if parameters is False:
+        return tool, (), f'{path} does not permit object tool arguments'
+    if not isinstance(parameters, Mapping):
+        return tool, (), ''
+    root, root_repairs, error = _project_moonshot_root_object(
+        parameters, path=path)
+    if error:
+        return tool, root_repairs, error
+    normalized, nested_repairs, error = (
+        _normalize_provider_schema_anyof_types(root, path=path)
+    )
+    repairs = (*root_repairs, *nested_repairs)
+    if error:
+        return tool, repairs, error
+    from lib.tools.moonshot_schema import project_mfjs_schema
+    normalized, subset_repairs, error = project_mfjs_schema(
+        normalized, path=path)
+    repairs = (*repairs, *subset_repairs)
+    if error or normalized is parameters:
+        return tool, repairs, error
+    normalized_tool = dict(tool)
+    if function is not None:
+        normalized_function = dict(function)
+        normalized_function[schema_key] = normalized
+        normalized_tool['function'] = normalized_function
+    else:
+        normalized_tool[schema_key] = normalized
+    return normalized_tool, repairs, ''
 
 
 def _without_json_schema_annotations(schema: Mapping[str, Any]) -> dict[str, Any]:
@@ -376,7 +1035,77 @@ def _required_property_error(
     return ''
 
 
-def _wire_tool_schema_error(tool: Mapping[str, Any]) -> str:
+def _moonshot_schema_shape_error(
+    schema: Mapping[str, Any], *, path: str, root: bool = False,
+) -> str:
+    """Return an MFJS structural error that would reject a Kimi request."""
+    if root:
+        # The dedicated validator carries root-$defs context through the whole
+        # document. Calling it independently for a child $ref would lose that
+        # context and incorrectly reject a valid ``#/$defs/...`` reference.
+        from lib.tools.moonshot_schema import mfjs_schema_error
+        return mfjs_schema_error(schema, path=path, root=True)
+    raw_type = schema.get('type')
+    if isinstance(raw_type, (list, tuple)):
+        return f'{path}.type must be one MFJS type string, not an array'
+    if raw_type is not None:
+        _types, error = _schema_type_names(raw_type, path=path)
+        if error:
+            return error
+    if 'type' in schema and 'anyOf' in schema:
+        return f'{path}.type must be declared inside anyOf branches'
+    for unsupported in ('oneOf', 'allOf', 'const'):
+        if unsupported in schema:
+            return f'{path}.{unsupported} was not projected into MFJS'
+    any_of = schema.get('anyOf')
+    if any_of is not None and (not isinstance(any_of, list) or not any_of):
+        return f'{path}.anyOf must be a non-empty schema array'
+    if isinstance(any_of, list):
+        for index, branch in enumerate(any_of):
+            if not isinstance(branch, Mapping):
+                return f'{path}.anyOf[{index}] must be an object schema'
+
+    for key in _SCHEMA_MAP_OF_SCHEMAS_KEYS:
+        children = schema.get(key)
+        if not isinstance(children, Mapping):
+            continue
+        for name, child in children.items():
+            if not isinstance(child, Mapping):
+                return f'{path}.{key}.{name} must be an object schema'
+            error = _moonshot_schema_shape_error(
+                child, path=f'{path}.{key}.{name}')
+            if error:
+                return error
+    for key in _SCHEMA_LIST_OF_SCHEMAS_KEYS:
+        children = schema.get(key)
+        if not isinstance(children, list):
+            continue
+        for index, child in enumerate(children):
+            if isinstance(child, Mapping):
+                error = _moonshot_schema_shape_error(
+                    child, path=f'{path}.{key}[{index}]')
+                if error:
+                    return error
+    for key in _SCHEMA_SINGLE_SCHEMA_KEYS:
+        child = schema.get(key)
+        if isinstance(child, Mapping):
+            error = _moonshot_schema_shape_error(
+                child, path=f'{path}.{key}')
+            if error:
+                return error
+        elif isinstance(child, list):
+            for index, item in enumerate(child):
+                if isinstance(item, Mapping):
+                    error = _moonshot_schema_shape_error(
+                        item, path=f'{path}.{key}[{index}]')
+                    if error:
+                        return error
+    return ''
+
+
+def _wire_tool_schema_error(
+    tool: Mapping[str, Any], *, model: str = '',
+) -> str:
     """Return a provider-facing parameter-schema error, or ``''``."""
     function = tool.get('function')
     if isinstance(function, Mapping):
@@ -393,42 +1122,50 @@ def _wire_tool_schema_error(tool: Mapping[str, Any]) -> str:
         return ''
     if not isinstance(parameters, Mapping):
         return f'{path} must be an object schema'
-    return _required_property_error(parameters, path=path)
+    error = _required_property_error(parameters, path=path)
+    if error:
+        return error
+    if model:
+        from lib.model_info import is_kimi
+        if is_kimi(model):
+            return _moonshot_schema_shape_error(
+                parameters, path=path, root=True)
+    return ''
 
 
-def _compact_gateway_schemas(
-    tools: list[dict[str, Any]], *, model: str = '',
-) -> list[dict[str, Any]]:
-    """Return one concise canonical schema for each gateway name present."""
-    compacted: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for tool in tools:
-        name = _schema_name(tool)
-        if name in seen or name not in GATEWAY_TOOL_NAMES:
-            continue
-        seen.add(name)
-        if name == SEARCH_TOOLS_NAME:
-            compacted.append(search_tools_schema(compact=True))
-            continue
-        fn = tool.get('function') if isinstance(tool, dict) else None
-        parameters = fn.get('parameters') if isinstance(fn, dict) else None
-        properties = (parameters.get('properties')
-                      if isinstance(parameters, dict) else None)
-        include_program = (
-            isinstance(properties, dict) and 'program' in properties)
-        compacted.append(execute_tools_schema(
-            include_program=include_program, compact=True))
-    compact_tokens = tool_schema_tokens(compacted, model=model)
-    if compact_tokens > LOCAL_GATEWAY_MAX_TOKENS:
-        # The limit is an application cost budget, not a provider validity
-        # rule.  A future tokenizer/schema change must not turn it into an
-        # availability failure; send the smallest functional pair and report
-        # the budget drift for maintainers.
-        logger.warning(
-            '[ToolGateway] compact gateway still exceeds target: tokens=%d '
-            'target=%d; continuing with functional schemas',
-            compact_tokens, LOCAL_GATEWAY_MAX_TOKENS)
-    return compacted
+def _source_wire_tool_schema_error(
+    tool: Mapping[str, Any], *, model: str = '',
+) -> str:
+    """Validate source shape without applying Kimi-only wire restrictions.
+
+    A canonical JSON Schema may legally require a property that it does not
+    declare locally. MFJS rejects that shape, but the Kimi projection can add
+    an unconstrained property declaration exactly. Other providers retain the
+    historical strict preflight behavior.
+    """
+    from lib.model_info import is_kimi
+
+    if not is_kimi(model):
+        return _wire_tool_schema_error(tool)
+    function = tool.get('function')
+    if isinstance(function, Mapping):
+        parameters = function.get('parameters')
+        path = '$.function.parameters'
+    else:
+        parameters = tool.get('input_schema')
+        path = '$.input_schema'
+        if parameters is None:
+            parameters = tool.get('parameters')
+            path = '$.parameters'
+    if parameters is None:
+        return ''
+    if parameters is True:
+        return ''
+    if parameters is False:
+        return f'{path} does not permit object tool arguments'
+    if not isinstance(parameters, Mapping):
+        return f'{path} must be an object schema'
+    return ''
 
 
 def fit_tool_schema_budget(
@@ -454,7 +1191,44 @@ def fit_tool_schema_budget(
                 detail=f'expected object, got {type(tool).__name__}',
             )
             continue
-        schema_error = _wire_tool_schema_error(tool)
+        source_schema_error = _source_wire_tool_schema_error(
+            tool, model=model)
+        if source_schema_error:
+            logger.error(
+                '[ToolGateway] omitted invalid tool schema before budget fit: '
+                'tool=%s error=%s',
+                _schema_name(tool) or '?', source_schema_error)
+            _report_tool_isolation(
+                on_tool_isolated,
+                tool_name=_schema_name(tool),
+                stage='budget_preflight',
+                reason_code='invalid_schema',
+                detail=source_schema_error,
+            )
+            continue
+        normalized_tool, repair_paths, normalization_error = (
+            _normalize_provider_tool_schema(tool, model=model)
+        )
+        if normalization_error:
+            logger.error(
+                '[ToolGateway] omitted invalid tool schema before budget fit: '
+                'tool=%s error=%s',
+                _schema_name(tool) or '?', normalization_error)
+            _report_tool_isolation(
+                on_tool_isolated,
+                tool_name=_schema_name(tool),
+                stage='budget_preflight',
+                reason_code='invalid_schema',
+                detail=normalization_error,
+            )
+            continue
+        if repair_paths:
+            logger.warning(
+                '[ToolGateway] projected provider-compatible MFJS schema '
+                'before budget fit: tool=%s paths=%s',
+                _schema_name(tool) or '?', ','.join(repair_paths[:8]))
+        tool = normalized_tool
+        schema_error = _wire_tool_schema_error(tool, model=model)
         if schema_error:
             logger.error(
                 '[ToolGateway] omitted invalid tool schema before budget fit: '
@@ -473,15 +1247,13 @@ def fit_tool_schema_budget(
                if _schema_name(tool) in GATEWAY_TOOL_NAMES]
     gateway_tokens = tool_schema_tokens(gateway, model=model)
     if gateway and gateway_tokens > LOCAL_GATEWAY_MAX_TOKENS:
-        gateway = _compact_gateway_schemas(gateway, model=model)
-        values = [tool for tool in values
-                  if _schema_name(tool) not in GATEWAY_TOOL_NAMES]
-        values.extend(gateway)
+        # The target is an authoring contract guarded by tests, not a reason
+        # to rewrite the pair at runtime: compacted gateway bytes broke the
+        # provider prompt-cache prefix whenever PTC activation flipped.
         logger.warning(
-            '[ToolGateway] compacted oversized gateway schemas: tokens=%d '
-            '-> %d target=%d; request continues',
-            gateway_tokens, tool_schema_tokens(gateway, model=model),
-            LOCAL_GATEWAY_MAX_TOKENS)
+            '[ToolGateway] gateway schemas exceed cost target: tokens=%d '
+            'target=%d; request continues with byte-stable schemas',
+            gateway_tokens, LOCAL_GATEWAY_MAX_TOKENS)
     if not budget or tool_schema_tokens(values, model=model) <= budget:
         return values
     direct = [(index, tool) for index, tool in enumerate(values)
@@ -589,6 +1361,7 @@ def _report_tool_isolation(
 def sanitize_wire_tools(
     tools: Any,
     *,
+    model: str = '',
     log_prefix: str = '',
     on_tool_isolated: ToolIsolationReporter | None = None,
 ) -> list[dict[str, Any]]:
@@ -607,16 +1380,22 @@ def sanitize_wire_tools(
       bad apple must not 400 the whole request;
     • a function entry missing ``type`` is REPAIRED to ``'function'`` on a
       copy (the caller's canonical catalog is never mutated);
+    • Kimi schemas are projected to MFJS on a copy: nested ``type`` +
+      ``anyOf`` is distributed exactly, while an unrepresentable root object
+      union becomes a sound relaxation and the canonical execution contract
+      remains strict;
     • a clean array is returned AS THE SAME OBJECT so prompt-cache bytes and
       identity-based fast paths are untouched on the hot path.
 
-    Every intervention is logged loudly with the offending index and shape
-    so the regressing producer is named in the logs.
+    Unexpected producer defects are warnings with the offending index and
+    shape. Expected provider-specific schema projection is a bounded debug
+    diagnostic because it does not indicate a broken producer.
     """
     if not isinstance(tools, list):
         return []
     offenders: list[str] = []
-    repaired: list[str] = []
+    repaired_types: list[str] = []
+    repaired_schemas: list[str] = []
     out: list[dict[str, Any]] | None = None
     for idx, tool in enumerate(tools):
         keep = tool
@@ -645,7 +1424,18 @@ def sanitize_wire_tools(
                     detail='tool schema has no function/name field',
                 )
             else:
-                schema_error = _wire_tool_schema_error(tool)
+                source_schema_error = _source_wire_tool_schema_error(
+                    tool, model=model)
+                if source_schema_error:
+                    keep = tool
+                    repair_paths = ()
+                    normalization_error = source_schema_error
+                else:
+                    keep, repair_paths, normalization_error = (
+                        _normalize_provider_tool_schema(tool, model=model)
+                    )
+                schema_error = normalization_error or _wire_tool_schema_error(
+                    keep, model=model)
                 if schema_error:
                     drop = True
                     offenders.append(
@@ -657,23 +1447,54 @@ def sanitize_wire_tools(
                         reason_code='invalid_schema',
                         detail=schema_error,
                     )
-            if not drop and isinstance(tool.get('function'), dict) \
-                    and tool.get('type') != 'function':
-                keep = {**tool, 'type': 'function'}
-                repaired.append(f'#{idx}:{name}')
+                elif repair_paths:
+                    repaired_schemas.append(
+                        f'#{idx}:{name}({",".join(repair_paths[:8])})')
+            if not drop and isinstance(keep.get('function'), dict) \
+                    and keep.get('type') != 'function':
+                keep = {**keep, 'type': 'function'}
+                repaired_types.append(f'#{idx}:{name}')
         if out is None and (drop or keep is not tool):
             out = list(tools[:idx])
         if out is not None and not drop:
             out.append(keep)
     if out is None:
         return tools
-    if offenders or repaired:
+    if offenders or repaired_types:
         logger.warning(
             '%s[ToolGateway] wire tools invariant enforced: dropped=%s '
-            'repaired_type=%s — a producer emitted non-conforming entries; '
-            'fix the producer, this boundary only contains the blast radius',
-            log_prefix or '', offenders or '-', repaired or '-')
+            'repaired_type=%s repaired_schema=%s — a producer emitted '
+            'non-conforming entries; fix the producer, this boundary only '
+            'contains the blast radius',
+            log_prefix or '', offenders or '-', repaired_types or '-',
+            repaired_schemas or '-')
+    elif repaired_schemas:
+        logger.debug(
+            '%s[ToolGateway] projected %d provider-compatible tool schemas: %s',
+            log_prefix or '', len(repaired_schemas), repaired_schemas[:4])
     return out
+
+
+def preflight_wire_tool_body(
+    body: dict[str, Any],
+    *,
+    log_prefix: str = '',
+    on_tool_isolated: ToolIsolationReporter | None = None,
+) -> None:
+    """Apply the one tool-schema wire boundary shared by every transport."""
+    if not isinstance(body.get('tools'), list):
+        return
+    body['tools'] = sanitize_wire_tools(
+        body['tools'],
+        model=str(body.get('model') or ''),
+        log_prefix=log_prefix,
+        on_tool_isolated=on_tool_isolated,
+    )
+    if not body['tools']:
+        # Empty arrays and choices pointing at an isolated tool are rejected by
+        # multiple OpenAI-compatible providers. Continue as an ordinary chat.
+        body.pop('tools', None)
+        body.pop('tool_choice', None)
 
 
 def catalog_index(catalog: Any) -> dict[str, dict[str, Any]]:
@@ -834,48 +1655,47 @@ def ptc_local_wire_tools(
     *,
     tier: str,
     eligible: list[str] | tuple | set,
+    exposure: str = 'additive',
 ) -> list[dict[str, Any]]:
     """Project the PTC-local ``execute_tools`` surface for one round.
 
     Follows the Tool Search dual-backend precedent: the projection runs at
     the last common wire boundary and only shapes what the model sees —
-    execution authority is unchanged.  The round's ordinary tools stay
-    byte-stable and in order; exactly one tier-shaped ``execute_tools``
-    schema carries the bounded read-only routing contract (``ptc_note``), so
-    the policy travels with the tool the model actually calls.  Per-round
-    observations (including eligible-name visibility and the serial-read-chain
-    adoption signal) are not interpolated: for a fixed tier this gateway schema
-    is a byte fixpoint, preserving the provider prompt-cache prefix.  An existing
-    gateway schema (local Tool Search) is replaced rather than duplicated.
-    Every model sees the free-form ``program`` parameter by default; only the
-    explicit ``batch`` override shape strips it.
+    execution authority is unchanged. ``additive`` keeps the round's ordinary
+    tools byte-stable and in order. ``gateway_only`` is a one-request adoption
+    trial: after authoritative receipts prove a serial read chain, it exposes
+    only ``execute_tools``. This removes command/skill read-around paths that
+    real-model evaluation showed could make a sticky partial projection more
+    expensive. The next request restores the full direct surface regardless of
+    model behavior, so write, approval, and recovery availability are delayed
+    by at most one model round and their execution authority never changes.
+    Exactly one tier-shaped ``execute_tools`` schema carries the
+    bounded read-only routing contract (``ptc_note``), so per-round tool names
+    are never interpolated into cached schema text. An existing gateway schema
+    (local Tool Search) is replaced rather than duplicated. Every model sees
+    the free-form ``program`` parameter by default; only the explicit ``batch``
+    override shape strips it.
     """
     include_program = str(tier or '').strip().lower() != 'batch'
     normalized_tier = 'program' if include_program else 'batch'
     execute = _stable_local_execute_tools_schema(tier=normalized_tier)
-    # PTC guidance is advisory; it must never make the fixed local gateway
-    # pair unusable.  Leave headroom for model-tokenizer variance, and if an
-    # unusually long future stable guidance edit consumes it, retain the
-    # complete execution contract while dropping advisory text. Execution
-    # authority still comes from the task-owned catalog in either shape.
+    # The fixed guidance is authored and tested inside the 600-token gateway
+    # contract for supported tokenizers. Drift over that ceiling is reported
+    # for maintainers, but the pair is never compacted at runtime: rewriting
+    # gateway bytes between rounds breaks the provider prompt-cache prefix.
     projected_pair = [search_tools_schema(), execute]
-    guidance_target = max(0, LOCAL_GATEWAY_MAX_TOKENS - 50)
-    if tool_schema_tokens(projected_pair) > guidance_target:
-        execute = _stable_local_execute_tools_schema(tier=normalized_tier)
-        logger.info(
-            '[ToolGateway] compacted PTC guidance to preserve the %d-token '
-            'gateway contract', LOCAL_GATEWAY_MAX_TOKENS)
-    projected_pair = [search_tools_schema(), execute]
-    if tool_schema_tokens(projected_pair) > LOCAL_GATEWAY_MAX_TOKENS:
-        compacted_pair = _compact_gateway_schemas(projected_pair)
-        execute = next(
-            tool for tool in compacted_pair
-            if _schema_name(tool) == EXECUTE_TOOLS_NAME)
+    projected_tokens = tool_schema_tokens(projected_pair)
+    if projected_tokens > LOCAL_GATEWAY_MAX_TOKENS:
         logger.warning(
-            '[ToolGateway] compacted the fixed PTC gateway; request continues')
-    out = [tool for tool in (catalog or [])
-           if isinstance(tool, dict)
-           and _schema_name(tool) != EXECUTE_TOOLS_NAME]
+            '[ToolGateway] fixed PTC gateway exceeds cost target: tokens=%d '
+            'target=%d; request continues with byte-stable schemas',
+            projected_tokens, LOCAL_GATEWAY_MAX_TOKENS)
+    gateway_only = str(exposure or '').strip().lower() == 'gateway_only'
+    out = [] if gateway_only else [
+        tool for tool in (catalog or [])
+        if isinstance(tool, dict)
+        and _schema_name(tool) != EXECUTE_TOOLS_NAME
+    ]
     out.append(execute)
     return out
 
@@ -943,16 +1763,32 @@ _SEARCH_CONCEPTS: dict[str, tuple[str, ...]] = {
     'calendar': (
         'calendar', 'meeting', 'appointment', 'event', 'book',
         '日历', '日程', '会议', '预约', '安排时间'),
-    'slides': (
-        'slides', 'slide', 'deck', 'presentation', 'powerpoint', 'ppt',
-        'keynote', '幻灯片', '演示文稿', '演示', 'ppt'),
+    **CAPABILITY_SEARCH_CONCEPTS,
     'create': (
         'create', 'make', 'generate', 'add', 'new', 'build', 'produce',
-        '创建', '新建', '生成', '制作', '添加', '做一份'),
+        '创建', '新建', '生成', '制作', '添加', '做一份', '做一个', '做个',
+        '做段', '做条', '画一张'),
+    'authenticate': (
+        'login', 'log in', 'sign in', 'signin', 'authenticate',
+        'authentication', 'authorize', 'authorization', 'access approval',
+        'not_logged_in', '登录', '登陆', '登入', '认证', '鉴权', '授权',
+        '开通权限'),
+    'download': (
+        'download', 'save', 'copy', 'export', 'archive', 'zip', 'install',
+        'unzip', 'staging', 'local', 'latest',
+        '下载', '保存', '拷贝', '复制', '导出', '压缩包', '安装', '解压',
+        '服务器', '本地', '最新版'),
     'list': (
         'list', 'show', 'open', 'what', 'which', 'see',
         '列出', '查看', '看看', '有哪些', '显示'),
 }
+
+_NAME_WEIGHTED_CONCEPTS = frozenset({
+    '@search', '@edit', '@cancel', '@create', '@list', '@download',
+    '@authenticate',
+}) | frozenset(
+    '@' + concept for concept in CAPABILITY_SEARCH_CONCEPTS
+)
 
 
 _TOKEN_CONCEPTS: dict[str, tuple[str, ...]] = {}
@@ -983,8 +1819,7 @@ def _cjk_ngrams(value: str) -> list[str]:
     return [value] if len(value) <= 12 else []
 
 
-@lru_cache(maxsize=16_384)
-def _terms_cached(text: str) -> tuple[str, ...]:
+def _extract_terms(text: str) -> tuple[str, ...]:
     raw = _WORD_RE.findall(text)
     out: list[str] = []
     for word in raw:
@@ -1005,8 +1840,16 @@ def _terms_cached(text: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+@lru_cache(maxsize=tool_search_term_cache_capacity())
+def _terms_cached(text: str) -> tuple[str, ...]:
+    return _extract_terms(text)
+
+
 def _terms(value: Any) -> list[str]:
-    return list(_terms_cached(str(value or '').lower()))
+    text = str(value or '').lower()
+    if len(text) > LOCAL_TOOL_SEARCH_TERM_CACHE_MAX_INPUT_CHARS:
+        return list(_extract_terms(text))
+    return list(_terms_cached(text))
 
 
 def _private_search_text(value: Any) -> str:
@@ -1024,7 +1867,10 @@ def _cursor_decode(cursor: Any) -> int:
     if not cursor:
         return 0
     try:
-        padded = str(cursor) + '=' * (-len(str(cursor)) % 4)
+        encoded = str(cursor)
+        if len(encoded) > LOCAL_TOOL_SEARCH_MAX_CURSOR_CHARS:
+            raise ValueError('invalid_cursor')
+        padded = encoded + '=' * (-len(encoded) % 4)
         raw = base64.urlsafe_b64decode(padded.encode('ascii')).decode('ascii')
         return max(0, int(raw))
     except (ValueError, TypeError, UnicodeError):
@@ -1046,7 +1892,31 @@ _SEARCH_NOTICE = ("Call execute_tools with a result's exact name and "
                   'arguments matching arguments_schema.')
 
 
-def _search_notice(missing_name: str, hint_ns: str, total: int) -> str:
+_DISCLOSED_OMITTED_HINT = (
+    ' Tools already disclosed by earlier searches in this task are omitted '
+    'from results — call them through execute_tools by exact name, or '
+    'search the exact name to see the schema again.')
+
+
+def _search_notice(
+    missing_name: str,
+    hint_ns: str,
+    total: int,
+    already_visible: str = '',
+    already_disclosed: str = '',
+) -> str:
+    if already_visible:
+        return (
+            f"Tool '{already_visible}' is already available directly in this "
+            'model request. Call it directly instead of searching for or '
+            'routing it through execute_tools.')
+    if already_disclosed:
+        return (
+            f"Tool '{already_disclosed}' was already disclosed by an earlier "
+            'search in this task (schema unchanged); it is returned below '
+            'for convenience. It is NOT in your direct tool list — call it '
+            'through execute_tools with the exact name and the '
+            'arguments_schema shown. Do not search for this name again.')
     if missing_name:
         return (
             f"No tool named '{missing_name}' exists in this task's catalog "
@@ -1064,6 +1934,92 @@ def _search_notice(missing_name: str, hint_ns: str, total: int) -> str:
     return _SEARCH_NOTICE
 
 
+def _bounded_summary(value: Any, limit: int = 240) -> str:
+    """Return one whitespace-normalized, model-useful summary."""
+    compact = ' '.join(str(value or '').split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:max(1, limit - 1)].rstrip() + '…'
+
+
+_SEARCH_SCHEMA_KEYS = frozenset({
+    'type', 'enum', 'const', 'default', 'required', 'additionalProperties',
+    'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum',
+    'minLength', 'maxLength', 'minItems', 'maxItems', 'uniqueItems',
+    'format', 'pattern', 'nullable',
+})
+
+
+def _compact_arguments_schema(
+    schema: Any,
+    *,
+    include_descriptions: bool = False,
+    depth: int = 0,
+) -> dict[str, Any]:
+    """Project a callable JSON schema without duplicating contract prose."""
+    if not isinstance(schema, dict) or depth > 8:
+        return {'type': 'object', 'properties': {}} if depth == 0 else {}
+    out = {
+        key: copy.deepcopy(value)
+        for key, value in schema.items()
+        if key in _SEARCH_SCHEMA_KEYS
+    }
+    if include_descriptions and schema.get('description'):
+        out['description'] = _bounded_summary(schema['description'], 180)
+    properties = schema.get('properties')
+    if isinstance(properties, dict):
+        out['properties'] = {
+            str(name): _compact_arguments_schema(
+                value,
+                include_descriptions=include_descriptions,
+                depth=depth + 1,
+            )
+            for name, value in properties.items()
+            if isinstance(value, dict)
+        }
+    items = schema.get('items')
+    if isinstance(items, dict):
+        out['items'] = _compact_arguments_schema(
+            items,
+            include_descriptions=include_descriptions,
+            depth=depth + 1,
+        )
+    for choice_key in ('oneOf', 'anyOf', 'allOf'):
+        choices = schema.get(choice_key)
+        if isinstance(choices, list):
+            out[choice_key] = [
+                _compact_arguments_schema(
+                    choice,
+                    include_descriptions=include_descriptions,
+                    depth=depth + 1,
+                )
+                for choice in choices[:16]
+                if isinstance(choice, dict)
+            ]
+    if depth == 0:
+        out.setdefault('type', 'object')
+        out.setdefault('properties', {})
+    return out
+
+
+def _compact_contract_errors(value: Any) -> list[dict[str, str]]:
+    """Expose error vocabulary on exact lookup without returning a manual."""
+    rows = []
+    for error in value if isinstance(value, list) else ():
+        if not isinstance(error, dict):
+            continue
+        row = {
+            key: _bounded_summary(error.get(key), 180)
+            for key in ('code', 'message', 'retry_hint')
+            if error.get(key)
+        }
+        if row:
+            rows.append(row)
+        if len(rows) >= 8:
+            break
+    return rows
+
+
 def search_executable_catalog(
     catalog: list[dict[str, Any]] | None,
     query: Any,
@@ -1074,12 +2030,28 @@ def search_executable_catalog(
     namespace_by_name: dict[str, str] | None = None,
     search_text_by_name: dict[str, Any] | None = None,
     contract_documents_by_name: dict[str, Any] | None = None,
+    visible_names: set[str] | frozenset[str] | None = None,
+    disclosed_names: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """BM25-rank the immutable task catalog without issuing authority."""
+    """Rank hidden members of the immutable catalog without issuing authority.
+
+    ``visible_names`` are directly callable on the provider wire;
+    ``disclosed_names`` had their schema returned by an earlier search in
+    this task and are callable only through ``execute_tools``. Both are
+    excluded from broad results, but an exact-name lookup of a disclosed
+    tool re-returns its schema: compaction may have dropped the earlier
+    disclosure, and refusing to show it again leaves the model guessing
+    argument names."""
     query_text = str(query or '').strip()
     if not query_text:
         return {'status': 'error', 'error': {
             'code': 'invalid_query', 'message': 'query must be non-empty'}}
+    if len(query_text) > LOCAL_TOOL_SEARCH_MAX_QUERY_CHARS:
+        return {'status': 'error', 'error': {
+            'code': 'invalid_query',
+            'message': 'query exceeds the Tool Search character limit',
+            'max_chars': LOCAL_TOOL_SEARCH_MAX_QUERY_CHARS,
+        }}
     try:
         wanted = int(limit)
     except (TypeError, ValueError) as exc:
@@ -1100,12 +2072,49 @@ def search_executable_catalog(
     contract_map = (contract_documents_by_name
                     if isinstance(contract_documents_by_name, dict) else {})
     ns_filter = str(namespace or '').strip().lower()
+    if len(ns_filter) > LOCAL_TOOL_SEARCH_MAX_NAMESPACE_CHARS:
+        return {'status': 'error', 'error': {
+            'code': 'invalid_namespace',
+            'message': 'namespace exceeds the Tool Search character limit',
+            'max_chars': LOCAL_TOOL_SEARCH_MAX_NAMESPACE_CHARS,
+        }}
     qlower = query_text.lower()
-    name_case = {name.lower(): name for name in catalog_index(catalog)
+    indexed_catalog = catalog_index(catalog)
+    visible_casefold = {
+        str(name).strip().lower() for name in (visible_names or ()) if name
+    }
+    visible_name_set = {
+        name for name in indexed_catalog if name.lower() in visible_casefold
+    }
+    disclosed_casefold = {
+        str(name).strip().lower() for name in (disclosed_names or ()) if name
+    }
+    disclosed_name_set = {
+        name for name in indexed_catalog if name.lower() in disclosed_casefold
+    } - visible_name_set
+    hidden_name_set = visible_name_set | disclosed_name_set
+    name_case = {name.lower(): name for name in indexed_catalog
                  if name not in GATEWAY_TOOL_NAMES}
+    exact_lookup_name = name_case.get(qlower)
+    legacy_lookup_name = ''
+    if exact_lookup_name is None and '_' in qlower \
+            and _NAME_SHAPED_RE.fullmatch(qlower):
+        try:
+            from lib.tool_input_repair import resolve_tool_name
+            resolved, alias_kind = resolve_tool_name(
+                query_text, known=set(name_case.values()))
+            if alias_kind and resolved in set(name_case.values()):
+                exact_lookup_name = resolved
+                legacy_lookup_name = query_text
+        except Exception as exc:
+            logger.debug('[ToolGateway] exact alias lookup failed: %s', exc)
+    already_visible_name = (
+        exact_lookup_name if exact_lookup_name in visible_name_set else '')
+    already_disclosed_name = (
+        exact_lookup_name if exact_lookup_name in disclosed_name_set else '')
     docs: list[tuple[str, dict[str, Any], str, list[str]]] = []
-    for name, tool in catalog_index(catalog).items():
-        if name in GATEWAY_TOOL_NAMES:
+    for name, tool in indexed_catalog.items():
+        if name in GATEWAY_TOOL_NAMES or name in hidden_name_set:
             continue
         fn = tool.get('function') if isinstance(tool.get('function'), dict) \
             else tool
@@ -1140,21 +2149,28 @@ def search_executable_catalog(
     missing_name = ''
     hint_ns = ''
     if '_' in qlower and _NAME_SHAPED_RE.fullmatch(qlower):
-        exact = name_case.get(qlower)
+        exact = exact_lookup_name
         if exact is None:
             missing_name = query_text
-        elif ns_filter and all(row[0] != exact for row in docs):
+        elif ns_filter and not already_disclosed_name \
+                and all(row[0] != exact for row in docs):
             hint_ns = str(namespace_map.get(exact) or 'general').lower()
-    if not docs:
+    if not docs and not already_disclosed_name:
         out: dict[str, Any] = {
             'status': 'ok', 'query': query_text, 'items': [],
             'execute_with': EXECUTE_TOOLS_NAME,
             'next_cursor': None, 'total': 0,
-            'notice': _search_notice(missing_name, hint_ns, 0),
+            'notice': _search_notice(
+                missing_name, hint_ns, 0, already_visible_name),
         }
         if missing_name:
             out['missing_name'] = missing_name
+        if already_visible_name:
+            out['already_visible'] = already_visible_name
+        if disclosed_name_set:
+            out['notice'] += _DISCLOSED_OMITTED_HINT
         return out
+
     doc_freq = Counter()
     for _name, _tool, _ns, terms in docs:
         doc_freq.update(set(terms))
@@ -1180,13 +2196,10 @@ def search_executable_catalog(
         lname = name.lower()
         name_concepts = {term for term in _terms(name)
                          if term.startswith('@')}
-        action_concepts = {
-            '@search', '@edit', '@cancel', '@create', '@list',
-        }
         score += 3.0 * len(
             qconcepts.intersection(name_concepts).intersection(
-                action_concepts))
-        if qlower == lname:
+                _NAME_WEIGHTED_CONCEPTS))
+        if exact_lookup_name == name:
             score += 100.0
         elif qlower in lname:
             score += 12.0
@@ -1195,6 +2208,21 @@ def search_executable_catalog(
         if score > 0:
             scored.append((-score, position, name, tool, ns))
     scored.sort()
+    # Exact (including one-to-one maintained alias) lookup is a detail read,
+    # not a broad recommendation query. Returning lexical neighbors here made
+    # the model pay for unrelated schemas and occasionally choose a substitute
+    # despite already naming the intended tool.
+    if exact_lookup_name:
+        scored = [row for row in scored if row[2] == exact_lookup_name]
+    if already_disclosed_name and not any(
+            row[2] == already_disclosed_name for row in scored):
+        disclosed_tool = indexed_catalog.get(already_disclosed_name)
+        if disclosed_tool is not None:
+            scored.insert(0, (
+                -100.0, -1, already_disclosed_name, disclosed_tool,
+                str(namespace_map.get(already_disclosed_name)
+                    or 'general').lower(),
+            ))
     page = scored[offset:offset + wanted]
     items = []
     for negative, _pos, name, tool, ns in page:
@@ -1202,23 +2230,36 @@ def search_executable_catalog(
             else tool
         contract = contract_map.get(name)
         contract = contract if isinstance(contract, dict) else {}
+        detailed = name == exact_lookup_name
+        summary = _bounded_summary(fn.get('description') or '')
+        arguments_schema = (
+            contract.get('arguments_schema') or fn.get('parameters') or {
+                'type': 'object', 'properties': {}}
+        )
         item = {
             'name': name,
             'namespace': ns,
-            'description': str(fn.get('description') or ''),
-            'arguments_schema': contract.get('arguments_schema') or fn.get('parameters') or {
-                'type': 'object', 'properties': {}},
+            'summary': summary,
+            # Retained for frontend/older model compatibility; now bounded.
+            'description': summary,
+            'arguments_schema': _compact_arguments_schema(
+                arguments_schema, include_descriptions=detailed),
             'score': round(-negative, 6),
+            'detail_level': 'exact' if detailed else 'compact',
         }
         if contract:
             item.update({
                 'contract_version': contract.get('contractVersion'),
-                'help': contract.get('help') or item['description'],
                 'permission': contract.get('permission'),
                 'idempotency': contract.get('idempotency'),
                 'ptc_eligible': bool(contract.get('ptcEligible')),
-                'errors': contract.get('errors') or [],
             })
+            if detailed:
+                item['help'] = _bounded_summary(
+                    contract.get('help') or item['description'], 1200)
+                errors = _compact_contract_errors(contract.get('errors'))
+                if errors:
+                    item['errors'] = errors
         items.append(item)
     next_offset = offset + len(page)
     out = {
@@ -1228,10 +2269,44 @@ def search_executable_catalog(
         'next_cursor': (_cursor_encode(next_offset)
                         if next_offset < len(scored) else None),
         'total': len(scored),
-        'notice': _search_notice(missing_name, hint_ns, len(scored)),
+        'notice': _search_notice(
+            missing_name, hint_ns, len(scored), already_visible_name,
+            already_disclosed_name),
     }
     if missing_name:
         out['missing_name'] = missing_name
+    if already_visible_name:
+        out['already_visible'] = already_visible_name
+    if already_disclosed_name:
+        out['already_disclosed'] = already_disclosed_name
+    if not scored and disclosed_name_set:
+        out['notice'] += _DISCLOSED_OMITTED_HINT
+    if legacy_lookup_name and exact_lookup_name:
+        out['resolved_name'] = exact_lookup_name
+        if not already_visible_name:
+            out['notice'] = (
+                f"Legacy tool name '{legacy_lookup_name}' resolves to canonical "
+                f"'{exact_lookup_name}'. Use the canonical name with "
+                'execute_tools. ' + _SEARCH_NOTICE)
+
+    # Pagination is also a hard output budget: remove the lowest-ranked tail
+    # until the complete JSON envelope fits, then point the cursor at the first
+    # item not returned. Argument names/required fields are never truncated.
+    out['items_returned'] = len(out['items'])
+    original_notice = out['notice']
+    while out['items'] and len(json.dumps(
+            out, ensure_ascii=False, separators=(',', ':'))) \
+            > LOCAL_TOOL_SEARCH_MAX_RESULT_CHARS:
+        out['items'].pop()
+        returned = len(out['items'])
+        next_offset = offset + returned
+        out['items_returned'] = returned
+        out['next_cursor'] = (
+            _cursor_encode(next_offset) if next_offset < len(scored) else None)
+        out['truncated_for_budget'] = True
+        out['notice'] = original_notice + (
+            ' The result page hit its bounded output budget; continue with '
+            'next_cursor if another candidate is needed.')
     return out
 
 
@@ -1666,6 +2741,7 @@ def normalize_execute_request(
 __all__ = [
     'EXECUTE_TOOLS_NAME', 'GATEWAY_TOOL_NAMES', 'SEARCH_TOOLS_NAME',
     'CODE_CORE_DIRECT_TOOL_NAMES', 'LOCAL_GATEWAY_MAX_TOKENS',
+    'LOCAL_TOOL_SEARCH_MAX_RESULT_CHARS',
     'catalog_index', 'full_wire_tools',
     'execute_tools_schema',
     'fit_tool_schema_budget', 'gateway_tool_schemas', 'local_wire_tools',

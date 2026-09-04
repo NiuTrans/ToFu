@@ -12,10 +12,11 @@ to connected clients:
     { type:'conv_changed'|'conv_deleted', convId, rev?, userId }
 
 The frame is a targeting HINT, not the data. The client rev-gates on it (a
-frame whose rev is <= its known _serverRev is a no-op → cheap self-echo) and
-does a targeted refetch of just that conv. A metadata-only change (rename /
-folder — the DB rev trigger only bumps on a messages change) omits ``rev`` so
-the client does a debounced sidebar refresh instead of a body refetch.
+frame whose rev is <= its known TurnState/catalog revision is a no-op), wakes
+Conversation Sync for a newer revision, then rechecks after the debounce. A
+metadata-only change (rename / folder — the DB rev trigger only bumps on a
+messages change) omits ``rev`` and therefore retains the authoritative sidebar
+refresh.
 
 This suite captures the published frame directly (monkeypatching
 ``lib.agent_core.push.push_event``) and asserts the shape for each mutate

@@ -36,16 +36,6 @@ class ProviderStreamState(str, Enum):
     UNKNOWN = 'unknown'
 
 
-_RETRYABLE_STATES = frozenset({
-    ProviderStreamState.PREMATURE_CLOSE,
-    ProviderStreamState.MALFORMED_STREAM,
-    ProviderStreamState.SEMANTIC_PROGRESS_TIMEOUT,
-    ProviderStreamState.NO_ACTIONABLE_OUTPUT,
-    ProviderStreamState.EMPTY_RESPONSE,
-    ProviderStreamState.TOOL_PAYLOAD_MISSING,
-})
-
-
 _MAX_EVIDENCE_DIAGNOSTICS = 4
 _MAX_EVIDENCE_DIAGNOSTIC_CHARS = 240
 _EVIDENCE_PROJECTED_USAGE_KEYS = frozenset({
@@ -126,17 +116,8 @@ class ProviderStreamEvidence:
             raise ValueError('invalid tool payload missing cause')
 
     @property
-    def has_reasoning(self) -> bool:
-        return self.reasoning_chars > 0
-
-    @property
     def has_content(self) -> bool:
         return self.content_chars > 0
-
-    @property
-    def has_valid_tool_call(self) -> bool:
-        return self.tool_call_count > 0
-
 
 def _legacy_evidence(
     *,
@@ -460,10 +441,6 @@ class ProviderStreamResult:
     @property
     def is_verified_complete(self) -> bool:
         return self.state is ProviderStreamState.PROVIDER_FINISHED
-
-    @property
-    def is_retryable(self) -> bool:
-        return self.state in _RETRYABLE_STATES
 
     def require_verified(self, *, context: str = '') -> 'ProviderStreamResult':
         """Return self only when provider terminal evidence is authoritative."""

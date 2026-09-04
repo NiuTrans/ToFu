@@ -5,6 +5,7 @@ same-role messages — both defensive against Anthropic HTTP 400s.
 """
 
 from lib.log import get_logger
+from lib.llm_sanitize._fields import _SAME_ROLE_SEAM_HINT_FIELD
 
 logger = get_logger(__name__)
 
@@ -242,7 +243,8 @@ def _drop_empty_assistant_messages(messages: list) -> list:
 # Logging those at INFO was pure noise that also LOOKED like a bug being
 # re-patched forever. Any OTHER pair is an unexpected producer (send-race
 # duplicate user rows, error-ghost adjacency, endpoint leaks) and alarms at
-# WARNING with a location + preview, so the source is one grep away.
+# WARNING with a location + content shape, so the source remains diagnosable
+# without putting prompt text into durable logs.
 _SYNTHETIC_PAIR_PREFIXES = (
     '<system-reminder>',
     '<swarm-update>',
@@ -276,7 +278,8 @@ def _is_synthetic_context_msg(msg) -> bool:
     # round_attachments and ORIGINAL OBJECTIVE directive look like a broken
     # producer even though this merge is their documented final assembly seam.
     if (msg.get('_contextComposer') or msg.get('_isMeta')
-            or msg.get('_isVuDirective')):
+            or msg.get('_isVuDirective') or msg.get('_isObjectiveAnchor')
+            or msg.get(_SAME_ROLE_SEAM_HINT_FIELD)):
         return True
     content = msg.get('content')
     head = ''
@@ -295,17 +298,22 @@ def _is_synthetic_context_msg(msg) -> bool:
     return any(marker in head for marker in _SYNTHETIC_PAIR_MARKERS)
 
 
-def _pair_preview(msg, limit: int = 60) -> str:
+def _pair_content_shape(msg) -> str:
+    """Return bounded structural evidence without exposing message content."""
     content = msg.get('content')
+    if isinstance(content, str):
+        return f'text_chars={len(content)}'
     if isinstance(content, list):
-        parts = []
+        text_chars = 0
         for blk in content:
             if isinstance(blk, dict) and blk.get('type') == 'text':
-                parts.append(blk.get('text', '') or '')
-        content = ' '.join(p for p in parts if p)
-    if not isinstance(content, str):
-        content = str(content or '')
-    return content.replace('\n', ' ')[:limit]
+                text = blk.get('text', '') or ''
+                if isinstance(text, str):
+                    text_chars += len(text)
+        return f'blocks={len(content)},text_chars={text_chars}'
+    if content is None:
+        return 'content=none'
+    return f'content_type={type(content).__name__}'
 
 
 def _merge_consecutive_same_role(messages: list) -> list:
@@ -321,21 +329,35 @@ def _merge_consecutive_same_role(messages: list) -> list:
       - user/assistant: consecutive same-role messages are merged with \\n\\n separator
       - Messages with tool_calls are never merged (they are function-call requests)
 
-    Observability (): merges involving a synthetic-context
-    seam (``_is_synthetic_context_msg`` on either side) are BY DESIGN and go
-    to DEBUG; anything else is an unexpected producer and fires ONE WARNING
-    carrying each merged-away ``#index/role`` + a content preview. The merge
-    accumulator is deliberately NOT a laundering channel: once a designed
-    pair has fused, the accumulator counts as real content, so a genuine
-    duplicate following it still alarms.
+    Observability: merges involving a synthetic-context
+    seam (``_is_synthetic_context_msg`` on either ORIGINAL side) are BY DESIGN
+    and go to DEBUG; anything else is an unexpected producer and fires ONE
+    WARNING carrying each merged-away ``#index/role`` + bounded content shape
+    (never prompt text). Classification tracks the immediately previous
+    original message rather than the fused accumulator.  This keeps both
+    edges of ``real anchor → retained wrapper → current user`` silent after
+    compaction while ``synthetic carrier → real user → real duplicate`` still
+    alarms on its second, naked real→real edge.
 
-    Mutates nothing — returns a new list.
+    The field-strip stage may carry one short-lived classification hint.  This
+    function removes it from every returned message, including singleton and
+    non-merged paths, so no internal field can reach a provider or debug-wire
+    response. Mutates nothing — returns a new list.
     """
-    if not messages or len(messages) < 2:
-        return list(messages)
+    def _without_transient_hint(msg):
+        if not isinstance(msg, dict) or _SAME_ROLE_SEAM_HINT_FIELD not in msg:
+            return msg
+        clean = dict(msg)
+        clean.pop(_SAME_ROLE_SEAM_HINT_FIELD, None)
+        return clean
 
-    merged = [messages[0]]
-    merged_synthetic = _is_synthetic_context_msg(messages[0])
+    if not messages:
+        return []
+    if len(messages) < 2:
+        return [_without_transient_hint(messages[0])]
+
+    merged = [_without_transient_hint(messages[0])]
+    previous_original_synthetic = _is_synthetic_context_msg(messages[0])
     merge_count = 0
     expected = 0
     unexpected = []
@@ -366,18 +388,19 @@ def _merge_consecutive_same_role(messages: list) -> list:
                 merged[-1]['content'] = prev_content + separator + new_content
             merge_count += 1
             curr_synthetic = _is_synthetic_context_msg(msg)
-            if merged_synthetic or curr_synthetic:
+            if previous_original_synthetic or curr_synthetic:
                 expected += 1
             else:
                 if len(unexpected) < 6:
-                    unexpected.append(f"#{idx}/{role} '{_pair_preview(msg)}'")
-            # The accumulator now fuses with real content unless BOTH sides
-            # were synthetic — a fused accumulator must not launder a genuine
-            # duplicate into the silent path on the next iteration.
-            merged_synthetic = merged_synthetic and curr_synthetic
+                    unexpected.append(
+                        f'#{idx}/{role} {_pair_content_shape(msg)}')
+            # Preserve the identity of the immediate ORIGINAL left neighbor
+            # for the next boundary. The fused accumulator may contain many
+            # messages and is not itself an adjacency classification input.
+            previous_original_synthetic = curr_synthetic
         else:
-            merged.append(msg)
-            merged_synthetic = _is_synthetic_context_msg(msg)
+            merged.append(_without_transient_hint(msg))
+            previous_original_synthetic = _is_synthetic_context_msg(msg)
 
     if merge_count:
         if unexpected:

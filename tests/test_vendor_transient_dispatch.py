@@ -136,6 +136,7 @@ class TestCoolingCauseSummary:
         disp = object.__new__(LLMDispatcher)
         disp._lock = threading.Lock()
         disp.slots = list(slots)
+        disp._contention_strikes = {}
         disp.initialize = lambda: None
         return disp
 

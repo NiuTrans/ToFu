@@ -241,7 +241,7 @@ fun AddEditScreen(
                             value = projectPath,
                             onValueChange = { projectPath = it },
                             label = "Project path on the host",
-                            placeholder = "/home/dev/chatui",
+                            placeholder = "/home/dev/tofu",
                             helper = "Absolute path, and allow-listed in " +
                                 "TOFU_SUPERVISOR_PROJECTS on the host.",
                         )

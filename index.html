@@ -216,7 +216,7 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
       </button>
       <button class="action-btn" id="debugToggle" data-tofu-action="toggleDebug()" title="Debug">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 9V8a3 3 0 0 1 6 0v1"/><path d="M8 9h8a1 1 0 0 1 1 1v5a5 5 0 0 1-10 0v-5a1 1 0 0 1 1-1"/><path d="M12 14v6"/><path d="M3 13h4M17 13h4M4 19l3.35-2M20 19l-3.35-2M4 7l3.75 2.4M20 7l-3.75 2.4"/></svg>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 9V8a3 3 0 0 1 6 0v1"/><path d="M8 9h8a1 1 0 0 1 1 1v5a5 5 0 0 1-10 0v-5a1 1 0 0 1 1-1"/><path d="M12 14v6"/><path d="M3 13h4M17 13h4M4 19l3.35-2M20 19l-3.35-2M4 7l3.75 2.4M20 7l-3.75 2.4"/></svg>
       </button>
       <button class="action-btn" data-tofu-action="openSettings()" title="设置" data-i18n-title="sidebar.settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -331,7 +331,7 @@
     </div>
     <!-- Tool-status badges (SEARCH/PROJECT/CODE EXEC/BROWSER/MEMORY) removed:
          redundant with the input-box toggles, which already show enabled state. -->
-    <span class="optimizer-badge" id="optimizerBadge" data-i18n-title="optimizer.badgeTitle" title="Daily Optimizer — autonomous improvement proposals"><span class="opt-dot"></span>OPTIMIZER<span class="optimizer-count" id="optimizerCount" style="display:none">0</span>
+    <span class="optimizer-badge" id="optimizerBadge" data-tofu-action="toggleOptimizerPanel(event)" data-i18n-title="optimizer.badgeTitle" title="Daily Optimizer — autonomous improvement proposals"><span class="opt-dot"></span>OPTIMIZER<span class="optimizer-count" id="optimizerCount" style="display:none">0</span>
       <div class="optimizer-panel" id="optimizerPanel">
         <div class="optimizer-panel-title"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/><circle cx="12" cy="12" r="10"/></svg> <span data-i18n="optimizer.panelTitle">Daily Optimizer</span></div>
         <div id="optimizerPanelContent"><div class="optimizer-panel-empty" data-i18n="optimizer.loading">Loading…</div></div>
@@ -602,7 +602,7 @@
             </summary>
             <div class="paper-rebuttal-body">
               <p class="paper-report-hint" data-i18n="paper.rebuttalHint">Paste the authors' rebuttal below. The reviewer replies point by point and decides whether the OA / Confidence score should change (most rebuttals should not).</p>
-              <textarea id="paperRebuttalInput" class="paper-rebuttal-input" rows="6" data-i18n-placeholder="paper.rebuttalPlaceholder" placeholder="Paste the author rebuttal here…" data-tofu-action-input="_onRebuttalInputChange(this.value)"></textarea>
+              <textarea id="paperRebuttalInput" class="paper-rebuttal-input" rows="6" maxlength="40000" data-i18n-placeholder="paper.rebuttalPlaceholder" placeholder="Paste the author rebuttal here…" data-tofu-action-input="_onRebuttalInputChange(this.value)"></textarea>
               <div class="paper-rebuttal-actions">
                 <button class="paper-report-generate-btn" id="paperRebuttalGenBtn" data-tofu-action="_generatePaperRebuttal()">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
@@ -671,23 +671,14 @@
        it opens the Project Brain panel. Replaces the old crowding presence
        strip that sat above the messages.
 
-       ONE project-scoped cluster (brainSummary, push-driven): it LEADS with a
-       plain "Project" label, followed by the action-ordered coordination counts
-       (conflicts · decisions awaiting you · epics in progress · open · peers
-       online) and per-peer "advancing «epic»" joins. The Pillar #7 ambient
-       status headline (summary.statusLine) is deliberately NOT surfaced here —
-       a truncated one-line narrative carries no useful signal; the full
-       snapshot lives in the Project Brain Status tab. The bar hides when there
-       is no coordination count. The per-conversation influence lens ("how is
-       THIS chat affected") is NOT duplicated here — it lives in full inside the
-       Project Brain panel, one click away. -->
+       The project push channel carries only invalidation hints. Counts are
+       derived from the owner-scoped Project Brain projection; no peer,
+       dispatch, claim, or handoff state is synthesized here. -->
   <div class="presence-strip collab-bar" id="presenceStrip" hidden></div>
 
   <div class="chat-wrapper">
-    <!-- ═══ Project Brain — cross-conversation Activity Feed (Pillar #1) ═══
-         A slide-in overlay panel, opened from the project bar. Three columns
-         (Charter / Board / Activity); only Activity is live in Pillar #1.
-         Populated by the registered Project Brain domain owner. -->
+    <!-- Project Brain — read-only signal projection plus human Watch,
+         Checker, decision-promotion, and Integration control surfaces. -->
     <div class="project-brain-overlay" id="projectBrainOverlay" hidden data-tofu-action="if(event.target===this)closeProjectBrain()">
       <div class="project-brain-panel" role="dialog" aria-modal="true">
         <div class="project-brain-head">
@@ -696,31 +687,11 @@
             <span data-i18n="projectBrain.title">Project Brain</span>
           </span>
           <div class="project-brain-head-actions">
-            <button type="button" class="pb-tr-toggle" id="projectBrainTranslateToggle" aria-pressed="false" role="switch">
-              <span class="pb-tr-toggle-ico"></span>
-              <span class="pb-tr-toggle-label" data-i18n="projectBrain.translateToggle">Translate content</span>
-            </button>
             <button class="project-brain-close icon-box" data-tofu-action="closeProjectBrain()" title="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
           </div>
         </div>
-        <!-- ═══ Per-conversation Influence lens ═══
-             How the CURRENT conversation is affected by the shared brain:
-             the charter it's bound by, epics it owns vs. must avoid, and
-             decisions awaiting a human. Populated by project-brain.js
-             (renderInfluence). Hidden until an active conv is resolved. -->
-        <div class="project-brain-influence" id="projectBrainInfluence" hidden>
-          <div class="pb-influence-head">
-            <span class="pb-influence-title" data-i18n="projectBrain.influenceTitle">How this conversation is influenced</span>
-            <span class="pb-influence-conv" id="projectBrainInfluenceConv"></span>
-          </div>
-          <div class="pb-influence-body" id="projectBrainInfluenceBody"></div>
-        </div>
-        <!-- ═══ Tab bar ═══
-             The four surfaces (Charter / Board / Activity / Team) are shown
-             ONE-AT-A-TIME so each gets the full panel width — four side-by-side
-             columns collapse to unreadable slivers on a narrow / port-forwarded
-             viewport. Tabs are wired by project-brain.js (_initTabs); the count
-             badges are refreshed after each render. -->
+        <!-- Projection surfaces are shown one at a time so each remains
+             readable in narrow and port-forwarded viewports. -->
         <div class="project-brain-tabs" id="projectBrainTabs" role="tablist">
           <button type="button" class="pb-tab" data-pb-tab="attention" role="tab" aria-selected="false">
             <span class="pb-tab-label" data-i18n="projectBrain.attention">Needs you</span>
@@ -737,10 +708,6 @@
           <button type="button" class="pb-tab" data-pb-tab="activity" role="tab" aria-selected="false">
             <span class="pb-tab-label" data-i18n="projectBrain.activity">Activity</span>
           </button>
-          <button type="button" class="pb-tab" data-pb-tab="peers" role="tab" aria-selected="false">
-            <span class="pb-tab-label" data-i18n="projectBrain.team">Team</span>
-            <span class="pb-tab-count" id="pbTabCountPeers" hidden></span>
-          </button>
           <button type="button" class="pb-tab" data-pb-tab="status" role="tab" aria-selected="false">
             <span class="pb-tab-label" data-i18n="projectBrain.status">Status &amp; Watch</span>
           </button>
@@ -750,14 +717,8 @@
           </button>
         </div>
         <div class="project-brain-columns">
-          <!-- ═══ Needs you ═══
-               The ONE place everything genuinely waiting on the human is
-               collected: epics halted on a structured question (the only
-               thing that stops a workstream indefinitely), pending charter
-               proposals, and live file-conflict advisories. Rendered from the
-               backend attention SSOT (/api/v1/project/brain/attention) by
-               project-brain-attention.js — priority-ordered server-side, so
-               this tab and the collab-bar count are the same judgment. -->
+          <!-- Checker, Integration, and legacy-decision Attention. Ephemeral
+               path overlap advice never appears in this projection. -->
           <div class="project-brain-col project-brain-col-attention pb-tab-panel" data-pb-panel="attention">
             <div class="project-brain-col-body" id="projectBrainAttentionBody">
               <div class="pb-attn-empty" data-i18n="projectBrain.attnEmpty">Nothing needs you</div>
@@ -780,23 +741,8 @@
               </div>
             </div>
           </div>
-          <!-- ═══ Team / Peers ═══
-               The conversations-as-a-room surface: each active sibling conv
-               (title · what it's advancing · presence dot · current round),
-               plus the peer-message exchanges as an inline thread. Populated
-               by project-brain-peers.js (renderPeers) from the LIVE
-               Api.project.brainPeers roster + the feed's peer notes. -->
-          <div class="project-brain-col project-brain-col-peers pb-tab-panel" data-pb-panel="peers">
-            <div class="project-brain-col-body" id="projectBrainPeersBody">
-              <div class="pb-peers-empty" data-i18n="projectBrain.peersEmpty">No sibling conversations active</div>
-            </div>
-          </div>
-          <!-- ═══ Status (Pillar #7 human↔brain status lane) ═══
-               Ask the PROJECT "where are we / are we drifting from the
-               charter" and get a synthesized answer, backed by an append-only
-               history of status snapshots. Read-only synthesis (increment 1);
-               populated by project-brain-status.js from Api.project.brainStatus.
-               HUMAN-FACING ONLY — never injected into sibling agent prompts. -->
+          <!-- Status is derived from the same projection; Watch is the only
+               human-maintained state in this tab. -->
           <div class="project-brain-col project-brain-col-status pb-tab-panel" data-pb-panel="status">
             <div class="project-brain-col-body" id="projectBrainStatusBody">
               <div class="pb-status-empty" data-i18n="projectBrain.statusEmpty">No status yet</div>
@@ -830,6 +776,7 @@
       <div class="ri-side">
         <div class="ri-side-header">
           <span class="ri-title" data-i18n="ri.title">运行详情</span>
+          <button class="debug-clear icon-box" data-tofu-action="riRefreshTasks()" title="刷新" data-i18n-title="ri.refresh" aria-label="Refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <button class="debug-clear icon-box" data-tofu-action="closeDebug()" title="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
         </div>
         <div class="ri-task-list" id="riTaskList"></div>
@@ -1121,13 +1068,13 @@
         </button>
 
         <div class="settings-tab-group" data-i18n="settings.groupModels">模型接入</div>
-        <button class="settings-tab" data-tab="models" data-tofu-action="switchSettingsTab('models')">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-          <span data-i18n="settings.tabModels">模型</span>
-        </button>
         <button class="settings-tab" data-tab="api" data-tofu-action="switchSettingsTab('api')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
           <span data-i18n="settings.tabProviders">服务商</span>
+        </button>
+        <button class="settings-tab" data-tab="models" data-tofu-action="switchSettingsTab('models')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4.5v11L12 22l-8-4.5v-11z"/><path d="M4 6.5l8 4.5 8-4.5M12 11v11"/></svg>
+          <span>模型</span>
         </button>
         <button class="settings-tab" data-tab="oauth" data-tofu-action="switchSettingsTab('oauth')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
@@ -1651,19 +1598,19 @@
       <div class="pm-header-text">
         <h3>
           <svg class="pm-header-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-          Project Co-Pilot
+          <span data-i18n="pm.title">Project Co-Pilot</span>
         </h3>
-        <p class="pm-subtitle">Point the assistant at one or more folders on the server. Drag to reorder — the top folder is the primary project root.</p>
+        <p class="pm-subtitle" data-i18n="pm.subtitle">Point the assistant at one or more folders on the server. Drag to reorder — the top folder is the primary project root.</p>
       </div>
-      <button class="pm-close" data-tofu-action="closeProjectModal()" title="Close">
+      <button class="pm-close" data-tofu-action="closeProjectModal()" title="Close" data-i18n-title="common.close">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
 
     <!-- Mobile-only segmented tabs (hidden on desktop via CSS) -->
     <div class="pm-mobile-tabs" role="tablist">
-      <button class="pm-mtab active" data-pm-tab="browse" data-tofu-action="pmMobileTab('browse')">Browse</button>
-      <button class="pm-mtab" data-pm-tab="workspace" data-tofu-action="pmMobileTab('workspace')">Workspace <span class="pm-mtab-count" id="pmMobileCount"></span></button>
+      <button class="pm-mtab active" data-pm-tab="browse" data-tofu-action="pmMobileTab('browse')" data-i18n="pm.tabBrowse">Browse</button>
+      <button class="pm-mtab" data-pm-tab="workspace" data-tofu-action="pmMobileTab('workspace')"><span data-i18n="pm.workspace">Workspace</span> <span class="pm-mtab-count" id="pmMobileCount"></span></button>
     </div>
 
     <!-- Two-pane body: left = file tree browser · right = selected folders + recent -->
@@ -1672,26 +1619,32 @@
       <div class="pm-browser-pane">
         <div id="folderBrowser" class="folder-browser">
           <div class="folder-browser-header">
-            <button class="pm-up-btn" data-tofu-action="browseParent()" id="browseBackBtn" title="Go up one level" disabled>
+            <button class="pm-up-btn" data-tofu-action="browseParent()" id="browseBackBtn" title="Go up one level" data-i18n-title="pm.goUp" disabled>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
             </button>
             <div class="pm-breadcrumb" id="browseCrumbs"></div>
-            <button class="pm-eye-btn" data-tofu-action="mpNewFolder()" id="browseNewFolderBtn" title="New folder here">
+            <button class="pm-eye-btn" data-tofu-action="mpNewFolder()" id="browseNewFolderBtn" title="New folder here" data-i18n-title="pm.newFolderHere">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
             </button>
-            <button class="pm-eye-btn" data-tofu-action="toggleHiddenDirs()" id="browseHiddenBtn" title="Show hidden folders">
+            <button class="pm-eye-btn" data-tofu-action="toggleHiddenDirs()" id="browseHiddenBtn" title="Show hidden folders" data-i18n-title="pm.showHidden">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+          <div class="browse-search recent-search">
+            <input type="text" id="browseSearchInput" class="recent-search-input" placeholder="Filter folders…" data-i18n-placeholder="pm.browseSearchPlaceholder" autocomplete="off" spellcheck="false" data-tofu-action-input="_filterBrowseDirs(this.value)" data-tofu-action-keydown="if(event.key==='Escape'){event.preventDefault();_clearBrowseSearch();}">
+            <button class="recent-search-clear" id="browseSearchClear" data-tofu-action="_clearBrowseSearch()" title="Clear filter" data-i18n-title="pm.browseClearSearch" hidden>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
           </div>
           <div id="remoteDevicesSection" class="remote-devices-section" style="display:none"></div>
           <div class="folder-browser-list" id="browseList">
-            <div class="folder-browser-empty">Browse server directories</div>
+            <div class="folder-browser-empty" data-i18n="pm.browseEmpty">Browse server directories</div>
           </div>
           <div class="folder-browser-footer">
-            <span class="folder-browser-hint">Click a folder to open · hover <kbd>+</kbd> to add</span>
-            <button class="btn btn-sm btn-secondary" data-tofu-action="selectBrowsedFolder()" title="Add the folder currently open above">
+            <span class="folder-browser-hint"><span data-i18n="pm.hintOpen">Click a folder to open · hover</span> <kbd>+</kbd> <span data-i18n="pm.hintAdd">to add</span></span>
+            <button class="btn btn-sm btn-secondary" data-tofu-action="selectBrowsedFolder()" title="Add the folder currently open above" data-i18n-title="pm.addThisFolderTitle">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              Add this folder
+              <span data-i18n="pm.addThisFolder">Add this folder</span>
             </button>
           </div>
         </div>
@@ -1700,10 +1653,10 @@
       <!-- RIGHT RAIL: workspace folders + recent -->
       <div class="pm-rail">
         <div class="pm-rail-card pm-rail-workspace">
-          <div class="pm-section-label"><span>Workspace</span><span class="pm-count" id="mpFolderCount"></span></div>
+          <div class="pm-section-label"><span data-i18n="pm.workspace">Workspace</span><span class="pm-count" id="mpFolderCount"></span></div>
           <div class="mp-add-row">
-            <input type="text" id="mpPathInput" class="mp-path-input" placeholder="Paste or type a path…" data-tofu-action-keydown="if(event.key==='Enter'){event.preventDefault();mpAddFolder();}">
-            <button class="btn btn-sm btn-primary" data-tofu-action="mpAddFolder()">Add</button>
+            <input type="text" id="mpPathInput" class="mp-path-input" placeholder="Paste or type a path…" data-i18n-placeholder="pm.pathPh" data-tofu-action-keydown="if(event.key==='Enter'){event.preventDefault();mpAddFolder();}">
+            <button class="btn btn-sm btn-primary" data-tofu-action="mpAddFolder()" data-i18n="pm.add">Add</button>
           </div>
           <div class="mp-folder-list" id="mpFolderTags"></div>
         </div>
@@ -1728,11 +1681,13 @@
     </div>
 
     <div id="projectModalStatus"></div>
+    <div id="projectModalHint"></div>
 
     <div class="modal-actions">
-      <button class="btn btn-secondary" data-tofu-action="closeProjectModal()">Cancel</button>
-      <button class="btn btn-secondary" data-tofu-action="clearProject()">Clear</button>
-      <button class="btn btn-primary" data-tofu-action="mpApplyFolders()">Set Project</button>
+      <span class="pm-apply-hint" data-i18n="pm.applyHint">Folder changes are staged until applied; new messages and regenerated replies then use the updated workspace.</span>
+      <button class="btn btn-secondary" data-tofu-action="closeProjectModal()" data-i18n="common.cancel">Cancel</button>
+      <button class="btn btn-secondary" data-tofu-action="clearProject()" data-i18n="pm.clear">Clear</button>
+      <button class="btn btn-primary" data-tofu-action="mpApplyFolders()" data-i18n="pm.applyChanges">Apply Changes</button>
     </div>
   </div>
 </div>

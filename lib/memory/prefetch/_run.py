@@ -14,6 +14,7 @@ from lib.log import audit_log, get_logger
 from lib.memory.prefetch._config import (
     PREFETCH_BM25_TOP_N,
     PREFETCH_ENABLED,
+    PREFETCH_MAX_BYTES,
     PREFETCH_MAX_INJECTED,
 )
 from lib.memory.prefetch._query import _extract_current_user_request
@@ -88,16 +89,6 @@ def run_memory_prefetch(messages: list, project_path: str | None,
                 logger.debug('[MemPrefetch] event emit failed: %s', exc)
 
     started = time.monotonic()
-    try:
-        from lib.memory.storage import get_eligible_memories
-        memories = get_eligible_memories(project_path, extra_paths=extra_paths)
-    except Exception as exc:
-        emit('failed', reason=f'load_error:{exc}')
-        return []
-    if not memories:
-        emit('skipped', reason='no_memories')
-        return []
-
     current = _extract_current_user_request(messages)
     identifiers = _todo_identifiers(task)
     query = current
@@ -106,6 +97,22 @@ def run_memory_prefetch(messages: list, project_path: str | None,
     if not query.strip():
         emit('skipped', reason='empty_query')
         return []
+
+    try:
+        from lib.memory.storage import get_eligible_memories
+        memories = get_eligible_memories(
+            project_path,
+            extra_paths=extra_paths,
+            include_body=False,
+            record_view='retrieval',
+        )
+    except Exception as exc:
+        emit('failed', reason=f'load_error:{exc}')
+        return []
+    if not memories:
+        emit('skipped', reason='no_memories')
+        return []
+
     emit('started', total_memories=len(memories),
          candidate_target=PREFETCH_BM25_TOP_N, strategy='local_high_confidence')
     scored = _bm25_top_n(memories, query, top_n=PREFETCH_BM25_TOP_N,
@@ -124,6 +131,43 @@ def run_memory_prefetch(messages: list, project_path: str | None,
         selected.append(row)
         if len(selected) >= PREFETCH_MAX_INJECTED:
             break
+
+    if selected:
+        try:
+            from lib.memory.storage import load_eligible_memories
+            hydrated = load_eligible_memories(
+                [row.get('id', '') for row in selected if row.get('id')],
+                project_path,
+                extra_paths=extra_paths,
+                body_char_limit=PREFETCH_MAX_BYTES,
+            )
+            hydrated_by_id = {
+                memory['id']: memory for memory in hydrated
+            }
+            refreshed = []
+            for row in selected:
+                memory_id = row.get('id')
+                if not memory_id:
+                    # Synthetic/custom sources without repository identity
+                    # cannot be reloaded; retain their already-frozen row.
+                    refreshed.append(row)
+                    continue
+                loaded = hydrated_by_id.get(memory_id)
+                if loaded is None:
+                    continue
+                keep, reason, overlap = _confidence(query, loaded)
+                if not keep:
+                    continue
+                loaded = dict(loaded)
+                loaded['_prefetch_score'] = row['_prefetch_score']
+                loaded['_prefetch_reason'] = reason
+                loaded['_prefetch_overlap'] = overlap
+                refreshed.append(loaded)
+            selected = refreshed
+        except Exception as exc:
+            # Metadata evidence and an explicit read_files recovery path remain
+            # useful when a selected file disappears or cannot be hydrated.
+            logger.debug('[MemPrefetch] selected body hydration failed: %s', exc)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     if task is not None:

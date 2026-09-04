@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """jsdom test for the Search settings tab redesign (settings/other_tabs.js +
-settings/save_export.js, with the REAL core/safe_html.js beneath).
+settings/save_export.js, with the typed HTML-safety owner beneath).
 
 Pins the contracts the redesign introduced:
 
@@ -22,8 +22,15 @@ import os
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
+
+ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
+HTML_SAFETY = native_module_path(
+    '.native/search-settings-html-safety.js',
+    os.path.join(ROOT, 'frontend', 'src', 'html-safety.ts'),
+)
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -42,7 +49,7 @@ const { window, document, check, report } = setup({
     '<input id="settingHttpProxy"><input id="settingHttpsProxy">' +
     '<div id="settingProxyBypass"></div>' +
     '</body>',
-  // Order matters: safe_html defines safeHtml/raw used by other_tabs.js.
+  // Order matters: the typed owner defines safeHtml/raw for other_tabs.js.
   targets: [process.argv[4], process.argv[2], process.argv[5]],
   globals: {
     _setVal: function (id, value, prop) {
@@ -147,7 +154,7 @@ def test_search_settings_tab_frontend():
         target_js=os.path.join(JS_DIR, 'settings', 'other_tabs.js'),
         body_js=_BODY,
         extra_targets=[
-            os.path.join(JS_DIR, 'core', 'safe_html.js'),
+            HTML_SAFETY,
             os.path.join(JS_DIR, 'settings', 'save_export.js'),
         ],
         min_pass=14,

@@ -9,6 +9,7 @@ remain behind the injected classifier port.
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 from typing import Protocol
 
 from lib.log import get_logger
@@ -23,6 +24,42 @@ class OrchestrationBranchNavigatorPort(Protocol):
 
 class OrchestrationBranchRuntime:
     """Select one successor for a branch control node."""
+
+    @staticmethod
+    def _classifier_choice(
+        verdict: str, labels: dict[str, str],
+    ) -> str | None:
+        """Return one unambiguous label mention from classifier output.
+
+        Labels are matched on word boundaries, then shorter matches wholly
+        contained by a longer match are discarded. This accepts a harmless
+        preamble such as ``I choose Writer`` while preventing ``A`` from
+        matching ``Data`` and ``Review`` from stealing ``Security Review``.
+        If distinct options are mentioned, the verdict is ambiguous and the
+        caller retains deterministic first-edge fallback.
+        """
+        text = str(verdict or '').casefold()
+        matches: list[tuple[str, int, int]] = []
+        for target, raw_label in labels.items():
+            label = str(raw_label or '').strip().casefold()
+            if not label:
+                continue
+            pattern = rf'(?<!\w){re.escape(label)}(?!\w)'
+            matches.extend(
+                (target, match.start(), match.end())
+                for match in re.finditer(pattern, text)
+            )
+        maximal = [
+            candidate for candidate in matches
+            if not any(
+                other[1] <= candidate[1]
+                and other[2] >= candidate[2]
+                and (other[2] - other[1]) > (candidate[2] - candidate[1])
+                for other in matches
+            )
+        ]
+        targets = {target for target, _start, _end in maximal}
+        return next(iter(targets)) if len(targets) == 1 else None
 
     def __init__(
         self,
@@ -78,11 +115,10 @@ class OrchestrationBranchRuntime:
                     'tier': params.get('tier') or 'light',
                 },
             }
-            verdict = self._run_classifier(classifier, context).lower()
-            for target, label in labels.items():
-                if label and label.lower() in verdict:
-                    chosen, how = target, 'classifier'
-                    break
+            classifier_choice = self._classifier_choice(
+                self._run_classifier(classifier, context), labels)
+            if classifier_choice is not None:
+                chosen, how = classifier_choice, 'classifier'
 
         self._emit({
             'type': 'branch_pick',

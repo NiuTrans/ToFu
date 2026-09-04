@@ -12,10 +12,10 @@ if TYPE_CHECKING:
 
 
 _DOMAIN_MODULES = (
-    'core', 'identity', 'providers', 'artifacts', 'billing', 'integration', 'workflows', 'research',
+    'core', 'identity', 'providers', 'model_routing', 'artifacts', 'billing', 'integration', 'workflows', 'research',
     'knowledge',
     'queue', 'worker_jobs', 'conversations', 'archives', 'timers', 'scheduler', 'turns',
-    'observability', 'plugins',
+    'observability', 'plugins', 'desktop', 'project_brain',
 )
 
 

@@ -4,9 +4,10 @@
 Usage:
     python3 shoot.py <html-relative-or-abs> <out.png> [--w 1280] [--h 900] [--sel CSS_SELECTOR]
 
-This host's Playwright chrome-headless-shell is missing the GTK/ATK sonames;
-they exist in the conda `tofu` env lib dir, so LD_LIBRARY_PATH is injected here
-rather than being left as tribal knowledge in a shell history.
+Some hosts' Playwright chrome-headless-shell is missing the GTK/ATK sonames.
+Point TOFU_ICON_SHOOT_LIB at a lib dir that provides them (e.g. your conda
+env's lib) and it is injected into LD_LIBRARY_PATH; unset means the system
+chrome dependencies are complete and nothing is injected.
 """
 from __future__ import annotations
 
@@ -14,11 +15,11 @@ import argparse
 import os
 import sys
 
-_CONDA_LIB = ('/path/to/your/data'
-              'your-username/miniforge3/envs/tofu/lib')
+_EXTRA_LIB = os.environ.get('TOFU_ICON_SHOOT_LIB', '')
 
-if _CONDA_LIB not in os.environ.get('LD_LIBRARY_PATH', ''):
-    os.environ['LD_LIBRARY_PATH'] = _CONDA_LIB + ':' + os.environ.get('LD_LIBRARY_PATH', '')
+if (_EXTRA_LIB and os.path.isdir(_EXTRA_LIB)
+        and _EXTRA_LIB not in os.environ.get('LD_LIBRARY_PATH', '')):
+    os.environ['LD_LIBRARY_PATH'] = _EXTRA_LIB + ':' + os.environ.get('LD_LIBRARY_PATH', '')
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 from playwright.sync_api import sync_playwright  # noqa: E402

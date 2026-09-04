@@ -3,8 +3,8 @@
 Coverage ceiling (honest — see the project journal entry):
   * ``lib/optimizer/analyzer.py`` (734 LOC) is mostly log-file + DB readers
     (``_collect_*`` walk ``APP_LOG``/``AUDIT_LOG_FILE``/``ERROR_LOG`` and the
-    SYSTEM/CHAT DBs). The DB-backed collectors are NOT unit-tested beyond
-    their graceful-degrade-on-error contract. The genuinely pure scoring /
+    SYSTEM/CHAT DBs). DB-backed collectors are unit-tested at their repository
+    and graceful-degrade boundaries, not against a real database. The pure scoring /
     aggregation slice IS exercised against a real temp log file:
     ``_collect_app_log_signals`` (regex counting) and ``_collect_recurring_issues``
     (fingerprint clustering with ``min_count``), plus the pure parsers and
@@ -393,6 +393,69 @@ class TestAnalyzerPureLogic:
         assert analyzer._domain_of("ftp://nope") == ""
         assert analyzer._domain_of("") == ""
 
+    def test_conversation_tool_scan_uses_bounded_transcript_batches(
+            self, monkeypatch):
+        from lib.conversations import repository
+
+        cutoff = datetime(2026, 8, 29, 12, 30)
+        captured = {}
+
+        def scan(**kwargs):
+            captured.update(kwargs)
+            return 1, iter([{'messages': [{'toolRounds': [
+                {
+                    'toolName': 'web_search',
+                    'results': [
+                        {'url': 'https://www.Example.com/a'},
+                        {'url': 'https://example.com/b'},
+                    ],
+                },
+                {
+                    'toolName': 'fetch_url',
+                    'args': {'url': 'https://Docs.Example.org/page'},
+                },
+            ]}]}])
+
+        monkeypatch.setattr(repository, 'scan_conversations_bounded', scan)
+
+        result = analyzer._collect_conversation_tool_distribution(
+            cutoff, owner_user_id=_OWNER_USER_ID)
+
+        assert captured == {
+            'user_id': _OWNER_USER_ID,
+            'updated_at_gte': int(cutoff.timestamp() * 1000),
+            'limit': 200,
+            'settings_keys': [],
+        }
+        assert result == {
+            'tool_counts': {'web_search': 1, 'fetch_url': 1},
+            'search_urls': [{'domain': 'example.com', 'count': 2}],
+            'fetch_urls': [{'domain': 'docs.example.org', 'count': 1}],
+        }
+
+    def test_conversation_tool_scan_discards_partial_counts_on_lazy_error(
+            self, monkeypatch):
+        from lib.conversations import repository
+
+        def rows():
+            yield {'messages': [{'toolRounds': [
+                {'toolName': 'web_search', 'results': []},
+            ]}]}
+            raise RuntimeError('later transcript frame failed')
+
+        monkeypatch.setattr(
+            repository,
+            'scan_conversations_bounded',
+            lambda **_kwargs: (2, rows()),
+        )
+
+        result = analyzer._collect_conversation_tool_distribution(
+            datetime(2026, 8, 29), owner_user_id=_OWNER_USER_ID)
+
+        assert result == {
+            'tool_counts': {}, 'search_urls': [], 'fetch_urls': [],
+        }
+
     def test_classify_error_signature(self):
         assert analyzer._classify_error_signature("xx KeyError yy") == "KeyError"
         assert analyzer._classify_error_signature("PREMATURE STREAM CLOSE now") == "PREMATURE STREAM CLOSE"
@@ -413,6 +476,11 @@ class TestAnalyzerPureLogic:
             f"{ts} [WARNING] [Fetch] Request failed for x",
             f"{ts} [INFO] [Fetch] Timeout after 30s",
             f"{ts} [INFO] got a 429 rate-limit",
+            f"{ts} [INFO] [Search] IRRELEVANT dropped example.com",
+            f"{ts} [ERROR] PromptTooLong",
+            f"{ts} [WARNING] context near full",
+            f"{ts} [INFO] [Compaction] compacting history",
+            f"{ts} WARNING [LLM] candidate excerpt",
         ]) + "\n")
         monkeypatch.setattr(analyzer, "APP_LOG", str(log))
         out = analyzer._collect_app_log_signals(now - timedelta(hours=1))
@@ -421,6 +489,54 @@ class TestAnalyzerPureLogic:
         assert out["fetch_failure_count"] == 1
         assert out["fetch_timeout_count"] == 1
         assert out["rate_limit_429_count"] == 1
+        assert out['irrelevant_dropped_domains'] == [
+            {'domain': 'example.com', 'count': 1},
+        ]
+        assert out['prompt_too_long_count'] == 1
+        assert out['context_near_full_count'] == 1
+        assert out['compaction_trigger_count'] == 1
+        assert out['warn_excerpts'] == [
+            f'{ts} WARNING [LLM] candidate excerpt',
+        ]
+
+    def test_collect_app_log_signals_skips_non_candidate_timestamp_parse(
+            self, monkeypatch):
+        from lib.optimizer.analyzer import _logs
+
+        now = datetime.now()
+        timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
+        parse_timestamp = mock.Mock(wraps=_logs._parse_app_log_ts)
+        monkeypatch.setattr(_logs, '_parse_app_log_ts', parse_timestamp)
+
+        out = analyzer._collect_app_log_signals(
+            now - timedelta(hours=1),
+            log_lines=(
+                f'{timestamp} [INFO] ordinary request completed',
+                'not even a timestamp and no optimizer marker',
+                f'{timestamp} [INFO] [Tool:web_search] called',
+            ),
+        )
+
+        assert out['tool_call_counts'] == {'web_search': 1}
+        assert parse_timestamp.call_count == 1
+
+    def test_collect_app_log_signals_preserves_long_mixed_case_marker(self):
+        from lib.optimizer.analyzer import _logs
+
+        now = datetime.now()
+        timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
+        padding = 'x' * (_logs._APP_LOG_FAST_MARKER_CHARACTER_LIMIT + 1)
+
+        out = analyzer._collect_app_log_signals(
+            now - timedelta(hours=1),
+            log_lines=(
+                f'{timestamp} {padding} [sEaRcH] IRRELEVANT dropped long.example',
+            ),
+        )
+
+        assert out['irrelevant_dropped_domains'] == [
+            {'domain': 'long.example', 'count': 1},
+        ]
 
     def test_collect_app_log_signals_excludes_old_lines(self, tmp_path, monkeypatch):
         now = datetime.now()
@@ -456,6 +572,233 @@ class TestAnalyzerPureLogic:
         labels = {c["fingerprint"] for c in out}
         assert "errorlog::KeyError" in labels
         assert "errorlog::ConnectionError" not in labels  # below threshold
+
+    def test_combined_audit_scan_preserves_all_projections(self):
+        from lib.optimizer.analyzer import _audit
+
+        now = datetime.now().astimezone()
+        old = now - timedelta(days=2)
+        entries = (
+            {
+                'timestamp': now.isoformat(),
+                'event': 'optimizer_reviewed',
+                'user_id': _OWNER_USER_ID,
+                'detail': 'kept',
+            },
+            {
+                'timestamp': now.isoformat(),
+                'event': 'model_switch',
+                'user_id': _OWNER_USER_ID,
+                'old': 'model-a',
+                'new': 'model-b',
+                'reason': 'fallback',
+            },
+            *(
+                {
+                    'timestamp': now.isoformat(),
+                    'event': 'tool_error',
+                    'user_id': _OWNER_USER_ID,
+                    'fingerprint': 'same-failure',
+                    'detail': f'failure-{index}',
+                    'tool': 'fetch_url',
+                    'exc_type': 'TimeoutError',
+                }
+                for index in range(2)
+            ),
+            {
+                'timestamp': now.isoformat(),
+                'event': 'optimizer_foreign',
+                'user_id': _OWNER_USER_ID + 1,
+            },
+            {
+                'timestamp': old.isoformat(),
+                'event': 'optimizer_old',
+                'user_id': _OWNER_USER_ID,
+            },
+        )
+        lines = tuple(json.dumps(entry) for entry in entries)
+
+        evidence = _audit._collect_audit_log_evidence(
+            now - timedelta(hours=1),
+            owner_user_id=_OWNER_USER_ID,
+            allow_unowned=False,
+            log_lines=lines,
+        )
+        issues = analyzer._collect_recurring_issues(
+            now - timedelta(hours=1),
+            now - timedelta(hours=1),
+            owner_user_id=_OWNER_USER_ID,
+            allow_unowned=False,
+            audit_issue_clusters=evidence['tool_error_clusters'],
+            error_issue_clusters={},
+        )
+
+        assert evidence['audit_event_counts'] == {
+            'optimizer_reviewed': 1,
+            'model_switch': 1,
+            'tool_error': 2,
+        }
+        assert evidence['model_switch_events'] == [{
+            'timestamp': now.isoformat(),
+            'old': 'model-a',
+            'new': 'model-b',
+            'reason': 'fallback',
+            'error': '',
+        }]
+        assert len(evidence['optimizer_events']) == 1
+        assert [(row['fingerprint'], row['count']) for row in issues] == [
+            ('tool_error::same-failure', 2),
+        ]
+
+    def test_combined_error_scan_preserves_timestamp_split_semantics(self):
+        from lib.optimizer.analyzer import _issues
+
+        now = datetime.now()
+        recent = now.strftime('%Y-%m-%d %H:%M:%S')
+        old = (now - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        recent_first = f'{recent} [ERROR] KeyError first'
+        recent_second = f'{recent} [ERROR] KeyError second'
+        lines = (
+            f'{recent} [INFO] ordinary line',
+            '[ERROR] KeyError without timestamp',
+            recent_first,
+            f'{old} [ERROR] KeyError old',
+            recent_second,
+        )
+
+        excerpts, clusters = _issues._collect_error_log_evidence(
+            now - timedelta(hours=1),
+            log_lines=lines,
+            max_excerpt_lines=2,
+        )
+        recurring = analyzer._collect_recurring_issues(
+            now - timedelta(hours=1),
+            now - timedelta(hours=1),
+            owner_user_id=_OWNER_USER_ID,
+            allow_unowned=True,
+            audit_issue_clusters={},
+            error_issue_clusters=clusters,
+        )
+
+        assert excerpts == [recent_first, recent_second]
+        assert [(row['fingerprint'], row['count']) for row in recurring] == [
+            ('errorlog::KeyError', 3),
+        ]
+
+    def test_post_apply_metrics_scan_shared_app_snapshot_once(
+            self, monkeypatch):
+        from lib.optimizer.analyzer import _metrics
+
+        now = datetime.now()
+        recent = now.strftime('%Y-%m-%d %H:%M:%S')
+        old = (now - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        lines = (
+            f'{recent} [INFO] [Search] IRRELEVANT dropped a.example',
+            f'{recent} [INFO] [Search] IRRELEVANT dropped b.example',
+            f'{recent} [ERROR] [Tool:fetch_url] failed',
+            f'{old} [INFO] [Search] IRRELEVANT dropped a.example',
+        )
+        actions = [
+            {
+                'id': index,
+                'p_action_type': 'block_search_domain',
+                'p_action_args': json.dumps({'domain': domain}),
+                'outcome_metric': '',
+            }
+            for index, domain in enumerate(
+                ('a.example', 'b.example', 'a.example'), start=1)
+        ]
+        monkeypatch.setattr(
+            analyzer.storage, 'list_applied_actions',
+            mock.Mock(return_value=actions))
+        record_metric = mock.Mock()
+        monkeypatch.setattr(
+            analyzer.storage, 'record_outcome_metric', record_metric)
+        parse_timestamp = mock.Mock(wraps=_metrics._parse_app_log_ts)
+        monkeypatch.setattr(_metrics, '_parse_app_log_ts', parse_timestamp)
+        monkeypatch.setattr(
+            _metrics, '_safe_tail_lines',
+            mock.Mock(side_effect=AssertionError('snapshot must be reused')))
+
+        result = analyzer._compute_post_apply_metrics(
+            now - timedelta(hours=1),
+            owner_user_id=_OWNER_USER_ID,
+            allow_unowned_observability=True,
+            app_log_lines=lines,
+        )
+
+        assert parse_timestamp.call_count == len(lines)
+        assert [row['outcome_metric']['irrelevant_dropped_24h']
+                for row in result] == [1, 1, 1]
+        assert [row['outcome_metric']['total_tool_errors_24h']
+                for row in result] == [1, 1, 1]
+        assert record_metric.call_count == 3
+
+    def test_gather_evidence_reads_each_personal_log_tail_once(
+            self, tmp_path, monkeypatch):
+        from lib.optimizer.analyzer import _audit, _issues, _model
+
+        monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'personal')
+        now = datetime.now().astimezone()
+        local_timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
+        paths = {
+            'APP_LOG': tmp_path / 'app.log',
+            'ERROR_LOG': tmp_path / 'error.log',
+            'AUDIT_LOG_FILE': tmp_path / 'audit.log',
+        }
+        paths['APP_LOG'].write_text(
+            f'{local_timestamp} [ERROR] [Tool:fetch_url] failed\n')
+        paths['ERROR_LOG'].write_text(
+            f'{local_timestamp} [ERROR] KeyError first\n'
+            f'{local_timestamp} [ERROR] KeyError second\n')
+        paths['AUDIT_LOG_FILE'].write_text(json.dumps({
+            'timestamp': now.isoformat(),
+            'event': 'optimizer_snapshot_test',
+            'user_id': _OWNER_USER_ID,
+        }) + '\n')
+        for constant, path in paths.items():
+            monkeypatch.setattr(analyzer, constant, str(path))
+
+        original_tail = _model._safe_tail_lines
+        tail_paths: list[str] = []
+
+        def counted_tail(path, *args, **kwargs):
+            tail_paths.append(path)
+            return original_tail(path, *args, **kwargs)
+
+        monkeypatch.setattr(_model, '_safe_tail_lines', counted_tail)
+        parse_audit_line = mock.Mock(wraps=_audit._parse_audit_line)
+        parse_error_timestamp = mock.Mock(wraps=_issues._parse_app_log_ts)
+        monkeypatch.setattr(_audit, '_parse_audit_line', parse_audit_line)
+        monkeypatch.setattr(
+            _issues, '_parse_app_log_ts', parse_error_timestamp)
+        monkeypatch.setattr(
+            analyzer.storage, 'list_applied_actions', mock.Mock(return_value=[]))
+        monkeypatch.setattr(
+            _model, '_collect_scheduler_signals',
+            lambda **_kwargs: {
+                'failing_scheduled_tasks': [], 'idle_proactive_tasks': []})
+        monkeypatch.setattr(
+            _model, '_collect_cost_outliers',
+            lambda **_kwargs: {'top_cost_conversations': []})
+        monkeypatch.setattr(
+            _model, '_collect_conversation_tool_distribution',
+            lambda *_args, **_kwargs: {
+                'tool_counts': {}, 'search_urls': [], 'fetch_urls': []})
+        monkeypatch.setattr(
+            _model, '_collect_daily_report_snippets', lambda **_kwargs: [])
+
+        bundle = analyzer.gather_evidence(
+            principal=_optimizer_principal(), window_hours=24)
+
+        assert tail_paths.count(str(paths['APP_LOG'])) == 1
+        assert tail_paths.count(str(paths['ERROR_LOG'])) == 1
+        assert tail_paths.count(str(paths['AUDIT_LOG_FILE'])) == 1
+        assert bundle.tool_error_counts == {'fetch_url': 1}
+        assert bundle.audit_event_counts == {'optimizer_snapshot_test': 1}
+        assert len(bundle.recurring_issues) == 1
+        assert parse_audit_line.call_count == 1
+        assert parse_error_timestamp.call_count == 2
 
     def test_gather_evidence_degrades_when_dbs_unavailable(self, tmp_path, monkeypatch):
         """The DB-backed collectors must degrade gracefully (no raise) — point
@@ -556,6 +899,14 @@ def test_distributed_evidence_excludes_unowned_and_foreign_owner_logs(
     monkeypatch.setattr(analyzer, 'APP_LOG', str(app_log))
     monkeypatch.setattr(analyzer, 'ERROR_LOG', str(error_log))
     monkeypatch.setattr(analyzer, 'AUDIT_LOG_FILE', str(audit_log))
+    original_tail = _model._safe_tail_lines
+    tail_paths: list[str] = []
+
+    def counted_tail(path, *args, **kwargs):
+        tail_paths.append(path)
+        return original_tail(path, *args, **kwargs)
+
+    monkeypatch.setattr(_model, '_safe_tail_lines', counted_tail)
     monkeypatch.setattr(
         _model, '_collect_scheduler_signals',
         lambda **_kwargs: {
@@ -584,3 +935,4 @@ def test_distributed_evidence_excludes_unowned_and_foreign_owner_logs(
     assert 'unowned-secret' not in serialized
     assert 'foreign raw secret' not in serialized
     assert 'foreign owner private failure' not in serialized
+    assert tail_paths == [str(audit_log)]

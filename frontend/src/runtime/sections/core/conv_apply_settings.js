@@ -11,6 +11,10 @@ function _applySettingsToConv(conv, settings) {
   if (!settings) return;
   if (settings.model || settings.effort || settings.preset)
     conv.model = settings.model || settings.preset || settings.effort;
+  if (settings.modelRef && typeof settings.modelRef === 'object')
+    conv.modelRef = Object.assign({}, settings.modelRef);
+  if (settings.preferredProviderId !== undefined)
+    conv.preferredProviderId = settings.preferredProviderId || '';
   /* The provider that actually served this conv (stamped server-side at
    * task persist). The context gauge's limit lookup keys on
    * provider::model — without this mapping the gauge could never resolve
@@ -44,6 +48,14 @@ function _applySettingsToConv(conv, settings) {
     conv.planMode = settings.planMode === true;
   if (settings.imageGenModel)
     conv.imageGenModel = settings.imageGenModel;
+  if (settings.imageGenProviderId !== undefined)
+    conv.imageGenProviderId = settings.imageGenProviderId || '';
+  if (settings.imageGenCount !== undefined)
+    conv.imageGenCount = settings.imageGenCount;
+  if (settings.imageGenAspect)
+    conv.imageGenAspect = settings.imageGenAspect;
+  if (settings.imageGenResolution)
+    conv.imageGenResolution = settings.imageGenResolution;
   if (settings.projectSummary !== undefined)
     conv.projectSummary = settings.projectSummary;
   if (settings.projectPath !== undefined)
@@ -58,6 +70,7 @@ function _applySettingsToConv(conv, settings) {
   if (settings.pinnedAt !== undefined) conv.pinnedAt = settings.pinnedAt;
   if (settings.folderId !== undefined) conv.folderId = settings.folderId;
   if (settings.source) conv.source = settings.source;
+  if (settings.clonedFrom) conv.clonedFrom = settings.clonedFrom;
   if (settings.feishuUser) conv.feishuUser = settings.feishuUser;
   /* Autopilot run summaries — human-only sidecar (runId → {content,
    * translatedContent?, ts}). Not Turns; rendered as the run fold's

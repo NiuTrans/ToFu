@@ -25,6 +25,7 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_paper_podcast
 import io
 import os
 import sys
+import threading
 import time
 import uuid
 import wave
@@ -94,7 +95,9 @@ def podcast_env(tmp_path, monkeypatch):
     import lib.paper_identity as hashing
     import lib.paper.podcast_engine.worker as PE
     import lib.paper.podcast_engine._audio as PA
+    import lib.model_routing as routing
     import lib.tts as T
+    from types import SimpleNamespace
     from lib.storage import StorageRuntime, StorageSupervisor
     from lib.storage.service import install_runtime_for_test
 
@@ -118,6 +121,16 @@ def podcast_env(tmp_path, monkeypatch):
     monkeypatch.setattr(T, '_tts_slots', lambda: [_FakeSlot()])
     monkeypatch.setattr(T, '_post_speech',
                         lambda slot, text, *, voice, fmt, speed: _tiny_wav())
+    route = SimpleNamespace(model_id='unit-tts', provider_id='prov0')
+    group = SimpleNamespace(pin_id='prov0')
+    monkeypatch.setattr(
+        routing, 'list_capability_routes',
+        lambda *_args, **_kwargs: [route])
+    monkeypatch.setattr(
+        routing, 'mint_capability_slot_group',
+        lambda *_args, **_kwargs: ('unit-tts', group))
+    monkeypatch.setattr(
+        routing, 'dispose_routed_slot_group', lambda _group: True)
     monkeypatch.setattr(PA, '_transcode_to_mp3', lambda wav: None)  # WAV path
     try:
         yield tmp_path
@@ -182,13 +195,118 @@ def test_worker_full_chain(podcast_env, phash):
     assert not [f for f in os.listdir(outdir) if '.tmp.' in f]
 
 
+def test_audio_segments_overlap_with_bounded_ordered_assembly(monkeypatch):
+    import lib.paper.podcast_engine._audio as audio_module
+
+    monkeypatch.setenv('TOFU_PRODUCTION_TTS_FANOUT', '2')
+    lock = threading.Lock()
+    first_pair = threading.Barrier(2)
+    state = {'issued': 0, 'active': 0, 'peak': 0}
+    progress = []
+
+    def synth(_chunk, *, voice, fmt, speed, abort_check=None):
+        with lock:
+            index = state['issued']
+            state['issued'] += 1
+            state['active'] += 1
+            state['peak'] = max(state['peak'], state['active'])
+        try:
+            if index < 2:
+                first_pair.wait(timeout=2)
+            return _tiny_wav(), f'tts-{index}'
+        finally:
+            with lock:
+                state['active'] -= 1
+
+    monkeypatch.setattr(audio_module, '_synth_chunk_with_retry', synth)
+    monkeypatch.setattr(audio_module, '_transcode_to_mp3', lambda _wav: None)
+    result = audio_module.synthesize_script_audio(
+        dict(SCRIPT), voice='alloy', fmt='wav',
+        on_segment_done=lambda done, total: progress.append((done, total)))
+
+    assert state['issued'] == len(SCRIPT['segments'])
+    assert state['peak'] == 2
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+    assert result['container'] == 'wav' and result['duration_sec'] > 0
+
+
+def test_audio_failure_stops_serial_admission(monkeypatch):
+    import lib.paper.podcast_engine._audio as audio_module
+
+    calls = []
+
+    def fail_first(_chunk, **kwargs):
+        calls.append('called')
+        raise RuntimeError('provider failed')
+
+    monkeypatch.setattr(audio_module, '_synth_chunk_with_retry', fail_first)
+    with pytest.raises(RuntimeError, match='provider failed'):
+        audio_module.synthesize_script_audio(
+            dict(SCRIPT), voice='alloy', fmt='wav', max_workers=1)
+    assert calls == ['called']
+
+
+def test_audio_failure_stops_parallel_admission_after_active_wave(monkeypatch):
+    import lib.paper.podcast_engine._audio as audio_module
+
+    calls = []
+    lock = threading.Lock()
+
+    def fail_active_wave(_chunk, **kwargs):
+        with lock:
+            calls.append('called')
+        raise RuntimeError('parallel provider failed')
+
+    monkeypatch.setattr(
+        audio_module, '_synth_chunk_with_retry', fail_active_wave)
+    with pytest.raises(RuntimeError, match='parallel provider failed'):
+        audio_module.synthesize_script_audio(
+            dict(SCRIPT), voice='alloy', fmt='wav', max_workers=2)
+
+    assert calls == ['called', 'called']
+
+
+def test_audio_abort_prevents_the_chunk_retry(monkeypatch):
+    import lib.paper.podcast_engine._audio as audio_module
+    import lib.tts as tts
+
+    signal = {'aborted': False}
+    calls = []
+
+    def interrupted(*args, **kwargs):
+        calls.append('attempt')
+        signal['aborted'] = True
+        raise tts.TTSError('interrupted')
+
+    monkeypatch.setattr(tts, 'synthesize', interrupted)
+    with pytest.raises(audio_module.AudioSynthesisAborted):
+        audio_module._synth_chunk_with_retry(
+            'text', voice='alloy', fmt='wav', speed=None,
+            abort_check=lambda: signal['aborted'])
+    assert calls == ['attempt']
+
+
+def test_audio_rejects_an_oversized_provider_part(monkeypatch):
+    import lib.paper.podcast_engine._audio as audio_module
+    import lib.tts as tts
+
+    monkeypatch.setattr(audio_module, '_MAX_AUDIO_PART_BYTES', 10)
+    monkeypatch.setattr(
+        audio_module, '_synth_chunk_with_retry',
+        lambda *args, **kwargs: (b'x' * 11, 'oversized-provider'))
+
+    with pytest.raises(tts.TTSError, match='TTS part is 11 bytes'):
+        audio_module.synthesize_script_audio(
+            dict(SCRIPT), voice='alloy', fmt='wav', max_workers=1)
+
+
 def test_worker_script_only_degrade(podcast_env, phash, monkeypatch):
     """No TTS slot configured → script_only row + honest reason (owner rule)."""
     import lib.paper.podcast_engine.worker as PE
     import lib.tts as T
     from lib.paper.podcast_runtime import _new_podcast_task
 
-    monkeypatch.setattr(T, '_tts_slots', lambda: [])
+    monkeypatch.setattr(T, 'tts_available', lambda **_kwargs: False)
     _insert_report(phash)
     task = _new_podcast_task('podcast_test02', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
     PE.run_podcast_task(task)
@@ -203,6 +321,57 @@ def test_worker_script_only_degrade(podcast_env, phash, monkeypatch):
     assert not row['file_path']
 
 
+def test_unconfirmed_podcast_write_is_not_success(monkeypatch):
+    """The typed repository's ``saved=false`` is a failed commit, not done."""
+    import lib.paper.artifact_repository as artifact_repository
+    import lib.paper.podcast_engine.worker as PE
+
+    class Repository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == TEST_OWNER_USER_ID
+
+        def put_podcast(self, *_args, **_kwargs):
+            return False
+
+    monkeypatch.setattr(
+        artifact_repository, 'PaperArtifactRepository', Repository)
+
+    with pytest.raises(RuntimeError, match='did not confirm persistence'):
+        PE.persist_podcast_row(
+            'paper-hash', 'short', 'zh', 'alloy',
+            status='done', script=dict(SCRIPT), meta=dict(META),
+            user_id=TEST_OWNER_USER_ID,
+        )
+
+
+def test_script_only_task_requires_confirmed_persistence(
+    podcast_env, phash, monkeypatch,
+):
+    import lib.paper.podcast_engine.worker as PE
+    import lib.tts as T
+    from lib.paper.podcast_runtime import _new_podcast_task
+
+    _insert_report(phash)
+    monkeypatch.setattr(T, 'tts_available', lambda **_kwargs: False)
+    original_persist = PE.persist_podcast_row
+
+    def fail_script_only(*args, **kwargs):
+        if kwargs.get('status') == 'script_only':
+            raise RuntimeError('script-only write was not confirmed')
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(PE, 'persist_podcast_row', fail_script_only)
+    task = _new_podcast_task(
+        'podcast_unconfirmed_script', phash, 'short', 'zh', 'alloy', None,
+        user_id=TEST_OWNER_USER_ID,
+    )
+
+    PE.run_podcast_task(task)
+
+    assert task['status'] == 'error'
+    assert not any(event.get('type') == 'done' for event in task['events'])
+
+
 def test_worker_degrade_vs_error_contrast(podcast_env, phash, monkeypatch):
     """NEUTER-contrast: tts_available=True but ZERO slots → synthesize raises
     503 → the task must go ERROR(tts_unavailable), NOT script_only. Proves
@@ -211,7 +380,7 @@ def test_worker_degrade_vs_error_contrast(podcast_env, phash, monkeypatch):
     import lib.tts as T
     from lib.paper.podcast_runtime import _new_podcast_task
 
-    monkeypatch.setattr(T, 'tts_available', lambda: True)   # gate says yes…
+    monkeypatch.setattr(T, 'tts_available', lambda **_kwargs: True)  # gate says yes…
     monkeypatch.setattr(T, '_tts_slots', lambda: [])        # …but no slot
     _insert_report(phash)
     task = _new_podcast_task('podcast_test03', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)

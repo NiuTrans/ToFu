@@ -2,9 +2,9 @@
 
 The sidecar deliberately implements only the developer runtime boundary:
 agent runs, in-memory task replay, abort, custom-tool handoff, health, and
-capabilities, plus a small static Provider setup control plane. It does not
+capabilities, plus a small static model-routing setup control plane. It does not
 initialize the full Tofu server, storage authority, billing, conversations,
-or ChatUI application frontend.
+or full Tofu application frontend.
 """
 
 from __future__ import annotations
@@ -31,14 +31,16 @@ from tofu_agent.models import (
     AgentOverloadedError,
     AgentRequest,
     AgentTimeoutError,
-    ProviderConfig,
+    ModelRoutingConfig,
 )
 from tofu_agent.provider_setup import (
-    ProviderConfigurationLocked,
-    ProviderDiscoveryError,
-    ProviderSetupService,
+    ModelRoutingConfigurationLocked,
+    ModelRoutingSetupService,
 )
-from tofu_agent.provider_store import ProviderSettingsStore, ProviderStoreError
+from tofu_agent.provider_store import (
+    ModelRoutingSettingsStore,
+    ModelRoutingStoreError,
+)
 from tofu_agent.runtime import AgentExecution, AgentRuntime
 
 
@@ -329,43 +331,43 @@ def create_app(
     *,
     runtime: AgentRuntime | None = None,
     config: HeadlessServerConfig | None = None,
-    provider_setup: ProviderSetupService | None = None,
+    model_routing_setup: ModelRoutingSetupService | None = None,
 ) -> Quart:
     """Create the isolated headless ASGI application."""
     server_config = config or HeadlessServerConfig.from_env()
     owns_runtime = runtime is None
     if runtime is None:
-        store = ProviderSettingsStore()
-        environment_provider = ProviderConfig.from_env()
-        source = 'environment' if environment_provider is not None else 'none'
+        store = ModelRoutingSettingsStore()
+        environment_access = ModelRoutingConfig.from_env()
+        source = 'environment' if environment_access is not None else 'none'
         load_error = ''
-        saved_provider = None
-        if environment_provider is None:
+        saved_access = None
+        if environment_access is None:
             try:
-                saved_provider = store.load()
-            except ProviderStoreError as exc:
+                saved_access = store.load()
+            except ModelRoutingStoreError as exc:
                 load_error = str(exc)
-            if saved_provider is not None:
+            if saved_access is not None:
                 source = 'saved'
         agent_runtime = AgentRuntime.local(
-            provider=(environment_provider or saved_provider),
-            provider_source=source,
+            model_routing=(environment_access or saved_access),
+            model_routing_source=source,
         )
-        provider_setup = ProviderSetupService(
+        model_routing_setup = ModelRoutingSetupService(
             agent_runtime,
             store,
             source=source,
-            editable=environment_provider is None,
+            editable=environment_access is None,
             load_error=load_error,
         )
     else:
         agent_runtime = runtime
-    if provider_setup is None:
+    if model_routing_setup is None:
         source = str(getattr(
-            agent_runtime, 'provider_source', 'runtime') or 'runtime')
-        provider_setup = ProviderSetupService(
+            agent_runtime, 'model_routing_source', 'runtime') or 'runtime')
+        model_routing_setup = ModelRoutingSetupService(
             agent_runtime,
-            ProviderSettingsStore(),
+            ModelRoutingSettingsStore(),
             source=source,
             editable=source in {'none', 'saved'},
         )
@@ -378,7 +380,7 @@ def create_app(
     app.config['MAX_CONTENT_LENGTH'] = server_config.max_body_bytes
     app.extensions['tofu_agent_runtime'] = agent_runtime
     app.extensions['tofu_agent_server_config'] = server_config
-    app.extensions['tofu_agent_provider_setup'] = provider_setup
+    app.extensions['tofu_agent_model_routing_setup'] = model_routing_setup
 
     @app.before_request
     async def _authenticate():
@@ -392,7 +394,7 @@ def create_app(
                 and not _setup_request_is_same_origin():
             return _json_error(
                 'cross_site_request',
-                'Provider setup accepts same-origin browser requests only.',
+                'Model-routing setup accepts same-origin browser requests only.',
                 403,
             )
         if server_config.auth_mode == 'open':
@@ -445,16 +447,16 @@ def create_app(
         })
 
     @app.get('/setup')
-    async def _provider_setup_page():
+    async def _model_routing_setup_page():
         if not server_config.setup_enabled:
-            return _json_error('not_found', 'Provider setup is disabled.', 404)
+            return _json_error('not_found', 'Model-routing setup is disabled.', 404)
         return Response(
             _setup_asset('index.html'),
             content_type=_SETUP_ASSETS['index.html'],
         )
 
     @app.get('/setup/assets/<name>')
-    async def _provider_setup_asset(name: str):
+    async def _model_routing_setup_asset(name: str):
         if not server_config.setup_enabled or name not in _SETUP_ASSETS \
                 or name == 'index.html':
             return _json_error('not_found', 'Setup asset not found.', 404)
@@ -483,7 +485,7 @@ def create_app(
     def _setup_disabled():
         if server_config.setup_enabled:
             return None
-        return _json_error('not_found', 'Provider setup is disabled.', 404)
+        return _json_error('not_found', 'Model-routing setup is disabled.', 404)
 
     async def _setup_json_body():
         body = await request.get_json(silent=True)
@@ -491,89 +493,71 @@ def create_app(
             raise AgentConfigurationError('JSON object body required')
         return body
 
-    @app.get('/api/v1/setup/provider')
-    async def _get_provider_setup():
+    @app.get('/api/v1/setup/model-routing')
+    async def _get_model_routing_setup():
         disabled = _setup_disabled()
         if disabled:
             return disabled
-        return jsonify({'ok': True, **provider_setup.snapshot()})
+        return jsonify({'ok': True, **model_routing_setup.snapshot()})
 
-    @app.post('/api/v1/setup/provider/discover')
-    async def _discover_provider_models():
-        disabled = _setup_disabled()
-        if disabled:
-            return disabled
-        try:
-            body = await _setup_json_body()
-            result = await asyncio.to_thread(provider_setup.discover, body)
-            return jsonify({'ok': True, **result})
-        except ProviderDiscoveryError as exc:
-            return _json_error(
-                'provider_discovery_failed', str(exc), 502,
-                verdict=exc.verdict)
-        except (AgentConfigurationError, ValueError) as exc:
-            return _json_error('invalid_request', str(exc), 400)
-
-    @app.post('/api/v1/setup/provider/test')
-    async def _test_provider_connection():
+    @app.post('/api/v1/setup/model-routing/test')
+    async def _test_model_routing_connection():
         disabled = _setup_disabled()
         if disabled:
             return disabled
         try:
             body = await _setup_json_body()
             result = await asyncio.to_thread(
-                provider_setup.test_connection, body)
+                model_routing_setup.test_connection, body)
             return jsonify(result)
         except (AgentConfigurationError, ValueError) as exc:
             return _json_error('invalid_request', str(exc), 400)
 
-    @app.put('/api/v1/setup/provider')
-    async def _save_provider_setup():
+    @app.put('/api/v1/setup/model-routing')
+    async def _save_model_routing_setup():
         disabled = _setup_disabled()
         if disabled:
             return disabled
         try:
             body = await _setup_json_body()
-            result = await asyncio.to_thread(provider_setup.save, body)
+            result = await asyncio.to_thread(model_routing_setup.save, body)
             return jsonify({'ok': True, **result})
-        except ProviderConfigurationLocked as exc:
+        except ModelRoutingConfigurationLocked as exc:
             return _json_error('configuration_locked', str(exc), 409)
         except (AgentConfigurationError, ValueError) as exc:
             return _json_error('invalid_request', str(exc), 400)
         except Exception:
-            app.logger.exception('provider settings save failed')
+            app.logger.exception('model-routing settings save failed')
             return _json_error(
-                'internal_error', 'Provider settings could not be saved.', 500)
+                'internal_error', 'Model-routing settings could not be saved.', 500)
 
-    @app.delete('/api/v1/setup/provider')
-    async def _delete_provider_setup():
+    @app.delete('/api/v1/setup/model-routing')
+    async def _delete_model_routing_setup():
         disabled = _setup_disabled()
         if disabled:
             return disabled
         try:
-            result = await asyncio.to_thread(provider_setup.delete)
+            result = await asyncio.to_thread(model_routing_setup.delete)
             return jsonify({'ok': True, **result})
-        except ProviderConfigurationLocked as exc:
+        except ModelRoutingConfigurationLocked as exc:
             return _json_error('configuration_locked', str(exc), 409)
         except AgentConfigurationError as exc:
             return _json_error('invalid_request', str(exc), 400)
         except Exception:
-            app.logger.exception('provider settings delete failed')
+            app.logger.exception('model-routing settings delete failed')
             return _json_error(
-                'internal_error', 'Provider settings could not be removed.', 500)
+                'internal_error', 'Model-routing settings could not be removed.', 500)
 
     async def _execution_from_body(body: dict) -> AgentExecution:
-        provider_value = body.get('provider')
-        if isinstance(provider_value, dict) and not (
-                provider_value.get('model')
-                or provider_value.get('model_id')):
-            provider_value = dict(provider_value)
-            provider_value['model'] = (
-                body.get('model') or agent_runtime.default_model)
+        if 'provider' in body:
+            raise AgentConfigurationError(
+                'inline provider blocks were removed; configure '
+                'tofu.model-routing/v2 access')
         request_value = AgentRequest(
             messages=body.get('messages'),
-            model=body.get('model') or '',
-            provider=provider_value,
+            model=body.get('model'),
+            routing=(body['routing'] if body.get('routing') is not None else {}),
+            model_routing=body.get('model_routing'),
             config=(body['config']
                     if body.get('config') is not None else {}),
             capabilities=(body['capabilities']

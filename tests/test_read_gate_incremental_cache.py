@@ -170,9 +170,89 @@ def test_cache_invalidates_on_shrink(workspace, _isolate, monkeypatch):
 
 
 @pytest.mark.unit
+def test_recycled_call_id_cannot_lend_success_to_an_earlier_failed_read(
+        workspace, _isolate):
+    """Legacy positional IDs are scoped to their adjacent provider batch."""
+    rg = _isolate['read_gate']
+    task = _make_task(messages=(
+        _history_with_call(
+            'read_files', {'path': 'a.py'},
+            'Error: File not found: a.py', 'read_files_0')
+        + _history_with_call(
+            'read_files', {'path': 'b.py'},
+            '=== b.py ===\n  1: x = 1\n', 'read_files_0')
+    ))
+
+    satisfied = rg._collect_satisfied_paths_from_messages(task, workspace)
+
+    assert os.path.join(workspace, 'a.py') not in satisfied
+    assert os.path.join(workspace, 'b.py') in satisfied
+
+
+@pytest.mark.unit
+def test_duplicate_id_results_pair_by_occurrence_inside_one_batch(
+        workspace, _isolate):
+    rg = _isolate['read_gate']
+    task = _make_task(messages=[
+        {
+            'role': 'assistant',
+            'tool_calls': [
+                {'id': 'dup', 'function': {
+                    'name': 'read_files',
+                    'arguments': json.dumps({'path': 'a.py'}),
+                }},
+                {'id': 'dup', 'function': {
+                    'name': 'read_files',
+                    'arguments': json.dumps({'path': 'b.py'}),
+                }},
+            ],
+        },
+        {'role': 'tool', 'tool_call_id': 'dup',
+         'content': 'Error: File not found: a.py'},
+        {'role': 'tool', 'tool_call_id': 'dup',
+         'content': '=== b.py ===\n  1: x = 1\n'},
+    ])
+
+    satisfied = rg._collect_satisfied_paths_from_messages(task, workspace)
+
+    assert os.path.join(workspace, 'a.py') not in satisfied
+    assert os.path.join(workspace, 'b.py') in satisfied
+
+
+@pytest.mark.unit
+def test_cache_rescans_when_tool_receipt_arrives_after_assistant(
+        workspace, _isolate, monkeypatch):
+    rg = _isolate['read_gate']
+    carrier = _history_with_call(
+        'read_files', {'path': 'a.py'},
+        '=== a.py ===\n  1: x = 1\n', 'tc_split')
+    task = _make_task(messages=carrier[:1])
+    seen_starts = []
+    real_collect = rg._collect_satisfied_paths_from_messages
+
+    def spy(task_arg, project_path_arg, start=0):
+        seen_starts.append(start)
+        return real_collect(task_arg, project_path_arg, start=start)
+
+    monkeypatch.setattr(rg, '_collect_satisfied_paths_from_messages', spy)
+    assert not rg._cached_satisfied_paths_from_messages(task, workspace)
+    task['messages'].append(carrier[1])
+
+    satisfied = rg._cached_satisfied_paths_from_messages(task, workspace)
+
+    assert seen_starts == [0, 0]
+    assert os.path.join(workspace, 'a.py') in satisfied
+
+
+@pytest.mark.unit
 def test_gate_decision_unchanged_by_cache(workspace, _isolate):
     """The full gate's allow/refuse decision is identical whether or not the
     incremental cache is warm."""
+
+    rg = _isolate['read_gate']
+    assert rg._satisfied_cache.ttl > 0
+    assert rg._satisfied_cache.max_size is not None
+    assert rg._satisfied_cache.max_size > 0
     rg = _isolate['read_gate']
     from lib.tasks_pkg.handlers._read_gate import check_read_before_edit
 

@@ -90,16 +90,16 @@ async function _populateMcpTab() {
     if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
     var data = await r.json();
     _mcpCatalog = data.catalog || [];
+    if (data.mcp_tool_summary
+        && typeof runtimeScope.applyMcpToolSummary === 'function') {
+      runtimeScope.applyMcpToolSummary(data.mcp_tool_summary);
+    }
 
     _renderMcpCategoryBar();
     _renderMcpCatalog();
     _renderMcpInstalled();
     _mcpUpdateToolCount();
     _mcpCheckUpdates();   // async — cards gain update buttons on re-render
-    // Keep the per-turn context capsule's MCP chips in sync with the live
-    // connection state (install / connect / uninstall all funnel through a
-    // _populateMcpTab refresh). See info-rail.js::refreshMcpRailState.
-    if (typeof runtimeScope.refreshMcpRailState === 'function') runtimeScope.refreshMcpRailState();
   } catch (e) {
     if (grid) grid.innerHTML = '<p class="stg-empty">' + escapeHtml(t('mcp.loadFailed', { err: e.message })) + '</p>';
     debugLog('[MCP] Failed to load catalog: ' + e.message, 'error');
@@ -518,8 +518,14 @@ async function _mcpSaveTools(serverId, undo) {
   try {
     var r = await Api.mcp.serverToolsSet(serverId, disabled);
     if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
+    var data = typeof r.json === 'function'
+      ? await r.json().catch(function() { return {}; }) : {};
     var entry = _mcpCatalog.filter(function(x) { return x.id === serverId; })[0];
     if (entry) entry.disabled_tools = disabled;
+    if (data.mcp_tool_summary
+        && typeof runtimeScope.applyMcpToolSummary === 'function') {
+      runtimeScope.applyMcpToolSummary(data.mcp_tool_summary);
+    }
     _renderMcpCatalog();
     _mcpUpdateToolCount();
   } catch (err) {
@@ -1276,7 +1282,7 @@ async function _mcpSaveServer() {
 }
 
 function _applyDebugModeVisibility() {
-  const visible = Boolean(_featureFlags.debug_mode);
+  const visible = Boolean(runtimeScope._featureFlags?.debug_mode);
   for (const id of ['studioTopbarBtn', 'tasksTopbarBtn', 'mobileStudio',
     'mobileTasks', 'agentWorkflowSection', 'mobileWorkflowSection']) {
     const element = document.getElementById(id);
@@ -1285,7 +1291,7 @@ function _applyDebugModeVisibility() {
   /* A hidden experimental workflow must never keep owning future turns. The
    * already-accepted turn has an immutable config, so this paint/persist reset
    * only affects the next message when Debug Mode is switched off. */
-  if (!visible && typeof activeFlow !== 'undefined' && activeFlow) {
+  if (!visible && runtimeScope.activeFlow) {
     if (typeof _applyFlowUI === 'function') _applyFlowUI('');
     if (typeof captureActiveConversationSettings === 'function') {
       captureActiveConversationSettings();
@@ -1295,13 +1301,13 @@ function _applyDebugModeVisibility() {
 
 function _applyTradingVisibility() {
   const element = document.getElementById('tradingModeBtn');
-  if (element) element.style.display = _featureFlags.trading_enabled ? '' : 'none';
+  if (element) element.style.display = runtimeScope._featureFlags?.trading_enabled ? '' : 'none';
 }
 
 function openTradingMode() { window.location.href = 'trading.html'; }
 
 function _openActiveCompaction() {
-  if (typeof runtimeScope.openCompactionViewer === 'function' && activeConvId) {
-    return runtimeScope.openCompactionViewer(activeConvId);
+  if (typeof runtimeScope.openCompactionViewer === 'function' && runtimeScope.activeConvId) {
+    return runtimeScope.openCompactionViewer(runtimeScope.activeConvId);
   }
 }

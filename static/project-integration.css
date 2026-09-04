@@ -11,6 +11,7 @@
 .pbi-head button:disabled,.pbi-writer-actions button:disabled,.pbi-create button:disabled { opacity:.45; cursor:not-allowed; }
 .pbi-head button:hover:not(:disabled),.pbi-writer-actions button:hover:not(:disabled),.pbi-create button:hover:not(:disabled) { border-color:var(--pbi-blue); }
 .pbi-head .pbi-promote,.pbi-primary { background:var(--text-primary,#292722)!important; color:var(--bg-primary,#fff)!important; border-color:transparent!important; }
+.pbi-head .pbi-reconcile { border-color:color-mix(in srgb,var(--pbi-blue) 45%,var(--border-color,#d8d3c8)); color:var(--pbi-blue); }
 .pbi-auto { display:inline-flex; align-items:center; gap:6px; min-height:30px; border-radius:999px; padding:0 10px; background:color-mix(in srgb,var(--pbi-green) 9%,transparent); color:var(--pbi-green); font-size:11px; font-weight:700; }
 .pbi-auto>span { width:7px; height:7px; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb,currentColor 13%,transparent); }
 .pbi-auto.is-off { color:var(--pbi-red); }

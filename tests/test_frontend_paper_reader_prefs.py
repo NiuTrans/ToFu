@@ -28,6 +28,7 @@ import shutil
 import subprocess
 
 import pytest
+from tests._paper_vite import compiled_typescript
 
 pytestmark = pytest.mark.unit
 
@@ -35,6 +36,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 PAPER_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'reader-prefs.ts')
+
+_TEST_ENTRY = """
+import {
+  applyReaderPreferences,
+  readerFontStep,
+  readerWidthCycle,
+} from './reader-prefs';
+
+Object.assign(window, {
+  _applyReaderPrefs: applyReaderPreferences,
+  _readerFontStep: readerFontStep,
+  _readerWidthCycle: readerWidthCycle,
+});
+"""
 
 
 def _node_deps_available() -> bool:
@@ -142,19 +157,16 @@ def _run(paper_js: str) -> subprocess.CompletedProcess:
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed')
-def test_vite_reader_prefs_apply_and_persist(tmp_path):
+def test_vite_reader_prefs_apply_and_persist():
     """The native TS owner must satisfy the same browser behavior contract."""
     esbuild = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
     if not os.path.isfile(esbuild):
         pytest.skip('esbuild dev dependency not installed')
-    built = tmp_path / 'reader-prefs.js'
-    compiled = subprocess.run(
-        [esbuild, PAPER_TS, '--bundle', '--format=iife',
-         '--platform=browser', f'--outfile={built}'],
-        capture_output=True, text=True, timeout=60)
-    assert compiled.returncode == 0, compiled.stderr
-
-    proc = _run(str(built))
+    with compiled_typescript(
+        PAPER_TS,
+        contents=_TEST_ENTRY,
+    ) as built:
+        proc = _run(built)
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]

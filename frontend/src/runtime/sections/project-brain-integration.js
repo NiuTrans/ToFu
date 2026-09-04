@@ -41,7 +41,7 @@
     unregistered: 'Unregistered worktrees', unregisteredHint: 'Visible to Git, but not owned by this integration queue.',
     showingFirst: 'showing the first 20',
     workspaces: 'Writer workspaces', noWorkspaces: 'No writer workspace is registered.',
-    task: 'Task ID', taskPlaceholder: 'e.g. auth-refresh',
+    task: 'Work ID', taskPlaceholder: 'e.g. pw_a1b2c3',
     titleLabel: 'Title', titlePlaceholder: 'Short description (optional)',
     worktreeLabel: 'Worktree',
     pathPlaceholder: 'Existing worktree path (leave empty to create one)',
@@ -190,7 +190,7 @@
   }
 
   function _taskActions(item) {
-    var id = _esc(item.taskId);
+    var id = _esc(item.workId);
     var writable = item.state === 'running' || item.state === 'checkpointed' ||
       item.state === 'quarantined' || item.state === 'failed';
     var html = '';
@@ -223,7 +223,8 @@
         '<div class="pbi-writer-state"><span class="pbi-state-dot"></span>' +
         _esc(_stateLabel(item.state)) + '</div>' +
         '<div class="pbi-writer-main"><div class="pbi-writer-title"><strong>' +
-        _esc(item.title || item.taskId) + '</strong><code>' + _esc(item.taskId) + '</code></div>' +
+        _esc(item.title || item.workId) + '</strong><code>' +
+        _esc(item.workId) + '</code></div>' +
         '<div class="pbi-writer-path" title="' + _esc(item.workspacePath) + '">' +
         _esc(item.workspacePath) + '</div><div class="pbi-writer-meta"><span>' + _esc(_pbiText('checkpoint')) + ' ' +
         _esc(checkpoint) + '</span><span>' + (dirty.scanned === false
@@ -241,7 +242,7 @@
     return events.map(function (event) {
       return '<div class="pbi-event"><span class="pbi-event-dot"></span><div><strong>' +
         _esc(event.message || event.kind) + '</strong>' +
-        (event.taskId ? '<code>' + _esc(event.taskId) + '</code>' : '') +
+        (event.workId ? '<code>' + _esc(event.workId) + '</code>' : '') +
         (event.detail ? '<p>' + _esc(event.detail) + '</p>' : '') +
         '<time>' + _esc(_fmtTime(event.createdAt)) + '</time></div></div>';
     }).join('');
@@ -249,7 +250,7 @@
 
   function _writerForm() {
     return '<form class="pbi-create" id="pbiCreateForm"><div class="pbi-create-fields">' +
-      '<label><span>' + _esc(_pbiText('task')) + '</span><input name="taskId" required maxlength="96" placeholder="' +
+      '<label><span>' + _esc(_pbiText('task')) + '</span><input name="workId" required maxlength="96" placeholder="' +
       _esc(_pbiText('taskPlaceholder')) + '"></label>' +
       '<label><span>' + _esc(_pbiText('titleLabel')) + '</span><input name="title" maxlength="160" placeholder="' +
       _esc(_pbiText('titlePlaceholder')) + '"></label>' +
@@ -363,17 +364,17 @@
     });
   }
 
-  function _runAction(action, taskId) {
+  function _runAction(action, workId) {
     if (_state.busy) return;
     var api = _api();
     if (!api || !_state.path) return;
     var promise;
-    if (action === 'checkpoint') promise = api.integrationCheckpoint(_state.path, taskId);
-    else if (action === 'submit') promise = api.integrationSubmit(_state.path, taskId);
-    else if (action === 'retry') promise = api.integrationRetry(_state.path, taskId);
+    if (action === 'checkpoint') promise = api.integrationCheckpoint(_state.path, workId);
+    else if (action === 'submit') promise = api.integrationSubmit(_state.path, workId);
+    else if (action === 'retry') promise = api.integrationRetry(_state.path, workId);
     else if (action === 'discard') {
       if (!window.confirm(_pbiText('confirmDiscard'))) return;
-      promise = api.integrationDiscard(_state.path, taskId);
+      promise = api.integrationDiscard(_state.path, workId);
     }
     else if (action === 'reconcile-head') {
       if (!window.confirm(_pbiText('confirmReconcileHead'))) return;
@@ -406,14 +407,14 @@
   function _create(form) {
     if (_state.busy) return;
     var api = _api();
-    var taskId = (form.elements.taskId.value || '').trim();
+    var workId = (form.elements.workId.value || '').trim();
     var title = (form.elements.title.value || '').trim();
     var workspacePath = (form.elements.workspacePath.value || '').trim();
-    if (!api || !taskId) return;
+    if (!api || !workId) return;
     _state.busy = true;
     var promise = workspacePath
-      ? api.integrationRegister(_state.path, taskId, workspacePath, title)
-      : api.integrationCreate(_state.path, taskId, title);
+      ? api.integrationRegister(_state.path, workId, workspacePath, title)
+      : api.integrationCreate(_state.path, workId, title);
     Promise.resolve(promise).then(function () {
       form.reset();
       return refreshIntegration(_state.path);

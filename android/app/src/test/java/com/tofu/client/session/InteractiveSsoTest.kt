@@ -26,7 +26,7 @@ class InteractiveSsoTest {
         cookieHost: String? = null,
     ) = Profile(
         id = 1, alias = "s", baseUrl = baseUrl, authType = auth,
-        cookieHost = cookieHost, projectPath = "/home/dev/chatui",
+        cookieHost = cookieHost, projectPath = "/home/dev/tofu",
     )
 
     // ── navigation ────────────────────────────────────────────────────────

@@ -39,6 +39,11 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
 from lib.tasks_pkg.compaction.api import (
     execute_compact_tool,
 )
+from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+from lib.llm_sanitize import (
+    _merge_consecutive_same_role,
+    _strip_non_api_fields,
+)
 
 
 def _u(text, **flags):
@@ -180,10 +185,23 @@ class TestExecuteCompactRetainsUserVerbatim(unittest.TestCase):
         boundary = _find_turn_boundary(msgs, budget_tokens=1)
         self.assertEqual(msgs[boundary]['content'], 'current turn: finish it')
 
+        # The exact rebuild then crosses build_body's real field-strip +
+        # same-role boundary.  The retained wrapper is synthetic on BOTH
+        # original edges: anchor→wrapper and wrapper→current user.  It must
+        # not create the production false-positive warning that used to fire
+        # on every later LLM round after compaction.
+        clean = _strip_non_api_fields(msgs)
+        with self.assertNoLogs('lib.llm_sanitize._messages', level='WARNING'):
+            wire = _merge_consecutive_same_role(clean)
+        self.assertEqual(wire[1]['role'], 'user')
+        self.assertIn('the original goal', str(wire[1]['content']))
+        self.assertIn('current turn: finish it', str(wire[1]['content']))
+
     def test_no_real_user_in_old_region_no_wrapper(self):
+        authoritative_anchor = _u('the original goal')
         messages = [
             {'role': 'system', 'content': 'sys'},
-            _u('the original goal'),
+            authoritative_anchor,
             _a('a very long earlier reply with no user text in between'),
             _u('current turn: finish it'),
             _a('on it'),
@@ -193,6 +211,28 @@ class TestExecuteCompactRetainsUserVerbatim(unittest.TestCase):
                              for m in msgs),
                          'no real user message in the old region → no '
                          'wrapper (byte-identical to pre-feature behavior)')
+        self.assertNotIn('_isObjectiveAnchor', authoritative_anchor,
+                         'L2 must not mutate the authoritative anchor object')
+        self.assertIsNot(msgs[1], authoritative_anchor)
+        self.assertTrue(msgs[1].get('_isObjectiveAnchor'))
+
+        # Zero retained-user rows rebuilds ``system → objective anchor →
+        # current user``.  That is a designed L2 seam, not a duplicate user
+        # producer.  Exercise the complete model-neutral wire tail so private
+        # structure can guide diagnostics but can never leave the process.
+        with self.assertNoLogs('lib.llm_sanitize._messages', level='WARNING'):
+            wire = apply_wire_sanitize(msgs)
+        self.assertEqual(wire, [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user',
+             'content': 'the original goal\n\ncurrent turn: finish it'},
+            {'role': 'assistant', 'content': 'on it'},
+        ])
+        self.assertFalse(any(
+            key.startswith('_tofu')
+            for message in wire
+            for key in message
+        ), 'short-lived L2 classification hints must never reach wire output')
 
     def test_second_compaction_does_not_duplicate_wrapper(self):
         messages = [

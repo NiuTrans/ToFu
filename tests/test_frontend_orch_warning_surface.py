@@ -134,6 +134,10 @@ def test_main_editor_delegates_feedback_to_shared_controller():
         os.path.join(ROOT, 'static', 'js', 'orchestration-feedback.js'),
         encoding='utf-8',
     ).read()
+    services = open(
+        os.path.join(ROOT, 'static', 'js', 'orchestration-studio-services.js'),
+        encoding='utf-8',
+    ).read()
     studio_api = open(
         os.path.join(
             ROOT, 'frontend/src/features/orchestration/studio-api.ts'),
@@ -143,7 +147,7 @@ def test_main_editor_delegates_feedback_to_shared_controller():
     assert 'createOrchestrationFeedback' in editor
     assert 'toast: _orchServices.toast' in editor
     assert '_orchStudioApi.toast' in adapters
-    assert '_orchFeedback.warn' in adapters
+    assert '_orchFeedback.warn' in services
     assert "call('toast', message, isError, toastOptions)" in studio_api
     assert "createElement('div')" not in adapters
     assert "createElement('div')" in feedback

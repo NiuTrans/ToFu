@@ -10,6 +10,8 @@ from tests._runtime_sections import runtime_section_path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = Path(runtime_section_path('local-control.js'))
 API_SOURCE = Path(runtime_section_path('api.js'))
+MAIN_ENTRY = ROOT / 'frontend' / 'src' / 'main.ts'
+FEATURE_ENTRY = ROOT / 'frontend' / 'src' / 'features' / 'local-control.ts'
 
 pytestmark = pytest.mark.unit
 
@@ -17,10 +19,15 @@ pytestmark = pytest.mark.unit
 def test_relay_contract_is_wired_to_modal_download_and_hash_entry():
     src = SOURCE.read_text(encoding='utf-8')
     api_src = API_SOURCE.read_text(encoding='utf-8')
+    main_src = MAIN_ENTRY.read_text(encoding='utf-8')
+    feature_src = FEATURE_ENTRY.read_text(encoding='utf-8')
     assert "credentials: 'include'" in api_src
     assert 'Api.desktop.relayPoll' in src
     assert "targetAddressSpace: 'local'" in src
-    assert "#tofu-agent-relay" in src
+    assert "#tofu-agent-relay" in main_src
+    assert "prepareFeature('_lcEnsureAgentRelay')" in main_src
+    assert 'AGENT_RELAY_DEEP_LINK_DURATION_MS' in feature_src
+    assert "name !== '_lcEnsureAgentRelay'" in feature_src
     assert '立即通过浏览器连接' in src
     assert 'data-tofu-action="_lcEnsureAgentRelay(1800000)"' in src
     assert 'onclick="_lcEnsureAgentRelay(1800000)"' not in src

@@ -31,7 +31,9 @@ def store(monkeypatch):
     monkeypatch.setattr(A, '_STORE_PATH', os.path.join(tmp, 'auth_sources.json'))
     monkeypatch.setattr(sk, '_STORE_PATH', os.path.join(tmp, 'site_knowledge.json'))
     A.invalidate_cache()
+    A._live_session_cache.clear()
     yield A, sk
+    A._live_session_cache.clear()
     A.invalidate_cache()
 
 
@@ -213,6 +215,29 @@ def test_live_session_cached(store, monkeypatch):
     assert len(calls) == 1
     A.live_session_status('xiaohongshu.com', owner_user_id=1, refresh=True)
     assert len(calls) == 2, 'refresh=1 forces a re-probe'
+
+
+def test_live_session_cache_is_lru_bounded(store, monkeypatch):
+    A, _ = store
+    monkeypatch.setattr(A._live_session_cache, 'max_size', 2)
+    _fake_bridge(monkeypatch, connected=True, cookies=('session',))
+
+    for domain in ('one.example', 'two.example', 'three.example'):
+        A.live_session_status(domain, owner_user_id=1)
+
+    assert len(A._live_session_cache) == 2
+    assert A._live_session_cache.stats()['size_evicts'] == 1
+
+
+def test_live_session_cache_capacity_derives_from_device_budget(
+        store, monkeypatch):
+    A, _ = store
+    monkeypatch.setattr(
+        A, 'resolve_resource_budget', lambda *_args, **_kwargs: 64)
+    assert A._live_session_cache_capacity() == 256
+    monkeypatch.setattr(
+        A, 'resolve_resource_budget', lambda *_args, **_kwargs: 2048)
+    assert A._live_session_cache_capacity() == 8192
 
 
 # ── knowledge badge on the listing ────────────────────────

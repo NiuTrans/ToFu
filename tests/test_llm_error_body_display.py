@@ -174,6 +174,26 @@ class TestClassifyDisplayIntegration:
             _classify_http_error(429, raw, 'm', '[t]')
         assert ei.value.is_quota is True
 
+    def test_shared_project_wire_rejections_are_debug_only(self, monkeypatch):
+        """Dispatcher owns bounded INFO records for a repeated family streak."""
+        infos, debugs = [], []
+        monkeypatch.setattr(
+            'lib.llm_errors.logger.info', lambda *a, **k: infos.append(a))
+        monkeypatch.setattr(
+            'lib.llm_errors.logger.debug', lambda *a, **k: debugs.append(a))
+
+        with pytest.raises(RateLimitError) as ei:
+            _classify_http_error(
+                429,
+                'API HTTP 429: request reached project (kimi-k3) TPM rate limit',
+                'kimi-k3',
+                '[t]',
+            )
+
+        assert ei.value.is_shared_contention is True
+        assert infos == []
+        assert len(debugs) == 1
+
     def test_plain_text_message_byte_preserved(self):
         """Non-envelope bodies must raise with the raw text unchanged —
         byte-parity with pre-fix behaviour for non-JSON gateways."""
@@ -285,6 +305,75 @@ class TestUpstreamTransientClassification:
         raw = 'API HTTP 403: {"error":{"message":"invalid api key"}}'
         with pytest.raises(PermissionError_):
             _classify_http_error(403, raw, 'm', '[t]')
+
+    def test_missing_key_claim_with_wire_credential_is_gateway_anomaly(self):
+        """A header-present request cannot prove key death by claiming the
+        header is missing; preserve it as bounded gateway evidence."""
+        raw = 'API HTTP 401: {"error":{"message":"missing api key"}}'
+        with pytest.raises(RateLimitError) as raised:
+            _classify_http_error(
+                401, raw, 'kimi-k3', '[t]', credential_present=True)
+        error = raised.value
+        assert error.is_gateway is True
+        assert error.is_credential_delivery_anomaly is True
+        assert error.status_code == 401
+        assert error.reason == 'credential_delivery_anomaly'
+
+    def test_missing_key_claim_without_wire_credential_is_permission(self):
+        raw = 'API HTTP 401: missing api key'
+        with pytest.raises(PermissionError_):
+            _classify_http_error(
+                401, raw, 'kimi-k3', '[t]', credential_present=False)
+
+    def test_invalid_key_stays_permission_even_when_header_was_sent(self):
+        raw = 'API HTTP 401: invalid api key provided'
+        with pytest.raises(PermissionError_):
+            _classify_http_error(
+                401, raw, 'kimi-k3', '[t]', credential_present=True)
+
+    def test_wire_credential_evidence_reads_final_header_values_only(self):
+        assert _llm_errors._has_outbound_credential({
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer configured',
+        })
+        assert _llm_errors._has_outbound_credential({
+            'x-api-key': 'configured',
+        })
+        assert not _llm_errors._has_outbound_credential({
+            'Authorization': '',
+            'Content-Type': 'application/json',
+        })
+        assert not _llm_errors._has_outbound_credential({
+            'Authorization': 'Bearer   ',
+        })
+        assert not _llm_errors._has_outbound_credential({
+            'Authorization': 'Bearer configured',
+            'authorization': '',
+        })
+
+    def test_stream_request_plan_carries_boolean_wire_evidence(self):
+        from lib.llm._sse_core import prepare_request
+
+        body = {
+            'model': 'unit-model',
+            'messages': [{'role': 'user', 'content': 'hi'}],
+            'max_tokens': 8,
+            'stream': True,
+        }
+        plan = prepare_request(
+            body,
+            api_key='unit-test-key',
+            base_url='https://example.invalid/v1',
+        )
+        overridden = prepare_request(
+            body,
+            api_key='unit-test-key',
+            base_url='https://example.invalid/v1',
+            extra_headers={'authorization': ''},
+        )
+
+        assert plan.credential_present is True
+        assert overridden.credential_present is False
 
     def test_400_deterministic_rejection_raises_bad_request(self):
         """signature: Field required — deterministic payload rejection. NOT

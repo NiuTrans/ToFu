@@ -137,12 +137,44 @@ class BuildSpecTest(unittest.TestCase):
         self.assertIn('ErrorEnvelope', spec['components']['schemas'])
         self.assertIn('TypedErrorEnvelope', spec['components']['schemas'])
         self.assertIn('ChatCompletionRequest', spec['components']['schemas'])
+        self.assertIn(
+            'NativeChatCompletionRequest', spec['components']['schemas'])
         self.assertIn('TaskState', spec['components']['schemas'])
         self.assertIn('ApiKey', spec['components']['schemas'])
         # Security schemes wired.
         self.assertIn('bearerAuth', spec['components']['securitySchemes'])
         self.assertEqual(
             set(spec['components']['securitySchemes']), {'bearerAuth'})
+
+    def test_native_and_compatible_chat_models_have_distinct_wire_shapes(self):
+        from lib.openapi._schema import _components
+
+        schemas = _components()['schemas']
+        compatible = schemas['ChatCompletionRequest']['allOf'][1]
+        native = schemas['NativeChatCompletionRequest']['allOf'][1]
+
+        self.assertEqual(compatible['properties']['model'], {'type': 'string'})
+        self.assertEqual(
+            native['properties']['model'],
+            {'$ref': '#/components/schemas/NativeModelSelection'},
+        )
+        selections = schemas['NativeModelSelection']['oneOf']
+        self.assertEqual(
+            {tuple(row['required']) for row in selections},
+            {('creator_id', 'model_id'), ('provider_id', 'offering_id')},
+        )
+
+    def test_native_agent_run_publishes_the_same_structured_model_boundary(self):
+        from routes.api_v1.agent_run import agent_run
+
+        schema = agent_run._api_meta['request_body']['content'][
+            'application/json']['schema']
+        self.assertEqual(set(schema['required']), {'messages', 'model'})
+        self.assertEqual(
+            schema['properties']['model'],
+            {'$ref': '#/components/schemas/NativeModelSelection'},
+        )
+        self.assertNotIn('provider', schema['properties'])
 
     def test_error_schemas_share_the_runtime_envelope_contract(self):
         from lib.error_envelope import KINDS, make_envelope

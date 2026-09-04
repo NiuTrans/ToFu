@@ -11,6 +11,8 @@ the consent banner / grant store / resolve endpoints were removed):
   * a fresh stored session suppresses re-capture (no capture loop);
   * a per-domain cooldown suppresses a second login tab right after one was
     opened (no tab-spam when the user ignores the login tab);
+  * bounded admission starts before the synchronous probe, so concurrent
+    fetches cannot duplicate the route's expensive browser commands;
   * the fetch hook returns None on a wall (wall text is not content) and
     retries inline only when capture completed synchronously.
 
@@ -101,6 +103,16 @@ class TestWallDetection:
 # ══════════════════════════════════════════════════════════
 
 class TestCapture:
+    def test_capture_limits_derive_from_poll_budget(self, monkeypatch):
+        from lib.browser.queue import _limits
+
+        monkeypatch.setattr(
+            _limits, 'resolve_resource_budget', lambda *_args, **_kwargs: 8)
+        assert _limits.login_capture_limits() == (4, 2)
+        monkeypatch.setattr(
+            _limits, 'resolve_resource_budget', lambda *_args, **_kwargs: 128)
+        assert _limits.login_capture_limits() == (64, 8)
+
     def test_capture_stores_only_after_probe_clears_wall(
             self, monkeypatch, ext_online, no_existing_source):
         stored = {}
@@ -126,6 +138,7 @@ class TestCapture:
         assert stored.get('domain') == 'walled.example.com'
         assert stored.get('enabled') is True
         assert stored.get('cookies') == [{'name': 'sess', 'value': 'x'}]
+        assert not cc._capture_threads, 'synchronous success releases admission'
 
     def test_anonymous_cookies_not_stored_without_probe_pass(
             self, monkeypatch, ext_online, no_existing_source):
@@ -212,6 +225,147 @@ class TestCapture:
             user_id=USER_ID,
         ) is False
         assert len(started) == 1, 'a second login tab must not open inside the cooldown'
+
+    def test_async_capture_enforces_owner_and_process_capacity(
+            self, monkeypatch, no_existing_source):
+        monkeypatch.setattr(
+            'lib.browser.queue.is_extension_connected',
+            lambda *_args, **_kwargs: True)
+        probed = []
+        monkeypatch.setattr(
+            cc, '_probe_no_longer_walled',
+            lambda url, **_kwargs: probed.append(url) or False)
+        monkeypatch.setattr(cc, '_capture_limits', lambda: (2, 1))
+        started = []
+
+        class FakeThread:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def start(self):
+                started.append(self.kwargs['name'])
+
+        monkeypatch.setattr(cc.threading, 'Thread', FakeThread)
+
+        for owner, domain in (
+            ('41', 'owner-a.example'),
+            ('41', 'owner-b.example'),
+            ('42', 'owner-c.example'),
+            ('43', 'global-d.example'),
+        ):
+            assert cc.handle_login_wall(
+                f'https://{domain}/app',
+                client_id=f'client-{owner}',
+                user_id=owner,
+            ) is False
+
+        assert started == [
+            'cookie-capture-owner-a.example',
+            'cookie-capture-owner-c.example',
+        ]
+        assert probed == [
+            'https://owner-a.example/app',
+            'https://owner-c.example/app',
+        ]
+        assert len(cc._capture_threads) == 2
+
+    def test_capture_slot_deduplicates_synchronous_probe(
+            self, monkeypatch, ext_online, no_existing_source):
+        probe_calls = []
+
+        def nested_probe(*_args, **_kwargs):
+            probe_calls.append(True)
+            assert cc.handle_login_wall(
+                'https://dedupe.example/app',
+                client_id=CLIENT_ID,
+                user_id=USER_ID,
+            ) is False
+            return False
+
+        monkeypatch.setattr(cc, '_probe_no_longer_walled', nested_probe)
+        monkeypatch.setattr(
+            cc.threading,
+            'Thread',
+            lambda **_kwargs: type(
+                'FakeThread', (), {'start': lambda _self: None})(),
+        )
+
+        assert cc.handle_login_wall(
+            'https://dedupe.example/app',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is False
+        assert probe_calls == [True]
+
+    def test_probe_race_does_not_replace_existing_capture(
+            self, monkeypatch, ext_online, no_existing_source):
+        capture_key = (USER_ID, CLIENT_ID, 'race.example')
+        existing_thread = object()
+
+        def racing_probe(*_args, **_kwargs):
+            with cc._capture_lock:
+                cc._capture_threads[capture_key] = existing_thread
+            return False
+
+        monkeypatch.setattr(cc, '_probe_no_longer_walled', racing_probe)
+        started = []
+        monkeypatch.setattr(
+            cc.threading,
+            'Thread',
+            lambda **_kwargs: type(
+                'FakeThread', (),
+                {'start': lambda _self: started.append(True)},
+            )(),
+        )
+
+        assert cc.handle_login_wall(
+            'https://race.example/app',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is False
+
+        assert cc._capture_threads[capture_key] is existing_thread
+        assert started == []
+
+    def test_thread_start_failure_releases_slot_and_cooldown(
+            self, monkeypatch, ext_online, no_existing_source):
+        monkeypatch.setattr(
+            cc, '_probe_no_longer_walled', lambda *_args, **_kwargs: False)
+
+        class FailingThread:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                raise RuntimeError('thread unavailable')
+
+        monkeypatch.setattr(cc.threading, 'Thread', FailingThread)
+        capture_key = (USER_ID, CLIENT_ID, 'start-fail.example')
+
+        with pytest.raises(RuntimeError, match='thread unavailable'):
+            cc.handle_login_wall(
+                'https://start-fail.example/app',
+                client_id=CLIENT_ID,
+                user_id=USER_ID,
+            )
+
+        assert capture_key not in cc._capture_threads
+        assert capture_key not in cc._last_attempt
+
+    def test_cooldown_registry_is_lru_bounded(self, monkeypatch):
+        monkeypatch.setattr(cc, '_cooldown_capacity', lambda: 3)
+        with cc._capture_lock:
+            for index in range(4):
+                cc._record_attempt_locked(
+                    ('41', 'client', f'domain-{index}.example'),
+                    now=float(index),
+                )
+
+        assert tuple(cc._last_attempt) == (
+            ('41', 'client', 'domain-1.example'),
+            ('41', 'client', 'domain-2.example'),
+            ('41', 'client', 'domain-3.example'),
+        )
 
     def test_fresh_auth_source_suppresses_recapture(
             self, monkeypatch, ext_online):

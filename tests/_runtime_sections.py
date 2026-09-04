@@ -30,15 +30,36 @@ RUNTIME_EXTRA = (
     ROOT / 'frontend' / 'src' / 'runtime' / 'scene' / 'tofu-scene.js',
     ROOT / 'frontend' / 'src' / 'runtime' / 'scene' / 'tofu-pet.js',
 )
+_RETIRED_ORCHESTRATION_API_NAMES = (
+    'api/orchestration-http-contract.generated.js',
+    'api/orchestration-response-contracts.js',
+    'api/orchestration-client-methods.js',
+    'api/orchestration-endpoint-transport.js',
+    'api/orchestration-endpoints.js',
+    'api/orchestrations.js',
+)
+
+
+def shipped_source_text(rel_path: str) -> str:
+    """Read shipped source text for anchor guards; the single audited read point."""
+    return (ROOT / rel_path).read_text(encoding='utf-8')
 
 
 @lru_cache(maxsize=1)
 def _manifest_rows() -> tuple[dict[str, str], ...]:
     payload = json.loads(MANIFEST.read_text(encoding='utf-8'))
     rows = payload.get('sections')
-    if payload.get('version') != 1 or not isinstance(rows, list):
+    lazy_bundles = payload.get('lazyBundles')
+    if (payload.get('version') != 2 or not isinstance(rows, list)
+            or not isinstance(lazy_bundles, list)):
         raise AssertionError('invalid retained-runtime section manifest')
-    return tuple(rows)
+    combined = list(rows)
+    for bundle in lazy_bundles:
+        lazy_rows = bundle.get('sections') if isinstance(bundle, dict) else None
+        if not isinstance(lazy_rows, list):
+            raise AssertionError('invalid lazy retained-runtime bundle')
+        combined.extend(lazy_rows)
+    return tuple(combined)
 
 
 def _section_source(name: str) -> str:
@@ -69,6 +90,308 @@ def _cleanup() -> None:
 @lru_cache(maxsize=None)
 def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
     body = _section_source(name)
+    if name == 'core/debug_panel.js':
+        # Production imports the bounded typed collection owner, then the thin
+        # retained shell port, before loading Debug/Request Inspector. Raw
+        # fixtures compose that same owner graph rather than cloning policy.
+        state_owner = Path(native_module_path(
+            '.native/debug-runtime-owner.js',
+            ROOT / 'frontend/src/core/debug-runtime-owner.ts',
+        )).read_text(encoding='utf-8')
+        body = state_owner + _section_source('core/debug_state.js') + body
+    if name == 'local-control.js':
+        # Production keeps the badge in the retained runtime and injects live
+        # permission flags into the demand-loaded modal. Raw-section fixtures
+        # historically execute the complete Local Control behavior in one
+        # classic scope, so compose those same two authored ports here instead
+        # of recreating their predicates in each jsdom harness.
+        retained_badge = _section_source('local-control-state.js')
+        state_port = r'''
+var LocalControlShellState = Object.freeze({
+  get browserEnabled() {
+    return typeof browserEnabled !== 'undefined'
+      ? Boolean(browserEnabled) : Boolean(globalThis.browserEnabled);
+  },
+  get desktopEnabled() {
+    return typeof desktopEnabled !== 'undefined'
+      ? Boolean(desktopEnabled) : Boolean(globalThis.desktopEnabled);
+  },
+});
+'''
+        body = (
+            retained_badge
+            + state_port
+            + body
+            + '\nruntimeScope.LocalControlPresentationState = '
+              'LocalControlPresentationState;\n'
+        )
+    if name == 'compaction-viewer.js':
+        # Production retains only the bounded history projection and injects
+        # it into the demand-loaded drawer. Raw-section fixtures historically
+        # execute the complete viewer contract, so compose the real authority
+        # and its generated runtime ports around the authored presentation.
+        state_owner = Path(native_module_path(
+            '.native/compaction-history-state.js',
+            ROOT / 'frontend/src/core/compaction-history-state.ts',
+        )).read_text(encoding='utf-8')
+        body = (
+            state_owner
+            + _section_source('compaction-viewer-state.js')
+            + body
+            + '\nruntimeScope.CompactionHistoryState = CompactionHistoryState;\n'
+              'runtimeScope.getCompactionHistory = getCompactionHistory;\n'
+              'runtimeScope.loadCompactionHistory = loadCompactionHistory;\n'
+              'runtimeScope.openCompactionViewer = openCompactionViewer;\n'
+              'runtimeScope.closeCompactionViewer = closeCompactionViewer;\n'
+        )
+    if name == 'compaction-viewer-state.js':
+        state_owner = Path(native_module_path(
+            '.native/compaction-history-state.js',
+            ROOT / 'frontend/src/core/compaction-history-state.ts',
+        )).read_text(encoding='utf-8')
+        body = state_owner + body + (
+            '\nruntimeScope.CompactionHistoryState = CompactionHistoryState;\n'
+            'runtimeScope.getCompactionHistory = getCompactionHistory;\n'
+            'runtimeScope.loadCompactionHistory = loadCompactionHistory;\n'
+        )
+    if name == 'ui/streaming_swarm_panel.js':
+        # Production injects the DOM-free demand scheduler through the ESM
+        # prelude. Raw-section fixtures compose that exact typed owner before
+        # the retained Swarm projection adapter.
+        scheduler_owner = Path(native_module_path(
+            '.native/swarm-reconciliation-scheduler.js',
+            ROOT / 'frontend/src/conversation/application/'
+            'swarm-reconciliation-scheduler.ts',
+        )).read_text(encoding='utf-8')
+        body = (
+            scheduler_owner + body
+            + '\nvar SwarmReconciliationTestPort = '
+              '_swReconciliationScheduler;\n'
+        )
+    if name == 'presence.js':
+        # Production imports the DOM-free summary/peer state owner through the
+        # retained ESM prelude. Raw Collaboration Bar fixtures compose that
+        # same typed owner rather than recreating request ordering or bounds.
+        presence_owner = Path(native_module_path(
+            '.native/presence-summary-controller.js',
+            ROOT / 'frontend/src/features/presence-summary-controller.ts',
+        )).read_text(encoding='utf-8')
+        body = presence_owner + body
+    if name == 'core/client_log_relay.js':
+        # Production imports the browser-global-free, demand-scoped flush
+        # scheduler through the ESM prelude. Raw relay fixtures compose that
+        # exact owner ahead of the retained bounded-buffer/transport adapter.
+        flush_scheduler = Path(native_module_path(
+            '.native/client-log-flush-scheduler.js',
+            ROOT / 'frontend/src/core/client-log-flush-scheduler.ts',
+        )).read_text(encoding='utf-8')
+        body = flush_scheduler + body
+    if name == 'core/conversation_invalidation.js':
+        revision_gate = Path(native_module_path(
+            '.native/conversation-catalog-revision-gate.js',
+            ROOT / 'frontend/src/conversation/application/'
+            'conversation-catalog-revision-gate.ts',
+        )).read_text(encoding='utf-8')
+        body = revision_gate + body
+    if name == 'project.js':
+        # Production imports the browse coordinator in the generated lazy
+        # runtime header and injects live retained state through one frozen
+        # service object. Raw-section jsdom fixtures need those same two ports
+        # ahead of the authored section; a snapshot of projectState would hide
+        # the conversation-switch class this boundary is meant to protect.
+        coordinator = Path(native_module_path(
+            '.native/project-browse-coordinator.js',
+            ROOT / 'frontend/src/core/project-browse-coordinator.ts',
+        ))
+        assets = Path(native_module_path(
+            '.native/project-presentation-assets.js',
+            ROOT / 'frontend/src/features/project/presentation-assets.ts',
+        ))
+        state_port = r'''
+var ProjectPresentationShellState = Object.freeze({
+  get activeConversationId() {
+    return typeof activeConvId !== 'undefined'
+      ? activeConvId : (globalThis.activeConvId ?? null);
+  },
+  set activeConversationId(value) {
+    if (typeof activeConvId !== 'undefined') activeConvId = value;
+    else globalThis.activeConvId = value;
+  },
+  get conversations() {
+    return typeof conversations !== 'undefined'
+      ? conversations : (globalThis.conversations || []);
+  },
+  get projectState() {
+    return typeof projectState !== 'undefined'
+      ? projectState : (globalThis.projectState || {
+          active: false, path: '', extraRoots: [], readOnly: false,
+        });
+  },
+  set projectState(value) {
+    if (typeof projectState !== 'undefined') projectState = value;
+    else globalThis.projectState = value;
+  },
+  get sessionStorage() {
+    try {
+      return typeof sessionStorage !== 'undefined'
+        ? sessionStorage : (globalThis.window?.sessionStorage || null);
+    } catch (_error) {
+      return null;
+    }
+  },
+});
+'''
+        body = (
+            coordinator.read_text(encoding='utf-8')
+            + assets.read_text(encoding='utf-8')
+            + state_port
+            + body
+        )
+    if name == 'ui/tool_rounds.js':
+        # Production imports pure grouping and presentation owners through the
+        # retained ESM prelude. Individual classic-section fixtures load and
+        # compose those same TypeScript modules instead of rebuilding policy.
+        owner_sources = [
+            Path(native_module_path(
+                '.native/demand-scoped-presentation-ticker.js',
+                ROOT / 'frontend/src/conversation/application/'
+                'demand-scoped-presentation-ticker.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-execution-groups.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-execution-groups.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-execution-disclosure.js',
+                ROOT / 'frontend/src/conversation/ui/tool-execution-disclosure.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-round-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-round-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-round-icons.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-round-icons.ts',
+            )),
+            Path(native_module_path(
+                '.native/turn-provenance.js',
+                ROOT / 'frontend/src/conversation/presentation/turn-provenance.ts',
+            )),
+            Path(native_module_path(
+                '.native/write-gate-refusal.js',
+                ROOT / 'frontend/src/conversation/presentation/write-gate-refusal.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-result-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-result-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-search-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-search-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-image-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-image-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-browser-execution-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-browser-execution-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-command-execution-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-command-execution-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-approval-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-approval-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-injection-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-injection-presentation.ts',
+            )),
+            Path(native_module_path(
+                '.native/tool-human-guidance-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/tool-human-guidance-presentation.ts',
+            )),
+        ]
+        composition = r'''
+var _testTurnProvenancePresentation = createTurnProvenancePresentation({
+  translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  iconHtml: (...args) => typeof Icon === 'function' ? Icon(...args) : '',
+});
+var _tpInlineMd = _testTurnProvenancePresentation.inlineMarkdown;
+var _testWriteGateRefusalPresentation = createWriteGateRefusalPresentation({
+  translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  iconHtml: (...args) => typeof Icon === 'function' ? Icon(...args) : '',
+});
+var _refusalInfo = _testWriteGateRefusalPresentation.resolveRefusal;
+var _renderGateRefusalBadgeHtml =
+  _testWriteGateRefusalPresentation.renderBadgeHtml;
+var _renderGateNotice = _testWriteGateRefusalPresentation.renderNoticeHtml;
+var _testToolResultPresentation = createToolResultPresentation({
+  translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  writeGateRefusal: _testWriteGateRefusalPresentation,
+});
+var renderToolResultCompactionLabelHtml =
+  _testToolResultPresentation.renderCompactionLabelHtml;
+var renderWriteToolResultHtml =
+  _testToolResultPresentation.renderWriteResultHtml;
+var renderGenericToolResultHtml =
+  _testToolResultPresentation.renderGenericResultHtml;
+var _testToolSearchPresentation = createToolSearchPresentation({
+  translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  iconHtml: (...args) => typeof Icon === 'function' ? Icon(...args) : '',
+});
+var renderToolSearchHtml = _testToolSearchPresentation.renderSearchHtml;
+var _testToolImagePresentation = createToolImagePresentation({
+  translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  iconHtml: (...args) => typeof Icon === 'function' ? Icon(...args) : '',
+});
+var renderToolImageHtml = _testToolImagePresentation.renderImageHtml;
+var _testToolBrowserExecutionPresentation =
+  createToolBrowserExecutionPresentation({
+    translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  });
+var renderToolBrowserExecutionHtml =
+  _testToolBrowserExecutionPresentation.renderBrowserExecutionHtml;
+var _testToolCommandExecutionPresentation =
+  createToolCommandExecutionPresentation({
+    translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  });
+var renderRunningToolCommandHtml =
+  _testToolCommandExecutionPresentation.renderRunningCommandHtml;
+var renderSettledToolCommandHtml =
+  _testToolCommandExecutionPresentation.renderSettledCommandHtml;
+var _testToolApprovalPresentation = createToolApprovalPresentation({
+  translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+});
+var renderToolApprovalHtml =
+  _testToolApprovalPresentation.renderApprovalHtml;
+var _testToolInjectionPresentation = createToolInjectionPresentation({
+  translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+  renderMarkdown: (source) => typeof renderMarkdown === 'function'
+    ? renderMarkdown(source) : escapeHtml(source),
+  iconHtml: (...args) => typeof Icon === 'function' ? Icon(...args) : '',
+  resolveConversationTitle: (conversationId) =>
+    typeof convTitleById === 'function'
+      ? convTitleById(conversationId) : conversationId,
+});
+var renderToolInjectionHtml =
+  _testToolInjectionPresentation.renderInjectionHtml;
+var _testToolHumanGuidancePresentation =
+  createToolHumanGuidancePresentation({
+    translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
+    renderMarkdown: (source) => typeof renderMarkdown === 'function'
+      ? renderMarkdown(source) : escapeHtml(source),
+  });
+var renderToolHumanGuidanceHtml =
+  _testToolHumanGuidancePresentation.renderGuidanceHtml;
+'''
+        body = '\n'.join(
+            path.read_text(encoding='utf-8') for path in owner_sources
+        ) + composition + '\n' + body + (
+            '\nvar ToolElapsedTickerTestPort = ToolElapsedTicker;\n'
+        )
     if scope_prelude:
         body = (
             'var runtimeScope = typeof window !== "undefined" '
@@ -87,6 +410,9 @@ def runtime_section_names() -> list[str]:
 
 
 def runtime_section_path(name: str, *, scope_prelude: bool = True) -> str:
+    if name in _RETIRED_ORCHESTRATION_API_NAMES:
+        _materialize_orchestration_api_legacy_graph()
+        return str(_DIRECTORY / name)
     key = f'{name}:{scope_prelude}'
     cached = _CACHE.get(key)
     if cached is not None:
@@ -122,6 +448,15 @@ def runtime_sections_dir() -> str:
     """Materialize a logical-path test view of every migrated JS section."""
     for name in runtime_section_names():
         runtime_section_path(name)
+    # Orchestration's retained transport consumes the typed immutable result
+    # port that production imports through its generated lazy-runtime header.
+    # Legacy raw-section harnesses need the same owner at their historical
+    # logical path; never recreate a handwritten retained compatibility file.
+    native_module_path(
+        'api/http-result.js',
+        ROOT / 'frontend/src/core/http-result.ts',
+    )
+    _materialize_orchestration_api_legacy_graph()
     return str(_DIRECTORY)
 
 
@@ -130,7 +465,8 @@ def native_module_path(name: str, source: str | Path) -> str:
 
     The production graph stays ESM.  Legacy jsdom fixtures can use this
     adapter while they are migrated: named exports are copied onto
-    ``globalThis`` so the fixture exercises the native implementation without
+    ``globalThis`` and registry-owned properties retain their descriptors, so
+    live compatibility accessors behave like the composed runtime without
     recreating the deleted ``static/js`` source tree in the repository.
     """
     source_path = Path(source)
@@ -163,8 +499,10 @@ def native_module_path(name: str, source: str | Path) -> str:
         )
         compile_source = entry
         footer = (
-            f'Object.assign(globalThis,{global_name}.owner,'
-            f'{global_name}.orchestrationRegistry);')
+            f'Object.assign(globalThis,{global_name}.owner);'
+            'Object.defineProperties(globalThis,Object.getOwnPropertyDescriptors('
+            f'{global_name}.orchestrationRegistry));'
+            f'globalThis.orchestrationRegistry={global_name}.orchestrationRegistry;')
     elif features_dir in source_path.parents:
         entry = _DIRECTORY / '.native-entry' / f'{global_name}.ts'
         entry.parent.mkdir(parents=True, exist_ok=True)
@@ -193,14 +531,121 @@ def native_module_path(name: str, source: str | Path) -> str:
     return str(path)
 
 
-def native_module_graph(entries: list[tuple[str, str | Path]]) -> str:
+def _materialize_orchestration_api_legacy_graph() -> None:
+    """Compile the retired classic API paths into one temporary typed view.
+
+    Older Node fixtures still load the six historical files in order. The
+    first path exposes the generated contract and typed transport adapters;
+    the final path installs the stable facade after a fixture has created its
+    ``Api.orchestrations`` placeholder. Nothing is written to the repository
+    or shipped browser graph.
+    """
+    key = 'native:retired-orchestration-api-graph'
+    if _CACHE.get(key) is not None:
+        return
+    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
+    source = ROOT / 'frontend/src/features/orchestration/api-client.ts'
+    contracts = (
+        ROOT / 'frontend/src/features/orchestration/'
+        'request-contracts.generated.ts'
+    )
+    entry = _DIRECTORY / '.native-entry/orchestration-api-legacy.ts'
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(
+        f"import {{\n"
+        "  createOrchestrationEndpointTransport,\n"
+        "  installOrchestrationApiClient,\n"
+        "  orchestrationEndpointContract,\n"
+        "  orchestrationEndpointContracts,\n"
+        "  resolveOrchestrationApiClient,\n"
+        f"}} from {source.as_posix()!r};\n"
+        "import { ORCHESTRATION_REQUEST_CONTRACTS } from "
+        f"{contracts.as_posix()!r};\n"
+        "const scope = globalThis as any;\n"
+        "const endpointContracts = orchestrationEndpointContracts();\n"
+        "const responseContracts: Record<string, any> = Object.create(null);\n"
+        "const methodContracts: Record<string, any> = Object.create(null);\n"
+        "for (const [name, contract] of Object.entries(endpointContracts)) {\n"
+        "  responseContracts[contract.responseContract] ||= Object.freeze({\n"
+        "    name: contract.responseContract, optionName: contract.optionName,\n"
+        "    requiredFields: contract.responseRequiredFields,\n"
+        "  });\n"
+        "  methodContracts[name] = Object.freeze({\n"
+        "    name, resultMethod: contract.resultMethod,\n"
+        "    directMethod: contract.directMethod,\n"
+        "  });\n"
+        "}\n"
+        "Object.freeze(responseContracts); Object.freeze(methodContracts);\n"
+        "scope.ApiOrchestrationHttpContract = Object.freeze({\n"
+        "  contract: orchestrationEndpointContract,\n"
+        "  contracts: orchestrationEndpointContracts,\n"
+        "});\n"
+        "scope.ApiOrchestrationResponseContracts = Object.freeze({\n"
+        "  contract: (name: string) => responseContracts[name] || null,\n"
+        "  contracts: () => responseContracts,\n"
+        "});\n"
+        "scope.ApiOrchestrationClientMethods = Object.freeze({\n"
+        "  contract: (name: string) => methodContracts[name] || null,\n"
+        "  contracts: () => methodContracts,\n"
+        "});\n"
+        "scope.ApiOrchestrationEndpointTransport = Object.freeze({\n"
+        "  create: createOrchestrationEndpointTransport,\n"
+        "  resolveClient: resolveOrchestrationApiClient,\n"
+        "});\n"
+        "scope.ApiOrchestrationEndpoints = Object.freeze({\n"
+        "  contract: orchestrationEndpointContract,\n"
+        "  contracts: orchestrationEndpointContracts,\n"
+        "  createTransport: createOrchestrationEndpointTransport,\n"
+        "  resolveClient: resolveOrchestrationApiClient,\n"
+        "});\n"
+        "scope.resolveOrchestrationApiClient = resolveOrchestrationApiClient;\n"
+        "if (scope.Api?.orchestrations) installOrchestrationApiClient(scope.Api);\n"
+        "export { installOrchestrationApiClient, ORCHESTRATION_REQUEST_CONTRACTS };\n",
+        encoding='utf-8',
+    )
+    first = _DIRECTORY / _RETIRED_ORCHESTRATION_API_NAMES[0]
+    first.parent.mkdir(parents=True, exist_ok=True)
+    global_name = 'TofuNativeOrchestrationApi'
+    result = subprocess.run(
+        [str(test_bundler), str(entry), '--bundle', '--format=iife',
+         '--platform=browser', f'--global-name={global_name}',
+         f'--footer:js=Object.assign(globalThis,{global_name});',
+         f'--outfile={first}'],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f'failed to compile typed orchestration API test view:\n'
+            f'{result.stderr}')
+    for name in _RETIRED_ORCHESTRATION_API_NAMES[1:-1]:
+        path = _DIRECTORY / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '/* typed orchestration API graph already loaded */\n',
+            encoding='utf-8',
+        )
+    final = _DIRECTORY / _RETIRED_ORCHESTRATION_API_NAMES[-1]
+    final.write_text(
+        'if (typeof installOrchestrationApiClient === "function" '
+        '&& globalThis.Api && globalThis.Api.orchestrations) '
+        'installOrchestrationApiClient(globalThis.Api);\n',
+        encoding='utf-8',
+    )
+    _CACHE[key] = first
+
+
+def native_module_graph(
+        entries: list[tuple[str, str | Path]],
+        *,
+        output_dir: str | Path | None = None) -> str:
     """Materialize several native owners as one shared classic-script graph.
 
     Some legacy fixtures still evaluate logical owners one file at a time.  A
     native ESM graph, however, has one module-private compatibility registry.
     Put the bundle at the first logical path and harmless placeholders at the
     remaining paths so those fixtures preserve their evaluation order without
-    accidentally creating one registry per owner.
+    accidentally creating one registry per owner. Registry descriptors are
+    projected intact so stateful getters and setters remain live.
     """
     if not entries:
         raise AssertionError('native module graph requires at least one entry')
@@ -210,6 +655,14 @@ def native_module_graph(entries: list[tuple[str, str | Path]]) -> str:
     ]
     key = 'native-graph:' + '|'.join(
         f'{name}:{Path(source)}' for name, source in resolved)
+    digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+    if output_dir is not None:
+        target_root = Path(output_dir)
+    else:
+        # Default to an isolated per-graph directory: placeholder stubs must
+        # never overwrite real materialized sections in the shared directory.
+        target_root = _DIRECTORY / '.graphs' / digest
+    key += f'|out:{target_root}'
     cached = _CACHE.get(key)
     if cached is not None:
         return str(cached)
@@ -217,7 +670,6 @@ def native_module_graph(entries: list[tuple[str, str | Path]]) -> str:
     if not test_bundler.is_file():
         raise AssertionError(
             'vite_test_bundle.mjs is required to materialize native test modules')
-    digest = hashlib.sha256(key.encode()).hexdigest()[:12]
     global_name = f'TofuNativeGraph_{digest}'
     entry = _DIRECTORY / '.native-entry' / f'{global_name}.ts'
     entry.parent.mkdir(parents=True, exist_ok=True)
@@ -236,12 +688,14 @@ def native_module_graph(entries: list[tuple[str, str | Path]]) -> str:
         '\n'.join(imports) + f'\nexport {{ {exports} }};\n',
         encoding='utf-8',
     )
-    first = _DIRECTORY / resolved[0][0]
+    first = target_root / resolved[0][0]
     first.parent.mkdir(parents=True, exist_ok=True)
     owners = ','.join(
         f'{global_name}.owner{index}' for index in range(len(resolved)))
     footer = (
-        f'Object.assign(globalThis,{owners},{global_name}.orchestrationRegistry);'
+        f'Object.assign(globalThis,{owners});'
+        'Object.defineProperties(globalThis,Object.getOwnPropertyDescriptors('
+        f'{global_name}.orchestrationRegistry));'
         f'globalThis.orchestrationRegistry={global_name}.orchestrationRegistry;')
     result = subprocess.run(
         [str(test_bundler), str(entry), '--bundle', '--format=iife',
@@ -253,7 +707,7 @@ def native_module_graph(entries: list[tuple[str, str | Path]]) -> str:
         raise AssertionError(
             f'failed to compile native test graph:\n{result.stderr}')
     for name, _ in resolved[1:]:
-        placeholder = _DIRECTORY / name
+        placeholder = target_root / name
         placeholder.parent.mkdir(parents=True, exist_ok=True)
         placeholder.write_text(
             '/* owner loaded by the shared native test graph */\n',

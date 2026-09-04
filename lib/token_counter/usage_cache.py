@@ -15,9 +15,10 @@ This is nearly exact, zero network latency, zero heuristics. The
 short delta between rounds is the only thing we need to estimate —
 and we can use tiktoken on it to keep that estimate tight.
 
-Concurrency: a simple dict-with-lock works fine. Entries age out
-after ``USAGE_CACHE_TTL_SEC`` so stale data doesn't mislead a
-days-old conversation.
+Concurrency: a bounded ordered dict plus one lock keeps expiration, LRU
+promotion, and replacement atomic. Entries age out after
+``USAGE_CACHE_TTL_SEC``; capacity eviction safely falls through to the next
+counter tier.
 
 Invalidation: ``record_usage()`` is called by ``lib/llm/stream.py``
 after each streamed response. If the conversation compacts, the
@@ -28,10 +29,12 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from lib.log import get_logger
+from runtime_guards import resolve_resource_budget
 
 from .base import TokenCounter, iter_message_texts
 from .config import USAGE_CACHE_TTL_SEC
@@ -43,7 +46,7 @@ logger = get_logger(__name__)
 # Storage
 # ───────────────────────────────────────────────────────────────────────────
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class _UsageEntry:
     prompt_tokens: int
     model: str
@@ -54,10 +57,25 @@ class _UsageEntry:
     # Signature of the tail (role + first 120 chars of content) so we
     # can detect whether the tail changed vs. just grew.
     tail_signature: str
+    # Provider-reported hidden reasoning tokens produced by the successful
+    # call but not present in that call's input count. They become input only
+    # if the returned opaque reasoning block is appended and replayed on the
+    # next request (Responses encrypted reasoning / Claude redacted thinking).
+    opaque_replay_tokens: int = 0
 
 
 _lock = threading.Lock()
-_cache: dict[str, _UsageEntry] = {}
+_cache: OrderedDict[str, _UsageEntry] = OrderedDict()
+_USAGE_CACHE_CAPACITY = resolve_resource_budget(
+    'TOFU_USAGE_CACHE_CAPACITY', maximum=8192)
+_MAX_MODEL_CHARS = 160
+_MAX_ROLE_CHARS = 32
+_cache_metrics = {
+    'hits': 0,
+    'misses': 0,
+    'expiredEvictions': 0,
+    'capacityEvictions': 0,
+}
 
 
 def _signature(
@@ -74,7 +92,7 @@ def _signature(
     start_index = max(0, end_index - max(0, int(n_tail)))
     parts = []
     for m in messages[start_index:end_index]:
-        role = m.get('role', '')
+        role = str(m.get('role') or '')[:_MAX_ROLE_CHARS]
         content = m.get('content')
         if isinstance(content, str):
             s = content[:120]
@@ -94,7 +112,8 @@ def record_usage(conv_id: str, *,
                  prompt_tokens: int,
                  model: str,
                  message_count: int,
-                 messages: Optional[list] = None) -> None:
+                 messages: Optional[list] = None,
+                 opaque_replay_tokens: int = 0) -> None:
     """Record a successful API call's ``prompt_tokens`` for ``conv_id``.
 
     Called from ``lib/llm/stream.py`` after each stream completes.
@@ -105,17 +124,32 @@ def record_usage(conv_id: str, *,
         return
     try:
         sig = _signature(messages or [])
+        now = time.time()
         with _lock:
+            replaced = _cache.pop(conv_id, None)
+            if replaced is None and len(_cache) >= _USAGE_CACHE_CAPACITY:
+                expired_keys = [
+                    key for key, entry in _cache.items()
+                    if now - entry.ts > USAGE_CACHE_TTL_SEC
+                ]
+                for key in expired_keys:
+                    _cache.pop(key, None)
+                _cache_metrics['expiredEvictions'] += len(expired_keys)
+            while len(_cache) >= _USAGE_CACHE_CAPACITY:
+                _cache.popitem(last=False)
+                _cache_metrics['capacityEvictions'] += 1
             _cache[conv_id] = _UsageEntry(
                 prompt_tokens=prompt_tokens,
-                model=model or '',
-                ts=time.time(),
+                model=str(model or '')[:_MAX_MODEL_CHARS],
+                ts=now,
                 message_count=max(0, message_count),
                 tail_signature=sig,
+                opaque_replay_tokens=max(0, int(opaque_replay_tokens or 0)),
             )
         logger.debug('[TokenCounter][UsageCache] conv=%s recorded %d tokens '
-                     '(model=%s, msgs=%d)',
-                     conv_id[:8], prompt_tokens, model, message_count)
+                     '(model=%s, msgs=%d, opaque_replay=%d)',
+                     conv_id[:8], prompt_tokens, model, message_count,
+                     max(0, int(opaque_replay_tokens or 0)))
     except Exception as e:
         logger.debug('[TokenCounter][UsageCache] record_usage failed: %s', e)
 
@@ -131,12 +165,43 @@ def _lookup(conv_id: str) -> Optional[_UsageEntry]:
         return None
     with _lock:
         entry = _cache.get(conv_id)
-    if entry is None:
-        return None
-    if time.time() - entry.ts > USAGE_CACHE_TTL_SEC:
-        invalidate(conv_id)
-        return None
-    return entry
+        if entry is None:
+            _cache_metrics['misses'] += 1
+            return None
+        if time.time() - entry.ts > USAGE_CACHE_TTL_SEC:
+            _cache.pop(conv_id, None)
+            _cache_metrics['expiredEvictions'] += 1
+            _cache_metrics['misses'] += 1
+            return None
+        _cache.move_to_end(conv_id)
+        _cache_metrics['hits'] += 1
+        return entry
+
+
+def clear_usage_cache() -> int:
+    """Drop reconstructible entries under memory pressure; return the count."""
+    with _lock:
+        count = len(_cache)
+        _cache.clear()
+        return count
+
+
+def usage_cache_snapshot() -> dict[str, int | float]:
+    """Return content-free capacity/eviction telemetry."""
+    with _lock:
+        return {
+            **_cache_metrics,
+            'entries': len(_cache),
+            'capacity': _USAGE_CACHE_CAPACITY,
+            'ttlSeconds': USAGE_CACHE_TTL_SEC,
+        }
+
+
+def _reset_usage_cache_for_tests() -> None:
+    with _lock:
+        _cache.clear()
+        for key in _cache_metrics:
+            _cache_metrics[key] = 0
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -206,6 +271,10 @@ class UsageCacheCounter(TokenCounter):
             cheap_estimate_text(txt)
             for txt in iter_message_texts(suffix)
         )
+        opaque_replay_tokens = (
+            entry.opaque_replay_tokens
+            if _suffix_replays_opaque_reasoning(suffix) else 0
+        )
 
         # IMPORTANT: do NOT add the tool-schema / system-prompt cost here.
         # ``entry.prompt_tokens`` is the gateway's exact count for the
@@ -216,11 +285,31 @@ class UsageCacheCounter(TokenCounter):
         # is tens of thousands of phantom tokens, firing compaction early.
         # We only add the appended-suffix delta; tool/system drift between
         # rounds is negligible vs. that double-count risk.
-        total = entry.prompt_tokens + delta_tokens
+        total = (entry.prompt_tokens + delta_tokens
+                 + opaque_replay_tokens)
         logger.debug('[TokenCounter][UsageCache] conv=%s hit: %d (cached) + '
-                     '%d (suffix) = %d',
-                     conv_id[:8], entry.prompt_tokens, delta_tokens, total)
+                     '%d (suffix) + %d (opaque replay) = %d',
+                     conv_id[:8], entry.prompt_tokens, delta_tokens,
+                     opaque_replay_tokens, total)
         return total
+
+
+def _suffix_replays_opaque_reasoning(messages: list) -> bool:
+    """Return whether an appended suffix carries hidden reasoning state."""
+    for message in messages or ():
+        if not isinstance(message, dict):
+            continue
+        for item in message.get('_responses_items') or ():
+            if (isinstance(item, dict)
+                    and item.get('type') == 'reasoning'
+                    and item.get('encrypted_content')):
+                return True
+        for block in message.get('_anthropic_content_blocks') or ():
+            if (isinstance(block, dict)
+                    and block.get('type') == 'redacted_thinking'
+                    and block.get('data')):
+                return True
+    return False
 
 
 def _family(model: str) -> str:
@@ -237,4 +326,10 @@ def _family(model: str) -> str:
     return 'cl100k'
 
 
-__all__ = ['UsageCacheCounter', 'record_usage', 'invalidate']
+__all__ = [
+    'UsageCacheCounter',
+    'clear_usage_cache',
+    'invalidate',
+    'record_usage',
+    'usage_cache_snapshot',
+]

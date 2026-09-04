@@ -114,7 +114,7 @@ def build_branch_api_messages(
     logger.info('[MsgBuilder] Branch conv=%s msg=%d branch=%d: context=%d + branch=%d msgs',
                 conv_id[:8], msg_idx, branch_idx, len(main_context), len(decorated_branch))
 
-    return _transform_messages(combined, config)
+    return _transform_messages(combined, config, user_id=user_id)
 
 
 def build_api_messages_from_db(
@@ -165,7 +165,8 @@ def build_api_messages_from_db(
     # re-drive) inherits the "result unknown — do not re-fire" contract.
     caution = _lifecycle_caution_note(raw_messages) if exclude_last else None
 
-    built = _transform_messages(raw_messages, config, exclude_last=exclude_last)
+    built = _transform_messages(
+        raw_messages, config, exclude_last=exclude_last, user_id=user_id)
 
     if caution and built:
         if _prepend_note_to_last_user(built, caution):

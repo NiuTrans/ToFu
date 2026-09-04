@@ -82,15 +82,44 @@ eight minutes while the API stayed ready. A read-only postcondition matched
 SQLite byte count, schema version 40, and authority UUID. This is operational
 evidence, not a substitute for the explicit full integrity workflow.
 
-Because every rebase still writes one complete database image, its trigger is
-scale-aware. The effective WAL threshold is one eighth of the authority size
-with a 64 MiB floor, capped by a launch-time resource default equal to one
-percent of free disk and never more than 8 GiB. The local WAL and its durable
-mirror therefore consume at most twice that capped budget. On the 87.4 GB live
-authority the threshold rises from the former fixed 64 MiB to 8 GiB, reducing
-worst-case full-image write frequency by 128 times while retaining a finite
-native SQLite recovery tail. Operators may lower the ceiling with
-`TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB`.
+Because every rebase still writes one complete database image, its budget is
+scale-aware. The effective hard WAL budget is one quarter of the authority size
+with a 64 MiB floor, capped by a launch-time resource default equal to two
+percent of free disk and never more than 16 GiB. The local WAL and its durable
+mirror therefore stay within a four-percent hard envelope. At
+shipper construction the local-front and durable-shadow filesystems are both
+rechecked and the smaller two-percent ceiling wins; an unavailable secondary
+probe keeps the bounded launch value. On the 82 GiB live authority the resolved
+threshold rises from 8 to 16 GiB. A frozen
+pre-change log window contained 19 complete 82-GiB generations (1.56 TiB of
+sequential database-image writes); under equal WAL churn the doubled threshold
+projects roughly ten generations and 0.7–0.8 TiB fewer full-image writes. This
+is policy evidence, not a post-deployment saving claim. Operators may lower the
+ceiling with `TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB` when recovery-tail or
+disk headroom matters more than rewrite frequency.
+
+The shipper proactively starts a rebase at 15/16 of the resolved WAL budget,
+reserving one sixteenth (1 GiB on the 16-GiB live budget) for commits that race
+the checkpoint. The full budget remains a hard admission watermark, not a
+byte-exact file quota. Every physical commit observes the local WAL. Only at or
+above that hard watermark are later jobs refused before `BEGIN` with retryable
+`database_busy`; the raw shipper checkpoint bypasses the fence and clears it
+after truncation. One request-
+bounded transaction or at-most-64-job group-commit segment already in flight
+remains atomic and can cross the watermark (segments use a soft 0.25-second
+split and the existing hard transaction deadline). This closes both the
+long image-copy window and the
+pre-checkpoint capacity-failure window without cancelling a resumable copy or
+holding the writer for the full eight-minute image transfer. Publication still
+repeats the full snapshot-plus-tail capacity check and refuses an unsafe
+generation. Persistent pressure means capacity or shadow progress needs
+operator attention; reads and the prior durable recovery point remain usable.
+WAL-size observation is fail-closed: a non-`ENOENT` stat failure keeps the
+fence engaged and increments an explicit failure counter until a trustworthy
+observation succeeds. The added hot local `stat` cost measured 870 ns/physical
+commit (500,000 loops, best of five, 2026-08-29), about 0.06% of the previously
+measured 1.41 ms median physical acknowledgement; group commit amortizes that
+cost across logical jobs, and the change adds no thread, queue, or cache.
 
 The canonical nightly SQLite backup uses the same checkpoint owner instead of
 starting a second live page-wise backup. It forces one stable shadow generation
@@ -142,14 +171,29 @@ while the real authority sat untouched).
 - `fastpath.benchmark.*` — the boot-time measured fsync medians.
 - `fastpath.shipper.ship_lag_bytes` / `last_ship_age_s` — the RPO window:
   how much committed data is not yet on the durable dir.
+- `fastpath.shipper.snapshots`, `snapshot_database_bytes_copied`, and
+  `snapshot_wal_bytes_copied` — completed generations and the process-lifetime
+  physical chunks written during the current Sidecar lifetime.
+- `fastpath.shipper.snapshot_progress_bytes` / `wal_rebase_trigger_bytes` —
+  durable current-copy progress and the proactive full-rebase trigger.
+- `fastpath.shipper.wal_rebase_budget_bytes` / `wal_write_pressure_bytes` —
+  the resolved hard admission budget.
+- `fastpath.shipper.rebase_active`,
+  `write_pressure_active`,
+  `local_wal_bytes`, and `wal_write_headroom_bytes` — the live copy/admission
+  state and remaining WAL headroom.
+- `fastpath.shipper.write_pressure_activations` /
+  `write_pressure_rejections`, `write_pressure_observation_failures`, and
+  writer `write_admission_rejections` — how often the bounded fence engages,
+  how much write work it refuses, and whether its resource meter failed closed.
 - `fastpath.shipper.stale_artifacts_reclaimed` /
   `stale_artifact_bytes_reclaimed` — bounded cleanup of dead-owner private
   snapshot attempts during this Sidecar lifetime.
 - `writer.commit_latency` — p50/p95/max commit latency histogram; compare
   against `benchmark.data_dir_median_fsync_ms` to verify the win is real.
-- Prometheus mirrors these as `tofu_storage_commit_latency_milliseconds`,
-  `tofu_storage_fastpath_ship_lag_bytes`, and
-  `tofu_storage_fastpath_last_ship_age_seconds`; alert on trend, not one sample.
+- Prometheus mirrors these with the `tofu_storage_fastpath_*` generation,
+  copied-byte, progress, budget, pressure, local-WAL/headroom, lag, and age
+  series; alert on trend, not one sample.
 
 ## Crash semantics
 

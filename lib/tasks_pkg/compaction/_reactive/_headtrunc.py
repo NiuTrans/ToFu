@@ -85,7 +85,8 @@ def _strip_leading_orphan_tools(messages: list, system_end: int) -> int:
 def _head_truncate(messages: list, task: dict | None = None,
                    byte_target: int | None = None,
                    reported_token_count: int | None = None,
-                   *, event_name: str = 'reactive_head_truncate') -> int:
+                   *, token_target: int | None = None,
+                   event_name: str = 'reactive_head_truncate') -> int:
     """Last-resort head truncation: drop the oldest non-system messages.
 
     Drops in PAIRING-SAFE units (a whole ``assistant(tool_calls)+tool`` round at
@@ -166,9 +167,12 @@ def _head_truncate(messages: list, task: dict | None = None,
         return dropped
 
     context_limit = _get_context_limit(task)
-    target = int(context_limit * 0.60)
+    target = (max(1, int(token_target)) if token_target is not None
+              else int(context_limit * 0.60))
 
-    if reported_token_count and reported_token_count > target:
+    if token_target is not None:
+        target_measure = target
+    elif reported_token_count and reported_token_count > target:
         est_before = max(1, _estimate_total_tokens(messages))
         frac_to_drop = (reported_token_count - target) / reported_token_count
         heuristic_target = int(est_before * (1 - frac_to_drop))

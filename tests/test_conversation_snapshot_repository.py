@@ -46,6 +46,76 @@ def test_get_is_owner_scoped_and_requests_turn_projection():
     })]
 
 
+def test_get_bounded_tail_forwards_storage_window_without_full_projection():
+    client = _Client({'conversation.get': _document(
+        messages=[{'role': 'assistant', 'content': 'tail'}])})
+
+    snapshot = _repository(client).get(
+        'c1', user_id=7, message_window=2)
+
+    assert snapshot.messages == [{'role': 'assistant', 'content': 'tail'}]
+    assert client.calls == [('conversation.get', {
+        'conv_id': 'c1', 'user_id': 7, 'derive_messages': True,
+        'message_window': 2,
+    })]
+
+
+def test_get_bounded_page_forwards_owner_scoped_sequence_cursor():
+    client = _Client({'conversation.get': _document(
+        messages=[{'role': 'user', 'content': 'head'}])})
+
+    snapshot = _repository(client).get(
+        'c1', user_id=7, message_window=8, before_sequence=8)
+
+    assert snapshot.messages == [{'role': 'user', 'content': 'head'}]
+    assert client.calls == [('conversation.get', {
+        'conv_id': 'c1', 'user_id': 7, 'derive_messages': True,
+        'message_window': 8, 'before_sequence': 8,
+    })]
+
+
+@pytest.mark.parametrize('message_window', [True, 0, 501, 1.5, '2'])
+def test_get_rejects_invalid_or_ambiguous_message_window(message_window):
+    client = _Client({'conversation.get': _document()})
+
+    with pytest.raises(ValueError, match='message_window'):
+        _repository(client).get(
+            'c1', user_id=7, message_window=message_window)
+
+    assert client.calls == []
+
+
+def test_get_rejects_message_window_without_transcript_projection():
+    client = _Client({'conversation.get': _document()})
+
+    with pytest.raises(ValueError, match='include_messages=True'):
+        _repository(client).get(
+            'c1', user_id=7, include_messages=False, message_window=2)
+
+    assert client.calls == []
+
+
+@pytest.mark.parametrize('before_sequence', [True, -1, 1.5, '2'])
+def test_get_rejects_invalid_message_cursor(before_sequence):
+    client = _Client({'conversation.get': _document()})
+
+    with pytest.raises(ValueError, match='before_sequence'):
+        _repository(client).get(
+            'c1', user_id=7, message_window=2,
+            before_sequence=before_sequence)
+
+    assert client.calls == []
+
+
+def test_get_rejects_message_cursor_without_window():
+    client = _Client({'conversation.get': _document()})
+
+    with pytest.raises(ValueError, match='requires message_window'):
+        _repository(client).get('c1', user_id=7, before_sequence=2)
+
+    assert client.calls == []
+
+
 def test_metadata_list_never_loads_transcripts_and_bounds_settings():
     client = _Client({'conversation.list': [_document()]})
     snapshots = _repository(client).list(
@@ -61,6 +131,85 @@ def test_metadata_list_never_loads_transcripts_and_bounds_settings():
     assert payload['derive_messages'] is False
     assert payload['project_path'] == '/projects/alpha'
     assert payload['settings_keys'] == ['projectSummary']
+
+
+def test_metadata_list_forwards_bounded_title_filter():
+    client = _Client({'conversation.list': [_document()]})
+
+    _repository(client).list(
+        user_id=7,
+        title_contains=' Storage wedge ',
+        include_messages=False,
+    )
+
+    operation, payload = client.calls[0]
+    assert operation == 'conversation.list'
+    assert payload['title_contains'] == 'Storage wedge'
+
+
+@pytest.mark.parametrize(
+    'title_contains', ['', '   ', 1, True, 'x' * 513]
+)
+def test_title_filter_rejects_empty_unbounded_or_non_text_values(
+    title_contains,
+):
+    client = _Client({'conversation.list': []})
+
+    with pytest.raises(ValueError, match='title_contains'):
+        _repository(client).list(
+            user_id=7,
+            title_contains=title_contains,
+            include_messages=False,
+        )
+
+    assert client.calls == []
+
+
+def test_catalog_page_is_one_owner_scoped_bounded_storage_query():
+    client = _Client({'conversation.list': {
+        'items': [_document('c2'), _document('c1')],
+        'total_count': 7,
+        'has_more': True,
+    }})
+
+    page = _repository(client).list_catalog_page(
+        user_id=7,
+        limit=2,
+        folder_id=' folder-a ',
+        before_updated_at=500,
+        before_id='c3',
+        settings_keys=['folderId', 'lastMsgRole'],
+    )
+
+    assert [snapshot['id'] for snapshot in page.items] == ['c2', 'c1']
+    assert page.total_count == 7
+    assert page.has_more is True
+    assert client.calls == [('conversation.list', {
+        'user_id': 7,
+        'catalog_page': True,
+        'include_messages': False,
+        'order_by': 'updated_at_desc',
+        'limit': 2,
+        'before_id': 'c3',
+        'folder_id': 'folder-a',
+        'before_updated_at': 500,
+        'settings_keys': ['folderId', 'lastMsgRole'],
+    })]
+
+
+@pytest.mark.parametrize(
+    'response',
+    [
+        [],
+        {'items': 'bad', 'total_count': 0, 'has_more': False},
+        {'items': [_document()], 'total_count': 0, 'has_more': False},
+        {'items': [], 'total_count': 0, 'has_more': 0},
+    ],
+)
+def test_catalog_page_rejects_malformed_storage_projection(response):
+    client = _Client({'conversation.list': response})
+    with pytest.raises(RuntimeError, match='catalog'):
+        _repository(client).list_catalog_page(user_id=7, limit=2)
 
 
 @pytest.mark.parametrize('project_path', ['', 1, True, 'x' * 4097])
@@ -141,6 +290,61 @@ def test_bounded_scan_splits_only_oversize_transcript_frames():
         len(payload['ids']) for _, payload in client.calls if 'ids' in payload
     ]
     assert requested_sizes == [4, 2, 1, 1, 2, 1, 1]
+
+
+def test_activity_counts_use_owner_scoped_timestamp_only_operation():
+    client = _Client({'conversation.activity_dates': {
+        'candidate_count': 3,
+        'counts': [2, 1],
+    }})
+
+    result = _repository(client).activity_counts(
+        user_id=7,
+        updated_at_gte=100,
+        created_at_lt=300,
+        day_boundaries_ms=[100, 200, 300],
+        limit=50,
+    )
+
+    assert result == (3, [2, 1])
+    assert client.calls == [('conversation.activity_dates', {
+        'user_id': 7,
+        'updated_at_gte': 100,
+        'created_at_lt': 300,
+        'day_boundaries_ms': [100, 200, 300],
+        'limit': 50,
+    })]
+
+
+@pytest.mark.parametrize('boundaries', [
+    [], [1], [1, 1], [2, 1], [1, True], [1, '2'],
+])
+def test_activity_counts_reject_invalid_interval_boundaries(boundaries):
+    client = _Client({})
+    with pytest.raises(ValueError, match='day_boundaries_ms'):
+        _repository(client).activity_counts(
+            user_id=7,
+            updated_at_gte=1,
+            day_boundaries_ms=boundaries,
+        )
+    assert client.calls == []
+
+
+@pytest.mark.parametrize('response', [
+    None,
+    {'candidate_count': True, 'counts': [0]},
+    {'candidate_count': 1, 'counts': []},
+    {'candidate_count': 1, 'counts': [2]},
+    {'candidate_count': 1, 'counts': [False]},
+])
+def test_activity_counts_reject_malformed_authority_projection(response):
+    client = _Client({'conversation.activity_dates': response})
+    with pytest.raises(RuntimeError, match='activity projection'):
+        _repository(client).activity_counts(
+            user_id=7,
+            updated_at_gte=1,
+            day_boundaries_ms=[1, 2],
+        )
 
 
 def test_search_returns_ids_without_leaking_storage_hits():

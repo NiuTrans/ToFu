@@ -26,6 +26,7 @@ from lib.storage_sidecar.operations_pkg._common import (
 from lib.storage_sidecar.operations_pkg._records import (
     _record_get as _record_get,
     _record_list as _record_list,
+    _task_results_replay_get as _task_results_replay_get,
     _task_results_summary_list as _task_results_summary_list,
     _task_results_cost_experiment_scan as _task_results_cost_experiment_scan,
     _task_results_checkpoint as _task_results_checkpoint,
@@ -39,25 +40,56 @@ from lib.storage_sidecar.operations_pkg._records import (
     _event_append_batch as _event_append_batch,
     _event_list as _event_list,
     _event_latest as _event_latest,
+    _event_bounds as _event_bounds,
     _event_inspector_summary as _event_inspector_summary,
     _event_prune as _event_prune,
     _rate_limit_record_and_check as _rate_limit_record_and_check,
 )
+from lib.storage_sidecar.operations_pkg._raw_archives import (
+    _raw_archive_list as _raw_archive_list,
+    _raw_archive_put as _raw_archive_put,
+    _raw_archive_read as _raw_archive_read,
+)
 from lib.storage_sidecar.operations_pkg._project import (
-    _project_charter_get as _project_charter_get,
-    _project_charter_put as _project_charter_put,
-    _project_charter_delete as _project_charter_delete,
     _project_recent_list as _project_recent_list,
     _project_recent_touch as _project_recent_touch,
+    _project_recent_touch_many as _project_recent_touch_many,
     _project_recent_clear as _project_recent_clear,
+
+    _project_relink as _project_relink,
+)
+from lib.storage_sidecar.operations_pkg._project_brain import (
+    _project_brain_get as _project_brain_get,
+    _project_brain_list_active as _project_brain_list_active,
+    _project_brain_work_start as _project_brain_work_start,
+    _project_brain_work_refine as _project_brain_work_refine,
+    _project_brain_work_change as _project_brain_work_change,
+    _project_brain_work_finish as _project_brain_work_finish,
+    _project_brain_narrative_add as _project_brain_narrative_add,
+    _project_brain_attention_add as _project_brain_attention_add,
+    _project_brain_checker_register as _project_brain_checker_register,
+    _project_brain_checker_result as _project_brain_checker_result,
+    _project_brain_decision_promote as _project_brain_decision_promote,
+    _project_brain_watch_add as _project_brain_watch_add,
+    _project_brain_watch_update as _project_brain_watch_update,
+    _project_brain_watch_delete as _project_brain_watch_delete,
+    _project_brain_cursor_prepare as _project_brain_cursor_prepare,
+    _project_brain_cursor_confirm as _project_brain_cursor_confirm,
+    _project_brain_cutover as _project_brain_cutover,
+    _project_brain_cutover_status as _project_brain_cutover_status,
+    _project_brain_recovery_snapshot as _project_brain_recovery_snapshot,
+    _project_brain_rebuild as _project_brain_rebuild,
 )
 from lib.storage_sidecar.operations_pkg._knowledge import (
     _knowledge_document_list as _knowledge_document_list,
     _knowledge_document_get as _knowledge_document_get,
+    _knowledge_document_metadata as _knowledge_document_metadata,
+    _knowledge_document_assets as _knowledge_document_assets,
     _knowledge_document_content as _knowledge_document_content,
     _knowledge_document_find_digest as _knowledge_document_find_digest,
     _knowledge_document_create as _knowledge_document_create,
     _knowledge_document_replace as _knowledge_document_replace,
+    _knowledge_document_patch as _knowledge_document_patch,
     _knowledge_document_delete as _knowledge_document_delete,
     _knowledge_settings_get as _knowledge_settings_get,
     _knowledge_settings_patch as _knowledge_settings_patch,
@@ -79,7 +111,6 @@ from lib.storage_sidecar.operations_pkg._queue import (
     _queue_autopilot_list_all as _queue_autopilot_list_all,
     _queue_autopilot_arm as _queue_autopilot_arm,
     _queue_autopilot_clear as _queue_autopilot_clear,
-    _QUEUE_KINDS as _QUEUE_KINDS,
     _queue_kind as _queue_kind,
     _queue_priority as _queue_priority,
     _queue_item as _queue_item,
@@ -89,6 +120,7 @@ from lib.storage_sidecar.operations_pkg._queue import (
     _queue_list as _queue_list,
     _queue_remove as _queue_remove,
     _queue_clear as _queue_clear,
+    _queue_kind_clear as _queue_kind_clear,
     _queue_dequeue as _queue_dequeue,
     _queue_lease_release as _queue_lease_release,
     _queue_reap as _queue_reap,
@@ -127,6 +159,7 @@ from lib.storage_sidecar.operations_pkg._conversations import (
     _backfill_turn_message_counts as _backfill_turn_message_counts,
     _conversation_list as _conversation_list,
     _derive_turn_messages_bulk as _derive_turn_messages_bulk,
+    _conversation_activity_dates as _conversation_activity_dates,
     _conversation_count as _conversation_count,
     _conversation_search_op as _conversation_search_op,
     _conversation_metadata as _conversation_metadata,
@@ -156,11 +189,16 @@ from lib.storage_sidecar.operations_pkg._runs import (
     _orchestration_event_project as _orchestration_event_project,
     _orchestration_event_page as _orchestration_event_page,
     _orchestration_run_delete as _orchestration_run_delete,
+    _goal_run_start as _goal_run_start,
+    _goal_run_transition as _goal_run_transition,
+    _goal_run_get as _goal_run_get,
+    _goal_run_latest as _goal_run_latest,
     _SWARM_NONTERMINAL as _SWARM_NONTERMINAL,
     _swarm_json as _swarm_json,
     _optional_text as _optional_text,
     _swarm_session_save as _swarm_session_save,
     _swarm_session_terminate as _swarm_session_terminate,
+    _swarm_session_quarantine_ownerless as _swarm_session_quarantine_ownerless,
     _swarm_session_delete as _swarm_session_delete,
     _swarm_agent_save as _swarm_agent_save,
     _swarm_agents_mark_delivered as _swarm_agents_mark_delivered,
@@ -171,6 +209,9 @@ from lib.storage_sidecar.operations_pkg._papers import (
     _research_lang as _research_lang,
     _paper_report_upsert as _paper_report_upsert,
     _paper_report_get as _paper_report_get,
+    _paper_report_resolve as _paper_report_resolve,
+    _paper_report_reopen as _paper_report_reopen,
+    _paper_report_excerpts as _paper_report_excerpts,
     _paper_report_latest as _paper_report_latest,
     _paper_report_second_pass_merge as _paper_report_second_pass_merge,
     _paper_report_second_pass_accumulate as _paper_report_second_pass_accumulate,
@@ -180,6 +221,10 @@ from lib.storage_sidecar.operations_pkg._papers import (
     _paper_library_delete as _paper_library_delete,
     _paper_library_recent as _paper_library_recent,
     _paper_library_list as _paper_library_list,
+    _paper_library_summaries as _paper_library_summaries,
+    _paper_library_get as _paper_library_get,
+    _paper_library_reader as _paper_library_reader,
+    _paper_library_inputs as _paper_library_inputs,
     _paper_library_identity as _paper_library_identity,
     _paper_library_title_backfill as _paper_library_title_backfill,
     _paper_note_list as _paper_note_list,
@@ -238,6 +283,22 @@ from lib.storage_sidecar.operations_pkg._providers import (
     _provider_touch as _provider_touch,
     _provider_update as _provider_update,
 )
+from lib.storage_sidecar.operations_pkg._model_routing import (
+    _model_routing_commit as _model_routing_commit,
+    _model_routing_get as _model_routing_get,
+    _model_routing_migration_receipt as _model_routing_migration_receipt,
+    _model_routing_migration_receipt_put as _model_routing_migration_receipt_put,
+    _model_routing_secret_delete as _model_routing_secret_delete,
+    _model_routing_secret_get as _model_routing_secret_get,
+    _model_routing_secret_list as _model_routing_secret_list,
+    _model_routing_secret_prune as _model_routing_secret_prune,
+    _model_routing_secret_put as _model_routing_secret_put,
+)
+from lib.storage_sidecar.operations_pkg._desktop import (
+    _desktop_egress_agent_get as _desktop_egress_agent_get,
+    _desktop_egress_agent_initialize as _desktop_egress_agent_initialize,
+    _desktop_egress_agent_set as _desktop_egress_agent_set,
+)
 from lib.storage_sidecar.operations_pkg._orchestration_definitions import (
     _DEFINITION_COLUMNS as _DEFINITION_COLUMNS,
     _definition_document as _definition_document,
@@ -267,6 +328,11 @@ from lib.storage_sidecar.operations_pkg._artifacts import (
     _research_artifact_upsert as _research_artifact_upsert,
     _research_artifacts_get as _research_artifacts_get,
     _research_directions_list as _research_directions_list,
+)
+
+from lib.storage_sidecar.operations_pkg._research_workspace import (
+    _research_workspace_get as _research_workspace_get,
+    _research_workspace_put as _research_workspace_put,
 )
 from lib.storage_sidecar.operations_pkg._optimizer import (
     _OPT_PROPOSAL_COLUMNS as _OPT_PROPOSAL_COLUMNS,
@@ -329,12 +395,18 @@ from lib.storage_sidecar.operations_pkg._turns import (
     _turn_public as _turn_public,
     _attempt_public as _attempt_public,
     _turn_get as _turn_get,
+    _turn_image_get as _turn_image_get,
     _turn_list as _turn_list,
     _turn_list_delta as _turn_list_delta,
     _turn_sync_snapshot as _turn_sync_snapshot,
+    _turn_timing_trace_get as _turn_timing_trace_get,
+    _turn_timing_trace_list as _turn_timing_trace_list,
+    _turn_perception_record as _turn_perception_record,
+    _turn_sync_page as _turn_sync_page,
     _turn_sync_changes as _turn_sync_changes,
     _turn_sync_prune as _turn_sync_prune,
     _attempt_get as _attempt_get,
+    _attempt_dispatchable_list as _attempt_dispatchable_list,
     _turn_revision as _turn_revision,
     _turn_events as _turn_events,
     _SLIM_HYDRATABLE_TYPES as _SLIM_HYDRATABLE_TYPES,
@@ -343,6 +415,9 @@ from lib.storage_sidecar.operations_pkg._turns import (
     _turn_event_append as _turn_event_append,
     _turn_exists as _turn_exists,
     _turn_create_pair as _turn_create_pair,
+    _turn_queue_activate as _turn_queue_activate,
+    _turn_queue_cancel as _turn_queue_cancel,
+    _turn_steer_commit as _turn_steer_commit,
     _turn_append_settled as _turn_append_settled,
     _turn_attempt_claim as _turn_attempt_claim,
     _turn_attempt_create as _turn_attempt_create,
@@ -358,6 +433,7 @@ from lib.storage_sidecar.operations_pkg._turns import (
     _visible_shape as _visible_shape,
     _turn_visible_sync as _turn_visible_sync,
     _turn_attempt_bind as _turn_attempt_bind,
+    _turn_attempt_start as _turn_attempt_start,
     _turn_event_record as _turn_event_record,
 )
 from lib.storage_sidecar.operations_pkg._worker_dispatch import (
@@ -365,36 +441,6 @@ from lib.storage_sidecar.operations_pkg._worker_dispatch import (
     _CONVERSATION_ATTEMPT_JOB_KIND as _CONVERSATION_ATTEMPT_JOB_KIND,
     _turn_attempt_dispatch_worker as _turn_attempt_dispatch_worker,
 )
-from lib.storage_sidecar.operations_pkg._board import (
-    _board_public as _board_public,
-    _board_list as _board_list,
-    _board_post as _board_post,
-    _board_claim as _board_claim,
-    _board_dispatch as _board_dispatch,
-    _board_complete as _board_complete,
-    _board_mutate as _board_mutate,
-    _board_reopen as _board_reopen,
-    _board_write_set as _board_write_set,
-    _watch_public as _watch_public,
-    _watch_response_rows as _watch_response_rows,
-    _watch_list as _watch_list,
-    _watch_get as _watch_get,
-    _watch_mutate as _watch_mutate,
-    _watch_edit as _watch_edit,
-    _watch_status as _watch_status,
-    _watch_promote as _watch_promote,
-    _watch_response_append as _watch_response_append,
-    _board_import_batch as _board_import_batch,
-    _watch_import_batch as _watch_import_batch,
-)
-from lib.storage_sidecar.operations_pkg._feed import (
-    _feed_append as _feed_append,
-    _feed_list as _feed_list,
-    _status_append as _status_append,
-    _status_list as _status_list,
-)
-
-
 _OPERATIONS: dict[str, OperationSpec] | None = None
 
 
@@ -407,7 +453,10 @@ def _operation_catalog() -> dict[str, OperationSpec]:
     return _OPERATIONS
 
 
-def resolve_operation(operation: str, kind: str, payload: Mapping[str, Any]):
+def resolve_operation_contract(
+    operation: str, kind: str, payload: Mapping[str, Any]
+):
+    """Resolve executable semantics plus its optional transaction budget."""
     spec = _operation_catalog().get(operation)
     if spec is not None:
         if spec.kind != kind:
@@ -420,12 +469,22 @@ def resolve_operation(operation: str, kind: str, payload: Mapping[str, Any]):
                 return spec.after(session, operation, payload, result)
             return result
 
-        return spec.receipt_required, execute
+        return spec.receipt_required, execute, spec.transaction_timeout_s
     if operation.startswith("plugin."):
-        return kind == "command", lambda session: _plugin_dynamic(
-            session, operation, kind, payload
+        return (
+            kind == "command",
+            lambda session: _plugin_dynamic(session, operation, kind, payload),
+            None,
         )
     raise StorageError("database_protocol_error", "Unknown storage operation")
 
 
-__all__ = ["OperationSpec", "resolve_operation"]
+def resolve_operation(operation: str, kind: str, payload: Mapping[str, Any]):
+    """Compatibility facade for callers that need only receipt and handler."""
+    receipt_required, execute, _transaction_timeout_s = (
+        resolve_operation_contract(operation, kind, payload)
+    )
+    return receipt_required, execute
+
+
+__all__ = ["OperationSpec", "resolve_operation", "resolve_operation_contract"]

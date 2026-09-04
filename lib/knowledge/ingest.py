@@ -12,8 +12,9 @@ from lib.log import get_logger
 
 from .assets import (
     IMAGE_EXTENSIONS, KnowledgeImageError, detect_image_mime, extract_package_assets,
-    extract_pdf_assets, standalone_image,
+    _extract_pdf_assets_without_admission, standalone_image,
 )
+from .resource_policy import resolve_knowledge_visual_budget
 
 logger = get_logger(__name__)
 
@@ -599,9 +600,14 @@ def _email_text(raw: bytes, limit: int, *, depth: int) -> dict:
             'assets': assets}
 
 
-def _ocr_scanned_pdf(raw: bytes, page_limit: int) -> tuple[str, list[str]]:
+def _ocr_scanned_pdf(
+    raw: bytes,
+    page_limit: int,
+    max_chars: int,
+) -> tuple[str, list[str]]:
     """Best-effort local OCR through PyMuPDF/Tesseract; never required."""
     warnings: list[str] = []
+    char_limit = max(1, int(max_chars))
     try:
         try:
             import pymupdf
@@ -613,7 +619,11 @@ def _ocr_scanned_pdf(raw: bytes, page_limit: int) -> tuple[str, list[str]]:
             try:
                 total = doc.page_count
                 parts: list[str] = []
+                used_chars = 0
+                text_limit_reached = False
                 for page_no in range(min(total, page_limit)):
+                    if used_chars >= char_limit:
+                        break
                     page = doc[page_no]
                     text = ''
                     for language in ('chi_sim+eng', 'eng'):
@@ -627,8 +637,29 @@ def _ocr_scanned_pdf(raw: bytes, page_limit: int) -> tuple[str, list[str]]:
                             logger.debug('[Knowledge] OCR page %d (%s) failed: %s',
                                          page_no + 1, language, exc)
                     if text.strip():
-                        parts.append(f'## Page {page_no + 1}\n\n{text.strip()}')
-                if total > page_limit:
+                        rendered = f'## Page {page_no + 1}\n\n{text.strip()}'
+                        separator_chars = 2 if parts else 0
+                        remaining = max(
+                            0, char_limit - used_chars - separator_chars)
+                        if len(rendered) > remaining:
+                            if remaining:
+                                parts.append(rendered[:remaining])
+                            used_chars = char_limit
+                            text_limit_reached = True
+                            warnings.append(
+                                'OCR stopped at the '
+                                f'{char_limit:,}-character text budget')
+                            break
+                        parts.append(rendered)
+                        used_chars += separator_chars + len(rendered)
+                        if (used_chars >= char_limit
+                                and page_no + 1 < min(total, page_limit)):
+                            text_limit_reached = True
+                            warnings.append(
+                                'OCR stopped at the '
+                                f'{char_limit:,}-character text budget')
+                            break
+                if total > page_limit and not text_limit_reached:
                     warnings.append(
                         f'OCR read {page_limit} of {total} pages; remaining pages were not OCRed')
                 return '\n\n'.join(parts), warnings
@@ -640,7 +671,64 @@ def _ocr_scanned_pdf(raw: bytes, page_limit: int) -> tuple[str, list[str]]:
         return '', warnings
 
 
-def extract(raw: bytes, filename: str, *, _depth: int = 0) -> dict:
+def _extract_admitted_pdf(raw: bytes, kind: str, limit: int) -> dict:
+    """Run every local knowledge PDF phase under one aggregate lease."""
+    from lib.pdf_parser.text import (
+        _extract_pdf_text_with_meta_without_admission,
+        validate_pdf_bytes,
+    )
+
+    ok, pages, error = validate_pdf_bytes(raw)
+    if not ok:
+        raise KnowledgeIngestError(f'Invalid PDF: {error}')
+    text, method = _extract_pdf_text_with_meta_without_admission(
+        raw, max_chars=limit, mode='rich')
+    text = text or ''
+    warnings: list[str] = []
+    visual_budget = resolve_knowledge_visual_budget()
+    visible = re.sub(r'\[[^\]]*error[^\]]*\]', '', text, flags=re.I).strip()
+    is_scanned = len(visible) < max(80, pages * 40)
+    if is_scanned:
+        ocr, ocr_warnings = _ocr_scanned_pdf(
+            raw,
+            visual_budget.pdf_ocr_max_pages,
+            limit,
+        )
+        warnings.extend(ocr_warnings)
+        if len(ocr.strip()) > len(visible):
+            text, method = ocr, 'pymupdf-ocr'
+    if text and method != 'pymupdf-ocr':
+        text = _strip_repeated_pdf_margins(text)
+    assets, visual_warnings = _extract_pdf_assets_without_admission(
+        raw, _budget=visual_budget)
+    warnings.extend(visual_warnings)
+    if method == 'pymupdf-ocr' and text:
+        page_sections = {
+            int(match.group(1)): match.group(2).strip()[:20_000]
+            for match in re.finditer(
+                r'^## Page (\d+)\s*\n(.*?)(?=^## Page \d+\s*\n|\Z)',
+                text, flags=re.M | re.S)
+        }
+        for asset in assets:
+            if asset.get('kind') == 'page':
+                asset['ocr_text'] = page_sections.get(
+                    int(asset.get('page') or 0), asset.get('ocr_text') or '')
+    if (not text.strip() or method == 'error') and not assets:
+        raise KnowledgeIngestError(
+            'No searchable text could be extracted from this PDF')
+    if not text.strip() or method == 'error':
+        text, method = '', 'pdf-visual-local'
+    return {'text': text[:limit], 'kind': kind, 'method': method,
+            'warnings': warnings, 'pages': pages, 'assets': assets}
+
+
+def extract(
+    raw: bytes,
+    filename: str,
+    *,
+    _depth: int = 0,
+    _pdf_already_admitted: bool = False,
+) -> dict:
     """Extract a supported file to normalized text plus provenance metadata."""
     kind = detect_kind(raw, filename)
     limit = _limit_chars()
@@ -664,48 +752,18 @@ def extract(raw: bytes, filename: str, *, _depth: int = 0) -> dict:
         }
 
     if kind == '.pdf':
-        from lib.pdf_parser.text import extract_pdf_text_with_meta, validate_pdf_bytes
-        ok, pages, error = validate_pdf_bytes(raw)
-        if not ok:
-            raise KnowledgeIngestError(f'Invalid PDF: {error}')
-        text, method = extract_pdf_text_with_meta(raw, max_chars=limit, mode='rich')
-        text = text or ''
-        warnings: list[str] = []
-        visible = re.sub(r'\[[^\]]*error[^\]]*\]', '', text, flags=re.I).strip()
-        is_scanned = len(visible) < max(80, pages * 40)
-        if is_scanned:
-            raw_limit = os.environ.get('TOFU_KNOWLEDGE_OCR_MAX_PAGES', '80')
-            try:
-                ocr_limit = max(1, min(int(raw_limit), 500))
-            except (TypeError, ValueError) as exc:
-                logger.debug('[Knowledge] invalid OCR page limit %r: %s',
-                             raw_limit, exc)
-                ocr_limit = 80
-            ocr, ocr_warnings = _ocr_scanned_pdf(raw, ocr_limit)
-            warnings.extend(ocr_warnings)
-            if len(ocr.strip()) > len(visible):
-                text, method = ocr, 'pymupdf-ocr'
-        if text and method != 'pymupdf-ocr':
-            text = _strip_repeated_pdf_margins(text)
-        assets, visual_warnings = extract_pdf_assets(raw)
-        warnings.extend(visual_warnings)
-        if method == 'pymupdf-ocr' and text:
-            page_sections = {
-                int(match.group(1)): match.group(2).strip()[:20_000]
-                for match in re.finditer(
-                    r'^## Page (\d+)\s*\n(.*?)(?=^## Page \d+\s*\n|\Z)',
-                    text, flags=re.M | re.S)
-            }
-            for asset in assets:
-                if asset.get('kind') == 'page':
-                    asset['ocr_text'] = page_sections.get(
-                        int(asset.get('page') or 0), asset.get('ocr_text') or '')
-        if (not text.strip() or method == 'error') and not assets:
-            raise KnowledgeIngestError('No searchable text could be extracted from this PDF')
-        if not text.strip() or method == 'error':
-            text, method = '', 'pdf-visual-local'
-        return {'text': text[:limit], 'kind': kind, 'method': method,
-                'warnings': warnings, 'pages': pages, 'assets': assets}
+        if _pdf_already_admitted:
+            return _extract_admitted_pdf(raw, kind, limit)
+        from lib.pdf_parser.admission import CLASSIC_PDF_ADMISSION
+        from lib.pdf_parser.policy import resolve_classic_pdf_budget
+
+        classic_pdf = resolve_classic_pdf_budget()
+        lease = CLASSIC_PDF_ADMISSION.reserve(
+            classic_pdf.unfinished_capacity)
+        try:
+            return _extract_admitted_pdf(raw, kind, limit)
+        finally:
+            lease.release()
 
     if kind == '.rtf':
         result = _extract_rtf(raw, limit)

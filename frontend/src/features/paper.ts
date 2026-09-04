@@ -1,6 +1,8 @@
 import { invokeFeatureEntry, type FeatureCallable } from '../runtime-bridge';
 import { getRuntimeService } from '../runtime/app-runtime.js';
 import { featureRegistry } from '../feature-registry';
+import '../runtime/paper-reader-presenters.generated.js';
+import '../runtime/paper-media-presenters.generated.js';
 
 // The retained Paper renderer still owns a small set of presentation seams.
 // Install only that explicit surface before native owners evaluate: several
@@ -8,7 +10,10 @@ import { featureRegistry } from '../feature-registry';
 const compatibilityTarget = featureRegistry as Window & Record<string, unknown>;
 for (const name of [
   '_applyReportEventRaw',
+  '_applyResolvedTitle',
+  '_attachReportPush',
   '_detachReportPush',
+  '_ensurePaperText',
   '_handlePaperKeyDown',
   '_loadOrGenerateReport',
   '_paintReportFromState',
@@ -16,10 +21,13 @@ for (const name of [
   '_populatePaperReportModelDropdown',
   '_populateReviewVenueDropdown',
   '_renderFinalReport',
+  '_renderReportSkeleton',
   '_reportView',
+  '_resolveReviewVenue',
   '_restoreRebuttalPanel',
   '_showPaperLanding',
   '_syncReviewSegState',
+  '_syncReportToolbar',
   '_teardownReadingTracker',
   '_updatePaperTitles',
 ] as const) {
@@ -29,33 +37,9 @@ for (const name of [
   }
 }
 
-// Renderer islands load first. The shared media UI then installs its single
-// public surface before any native runtime can invoke a renderer.
-const nativeReady = (async () => {
-  await import('./paper/media-model-ui');
-  await Promise.all([
-  import('./paper/pdf-responsive'),
-  import('./paper/push-transport'),
-  import('./paper/reader-prefs'),
-  import('./paper/babel'),
-  import('./paper/notes'),
-  import('./paper/deepen'),
-  import('./paper/qa'),
-  import('./paper/reading-xp'),
-  import('./paper/pdf-viewer'),
-  import('./paper/library'),
-  import('./paper/lifecycle'),
-  import('./paper/arxiv-search'),
-  import('./paper/research-view'),
-  import('./paper/recommend'),
-  import('./paper/arxiv-fetch'),
-  import('./paper/podcast-runtime'),
-  import('./paper/video-runtime'),
-  import('./paper/report-runtime'),
-    import('./paper/session'),
-    import('./paper/research-session'),
-  ]);
-})();
+// The manifest-owned media presenter imports its model UI and task owners
+// statically, so those ports are ready before the remaining Paper domains.
+const nativeReady = import('./paper/panel-owners');
 
 export async function invoke(name: string, args: readonly unknown[], stub: FeatureCallable): Promise<unknown> {
   await nativeReady;

@@ -11,6 +11,11 @@ Covers:
 import os
 import unittest
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 class EphemeralSlotTest(unittest.TestCase):
 

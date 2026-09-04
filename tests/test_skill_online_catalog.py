@@ -204,12 +204,20 @@ def test_online_verification_pool_is_shared_per_batch_then_retires(
                         f'batch{value}', limit=2)))
             worker.start()
             assert entered[batch].wait(1)
-            assert online.online_catalog_executor_snapshot() == {
+            snapshot = online.online_catalog_executor_snapshot()
+            assert {
+                key: snapshot[key]
+                for key in ('maxWorkers', 'activeBatches', 'executorActive')
+            } == {
                 'maxWorkers': 4,
                 'activeBatches': 1,
                 'executorActive': True,
-                'residentThreads': 4,
             }
+            # ThreadPoolExecutor publishes a newly started worker to its
+            # private thread set just after that worker can enter ``getter``.
+            # The actual-thread assertion below proves four-way concurrency;
+            # this diagnostic only promises a bounded resident count.
+            assert 1 <= snapshot['residentThreads'] <= snapshot['maxWorkers']
             current_threads = set(verify_threads[batch])
             assert len(current_threads) == 4
             assert not current_threads.intersection(prior_threads)

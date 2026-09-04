@@ -29,6 +29,7 @@ from lib.log import get_logger
 from lib.paper.podcast_prompts import (
     MAX_FIGURE_SEGMENTS,
     PODCAST_MODES,
+    PODCAST_SEGMENT_LIMITS,
     SCRIPT_SECTIONS,
     ZH_ABBREV_WATCHLIST,
 )
@@ -237,7 +238,8 @@ def check_number_provenance(script_text: str, source_text: str,
 # ── 3. Structure ─────────────────────────────────────────────────────────
 
 
-def check_structure(script: dict, manifest_files: list[str]) -> list[str]:
+def check_structure(script: dict, manifest_files: list[str], *,
+                    mode: str | None = None) -> list[str]:
     """Enforce the listening skeleton + figure_ref whitelist.
 
     Hard requirements: non-empty segments; first = cold_open containing at
@@ -249,6 +251,18 @@ def check_structure(script: dict, manifest_files: list[str]) -> list[str]:
     segs = (script or {}).get('segments')
     if not isinstance(segs, list) or not segs:
         return ['segments 为空或不是数组']
+    resolved_mode = mode or script.get('mode') or 'short'
+    segment_limit = PODCAST_SEGMENT_LIMITS.get(
+        resolved_mode, PODCAST_SEGMENT_LIMITS['short'])
+    try:
+        dropped = max(0, int(script.get('segments_dropped') or 0))
+    except (TypeError, ValueError, OverflowError):
+        dropped = 0
+    overflow = max(dropped, max(0, len(segs) - segment_limit))
+    if overflow:
+        issues.append(
+            f'{resolved_mode} 档段落超过上限 {segment_limit}'
+            f'(超出 {overflow} 段);请合并内容后重写')
     known = set(SCRIPT_SECTIONS)
     first, last = segs[0], segs[-1]
     if first.get('section') != 'cold_open':
@@ -327,7 +341,7 @@ def validate_script(script: dict, *, mode: str, lang: str, source_text: str,
     issues += check_unicode_math(full_text)
     issues += check_abbreviations(full_text, lang)
     issues += check_number_provenance(full_text, source_text)
-    issues += check_structure(script, manifest_files)
+    issues += check_structure(script, manifest_files, mode=mode)
     issues += check_duration(script, mode, lang)
     if issues:
         logger.info('[Paper:Podcast:Validate] %d issue(s): %s',

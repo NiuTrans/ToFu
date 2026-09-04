@@ -11,9 +11,6 @@ Key boundaries addressed:
   • **FetchService** — used by tasks_pkg.executor, trading.intel instead of
     importing ``tofu_search.fetch`` directly.
 
-  • **TradingDataProvider** — used by trading_autopilot instead of importing
-    ``lib.trading`` directly.
-
   • **TaskEventSink** — used by tasks_pkg.executor, tool_dispatch, etc.
     instead of importing ``lib.tasks_pkg.manager`` directly.
 
@@ -54,7 +51,6 @@ from lib.llm.stream_result import ProviderStreamResult
 __all__ = [
     'LLMService',
     'FetchService',
-    'TradingDataProvider',
     'TaskEventSink',
     'ConversationStore',
     'ToolHandler',
@@ -185,58 +181,6 @@ class FetchService(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════
-#  Fund Data Provider Protocol
-# ═══════════════════════════════════════════════════════════
-
-@runtime_checkable
-class TradingDataProvider(Protocol):
-    """Protocol for trading data access — NAV, info, intel.
-
-    Satisfied by ``lib.trading`` module-level functions.
-    Used by trading_autopilot to decouple the autopilot orchestration
-    from the concrete trading data implementation.
-    """
-
-    def get_latest_price(self, symbol: str) -> tuple[float | None, str]:
-        """Get the latest price for an asset.
-
-        Returns:
-            (nav_value_or_None, nav_date_string)
-        """
-        ...
-
-    def fetch_asset_info(self, symbol: str) -> dict[str, Any] | None:
-        """Fetch basic asset information.
-
-        Returns:
-            Dict with keys like 'name', 'type', 'nav', 'nav_date', etc.
-            or None if not found.
-        """
-        ...
-
-    def fetch_price_history(
-        self,
-        symbol: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Fetch price history for an asset.
-
-        Returns:
-            List of {'date': str, 'nav': float} dicts sorted by date ascending.
-        """
-        ...
-
-    def build_intel_context(
-        self,
-        db: Any,
-    ) -> tuple[str, int]:
-        """Build intelligence context for autopilot.
-
-        Returns:
-            (intel_context_string, intel_item_count)
-        """
-        ...
 
 
 # ═══════════════════════════════════════════════════════════
@@ -288,6 +232,10 @@ class ConversationStore(Protocol):
 
     def next_task_event_id(self, task_id: str, *, floor: int = 0) -> int:
         """Return an unused durable task-event sequence at or above ``floor``."""
+        ...
+
+    def confirm_project_context_delivery(self, delivery: dict[str, Any]) -> bool:
+        """Advance one owner-scoped Project Context delivery cursor."""
         ...
 
     def load_transcript(
@@ -423,6 +371,7 @@ class BodyBuilder(Protocol):
         thinking_enabled: bool = False,
         tools: list[dict] | None = None,
         stream: bool = True,
+        precomputed_input_tokens: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Build a model-aware request body for /chat/completions.

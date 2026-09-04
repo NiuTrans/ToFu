@@ -30,6 +30,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 from lib.llm_dispatch import cache_settle as cs
+from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
 
 
 @pytest.fixture(autouse=True)
@@ -42,6 +43,7 @@ def _clean_env(monkeypatch):
     monkeypatch.setenv('TOFU_CACHE_SETTLE_MS', '1500')
     monkeypatch.setenv('TOFU_CACHE_SETTLE_MAX_MS', '4000')
     monkeypatch.delenv('TOFU_CACHE_SETTLE_THRESHOLD_TOKENS', raising=False)
+    monkeypatch.delenv('TOFU_CACHE_SETTLE_WARM_WRITE_TOKENS', raising=False)
     cs._reset_settle_for_tests()
     yield
     cs._reset_settle_for_tests()
@@ -68,6 +70,66 @@ class _FakeAborted(Exception):
     pass
 
 
+# ── Prefix-size classification ───────────────────────────────────────────────
+
+def test_estimate_counts_string_content():
+    messages = [{'role': 'user', 'content': 'x' * 4000}]
+    assert cs.estimate_prefix_tokens(messages) == 1000
+
+
+def test_estimate_counts_block_text_and_thinking():
+    messages = [{'role': 'assistant', 'content': [
+        {'type': 'text', 'text': 'a' * 400},
+        {'type': 'thinking', 'thinking': 'b' * 400},
+    ]}]
+    assert cs.estimate_prefix_tokens(messages) == 200
+
+
+def test_estimate_counts_image_base64_payload():
+    messages = [{'role': 'user', 'content': [
+        {'type': 'image', 'source': {
+            'type': 'base64', 'data': 'Z' * 4000}},
+    ]}]
+    assert cs.estimate_prefix_tokens(messages) == 1000
+
+
+def test_estimate_accepts_body_dict_with_tools():
+    body = {
+        'messages': [{'role': 'user', 'content': 'hi'}],
+        'tools': [{'name': 'x', 'description': 'd' * 400}],
+    }
+    assert cs.estimate_prefix_tokens(body) > 90
+
+
+def test_estimate_reuses_admitted_prompt_tokens_without_traversal():
+    class MustNotIterate(list):
+        def __iter__(self):
+            raise AssertionError('admitted prompt must not be rescanned')
+
+    body = {
+        ADMITTED_INPUT_TOKENS_KEY: 123_456,
+        'messages': MustNotIterate([{'content': 'unreachable'}]),
+        'tools': MustNotIterate([{'name': 'unreachable'}]),
+    }
+
+    assert cs.estimate_prefix_tokens(body) == 123_456
+
+
+@pytest.mark.parametrize('invalid', [None, 0, -1, True, 1.5, '1000'])
+def test_invalid_admitted_prompt_tokens_retain_estimator(invalid):
+    body = {
+        ADMITTED_INPUT_TOKENS_KEY: invalid,
+        'messages': [{'role': 'user', 'content': 'x' * 4000}],
+    }
+
+    assert cs.estimate_prefix_tokens(body) == 1000
+
+
+def test_estimate_malformed_returns_zero():
+    assert cs.estimate_prefix_tokens(None) == 0
+    assert cs.estimate_prefix_tokens(42) == 0
+
+
 BIG = 200_000        # comfortably > default 30k threshold
 SMALL = 5_000        # < 30k threshold → a trivial turn, never gated
 OBSERVED_MISS = 120_000  # the real floor-miss size from production logs
@@ -81,6 +143,63 @@ def test_rapid_second_request_waits_remainder(spy_sleep):
     waited = cs.settle_before_send('convA', BIG, now=1000.3)
     assert 1.19 <= waited <= 1.21, f'expected ~1.2s remainder, got {waited}'
     assert len(spy_sleep) == 1 and abs(spy_sleep[0] - waited) < 1e-6
+
+
+def test_generic_unmetered_warm_tail_is_bounded():
+    assert cs.generic_cache_write_pending({
+        'prompt_tokens': 100_000,
+        'prompt_tokens_details': {'cached_tokens': 95_905},
+    }) is False
+    assert cs.generic_cache_write_pending({
+        'prompt_tokens': 100_000,
+        'prompt_tokens_details': {'cached_tokens': 95_904},
+    }) is True
+    assert cs.generic_cache_write_pending({
+        'prompt_tokens': 100_000,
+        'prompt_tokens_details': {'cached_tokens': 0},
+    }) is True
+
+
+def test_generic_metered_write_signal_is_authoritative():
+    assert cs.generic_cache_write_pending({
+        'input_tokens': 123,
+        'cache_creation_input_tokens': 50_000,
+        'cache_read_input_tokens': 0,
+    }) is True
+    assert cs.generic_cache_write_pending({
+        'input_tokens': 123,
+        'cache_creation_input_tokens': 0,
+        'cache_read_input_tokens': 50_000,
+    }) is False
+
+
+@pytest.mark.parametrize('value', [None, False, -1, 'invalid'])
+def test_malformed_metered_write_signal_remains_conservative(value):
+    assert cs.generic_cache_write_pending({
+        'input_tokens': 123,
+        'cache_creation_input_tokens': value,
+        'cache_read_input_tokens': 50_000,
+    }) is True
+
+
+@pytest.mark.parametrize('value', ['invalid', '0', '-1'])
+def test_invalid_generic_warm_threshold_falls_back_safely(monkeypatch, value):
+    monkeypatch.setenv('TOFU_CACHE_SETTLE_WARM_WRITE_TOKENS', value)
+    assert cs.generic_cache_write_pending({
+        'prompt_tokens': 100_000,
+        'prompt_tokens_details': {'cached_tokens': 95_905},
+    }) is False
+    assert cs.generic_cache_write_pending({
+        'prompt_tokens': 100_000,
+        'prompt_tokens_details': {'cached_tokens': 95_904},
+    }) is True
+
+
+def test_explicit_no_pending_write_clears_generic_clock(spy_sleep):
+    cs.record_stream_end('convA', now=1000.0, pending_write=True)
+    cs.record_stream_end('convA', now=1000.1, pending_write=False)
+    assert cs.settle_before_send('convA', BIG, now=1000.2) == 0.0
+    assert spy_sleep == []
 
 
 def test_enough_elapsed_waits_zero(spy_sleep):
@@ -236,10 +355,9 @@ def test_async_first_request_never_waits(monkeypatch):
     assert calls == []
 
 
-def test_default_threshold_is_far_below_admission_gate():
-    """Regression: the settle threshold default MUST be low (decoupled from the
-    150k admission gate). The bug was inheriting 150k → the gate logged 0 hits
-    because every real miss was ~120-140k, below the bar."""
+def test_default_threshold_stays_below_retired_shared_threshold():
+    """The same-conversation settle threshold must stay below the obsolete
+    150k cross-conversation value that skipped every ~120-140k real miss."""
     assert cs.settle_threshold_tokens() == 30_000
     assert cs.settle_threshold_tokens() < 150_000
 

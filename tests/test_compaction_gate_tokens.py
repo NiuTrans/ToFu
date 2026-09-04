@@ -113,6 +113,59 @@ def test_counter_failure_reuses_single_message_estimate(monkeypatch):
     assert measurement['message_tokens'] == 321
 
 
+def test_general_gate_measurement_does_not_collect_identity_hints(monkeypatch):
+    import lib.token_counter as token_counter
+
+    observed_measurement_sinks = []
+
+    def count(*args, **kwargs):
+        observed_measurement_sinks.append(kwargs.get('measurement_out'))
+        return {'tokens': 123, 'method': 'tiktoken'}
+
+    monkeypatch.setattr(token_counter, 'count_tokens', count)
+    measurement = {}
+
+    _count_tokens_authoritative(
+        [{'role': 'user', 'content': 'hello'}],
+        {'config': {'model': 'gpt-5.6-sol'}},
+        measurement_out=measurement,
+    )
+
+    assert observed_measurement_sinks == [None]
+    assert measurement['gate_tokens'] >= 123
+
+
+@pytest.mark.unit
+def test_counter_failure_still_counts_the_selected_tool_surface(monkeypatch):
+    """The declared full-request contract also holds on local degradation."""
+    import lib.context_telemetry as context_telemetry
+    import lib.token_counter as token_counter
+    import lib.tasks_pkg.compaction._tokens as token_mod
+
+    estimate_calls = []
+    monkeypatch.setattr(
+        token_counter, 'count_tokens',
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('offline')))
+    monkeypatch.setattr(
+        token_mod,
+        '_estimate_total_tokens',
+        lambda messages: estimate_calls.append(messages) or 321,
+    )
+    monkeypatch.setattr(
+        context_telemetry, 'tool_schema_tokens',
+        lambda tools, *, model='': 79,
+    )
+
+    count, method = _count_tokens_authoritative(
+        [{'role': 'user', 'content': 'hello'}],
+        {'config': {'model': 'gpt-4o'}, 'convId': 'fallback-tools'},
+        tool_schema=[{'type': 'function'}],
+    )
+
+    assert (count, method) == (400, 'heuristic_fallback')
+    assert len(estimate_calls) == 1
+
+
 @pytest.mark.unit
 def test_gate_includes_tool_schema():
     # Identical messages; only difference is a fat tool schema stashed on
@@ -162,6 +215,25 @@ def test_economic_working_set_bounds_large_context_by_default(monkeypatch):
     assert working_set == 128_000
     assert effective == 128_000
     assert window_safety > effective
+
+
+@pytest.mark.unit
+def test_default_working_set_stays_below_any_declared_price_cliff(monkeypatch):
+    monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
+
+    assert _working_set_token_limit({
+        'config': {'model': 'gpt-5.6-sol'},
+    }) == 244_800
+
+
+@pytest.mark.unit
+def test_explicit_working_set_still_overrides_price_tier_policy(monkeypatch):
+    monkeypatch.setenv('TOFU_WORKING_CONTEXT_TOKENS', '99000')
+    task = {'config': {
+        'model': 'gpt-5.6-sol',
+        'compaction': {'workingSetTokens': 180_000},
+    }}
+    assert _working_set_token_limit(task) == 180_000
 
 
 @pytest.mark.unit

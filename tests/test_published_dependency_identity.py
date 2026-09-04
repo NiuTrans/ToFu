@@ -75,7 +75,10 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.unit
+# The published-fixture reads the PUBLIC PyPI index over a real, unmocked HTTPS
+# request (skip only when unreachable). Tier it `slow` so it leaves the default
+# unit lane; verifying the deployed bytes is the behavior under test.
+pytestmark = pytest.mark.slow
 
 _ROOT = Path(__file__).resolve().parent.parent
 _REQUIREMENTS = _ROOT / 'requirements.txt'

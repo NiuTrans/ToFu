@@ -16,6 +16,7 @@ import json
 import posixpath
 
 from lib.log import get_logger
+from lib.tool_history_pairing import adjacent_tool_call_result_pairs
 from lib.tasks_pkg.compaction._constants import (
     _INTRA_TURN_HOT_ROUNDS,
     _MAX_PRESERVE_TURNS,
@@ -29,15 +30,19 @@ logger = get_logger(__name__)
 
 
 def _objective_anchor_index(messages: list) -> int | None:
-    """Index of the immutable OBJECTIVE ANCHOR — the first real user message.
+    """Index of the OPENING-REQUEST ANCHOR — the first real user message.
 
-    This is the SAME "first real user message" the autopilot objective pin
-    (``_get_or_persist_objective`` / ``_extract_objective``) is derived from —
-    ONE definition of "the objective", not a parallel one.  Compaction protects
-    this message so the original goal survives N successive summaries VERBATIM
-    (``execute_compact_tool`` excludes it from the summarized ``old_messages``
-    and re-inserts it exactly once; ``_head_truncate`` never drops it).  The
-    autopilot pin is a cross-run TEXT cache of the very same message.
+    This is the SAME "first real user message" the autopilot objective pin is
+    minted from (``_get_or_persist_objective`` / ``_extract_objective``) — ONE
+    definition of the opening ask, not a parallel one.  Compaction protects
+    this message so the conversation's origin survives N successive summaries
+    VERBATIM (``execute_compact_tool`` excludes it from the summarized
+    ``old_messages`` and re-inserts it exactly once; ``_head_truncate`` never
+    drops it).  Verbatim protection is EVIDENCE preservation, not an objective
+    decree: the receipt's Objective is separately model-authored from all
+    user messages (see ``_ensure_summary_objective``), and the autopilot pin
+    is re-pinned from accepted receipts when the human's goal is replaced
+    (``_update_objective_from_receipt``).
 
     Skips leading ``system`` messages, any VU directive / virtual-user turn
     (defensive — those flags are autopilot-only and absent elsewhere), and the
@@ -119,6 +124,45 @@ def _user_message_text(msg: dict) -> str:
                  if isinstance(b, dict) and b.get('type') == 'text']
         return '\n'.join(p for p in parts if p).strip()
     return ''
+
+
+def _extract_objective_anchor_text(
+    messages: list,
+    *,
+    char_limit: int = 2_400,
+) -> str:
+    """Return a bounded text view of the opening-request anchor.
+
+    The automatic compactor removes the anchor message from the lossy history
+    before dispatch and re-inserts it verbatim afterwards, so the summary
+    model would not see the opening request at all without this re-supply.
+    It reaches the model as VERBATIM EVIDENCE (labeled "may already be
+    completed or explicitly replaced"); the model authors the receipt's
+    Objective from all user messages, with this anchor as the failure-floor
+    fallback (``_ensure_summary_objective``). This helper derives both views
+    from the same canonical anchor index; it does not invent a second
+    objective source of truth.
+
+    The live message remains unmodified and unbounded. Only the cheap-model
+    prompt is capped, retaining both ends because long requests commonly put
+    references first and the operative instruction last.
+    """
+    anchor_index = _objective_anchor_index(messages)
+    if anchor_index is None:
+        return ''
+    text = _user_message_text(messages[anchor_index])
+    if not text:
+        return '[The primary request contains non-text attachment content.]'
+    limit = max(500, int(char_limit))
+    if len(text) <= limit:
+        return text
+    head = max(250, (limit * 3) // 5)
+    tail = max(250, limit - head - 80)
+    return (
+        text[:head]
+        + '\n...[middle of durable objective elided for summary prompt]...\n'
+        + text[-tail:]
+    )
 
 
 def _collect_user_verbatim(
@@ -440,42 +484,16 @@ def _normalise_recent_file_path(value) -> str:
     return normalised
 
 
-def _successful_file_tool_call_ids(messages: list) -> tuple[set[str], set[str]]:
-    """Return ``(successful, settled)`` ids for file-tool result messages.
+def _successful_file_tool_call_objects(messages: list) -> set[int]:
+    """Return object identities of calls with adjacent successful results.
 
-    Old imported transcripts sometimes omit tool-call ids entirely; callers
-    keep those compatible.  A modern call with an id is included only after a
-    matching successful result, so failed/nonexistent reads do not become
-    misleading recovery instructions after compaction.
+    A call id is only a queue selector inside one assistant/result run.  Using
+    a conversation-wide ``id -> latest result`` map loses valid earlier calls
+    when positional-id providers recycle ``call_0`` and can lend a result to
+    the wrong occurrence in malformed imported history.
     """
-    successful: set[str] = set()
-    settled: set[str] = set()
-    tool_names_by_id: dict[str, str] = {}
-    latest_call_index: dict[str, int] = {}
-    latest_result_index: dict[str, int] = {}
-    for message_index, message in enumerate(messages):
-        if not isinstance(message, dict):
-            continue
-        for tool_call in message.get('tool_calls') or []:
-            if not isinstance(tool_call, dict):
-                continue
-            call_id = str(tool_call.get('id') or '').strip()
-            function = tool_call.get('function') or {}
-            if call_id and isinstance(function, dict):
-                tool_names_by_id[call_id] = str(
-                    function.get('name') or '').strip()
-                latest_call_index[call_id] = message_index
-    for message_index, message in enumerate(messages):
-        if not isinstance(message, dict) or message.get('role') != 'tool':
-            continue
-        call_id = str(message.get('tool_call_id') or '').strip()
-        if not call_id:
-            continue
-        settled.add(call_id)
-        latest_result_index[call_id] = message_index
-        # Some providers recycle positional call IDs in later rounds. The most
-        # recent settlement is authoritative for the most recent matching call.
-        successful.discard(call_id)
+    successful: set[int] = set()
+    for tool_call, message in adjacent_tool_call_result_pairs(messages):
         if (message.get('isError') or message.get('is_error')
                 or str(message.get('status') or '').lower()
                 in {'error', 'failed', 'failure', 'rejected'}):
@@ -505,26 +523,24 @@ def _successful_file_tool_call_ids(messages: list) -> tuple[set[str], set[str]]:
                 in {'error', 'failed', 'failure', 'rejected'}
             ):
                 continue
+        function = tool_call.get('function') or {}
+        tool_name = (str(message.get('name') or '').strip()
+                     or str(function.get('name') or '').strip()
+                     if isinstance(function, dict) else '')
         try:
             from lib.tasks_pkg.handlers._read_gate import (
                 _result_indicates_success,
             )
-            tool_name = (str(message.get('name') or '').strip()
-                         or tool_names_by_id.get(call_id, ''))
             if _result_indicates_success(tool_name, content):
-                successful.add(call_id)
+                successful.add(id(tool_call))
         except Exception:
             # Keep the extraction helper total even in minimal/exported builds.
             if content and not content.lstrip().startswith((
                 'Error:', 'ERROR:', 'Write failed', 'Diff failed',
                 'Insert failed', 'Failed',
             )):
-                successful.add(call_id)
-    for call_id, call_index in latest_call_index.items():
-        if latest_result_index.get(call_id, -1) <= call_index:
-            settled.discard(call_id)
-            successful.discard(call_id)
-    return successful, settled
+                successful.add(id(tool_call))
+    return successful
 
 
 def _extract_recently_accessed_files(messages: list,
@@ -535,8 +551,7 @@ def _extract_recently_accessed_files(messages: list,
         return []
     files_seen: list[str] = []
     files_set: set[str] = set()
-    observed_call_ids: set[str] = set()
-    successful_ids, settled_ids = _successful_file_tool_call_ids(messages)
+    successful_calls = _successful_file_tool_call_objects(messages)
 
     def _add_path(value) -> None:
         if len(files_seen) >= max_files:
@@ -555,18 +570,13 @@ def _extract_recently_accessed_files(messages: list,
             fn = tc.get('function', {})
             fn_name = fn.get('name', '')
             call_id = str(tc.get('id') or '').strip()
-            if call_id:
-                if call_id in observed_call_ids:
-                    continue
-                observed_call_ids.add(call_id)
 
             if fn_name not in ('read_files', 'read_file',
                                'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                'insert_content', 'insert_contents'):
                 continue
 
-            if call_id and (call_id not in settled_ids
-                            or call_id not in successful_ids):
+            if call_id and id(tc) not in successful_calls:
                 continue
 
             try:

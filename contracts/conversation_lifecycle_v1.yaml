@@ -44,12 +44,18 @@ operations:
     storage: conversation.clone
     transition: active -> new_active
     atomic: true
-    precondition: every source turn is terminal
+    sourceMayBeGenerating: true
+    snapshotBoundary: >-
+      latest durable source projections fenced inside the clone transaction;
+      browser-only bytes not yet recorded by the authority are outside the snapshot
     request:
       conversationId: client-generated destination identity
       title: non-empty destination title
     effects:
-      - the complete turn graph and compaction history are copied server-side
+      - the durable turn graph and compaction history at the snapshot boundary are copied server-side
+      - pending and running source turns become interrupted static turns in the destination
+      - non-terminal tool presentation becomes aborted and cannot retain a running indicator
+      - source execution continues unchanged and later source updates never enter the destination
       - turn, archive, and historical task identities are remapped
       - attempts, live latches, approvals, and executable run identity are not copied
       - the browser never uploads a message array

@@ -21,7 +21,13 @@ import time
 
 from lib.log import audit_log, get_logger
 
-from lib.context_limits._store import _key, _MIN_LEARNABLE, _MAX_LEARNABLE
+from lib.context_limits._store import (
+    _has_pending_evidence,
+    _key,
+    _MAX_LEARNABLE,
+    _MIN_LEARNABLE,
+    _pending_timestamp,
+)
 
 logger = get_logger(__name__)
 
@@ -114,7 +120,10 @@ def learn_shrink_from_error(provider_id: str | None, model: str,
                          '(model=%s provider=%s)',
                          candidate, prior_known, model, provider_id or '?')
             # A non-shrinking event clears any pending big-drop strikes.
-            _clear_pending_strikes(k)
+            if _clear_pending_strikes(k):
+                # Clearing only in memory lets a restart resurrect stale
+                # corroboration and turn a later first overflow into strike 2.
+                f._persist()
             return None
 
         # ── Big-drop strike gate (inferred shrinks only) ──
@@ -169,22 +178,52 @@ def _register_strike(k: str, candidate: int, now: float) -> int:
     """
     _META = _facade()._META
     meta = _META.get(k)
-    if (meta and meta.get('source') == 'pending'
-            and (now - (meta.get('ts') or 0)) <= _STRIKE_WINDOW_SEC):
+    if (_has_pending_evidence(meta)
+            and (now - _pending_timestamp(meta)) <= _STRIKE_WINDOW_SEC):
         meta['strikes'] = int(meta.get('strikes', 0)) + 1
-        meta['ts'] = now
         meta['pending'] = candidate
+        if meta.get('source') == 'pending':
+            meta['ts'] = now
+        else:
+            meta['pending_ts'] = now
         return meta['strikes']
-    _META[k] = {'ts': now, 'source': 'pending', 'strikes': 1, 'pending': candidate}
+    if k in _facade()._LEARNED and isinstance(meta, dict):
+        # Preserve the learned value's source/timestamp: shrink TTL and expand
+        # floor semantics must keep working while a new drop awaits strike 2.
+        next_meta = dict(meta)
+        next_meta.update({
+            'strikes': 1,
+            'pending': candidate,
+            'pending_ts': now,
+        })
+        _META[k] = next_meta
+    else:
+        _META[k] = {
+            'ts': now,
+            'source': 'pending',
+            'strikes': 1,
+            'pending': candidate,
+        }
     return 1
 
 
-def _clear_pending_strikes(k: str):
-    """Drop a pending (not-yet-persisted) strike record. Caller holds ``_lock``."""
+def _clear_pending_strikes(k: str) -> bool:
+    """Clear pending evidence and report whether state changed.
+
+    Caller holds ``_lock``. Learned provenance is preserved because it drives
+    shrink expiry and expand resolution independently of the strike gate.
+    """
     _META = _facade()._META
     meta = _META.get(k)
-    if meta and meta.get('source') == 'pending':
+    if not _has_pending_evidence(meta):
+        return False
+    if meta.get('source') == 'pending':
         _META.pop(k, None)
+    else:
+        meta['strikes'] = 0
+        meta.pop('pending', None)
+        meta.pop('pending_ts', None)
+    return True
 
 
 def learn_expand_from_success(provider_id: str | None, model: str,

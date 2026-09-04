@@ -1,5 +1,5 @@
 # HOT_PATH — called once per stream round to emit the pre-flight
-# Request-Inspector messages snapshot for the debug panel.
+# Request-Inspector messages snapshot from the canonical request body.
 """Emit the pre-flight ``MESSAGES_SNAPSHOT`` (kind='request') event.
 
 Extracted 2026-07-31 ( slice 15) from
@@ -10,9 +10,10 @@ Extracted 2026-07-31 ( slice 15) from
     real outbound ordering, so the debug panel sees the same sequence
     the model will. The helper:
 
-    * Runs ``apply_wire_sanitize`` on an INDEPENDENT copy of
-      ``messages`` — build_body re-runs its own copy at request time,
-      so a shared mutation would double-sanitize.
+    * Successful rounds reuse the canonical message list already produced by
+      ``build_body`` instead of repeating every conversation-sized sanitizer.
+      A body-build failure still runs ``apply_wire_sanitize`` on an independent
+      copy so the failed request remains diagnosable.
     * Strips base64 data URLs from the snapshot via
       ``_strip_base64_for_snapshot`` — keeps the debug event small
       enough to travel over SSE.
@@ -65,6 +66,7 @@ def emit_messages_snapshot_event(
     max_tokens: int,
     response_format: Any,
     tools: Any,
+    prepared_messages: list[dict[str, Any]] | None = None,
 ) -> None:
     """Emit the pre-flight ``MESSAGES_SNAPSHOT`` event for the Request
     Inspector.
@@ -75,7 +77,10 @@ def emit_messages_snapshot_event(
             read; the emitted event is appended onto ``task['events']``
             via ``append_event``.
         messages: The live outbound message list — READ ONLY; the
-            helper runs the wire sanitizer on its own copy.
+            helper runs the wire sanitizer on its own copy only when a
+            canonical body could not be built.
+        prepared_messages: Canonical messages from the successfully built
+            request body. They are read-only and projected directly.
 
     The ``tools`` argument is the round's assembled tool list from
     ``_assemble_tool_list`` (may be None / empty). Attached to the
@@ -83,9 +88,11 @@ def emit_messages_snapshot_event(
     for the Request Inspector.
     """
     try:
-        _wire = apply_wire_sanitize(
-            messages, conv_id=task.get('convId', ''),
-            provider_id=task.get('provider_id') or '')
+        _wire = prepared_messages
+        if not isinstance(_wire, list):
+            _wire = apply_wire_sanitize(
+                messages, conv_id=task.get('convId', ''),
+                provider_id=task.get('provider_id') or '')
         snapshot = _strip_base64_for_snapshot(_wire)
         snap_evt = build_event(
             EventType.MESSAGES_SNAPSHOT,

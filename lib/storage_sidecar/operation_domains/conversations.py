@@ -8,6 +8,8 @@ OPERATIONS = {
         'query', False, ops._conversation_get),
     'conversation.list': ops.OperationSpec(
         'query', False, ops._conversation_list),
+    'conversation.activity_dates': ops.OperationSpec(
+        'query', False, ops._conversation_activity_dates),
     'conversation.count': ops.OperationSpec(
         'query', False, ops._conversation_count),
     'conversation.search': ops.OperationSpec(

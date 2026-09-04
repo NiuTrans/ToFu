@@ -5,6 +5,9 @@ import {
   type ErrorEnvelope,
 } from './errors';
 
+import { readBrowserStorage, writeBrowserStorage } from '../core/browser-storage';
+import { BoundedMap } from '../core/bounded-map';
+
 export type ParseMode = 'json' | 'text' | 'blob' | 'response' | 'none';
 export type RequestPriority = 'foreground' | 'normal' | 'background';
 
@@ -107,8 +110,14 @@ type AffinityRecord = {
 
 const globals = window as ApiGlobals;
 const AFFINITY_STORAGE_KEY = 'tofu_task_affinity_v1';
-const taskAffinity = new Map<string, string>();
-const conversationAffinity = new Map<string, string>();
+const TASK_AFFINITY_MAX_ENTRIES = 256;
+const CONVERSATION_AFFINITY_MAX_ENTRIES = 128;
+const AFFINITY_ID_MAX_CHARACTERS = 256;
+const AFFINITY_KEY_MAX_CHARACTERS = 256;
+const taskAffinity = new BoundedMap<string, string>(TASK_AFFINITY_MAX_ENTRIES);
+const conversationAffinity = new BoundedMap<string, string>(
+  CONVERSATION_AFFINITY_MAX_ENTRIES,
+);
 let requestSequence = 0;
 
 const PROXY_READ_CONCURRENCY = 6;
@@ -445,18 +454,22 @@ function queryString(params?: Record<string, unknown>): string {
 
 function loadAffinities(): void {
   try {
-    const raw = globals.sessionStorage?.getItem(AFFINITY_STORAGE_KEY);
+    const raw = readBrowserStorage(AFFINITY_STORAGE_KEY, 'session');
     if (!raw) return;
     const saved = record(JSON.parse(raw));
-    for (const pair of Array.isArray(saved?.tasks) ? saved.tasks : []) {
-      if (Array.isArray(pair) && pair[0] && pair[1]) {
-        taskAffinity.set(String(pair[0]), String(pair[1]));
-      }
+    const savedTasks = Array.isArray(saved?.tasks) ? saved.tasks : [];
+    for (const pair of savedTasks.slice(-TASK_AFFINITY_MAX_ENTRIES)) {
+      if (!Array.isArray(pair)) continue;
+      const id = affinityRecordId(pair[0]);
+      const key = affinityKey(pair[1]);
+      if (id && key) taskAffinity.set(id, key);
     }
-    for (const pair of Array.isArray(saved?.convs) ? saved.convs : []) {
-      if (Array.isArray(pair) && pair[0] && pair[1]) {
-        conversationAffinity.set(String(pair[0]), String(pair[1]));
-      }
+    const savedConversations = Array.isArray(saved?.convs) ? saved.convs : [];
+    for (const pair of savedConversations.slice(-CONVERSATION_AFFINITY_MAX_ENTRIES)) {
+      if (!Array.isArray(pair)) continue;
+      const id = affinityRecordId(pair[0]);
+      const key = affinityKey(pair[1]);
+      if (id && key) conversationAffinity.set(id, key);
     }
   } catch (error) {
     console.warn('[Api] task-affinity restore failed:', errorDetails(error).message);
@@ -465,20 +478,30 @@ function loadAffinities(): void {
 
 function persistAffinities(): void {
   try {
-    if (!globals.sessionStorage) return;
-    globals.sessionStorage.setItem(AFFINITY_STORAGE_KEY, JSON.stringify({
-      tasks: Array.from(taskAffinity.entries()).slice(-256),
-      convs: Array.from(conversationAffinity.entries()).slice(-128),
-    }));
+    writeBrowserStorage(AFFINITY_STORAGE_KEY, JSON.stringify({
+      tasks: Array.from(taskAffinity.entries()),
+      convs: Array.from(conversationAffinity.entries()),
+    }), 'session');
   } catch (error) {
     console.warn('[Api] task-affinity persist failed:', errorDetails(error).message);
   }
 }
 
 function conversationAffinityKey(convId: unknown): string {
-  return convId
-    ? `conv-${encodeURIComponent(String(convId)).slice(0, 220)}`
+  const id = affinityRecordId(convId);
+  return id
+    ? `conv-${encodeURIComponent(id).slice(0, 220)}`
     : '';
+}
+
+function affinityRecordId(value: unknown): string {
+  if (!value) return '';
+  const id = String(value);
+  return id.length <= AFFINITY_ID_MAX_CHARACTERS ? id : '';
+}
+
+function affinityKey(value: unknown): string {
+  return value ? String(value).slice(0, AFFINITY_KEY_MAX_CHARACTERS) : '';
 }
 
 /** Mint one page-scoped idempotency key for a logical write operation.
@@ -500,10 +523,14 @@ export function newIdempotencyKey(): string {
 }
 
 function rememberTaskAffinity(taskId: unknown, key: unknown, convId?: unknown): string {
-  if (!key) return '';
-  const value = String(key);
-  if (taskId) taskAffinity.set(String(taskId), value);
-  if (convId) conversationAffinity.set(String(convId), value);
+  const value = affinityKey(key);
+  if (!value) return '';
+  const normalizedTaskId = affinityRecordId(taskId);
+  const normalizedConversationId = affinityRecordId(convId);
+  if (normalizedTaskId) taskAffinity.set(normalizedTaskId, value);
+  if (normalizedConversationId) {
+    conversationAffinity.set(normalizedConversationId, value);
+  }
   persistAffinities();
   return value;
 }
@@ -513,12 +540,17 @@ export function bindTaskAffinity(
   convId?: unknown,
   explicitKey?: unknown,
 ): string {
-  const key = (explicitKey ? String(explicitKey) : '')
-    || (taskId ? taskAffinity.get(String(taskId)) : '')
-    || (convId ? conversationAffinity.get(String(convId)) : '')
-    || conversationAffinityKey(convId)
+  const normalizedTaskId = affinityRecordId(taskId);
+  const normalizedConversationId = affinityRecordId(convId);
+  const key = affinityKey(explicitKey)
+    || (normalizedTaskId ? taskAffinity.get(normalizedTaskId) : '')
+    || (normalizedConversationId
+      ? conversationAffinity.get(normalizedConversationId) : '')
+    || conversationAffinityKey(normalizedConversationId)
     || '';
-  if (key && taskId) rememberTaskAffinity(taskId, key, convId);
+  if (key && normalizedTaskId) {
+    rememberTaskAffinity(normalizedTaskId, key, normalizedConversationId);
+  }
   return key;
 }
 
@@ -562,9 +594,11 @@ function decorateActiveResponse(response: Response): Response {
 }
 
 function affinityFor(options: RequestOptions): string {
-  return options.taskAffinityKey
-    || (options.taskId ? taskAffinity.get(String(options.taskId)) : '')
-    || (options.convId ? conversationAffinity.get(String(options.convId)) : '')
+  const taskId = affinityRecordId(options.taskId);
+  const convId = affinityRecordId(options.convId);
+  return affinityKey(options.taskAffinityKey)
+    || (taskId ? taskAffinity.get(taskId) : '')
+    || (convId ? conversationAffinity.get(convId) : '')
     || conversationAffinityKey(options.convId)
     || '';
 }
@@ -891,8 +925,8 @@ export function taskStartAffinityOptions(
   options: RequestOptions = {},
 ): RequestOptions {
   const payload = record(body);
-  const convId = typeof payload?.convId === 'string' ? payload.convId : '';
-  const key = options.taskAffinityKey
+  const convId = affinityRecordId(payload?.convId);
+  const key = affinityKey(options.taskAffinityKey)
     || (convId ? conversationAffinity.get(convId) : '')
     || conversationAffinityKey(convId)
     || newIdempotencyKey();

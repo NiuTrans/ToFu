@@ -24,20 +24,28 @@ from quart import Blueprint
 from lib.api_response import api_bad_request, api_ok
 from lib.cost import compute_cost
 from lib.log import LOG_DIR, get_logger
-from lib.log_clean import detect_log_noise
 from lib.openapi import api_meta
 from lib.request_parser import BadRequest, optional_dict, optional_str, parse_body, require_list, require_str
-from lib.text_lang import (
-    cjk_ratio, detect_language, guess_language, is_predominantly_chinese,
-    latin_ratio,
-)
-from lib.tool_changes import extract_file_changes_dicts
 
 from .auth import current_auth, require_scope
 
 logger = get_logger(__name__)
 
 api_v1_logs_bp = Blueprint('api_v1_logs', __name__)
+
+
+def detect_log_noise(*args, **kwargs):
+    """Patchable request-loaded log-cleaning policy seam."""
+    from lib.log_clean import detect_log_noise as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def extract_file_changes_dicts(*args, **kwargs):
+    """Patchable request-loaded tool-round projection seam."""
+    from lib.tool_changes import extract_file_changes_dicts as implementation
+
+    return implementation(*args, **kwargs)
 
 
 @api_v1_logs_bp.route('/api/v1/logs/clean', methods=['POST'])
@@ -220,6 +228,17 @@ def extract_file_changes_batch_route():
     }}},
 )
 def detect_text_language():
+    # The language cascade owns optional model state and several policy
+    # modules. Ordinary route registration does not need any of it; cross the
+    # boundary only for this explicit detection request.
+    from lib.text_lang import (
+        cjk_ratio,
+        detect_language,
+        guess_language,
+        is_predominantly_chinese,
+        latin_ratio,
+    )
+
     body = parse_body()
     try:
         text = require_str(body, 'text', max_len=2_000_000,
@@ -356,9 +375,10 @@ def message_cost_batch():
     summary='Relay browser console lines into logs/frontend.log',
     description=(
         'Batch sink for the client-side log relay '
-        '(static/js/core/client_log_relay.js): the browser patches '
+        '(frontend/src/runtime/sections/core/client_log_relay.js): the browser patches '
         'console.{log,info,warn,error} into a bounded ring buffer and '
-        'POSTs it here every 15 s (sendBeacon on pagehide), closing the '
+        'POSTs it after a demand-scoped 15 s flush delay (60 s through a '
+        'constrained proxy; sendBeacon on pagehide), closing the '
         'gap where live-view diagnostics (console.info breadcrumbs) never '
         'reached the server.\n\n'
         'Body: ``{session, url, entries: [{t, lv, msg, n?}]}`` — capped '

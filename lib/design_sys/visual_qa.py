@@ -19,13 +19,15 @@ Degradation discipline (the whole point of the return shape):
                                          caller decides; it must NOT fail a
                                          film/deck over a QA outage.
 
-Nothing here retries. The owning capability decides what findings mean
-(repair round, advisory note, quality-axis entry).
+Nothing here performs a semantic QA retry. The transport may try at most two
+provider slots under the finite production 429 budget; the owning capability
+decides what findings mean (repair round, advisory note, quality-axis entry).
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -36,7 +38,13 @@ from lib.production.contracts import normalise_findings
 logger = get_logger(__name__)
 
 __all__ = ['QA_CHECKLIST', 'visual_qa_available', 'screenshot_composition',
-           'qa_frame', 'findings_text']
+           'resolve_visual_qa_model', 'qa_frame_input_sha256', 'qa_frame',
+           'load_visual_qa_cache', 'cached_visual_qa_result',
+           'remember_visual_qa_result', 'findings_text']
+
+_MAX_QA_IMAGE_BYTES = 16 * 1024 * 1024
+_MAX_QA_OUTPUT_TOKENS = 4096
+_QA_INPUT_VERSION = 'visual-qa-input-v1'
 
 #: The designer's checklist, one row per item. ``id`` is stable for telemetry.
 QA_CHECKLIST: tuple = (
@@ -115,6 +123,63 @@ def _vision_model() -> str:
     return ''
 
 
+def resolve_visual_qa_model(preferred: str = '') -> str:
+    """Resolve one model once so cache identity and dispatch cannot drift."""
+    return str(preferred or '').strip() or _vision_model()
+
+
+def _qa_prompt(theme, subject: str) -> str:
+    theme_line = ''
+    if theme is not None:
+        c = theme.colors
+        theme_line = (f',绑定主题为「{theme.label}」(背景{c["bg"]} 墨色'
+                      f'{c["ink"]} 结构色{c["primary"]} 强调色{c["accent"]})')
+    checklist = '\n'.join(f'{i}. [{cid}] {text}'
+                          for i, (cid, text) in enumerate(QA_CHECKLIST, 1))
+    return _QA_PROMPT_ZH.format(subject=subject, theme_line=theme_line,
+                                checklist=checklist)
+
+
+def _qa_output_tokens(max_tokens) -> int:
+    try:
+        return max(128, min(_MAX_QA_OUTPUT_TOKENS, int(max_tokens)))
+    except (TypeError, ValueError, OverflowError):
+        return 1500
+
+
+def _qa_input_sha256(prompt: str, model: str, output_tokens: int,
+                     raw_image: bytes) -> str:
+    payload = json.dumps({
+        'version': _QA_INPUT_VERSION,
+        'prompt': prompt,
+        'model': model,
+        'max_tokens': output_tokens,
+        'temperature': 0.1,
+        'strict_model': True,
+        'image_bytes': len(raw_image),
+        'image_sha256': hashlib.sha256(raw_image).hexdigest(),
+    }, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def qa_frame_input_sha256(image_path: str, *, theme=None,
+                          subject: str = '视频帧', model: str = '',
+                          max_tokens: int = 1500) -> str:
+    """Hash every semantic VLM input using the same builders as dispatch."""
+    resolved_model = resolve_visual_qa_model(model)
+    if not resolved_model:
+        raise ValueError('no vision-capable model slot')
+    with open(image_path, 'rb') as source:
+        raw_image = source.read(_MAX_QA_IMAGE_BYTES + 1)
+        file_size = os.fstat(source.fileno()).st_size
+    if (not 0 < file_size <= _MAX_QA_IMAGE_BYTES
+            or len(raw_image) != file_size):
+        raise ValueError('frame image is empty, oversized, or changed during read')
+    return _qa_input_sha256(
+        _qa_prompt(theme, subject), resolved_model,
+        _qa_output_tokens(max_tokens), raw_image)
+
+
 def screenshot_composition(scene_dir: str, out_path: str, *,
                            width: int = 0, height: int = 0,
                            settle_ms: int = 500,
@@ -165,7 +230,10 @@ def screenshot_composition(scene_dir: str, out_path: str, *,
 
 def qa_frame(image_path: str, *, theme=None, label: str = '',
              subject: str = '视频帧', model: str = '',
-             max_tokens: int = 1500) -> dict:
+             max_tokens: int = 1500, abort_check=None,
+             max_429_attempts: int | None = None,
+             owner_user_id: int | None = None,
+             provider_pin_id: str = '') -> dict:
     """Run the checklist against one rendered frame/page image.
 
     Returns ``{'ok', 'skipped', 'reason', 'findings', 'has_blocker',
@@ -174,12 +242,16 @@ def qa_frame(image_path: str, *, theme=None, label: str = '',
     """
     out = {'ok': False, 'skipped': False, 'reason': '', 'findings': [],
            'has_blocker': False, 'summary': ''}
+    if abort_check is not None and abort_check():
+        out['skipped'] = True
+        out['reason'] = 'aborted before visual QA'
+        return out
     if not os.path.isfile(image_path):
         out['skipped'] = True
         out['reason'] = f'frame image missing: {image_path}'
         return out
 
-    model = model or _vision_model()
+    model = resolve_visual_qa_model(model)
     if not model:
         out['skipped'] = True
         out['reason'] = 'no vision-capable model slot'
@@ -193,39 +265,68 @@ def qa_frame(image_path: str, *, theme=None, label: str = '',
     except Exception as e:
         logger.debug('[VisualQA] vision probe failed for %s: %s', model, e)
 
-    theme_line = ''
-    if theme is not None:
-        c = theme.colors
-        theme_line = (f',绑定主题为「{theme.label}」(背景{c["bg"]} 墨色'
-                      f'{c["ink"]} 结构色{c["primary"]} 强调色{c["accent"]})')
-    checklist = '\n'.join(f'{i}. [{cid}] {text}'
-                          for i, (cid, text) in enumerate(QA_CHECKLIST, 1))
-    prompt = _QA_PROMPT_ZH.format(subject=subject, theme_line=theme_line,
-                                  checklist=checklist)
+    prompt = _qa_prompt(theme, subject)
 
     try:
+        image_bytes = os.path.getsize(image_path)
+    except OSError as e:
+        out['skipped'] = True
+        out['reason'] = f'frame stat failed: {e}'
+        return out
+    if image_bytes > _MAX_QA_IMAGE_BYTES:
+        out['skipped'] = True
+        out['reason'] = (f'frame image is {image_bytes} bytes; visual QA limit '
+                         f'is {_MAX_QA_IMAGE_BYTES}')
+        return out
+    try:
         with open(image_path, 'rb') as fh:
-            data_uri = ('data:image/png;base64,'
-                        + base64.b64encode(fh.read()).decode('ascii'))
+            raw_image = fh.read(_MAX_QA_IMAGE_BYTES + 1)
     except OSError as e:
         logger.debug('[VisualQA] frame unreadable %s: %s', image_path, e)
         out['skipped'] = True
         out['reason'] = f'frame unreadable: {e}'
         return out
+    if len(raw_image) > _MAX_QA_IMAGE_BYTES:
+        out['skipped'] = True
+        out['reason'] = 'frame grew beyond the visual QA byte limit'
+        return out
+    if not raw_image:
+        out['skipped'] = True
+        out['reason'] = 'frame image is empty'
+        return out
+    output_tokens = _qa_output_tokens(max_tokens)
+    out['input_sha256'] = _qa_input_sha256(
+        prompt, model, output_tokens, raw_image)
+    data_uri = ('data:image/png;base64,'
+                + base64.b64encode(raw_image).decode('ascii'))
 
     try:
         from lib.llm_dispatch.api import dispatch_chat
-        content, _usage = dispatch_chat(
-            [{'role': 'user', 'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': data_uri}},
-            ]}],
-            max_tokens=max_tokens, temperature=0.1, prefer_model=model,
-            strict_model=True,
-            log_prefix=f'[VisualQA:{label}]')
+        from lib.llm_dispatch.provider_pin import provider_pin
+        from lib.production.llm_policy import production_llm_dispatch_kwargs
+        with provider_pin(provider_pin_id):
+            content, _usage = dispatch_chat(
+                [{'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': data_uri}},
+                ]}],
+                max_tokens=output_tokens, temperature=0.1, prefer_model=model,
+                strict_model=True, owner_user_id=owner_user_id,
+                **production_llm_dispatch_kwargs(
+                    abort_check=abort_check,
+                    max_429_attempts=max_429_attempts),
+                log_prefix=f'[VisualQA:{label}]')
     except Exception as e:
+        if abort_check is not None and abort_check():
+            out['skipped'] = True
+            out['reason'] = 'aborted during visual QA'
+            return out
         out['reason'] = f'VLM dispatch failed: {e}'
         logger.warning('[VisualQA] %s QA dispatch failed: %s', label, e)
+        return out
+    if abort_check is not None and abort_check():
+        out['skipped'] = True
+        out['reason'] = 'aborted after visual QA'
         return out
 
     findings = _parse_findings(content or '')
@@ -241,6 +342,123 @@ def qa_frame(image_path: str, *, theme=None, label: str = '',
     logger.info('[VisualQA] %s: %d finding(s) (blocker=%s)',
                 label, len(findings), out['has_blocker'])
     return out
+
+
+def load_visual_qa_cache(path: str, *, version: str, max_entries: int,
+                         max_bytes: int) -> dict:
+    """Load one bounded capability-owned cache of validated QA results."""
+    entry_limit = max(1, int(max_entries))
+    byte_limit = max(1, int(max_bytes))
+    try:
+        with open(path, 'rb') as source:
+            data = source.read(byte_limit + 1)
+        if len(data) > byte_limit:
+            raise ValueError('visual QA cache exceeds byte limit')
+        parsed = json.loads(data.decode('utf-8'))
+    except FileNotFoundError:
+        parsed = {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        logger.warning('[VisualQA] cache ignored at %s: %s', path, exc)
+        parsed = {}
+    if (not isinstance(parsed, dict)
+            or parsed.get('version') != version
+            or not isinstance(parsed.get('entries'), dict)):
+        return {'version': version, 'entries': {}}
+    entries = {}
+    for key, row in parsed['entries'].items():
+        if len(entries) >= entry_limit:
+            break
+        if isinstance(key, str) and isinstance(row, dict):
+            entries[key] = row
+    return {'version': version, 'entries': entries}
+
+
+def _visual_qa_result_payload(result: dict, *, max_findings: int) -> dict | None:
+    if not isinstance(result, dict) or result.get('ok') is not True:
+        return None
+    valid_checks = {check for check, _text in QA_CHECKLIST}
+    findings = normalise_findings(
+        result.get('findings'), valid_checks=valid_checks
+    )[:max(1, int(max_findings))]
+    return {
+        'ok': True,
+        'skipped': False,
+        'reason': '',
+        'findings': findings,
+        'has_blocker': any(item.get('severity') == 'blocker'
+                           for item in findings),
+        'summary': f'{len(findings)} finding(s)',
+    }
+
+
+def _visual_qa_result_sha256(result: dict) -> str:
+    encoded = json.dumps(result, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def cached_visual_qa_result(row: dict | None, input_sha256: str, *,
+                            max_findings: int = 64) -> dict | None:
+    """Return a hash-verified successful result for one exact VLM input."""
+    if (not isinstance(row, dict)
+            or row.get('input_sha256') != input_sha256
+            or not re.fullmatch(r'[0-9a-f]{64}',
+                                str(row.get('result_sha256') or ''))):
+        return None
+    result = _visual_qa_result_payload(
+        row.get('result'), max_findings=max_findings)
+    if (result is None
+            or _visual_qa_result_sha256(result) != row['result_sha256']):
+        return None
+    return {**result, 'reused': True, 'input_sha256': input_sha256}
+
+
+def remember_visual_qa_result(cache: dict, path: str, key: str,
+                              input_sha256: str, result: dict, *,
+                              max_entries: int,
+                              max_bytes: int,
+                              max_findings: int = 64) -> bool:
+    """Atomically retain one successful exact-input result under a hard cap."""
+    payload = _visual_qa_result_payload(
+        result, max_findings=max_findings)
+    if payload is None or result.get('input_sha256') != input_sha256:
+        return False
+    entries = cache.get('entries')
+    if not isinstance(entries, dict):
+        entries = {}
+        cache['entries'] = entries
+    entry_limit = max(1, int(max_entries))
+    while key not in entries and len(entries) >= entry_limit:
+        entries.pop(next(iter(entries)))
+    entries[key] = {
+        'input_sha256': input_sha256,
+        'result': payload,
+        'result_sha256': _visual_qa_result_sha256(payload),
+    }
+    byte_limit = max(1, int(max_bytes))
+
+    def _encoded() -> str:
+        return json.dumps(cache, ensure_ascii=False, sort_keys=True,
+                          separators=(',', ':'))
+
+    encoded = _encoded()
+    while len(encoded.encode('utf-8')) > byte_limit:
+        victim = next((entry_key for entry_key in entries if entry_key != key),
+                      None)
+        if victim is None:
+            entries.pop(key, None)
+            logger.warning('[VisualQA] one cache result exceeds %d bytes; '
+                           'not retained at %s', byte_limit, path)
+            return False
+        entries.pop(victim, None)
+        encoded = _encoded()
+    from lib.json_store import write_text_atomic
+    try:
+        write_text_atomic(path, encoded)
+    except OSError as exc:
+        logger.warning('[VisualQA] cache write failed at %s: %s', path, exc)
+        return False
+    return True
 
 
 _JSON_RE = re.compile(r'\{.*\}', re.DOTALL)

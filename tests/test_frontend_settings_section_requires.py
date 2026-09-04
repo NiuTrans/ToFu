@@ -29,14 +29,15 @@ from pathlib import Path
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+from tests._runtime_sections import runtime_section
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-MODULE = ROOT / "static" / "js" / "settings" / "section_requires.js"
 MODULE_TS = ROOT / "frontend" / "src" / "features" / "settings" / "section-requires.ts"
-ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 PANEL = ROOT / "static" / "settings_panels" / "general.html"
-STYLES = ROOT / "static" / "styles.css"
+STYLES = ROOT / "frontend/src/styles/application/10-project-progress-modals.css"
 
 
 def _node() -> str:
@@ -94,22 +95,29 @@ HARNESS = textwrap.dedent("""
 """)
 
 
-def _run(body: str, defines: str = "", source: str | None = None) -> dict:
-    script = HARNESS.format(body=body, defines=defines,
-                            source=(source if source is not None else
-                                    MODULE.read_text(encoding="utf-8")))
+def _run(body: str, source: str, defines: str = "") -> dict:
+    script = HARNESS.format(body=body, defines=defines, source=source)
     proc = subprocess.run([_node(), "-e", script], cwd=ROOT,
                           capture_output=True, text=True)
     assert proc.returncode == 0, f"node failed: {proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+@pytest.fixture(scope="module")
+def module_source() -> str:
+    with compiled_typescript(
+        MODULE_TS,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        yield Path(built).read_text(encoding="utf-8")
+
+
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_missing_module_degrades_the_section():
+def test_missing_module_degrades_the_section(module_source):
     """The exact live failure: the painting module is absent → the block must
     NOT sit there as an empty box; it must be marked degraded so CSS hides the
     control and reveals the notice."""
-    out = _run(_section_html())               # no paintSomeTab defined
+    out = _run(_section_html(), module_source)  # no paintSomeTab defined
     assert out["degradedCount"] == 1, "the block must be counted as degraded"
     assert out["hasDegradedClass"] is True, (
         "with its module missing the section MUST carry .degraded — otherwise "
@@ -120,9 +128,12 @@ def test_missing_module_degrades_the_section():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_present_module_leaves_the_section_fully_usable():
-    out = _run(_section_html(),
-               defines="global.window.paintSomeTab = function () { return []; };")
+def test_present_module_leaves_the_section_fully_usable(module_source):
+    out = _run(
+        _section_html(),
+        module_source,
+        defines="global.window.paintSomeTab = function () { return []; };",
+    )
     assert out["degradedCount"] == 0
     assert out["hasDegradedClass"] is False, (
         "with the module present the section must render normally"
@@ -130,45 +141,42 @@ def test_present_module_leaves_the_section_fully_usable():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_contract_is_generic_not_a_logo_special_case():
+def test_contract_is_generic_not_a_logo_special_case(module_source):
     """Any block can declare a dependency — adding a JS-gated section is one
     attribute, not new code. Also covers the multi-symbol form."""
     body = ('<div class="settings-section-needs-js" data-requires="someFn otherFn">'
             '<div class="theme-picker" id="someTabPicker"></div>'
             '<div class="settings-section-js-missing">needs restart</div></div>')
-    both_missing = _run(body)
+    both_missing = _run(body, module_source)
     assert both_missing["hasDegradedClass"] is True
-    one_missing = _run(body, defines="global.window.someFn = function () {};")
+    one_missing = _run(
+        body, module_source,
+        defines="global.window.someFn = function () {};",
+    )
     assert one_missing["hasDegradedClass"] is True, (
         "a block must degrade unless EVERY declared symbol is present"
     )
-    all_present = _run(body, defines=("global.window.someFn = function () {};"
-                                      "global.window.otherFn = function () {};"))
+    all_present = _run(
+        body, module_source,
+        defines=("global.window.someFn = function () {};"
+                 "global.window.otherFn = function () {};"),
+    )
     assert all_present["hasDegradedClass"] is False
 
 
-@pytest.mark.skipif(not _has_jsdom() or not ESBUILD.is_file(),
-                    reason="jsdom + esbuild not installed")
-def test_vite_section_requirements_match_classic_contract(tmp_path):
-    built = tmp_path / "section-requires.js"
-    compiled = subprocess.run(
-        [str(ESBUILD), str(MODULE_TS), "--bundle", "--format=iife",
-         "--platform=browser", f"--outfile={built}"],
-        cwd=ROOT, capture_output=True, text=True)
-    assert compiled.returncode == 0, compiled.stderr
-    source = built.read_text(encoding="utf-8")
-
-    missing = _run(_section_html(), source=source)
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_vite_section_requirements_match_declared_contract(module_source):
+    missing = _run(_section_html(), module_source)
     present = _run(
         _section_html(),
+        module_source,
         defines="global.window.paintSomeTab = function () {};",
-        source=source,
     )
     multi = _run(
         _section_html("paintSomeTab otherTab"),
+        module_source,
         defines=("global.window.paintSomeTab = function () {};"
                  "global.window.otherTab = true;"),
-        source=source,
     )
     assert missing["degradedCount"] == 1
     assert missing["hasDegradedClass"] is True
@@ -211,7 +219,7 @@ def test_a_shipped_block_that_declares_the_contract_is_wired():
             "a block declaring data-requires must also ship a notice element, "
             "or degrading it hides the control and shows nothing at all"
         )
-    core_panel = (ROOT / "static" / "js" / "settings" / "core_panel.js").read_text(encoding="utf-8")
+    core_panel = runtime_section('settings/core_panel.js')
     assert "applySectionRequirements()" in core_panel, (
         "settings-open must still invoke the contract — otherwise data-requires "
         "becomes a no-op attribute that looks like protection"
@@ -222,10 +230,19 @@ def test_a_shipped_block_that_declares_the_contract_is_wired():
 def test_NC_requirement_check_removed_leaves_the_dead_control():
     """Neuter: make the check always pass → the live defect returns (a block
     whose module is missing still presents itself as usable)."""
-    src = MODULE.read_text(encoding="utf-8")
-    poisoned = src.replace("if (typeof window[names[i]] === 'undefined') return false;",
-                           "/* neutered */")
-    script = HARNESS.format(body=_section_html(), defines="", source=poisoned)
+    authored = MODULE_TS.read_text(encoding="utf-8")
+    poisoned = authored.replace(
+        "return names.every((name) => typeof globals[name] !== 'undefined');",
+        "return true;",
+    )
+    assert poisoned != authored
+    with compiled_typescript(
+        MODULE_TS,
+        contents=poisoned,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        source = Path(built).read_text(encoding="utf-8")
+    script = HARNESS.format(body=_section_html(), defines="", source=source)
     proc = subprocess.run([_node(), "-e", script], cwd=ROOT,
                           capture_output=True, text=True)
     assert proc.returncode == 0, f"node failed: {proc.stderr}"

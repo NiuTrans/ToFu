@@ -5,6 +5,7 @@ Public API:
   - build_body(model, messages, ...) → dict
   - _validate_image_blocks(messages) → messages
   - _downscale_oversized_images(messages, model) → None
+  - _project_images_for_text_model(messages, model, ...) → int
   - _strip_trailing_assistant_for_claude(messages, model) → None
 
 This ``__init__`` is a pure re-export facade — every implementation lives in
@@ -22,6 +23,7 @@ from lib.llm.body._images import (  # noqa: E402,F401
     _CLAUDE_IMAGE_MAX_PX,
     _IMAGE_MAGICS,
     _downscale_oversized_images,
+    _project_images_for_text_model,
     _validate_image_blocks,
     sniff_image_mime,
 )
@@ -52,6 +54,7 @@ __all__ = [
     'sniff_image_mime',
     '_validate_image_blocks',
     '_downscale_oversized_images',
+    '_project_images_for_text_model',
     '_CLAUDE_IMAGE_MAX_PX',
     '_IMAGE_MAGICS',
     # model tweaks

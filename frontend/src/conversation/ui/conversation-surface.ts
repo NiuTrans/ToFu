@@ -7,6 +7,8 @@
  */
 import './conversation-surface.css';
 
+import { scheduleAnimationFrame } from './animation-frame-scheduler';
+
 import type {
   ConversationBlockViewModel,
   ConversationLaneViewModel,
@@ -24,6 +26,8 @@ export interface ConversationIntent {
   laneId?: string;
   queueId?: string;
   operation?: string;
+  beforeOrdinal?: number;
+  limit?: number;
 }
 
 export interface ConversationBlockRenderContext {
@@ -98,6 +102,7 @@ export interface ScrollAnchorPort<Snapshot = unknown> {
 
 export const CONVERSATION_DOM_WINDOW_MAX_TURNS = 80;
 export const CONVERSATION_DOM_WINDOW_BATCH_TURNS = 20;
+export const CONVERSATION_HISTORY_PAGE_TURNS = 64;
 
 export interface ConversationWindowOptions {
   /** A smaller value is allowed; the product hard ceiling remains 80. */
@@ -175,10 +180,7 @@ export function createConversationViewportPort(
   const threshold = positiveInteger(options.nearBottomThreshold, 80);
   const scheduleAfterLayout = options.scheduleAfterLayout ?? ((callback) => {
     const view = viewport.ownerDocument.defaultView;
-    if (view?.requestAnimationFrame) {
-      const handle = view.requestAnimationFrame(callback);
-      return () => view.cancelAnimationFrame(handle);
-    }
+    if (view) return scheduleAnimationFrame(view, callback);
     let cancelled = false;
     queueMicrotask(() => { if (!cancelled) callback(); });
     return () => { cancelled = true; };
@@ -359,12 +361,23 @@ function ensurePart(
 
 function directKeyedChildren(
   parent: HTMLElement,
-  key: 'turnId' | 'blockId' | 'laneId' | 'queueId',
+  key: 'turnId' | 'presentationId' | 'blockId' | 'laneId' | 'queueId',
 ): Map<string, HTMLElement> {
   const result = new Map<string, HTMLElement>();
   for (const child of Array.from(parent.children) as HTMLElement[]) {
     const value = child.dataset[key];
-    if (value) result.set(value, child);
+    if (!value) continue;
+    /* A keyed child is a singleton by contract. A stale asset transition or
+     * interrupted live render can leave two DOM nodes carrying the same key.
+     * Map.set alone retained only the last node and made every earlier copy an
+     * untracked orphan, so authoritative renders could never remove it and a
+     * single tool card appeared repeatedly. Keep the first managed node (and
+     * its focus/disclosure state) and converge duplicate DOM on every commit. */
+    if (result.has(value)) {
+      child.remove();
+      continue;
+    }
+    result.set(value, child);
   }
   return result;
 }
@@ -372,6 +385,23 @@ function directKeyedChildren(
 function placeAt(parent: HTMLElement, node: HTMLElement, index: number): void {
   const current = parent.children.item(index);
   if (current !== node) parent.insertBefore(node, current ?? null);
+}
+
+/* Content may host unmanaged children between managed parts (the inline turn
+ * editor host sits after turn-blocks). Index only managed parts so the
+ * per-commit order normalization leaves foreign children in place: moving a
+ * node that contains the focused textarea blurs it and steals the caret. */
+function placeManagedAt(
+  parent: HTMLElement,
+  node: HTMLElement,
+  managedIndex: number,
+): void {
+  const managed = (Array.from(parent.children) as HTMLElement[])
+    .filter((child) => child.dataset.conversationPart);
+  if (managed[managedIndex] === node) return;
+  const reference = managed.filter((child) => child !== node)[managedIndex]
+    ?? null;
+  parent.insertBefore(node, reference);
 }
 
 function hasRenderableContent(node: HTMLElement): boolean {
@@ -490,9 +520,28 @@ function renderDefaultBlock(
     node.appendChild(details);
     return;
   }
+  if (block.kind === 'program') {
+    const details = document.createElement('details');
+    details.className = 'conversation-block__tool conversation-block__program';
+    const summary = document.createElement('summary');
+    const status = typeof block.round.programStatus === 'string'
+      ? block.round.programStatus : block.round.status;
+    summary.textContent = ['Program orchestration', status]
+      .filter(Boolean).join(' · ');
+    const code = document.createElement('pre');
+    code.dataset.conversationPart = 'program-code';
+    code.textContent = String(block.round.programCode ?? '');
+    const result = document.createElement('pre');
+    result.dataset.conversationPart = 'program-result';
+    result.textContent = jsonText(block.round.programResult);
+    details.append(summary, code, result);
+    node.appendChild(details);
+    return;
+  }
   if (block.kind === 'attachments') {
     const total = block.images.length + block.videos.length
-      + block.pdfTexts.length + block.conversationReferences.length
+      + block.pdfTexts.length + block.mediaAttachments.length
+      + block.conversationReferences.length
       + block.replyQuotes.length;
     node.textContent = `${total} attachment${total === 1 ? '' : 's'}`;
     return;
@@ -512,8 +561,24 @@ function renderDefaultBlock(
       block.value.preferencesLearned?.length ? 'learned' : '',
       block.value.relatedConversations ? 'related' : '',
       block.value.mcpLoginHint ? 'login' : '',
+      block.value.mcpToolsDelta ? 'mcp' : '',
+      block.value.projectPathChange ? 'path' : '',
     ].filter(Boolean);
     node.textContent = labels.join(' · ');
+    return;
+  }
+  if (block.kind === 'rolled-back') {
+    const details = document.createElement('details');
+    details.className = 'conversation-block__rolled-back';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Rolled back';
+    const pre = document.createElement('pre');
+    pre.textContent = [block.value.thinking, block.value.content]
+      .map((part) => String(part ?? '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+    details.append(summary, pre);
+    node.appendChild(details);
     return;
   }
   if (block.kind === 'image-generation') {
@@ -581,7 +646,10 @@ function sameBlock(
       && previous.displayMarkdown === current.displayMarkdown
       && previous.displayMode === current.displayMode
       && previous.terminal === current.terminal
-      && previous.signature === current.signature;
+      && previous.signature === current.signature
+      && samePresentationValue(
+        previous.memberBlockIds, current.memberBlockIds,
+      );
   }
   if (previous.kind === 'proposed-plan' && current.kind === 'proposed-plan') {
     return previous.markdown === current.markdown
@@ -598,8 +666,15 @@ function sameBlock(
       && samePresentationValue(previous.result, current.result)
       && samePresentationValue(previous.round, current.round);
   }
+  if (previous.kind === 'program' && current.kind === 'program') {
+    return previous.programCallId === current.programCallId
+      && samePresentationValue(previous.round, current.round);
+  }
   if (previous.kind === 'attachments' && current.kind === 'attachments') {
     return samePresentationValue(previous.images, current.images)
+      && samePresentationValue(
+        previous.mediaAttachments, current.mediaAttachments,
+      )
       && samePresentationValue(previous.videos, current.videos)
       && samePresentationValue(previous.pdfTexts, current.pdfTexts)
       && samePresentationValue(
@@ -640,6 +715,9 @@ function sameBlock(
   if (previous.kind === 'compaction' && current.kind === 'compaction') {
     return previous.summaryMarkdown === current.summaryMarkdown
       && samePresentationValue(previous.value, current.value);
+  }
+  if (previous.kind === 'rolled-back' && current.kind === 'rolled-back') {
+    return samePresentationValue(previous.value, current.value);
   }
   if (previous.kind === 'image-generation'
       && current.kind === 'image-generation') {
@@ -771,6 +849,7 @@ function sameTurnFooter(
     && previous.metadata.model === current.metadata.model
     && previous.metadata.preset === current.metadata.preset
     && previous.metadata.translation.pending === current.metadata.translation.pending
+    && previous.metadata.costSignature === current.metadata.costSignature
     && previousFallback?.model === currentFallback?.model
     && previousFallback?.from === currentFallback?.from
     && previousFallback?.reason === currentFallback?.reason
@@ -898,6 +977,7 @@ function sameQueueItem(
     && previous.source.priority === current.source.priority
     && previous.source.hasImages === current.source.hasImages
     && previous.source.hasPdfs === current.source.hasPdfs
+    && previous.source.hasAttachments === current.source.hasAttachments
     && previous.source.hasRefs === current.source.hasRefs
     && previous.source.hasQuotes === current.source.hasQuotes
     && previous.source.isPeerMessage === current.source.isPeerMessage
@@ -926,6 +1006,7 @@ export function createConversationSurface(
     start: number;
     atTail: boolean;
     firstVisibleTurnId: string;
+    loadedTurns: number;
   }>();
   let laneBudgets = new Map<string, number>();
   let lanesById = new Map<string, ConversationLaneViewModel>();
@@ -1021,23 +1102,32 @@ export function createConversationSurface(
     const visibleTurns = includeHeader && !lane.expanded ? [] : lane.turns.slice(
       windowState.start, windowState.end,
     );
+    const remoteEarlier = windowState.start === 0 && lane.history?.hasMore
+      ? Math.min(
+        windowState.batchSize,
+        Math.max(1, lane.history.totalTurns - lane.turns.length),
+      ) : 0;
     renderWindowControl(
       laneContainer,
       lane.laneId,
       'earlier',
-      Math.min(windowState.batchSize, windowState.start),
+      Math.min(windowState.batchSize, windowState.start) || remoteEarlier,
     );
     const turnsContainer = ensurePart(laneContainer, 'lane-turns');
     turnsContainer.hidden = includeHeader && !lane.expanded;
     if (includeHeader) turnsContainer.className = 'conversation-lane-turns branch-messages';
-    const existingTurns = directKeyedChildren(turnsContainer, 'turnId');
+    const existingTurns = directKeyedChildren(turnsContainer, 'presentationId');
     visibleTurns.forEach((turn, index) => {
-      let turnNode = existingTurns.get(turn.turnId) as ManagedTurnElement | undefined;
+      const presentationId = turn.presentationId || turn.turnId;
+      let turnNode = existingTurns.get(
+        presentationId,
+      ) as ManagedTurnElement | undefined;
       if (!turnNode) {
         turnNode = turnsContainer.ownerDocument.createElement('article');
-        turnNode.dataset.turnId = turn.turnId;
         turnNode.className = 'conversation-turn';
       }
+      turnNode.dataset.presentationId = presentationId;
+      turnNode.dataset.turnId = turn.turnId;
       turnNode.dataset.turnStatus = turn.status;
       turnNode.dataset.turnRole = turn.role;
       turnNode.dataset.laneId = turn.laneId;
@@ -1177,14 +1267,16 @@ export function createConversationSurface(
        * decision stays attached to its authorizing plan, while branch history
        * remains above the turn's action and finish shelves. */
       let contentPartIndex = 0;
-      placeAt(content, header, contentPartIndex++);
-      placeAt(content, blocksContainer, contentPartIndex++);
-      if (planDecisionNode) placeAt(content, planDecisionNode, contentPartIndex++);
-      if (branchesContainer) {
-        placeAt(content, branchesContainer, contentPartIndex++);
+      placeManagedAt(content, header, contentPartIndex++);
+      placeManagedAt(content, blocksContainer, contentPartIndex++);
+      if (planDecisionNode) {
+        placeManagedAt(content, planDecisionNode, contentPartIndex++);
       }
-      placeAt(content, actions, contentPartIndex++);
-      placeAt(content, footer, contentPartIndex++);
+      if (branchesContainer) {
+        placeManagedAt(content, branchesContainer, contentPartIndex++);
+      }
+      placeManagedAt(content, actions, contentPartIndex++);
+      placeManagedAt(content, footer, contentPartIndex++);
 
       const contextBlock = turn.blocks.find(
         (block): block is Extract<ConversationBlockViewModel, { kind: 'context' }> => (
@@ -1211,7 +1303,7 @@ export function createConversationSurface(
       placeAt(turnNode, content, 1);
       placeAt(turnNode, contextRail, 2);
       placeAt(turnsContainer, turnNode, index);
-      existingTurns.delete(turn.turnId);
+      existingTurns.delete(presentationId);
     });
     for (const staleTurn of existingTurns.values()) staleTurn.remove();
     renderWindowControl(
@@ -1302,12 +1394,19 @@ export function createConversationSurface(
         const anchoredIndex = lane.turns.findIndex(
           (turn) => turn.turnId === previous.firstVisibleTurnId,
         );
-        if (anchoredIndex >= 0) start = anchoredIndex;
+        if (anchoredIndex >= 0) {
+          const prepended = lane.turns.length > previous.loadedTurns
+            && anchoredIndex > previous.start && previous.start === 0;
+          start = prepended
+            ? Math.max(0, anchoredIndex - windowOptions.batchSize)
+            : anchoredIndex;
+        }
       }
       laneWindows.set(laneId, {
         start: Math.min(maximumStart, Math.max(0, start)),
         atTail,
         firstVisibleTurnId: previous?.firstVisibleTurnId ?? '',
+        loadedTurns: lane.turns.length,
       });
     }
     for (const laneId of [...laneWindows.keys()]) {
@@ -1323,6 +1422,7 @@ export function createConversationSurface(
       start: maxWindowStart(lane.turns.length, maxTurns),
       atTail: true,
       firstVisibleTurnId: '',
+      loadedTurns: lane.turns.length,
     };
     laneWindows.set(lane.laneId, laneWindow);
     const start = Math.min(
@@ -1427,7 +1527,20 @@ export function createConversationSurface(
       laneWindow.start + (direction === 'earlier'
         ? -state.batchSize : state.batchSize),
     ));
-    if (nextStart === laneWindow.start) return false;
+    if (nextStart === laneWindow.start) {
+      if (direction === 'earlier' && lane.history?.hasMore
+          && lane.history.nextBeforeOrdinal !== null) {
+        options.onIntent?.({
+          type: 'load-earlier-turns',
+          conversationId: currentConversationId,
+          laneId,
+          beforeOrdinal: lane.history.nextBeforeOrdinal,
+          limit: CONVERSATION_HISTORY_PAGE_TURNS,
+        });
+        return true;
+      }
+      return false;
+    }
     laneWindow.start = nextStart;
     laneWindow.atTail = nextStart === maxWindowStart(state.total, state.maxTurns);
     commit();

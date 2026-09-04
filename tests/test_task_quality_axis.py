@@ -216,6 +216,65 @@ def test_running_task_detail_omits_private_set_state(api):
     assert body['status'] == 'pending'
 
 
+def test_task_detail_replaces_event_bodies_with_cursor_summary(api):
+    app, rt = api
+    task = rt.create(user_id=1)
+    for index in range(3):
+        rt.append_event(task['id'], {
+            'type': 'progress', 'content': 'large payload', 'index': index,
+        })
+
+    async def go():
+        response = await app.test_client().get(
+            f'/api/v1/tasks/{task["id"]}')
+        assert response.status_code == 200
+        return await response.get_json()
+
+    body = _run(go())
+    assert 'events' not in body
+    assert body['event_replay'] == {
+        'retained_count': 3,
+        'base_cursor': 0,
+        'next_cursor': 3,
+    }
+
+
+def test_task_events_page_is_bounded_and_terminal_snapshot_is_last(api):
+    app, rt = api
+    task = rt.create(user_id=1)
+    for index in range(129):
+        rt.append_event(task['id'], {
+            'type': 'progress', 'index': index,
+        })
+    rt.finish(task['id'], result={'answer': 'complete'})
+
+    async def go():
+        client = app.test_client()
+        first_response = await client.get(
+            f'/api/v1/tasks/{task["id"]}/events?cursor=0')
+        assert first_response.status_code == 200
+        first = await first_response.get_json()
+        final_response = await client.get(
+            f'/api/v1/tasks/{task["id"]}/events'
+            f'?cursor={first["next_cursor"]}')
+        assert final_response.status_code == 200
+        return first, await final_response.get_json()
+
+    first, final = _run(go())
+    assert len(first['events']) == 128
+    assert first['next_cursor'] == 128
+    assert first['caught_up'] is False
+    assert first['status'] == 'done'
+    assert first['done'] is False
+    assert 'result' not in first
+
+    assert [event['seq'] for event in final['events']] == [128, 129]
+    assert final['next_cursor'] == 130
+    assert final['caught_up'] is True
+    assert final['done'] is True
+    assert final['result'] == {'answer': 'complete'}
+
+
 def test_task_list_surface_also_shows_the_verdict(api):
     """The list view hand-lists its fields, so it needs its own guard.
 
@@ -299,6 +358,35 @@ def test_research_engine_reports_its_degraded_verdict(monkeypatch, tmp_path):
     assert task['status'] == 'done'
     assert task['artifact_quality']['degraded'] is True
     assert 'structural gate' in task['artifact_quality']['reason']
+
+
+def test_research_engine_treats_unconfirmed_publication_as_error(
+        monkeypatch, tmp_path):
+    """A durable-write failure is not a valid degraded artifact or clean done."""
+    import lib.research.engine as eng
+    from lib.production.stages import StageFailed
+    from lib.research.runtime import _research_runtime
+
+    task_id = 'research-publish-failure-1'
+    task = _research_runtime.create(user_id=1, task_id=task_id)
+    task.update({'task_id': task_id, 'direction': 'x',
+                 'workdir': str(tmp_path), 'lang': 'en', 'n_ideas': 2,
+                 'user_id': 1})
+
+    monkeypatch.setattr(eng, '_write_manifest', lambda *a, **k: None)
+    monkeypatch.setattr(eng, '_emit', lambda *a, **k: None)
+    monkeypatch.setattr(
+        'lib.research.recipe.build_research_from_direction',
+        lambda *a, **k: (_ for _ in ()).throw(
+            StageFailed('publish', 'repository did not confirm write')))
+
+    eng.run_research_task(task)
+
+    assert task['status'] == 'error'
+    assert task['result'] is None
+    assert task['error']['kind'] == 'generic'
+    assert "stage 'publish' failed" in task['error']['detail']
+    assert task['artifact_quality'] is None
 
 
 def test_longform_engine_flags_a_report_missing_sections(monkeypatch, tmp_path):

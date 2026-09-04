@@ -40,6 +40,10 @@ _MIN_SURFACE_CHARS = 4
 _LONG_SURFACE_REVIEW_CHARS = 200
 # How much recent text to feed the model.
 _MAX_SURFACE_CHARS = 6000
+# This advisory pass is retried naturally by future user turns.  It must yield
+# after one real provider-capacity rejection instead of competing with the
+# foreground task across the dispatcher's model rotation.
+_MAX_429_ATTEMPTS = 1
 # A model response is bounded before any profile write.  Two lets one explicit
 # statement carry both an identity fact and a response preference without
 # turning a single turn into an unreviewable profile rewrite.
@@ -147,7 +151,8 @@ Return ONLY JSON:
 Return {"actions":[]} when uncertain. Prefer zero or one action."""
 
 
-def _recent_surface(messages: list, cap: int = _MAX_SURFACE_CHARS) -> str:
+def _recent_surface(messages: list, cap: int = _MAX_SURFACE_CHARS, *,
+                    user_message_limit: int = 4) -> str:
     """Plain text from recent real USER messages only.
 
     Excluding assistant/tool/synthetic messages here is a data-boundary
@@ -184,7 +189,7 @@ def _recent_surface(messages: list, cap: int = _MAX_SURFACE_CHARS) -> str:
                 row = row[:head_chars] + marker + row[-tail_chars:]
         rows_newest_first.append(row)
         used += separator_chars + len(row)
-        if len(rows_newest_first) >= 4:
+        if len(rows_newest_first) >= user_message_limit:
             break
     return '\n\n'.join(reversed(rows_newest_first))
 
@@ -378,9 +383,14 @@ def run_profile_consolidation(messages: list, task: dict | None = None) -> list[
         return []
     import lib.memory.user_profile as up
 
-    surface = _recent_surface(messages)
-    if not _surface_is_worth_reviewing(surface):
+    # Only the just-finished turn may trigger another paid review. Historical
+    # long requests remain useful evidence/context once the latest user message
+    # has a durable signal, but cannot make every later acknowledgement repeat
+    # the same background call.
+    latest_surface = _recent_surface(messages, user_message_limit=1)
+    if not _surface_is_worth_reviewing(latest_surface):
         return []
+    surface = _recent_surface(messages)
 
     # Identity scope captured onto the task at creation (the daemon thread has
     # no request context). '' → the single global profile (open/private mode).
@@ -395,13 +405,31 @@ def run_profile_consolidation(messages: list, task: dict | None = None) -> list[
     )
 
     try:
-        from lib.llm_dispatch import dispatch_chat
-        content, _usage = dispatch_chat(
-            [{'role': 'system', 'content': _SYSTEM_PROMPT},
-             {'role': 'user', 'content': user_block}],
-            max_tokens=2048, temperature=0, capability='cheap',
-            log_prefix='[ProfileConsolidate]',
+        from lib.key_stats import strict_billing_stop_admission
+        from lib.llm_dispatch import (
+            DispatchSharedContentionDeferred,
+            dispatch_chat,
         )
+    except Exception as e:
+        logger.warning('[ProfileConsolidate] LLM dispatch load failed: %s', e)
+        return []
+
+    try:
+        with strict_billing_stop_admission():
+            content, _usage = dispatch_chat(
+                [{'role': 'system', 'content': _SYSTEM_PROMPT},
+                 {'role': 'user', 'content': user_block}],
+                max_tokens=2048, temperature=0, capability='cheap',
+                log_prefix='[ProfileConsolidate]',
+                max_429_attempts=_MAX_429_ATTEMPTS,
+                defer_on_shared_contention=True,
+            )
+    except DispatchSharedContentionDeferred as e:
+        logger.info(
+            '[ProfileConsolidate] deferred by shared contention for %.1fs',
+            e.retry_after_s,
+        )
+        return []
     except Exception as e:
         logger.warning('[ProfileConsolidate] cheap-LLM call failed: %s', e)
         return []

@@ -50,8 +50,8 @@ class TestCostMath:
         # Stub the pricing module so the math is deterministic:
         # input $10/1M, output $30/1M, rate 7.0 CNY/USD.
         pdata = {"usdToCny": 7.0, "inputPrice": 10.0, "outputPrice": 30.0}
-        with mock.patch("lib.pricing.get_pricing_data", return_value=pdata), \
-                mock.patch("lib.pricing.lookup_pricing",
+        with mock.patch("lib.cost.get_pricing_data", return_value=pdata), \
+                mock.patch("lib.cost.lookup_pricing",
                            return_value={"input": 10.0, "output": 30.0}):
             usd = (1000 * 10.0 + 500 * 30.0) / 1e6  # 0.025 USD
             expected = round(usd * 7.0, 4)
@@ -62,11 +62,42 @@ class TestCostMath:
     def test_calc_cost_handles_alternate_token_keys(self):
         """input_tokens/output_tokens aliases must be honored like prompt/completion."""
         pdata = {"usdToCny": 1.0, "inputPrice": 1000.0, "outputPrice": 1000.0}
-        with mock.patch("lib.pricing.get_pricing_data", return_value=pdata), \
-                mock.patch("lib.pricing.lookup_pricing", return_value=None):
+        with mock.patch("lib.cost.get_pricing_data", return_value=pdata), \
+                mock.patch("lib.cost.lookup_pricing", return_value=None):
             a = cost._calc_msg_cost_cny({"prompt_tokens": 100, "completion_tokens": 100}, "x")
             b = cost._calc_msg_cost_cny({"input_tokens": 100, "output_tokens": 100}, "x")
         assert a == b and a > 0
+
+
+    def test_calendar_cache_is_bounded_ttl_cache(self):
+        assert cost._calendar_cache.ttl == cost._CALENDAR_CACHE_TTL
+        assert cost._calendar_cache.max_size is not None
+        assert cost._calendar_cache.max_size > 0
+
+    def test_daily_report_delegates_cache_convention_to_cost_ssot(self):
+        usage = {
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 800,
+            "cache_creation_input_tokens": 200,
+        }
+        expected = {
+            "costCny": 1.2345,
+            "inputTokens": 12,
+            "totalInputTokens": 1012,
+        }
+        with mock.patch("lib.daily_report.cost.compute_cost",
+                        return_value=expected) as compute:
+            got = cost._calc_msg_cost_cny(
+                usage, "opus", "provider-x", at=123.0)
+
+        assert got == 1.2345
+        compute.assert_called_once_with(
+            usage,
+            model_id=cost._LEGACY_PRESET_TO_MODEL["opus"],
+            provider_id="provider-x",
+            at=123.0,
+        )
 
     def test_legacy_preset_maps_to_model(self):
         # 'opus' preset → aws.claude-opus model; just assert mapping is applied
@@ -418,6 +449,62 @@ class TestTranscriptBuilding:
 
     def test_transcript_empty_returns_empty_string(self):
         assert conversations._build_transcript_from_messages([], 0, 1000) == ""
+
+    def test_single_pass_day_summary_preserves_timestamp_and_tool_semantics(self):
+        messages = [
+            {'role': 'user', 'timestamp': 150, 'content': 'day question'},
+            {
+                'role': 'assistant',
+                'content': 'legacy visible text',
+                'toolRounds': [{'calls': [{'name': 'legacy_tool'}]}],
+            },
+            {
+                'role': 'assistant',
+                'timestamp': 160,
+                'content': 'day answer',
+                'toolRounds': [{'calls': [
+                    {'function': {'name': 'day_tool'}},
+                ]}],
+            },
+            {'role': 'user', 'timestamp': 170, 'content': ''},
+            {'role': 'assistant', 'timestamp': 50, 'content': 'old'},
+        ]
+
+        has_activity, rounds, tools, transcript = (
+            conversations._summarize_messages_for_day(
+                messages, 100, 200, 250)
+        )
+
+        assert has_activity is True
+        assert rounds == 2
+        assert tools == {'day_tool'}
+        assert transcript == conversations._build_transcript_from_messages(
+            messages, 100, 200)
+        assert 'legacy visible text' in transcript
+        assert 'legacy_tool' in transcript
+        assert 'old' not in transcript
+
+    def test_transcript_retains_only_bounded_prefix_before_render(
+            self, monkeypatch):
+        messages = [
+            {'role': 'user', 'timestamp': 100, 'content': 'x'}
+            for _ in range(1000)
+        ]
+        render = conversations._render_transcript_turns
+        observed = {}
+
+        def capture(turns, *, total_turn_count=None):
+            observed['retained'] = len(turns)
+            observed['total'] = total_turn_count
+            return render(turns, total_turn_count=total_turn_count)
+
+        monkeypatch.setattr(conversations, '_render_transcript_turns', capture)
+
+        transcript = conversations._build_transcript_from_messages(
+            messages, 0, 1000)
+
+        assert transcript
+        assert observed == {'retained': 128, 'total': 1000}
 
 
 @pytest.mark.unit

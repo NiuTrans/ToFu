@@ -10,6 +10,8 @@ import subprocess
 import sys
 import threading
 import time
+import gc
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -182,6 +184,17 @@ def test_refresh_singleflight_is_cross_process(private_store):
     assert all(result['refresh_token'] == 'new-refresh' for result in results)
 
 
+def test_refresh_singleflight_does_not_retain_rotated_token_locks():
+    lock = token_store._sf_lock('codex', 'one-time-refresh-generation')
+    reference = weakref.ref(lock)
+    assert len(token_store._sf_locks) >= 1
+
+    del lock
+    gc.collect()
+
+    assert reference() is None
+
+
 def test_logout_waits_for_inflight_refresh_and_wins(private_store):
     assert token_store.save_token('codex', {
         'access_token': 'old-access',
@@ -249,6 +262,80 @@ def test_refresh_started_after_logout_cannot_resurrect_token(private_store):
     assert token_store.load_token('codex') is None
 
 
+def test_codex_terminal_refresh_rejection_is_persisted_once(
+        private_store, monkeypatch):
+    """A revoked refresh token is terminal, not a three-retry transient."""
+    import lib.oauth.codex as codex
+
+    assert token_store.save_token('codex', {
+        'access_token': 'still-valid-access',
+        'refresh_token': 'revoked-refresh',
+        'expire': time.time() + 120,
+    })
+    calls = []
+
+    class _Response:
+        status_code = 401
+        text = '{"error":{"code":"refresh_token_invalidated"}}'
+
+        @staticmethod
+        def json():
+            return {'error': {'code': 'refresh_token_invalidated'}}
+
+    monkeypatch.setattr(
+        codex, '_oauth_http_post',
+        lambda *args, **kwargs: calls.append((args, kwargs)) or _Response())
+    monkeypatch.setattr(codex.time, 'sleep',
+                        lambda *_args: pytest.fail('terminal error retried'))
+
+    assert codex.codex_refresh_token() is None
+    stored = token_store.load_token('codex')
+    assert len(calls) == 1
+    assert stored['access_token'] == 'still-valid-access'
+    assert stored['refresh_token'] == ''
+    assert stored['refresh_invalidated_reason'] == 'refresh_token_invalidated'
+
+    # Cross-request replay is stopped by the persisted terminal state.
+    assert codex.codex_refresh_token() is None
+    assert len(calls) == 1
+
+
+def test_codex_never_returns_access_token_past_recorded_expiry(
+        private_store, monkeypatch):
+    import lib.oauth.codex as codex
+
+    assert token_store.save_token('codex', {
+        'access_token': 'old-access',
+        'refresh_token': '',
+        'refresh_invalidated_at': time.time(),
+        'refresh_invalidated_reason': 'refresh_token_invalidated',
+        'expire': time.time() - 1,
+    })
+    monkeypatch.setattr(
+        codex, 'codex_refresh_token',
+        lambda *args, **kwargs: pytest.fail('terminal refresh was replayed'))
+
+    assert codex.codex_get_valid_token() is None
+
+
+def test_codex_retains_access_token_until_recorded_expiry(
+        private_store, monkeypatch):
+    import lib.oauth.codex as codex
+
+    assert token_store.save_token('codex', {
+        'access_token': 'short-lived-access',
+        'refresh_token': '',
+        'refresh_invalidated_at': time.time(),
+        'refresh_invalidated_reason': 'refresh_token_invalidated',
+        'expire': time.time() + 60,
+    })
+    monkeypatch.setattr(
+        codex, 'codex_refresh_token',
+        lambda *args, **kwargs: pytest.fail('terminal refresh was replayed'))
+
+    assert codex.codex_get_valid_token() == 'short-lived-access'
+
+
 def test_browser_exchange_reports_persistence_failure(private_store):
     from lib.oauth.claude import claude_store_token
     from lib.oauth.token_store import OAuthExchangeError
@@ -284,3 +371,26 @@ def test_logout_does_not_claim_success_when_token_delete_fails():
     audit.assert_called_with(
         'oauth_logout_failed', provider='codex',
         reason='credential_delete_failed')
+
+
+def test_logout_signals_device_worker_before_removing_flow():
+    from lib.oauth.manager import _exchange
+    from lib.oauth.manager._state import _active_flows, _flows_lock
+
+    cancel_event = threading.Event()
+    with _flows_lock:
+        _active_flows['codex'] = {
+            'flow_type': 'device',
+            'cancel_event': cancel_event,
+        }
+    with mock.patch('lib.oauth.token_store.load_token', return_value={}), \
+            mock.patch('lib.oauth.token_store.delete_token', return_value=True), \
+            mock.patch('lib.oauth.outbound.deprovision_oauth_provider'), \
+            mock.patch('lib.subscription_quota.clear_subscription_quota'), \
+            mock.patch.object(_exchange, 'audit_log'):
+        result = _exchange.logout_oauth('codex')
+
+    assert result['ok'] is True
+    assert cancel_event.is_set()
+    with _flows_lock:
+        assert 'codex' not in _active_flows

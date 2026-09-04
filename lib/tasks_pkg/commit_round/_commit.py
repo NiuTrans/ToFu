@@ -28,35 +28,49 @@ from lib.tasks_pkg.manager import append_event
 logger = get_logger(__name__)
 
 
-def _note_write_set_advisories(
-    task: dict,
-    changed_files: list[dict],
-    project_path: str,
-) -> None:
-    """Emit owner-scoped write-set drift notes for one committed file list."""
-    try:
-        from lib.tasks_pkg.manager import task_user_id
-        from lib.write_set_advisory import note_project_write
+_READ_ONLY_TOOL_NAMES = frozenset({
+    'list_dir', 'read_files', 'grep_search', 'find_files',
+    'web_search', 'fetch_url', 'inspect_image',
+})
+_TRACKED_EDIT_TOOL_NAMES = frozenset({
+    'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents', 'run_command',
+})
 
-        owner_user_id = int(task_user_id(task))
-        for changed_file in changed_files:
-            if not isinstance(changed_file, dict):
+
+def _task_round_has_opaque_writer(task: dict) -> bool:
+    """Snapshot whether this round may contain an unattributed file write.
+
+    The commit daemon starts after terminal persistence.  Its task carrier can
+    release reconstructible ``toolRounds`` immediately after the thread is
+    admitted, so the classification must be captured synchronously instead of
+    retaining or rereading that potentially multi-MiB projection in the
+    background.  Unknown tools fail open because MCP/code executors may write
+    without stamping the modification journal.
+    """
+    try:
+        for round_record in task.get('toolRounds') or ():
+            if not isinstance(round_record, dict):
                 continue
-            changed_path = changed_file.get('path') or ''
-            changed_root = changed_file.get('root') or project_path
-            if changed_path:
-                note_project_write(
-                    task['convId'],
-                    changed_root,
-                    changed_path,
-                    user_id=owner_user_id,
-                )
+            tool_name = (
+                round_record.get('toolName')
+                or round_record.get('tool_name')
+                or ''
+            )
+            if not tool_name:
+                continue
+            if (tool_name in _READ_ONLY_TOOL_NAMES
+                    or tool_name in _TRACKED_EDIT_TOOL_NAMES):
+                continue
+            return True
+        return False
     except Exception as error:
         logger.debug(
-            '[Task:%s] write-set advisory failed: %s',
+            '[Task:%s] fh opaque-writer probe failed: %s',
             str(task.get('id') or '')[:8],
             error,
         )
+        return True
 
 
 def _spawn_async_commit_round(task: dict, project_enabled: bool,
@@ -74,9 +88,15 @@ def _spawn_async_commit_round(task: dict, project_enabled: bool,
     if not (project_enabled and project_path and task.get('id')):
         return
     try:
+        round_has_opaque_writer = _task_round_has_opaque_writer(task)
         threading.Thread(
             target=_run_commit_round_async,
-            args=(task, project_path, project_paths),
+            args=(
+                task,
+                project_path,
+                project_paths,
+                round_has_opaque_writer,
+            ),
             name=f'commit-round-{task["id"][:8]}',
             daemon=True,
         ).start()
@@ -86,7 +106,8 @@ def _spawn_async_commit_round(task: dict, project_enabled: bool,
 
 
 def _run_commit_round_async(task: dict, project_path: str,
-                            project_paths: list[str] | None = None) -> None:
+                            project_paths: list[str] | None = None,
+                            round_has_opaque_writer: bool | None = None) -> None:
     """Daemon-thread body for the deferred snapshot + file-list work.
 
     Uses the file-history store (lib.file_history) — the previous
@@ -98,6 +119,11 @@ def _run_commit_round_async(task: dict, project_path: str,
     without ever blocking the terminal frame.
     """
     tid = task['id'][:8]
+    if round_has_opaque_writer is None:
+        # Compatibility for focused direct callers. Production spawners pass
+        # the pre-release snapshot and never reread terminal toolRounds here.
+        round_has_opaque_writer = _task_round_has_opaque_writer(task)
+    round_has_opaque_writer = bool(round_has_opaque_writer)
     linear_checkpoint: dict | None = None
     try:
         from lib.linear_git_checkpoint import settle_task_checkpoint
@@ -181,13 +207,6 @@ def _run_commit_round_async(task: dict, project_path: str,
             except Exception as _pe:
                 logger.debug('[Task:%s] presence record_files failed: %s',
                              tid, _pe)
-
-            # Write-set drift is judged only after the round journal has
-            # attributed files to this task. This seam owns all required
-            # authority: authenticated owner, conversation, project roots and
-            # the canonical file list. Low-level atomic file writers remain
-            # storage-agnostic and cannot accidentally guess a tenant.
-            _note_write_set_advisories(task, _own_files, project_path)
 
         if not fh.is_enabled():
             # No snapshot to anchor the round_committed event, but the journal
@@ -359,37 +378,11 @@ def _run_commit_round_async(task: dict, project_path: str,
         # a foreign file appear while this round's real (extra-root) edits
         # were missing.
         #
-        # ``_TRACKED_EDIT_TOOLS`` and the read-only set both stamp/leave
+        # Tracked edit tools and the read-only set both stamp/leave
         # NO unattributed edits, so a round running only those cannot own
         # an empty-writer path.  Probe by ACTUAL tool name; unknown names
         # (custom MCP tools) count as opaque writers — fail open so a
         # genuine side-channel edit is never suppressed.
-        _READ_ONLY_TOOLS = frozenset({
-            'list_dir', 'read_files', 'grep_search', 'find_files',
-            'web_search', 'fetch_url', 'inspect_image',
-        })
-        _TRACKED_EDIT_TOOLS = frozenset({
-            'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
-            'insert_content', 'insert_contents', 'run_command',
-        })
-        _round_has_opaque_writer = False
-        try:
-            for _r in (task.get('toolRounds') or []):
-                if not isinstance(_r, dict):
-                    continue
-                _tn = _r.get('toolName') or _r.get('tool_name') or ''
-                if not _tn:
-                    continue
-                if _tn in _READ_ONLY_TOOLS or _tn in _TRACKED_EDIT_TOOLS:
-                    continue
-                # Anything else (code_exec / MCP / unknown) may write
-                # without stamping attribution.
-                _round_has_opaque_writer = True
-                break
-        except Exception as _e:
-            logger.debug('[Task:%s] fh opaque-writer probe failed: %s', tid, _e)
-            _round_has_opaque_writer = True  # fail open — never over-suppress
-
         try:
             if fh_changes:
                 _own_task_id = task.get('id') or ''
@@ -402,7 +395,7 @@ def _run_commit_round_async(task: dict, project_path: str,
                     if _writer and _writer != _own_task_id:
                         # Attributed to another concurrent task — always drop.
                         _dropped += 1
-                    elif not _writer and not _round_has_opaque_writer:
+                    elif not _writer and not round_has_opaque_writer:
                         # Unattributed path on a round that ran no opaque
                         # writer — it cannot be ours.  Drop (closes the
                         # concurrent-conversation leak).

@@ -1,20 +1,25 @@
 """tests/test_autopilot_summary.py — Autopilot run CLOSE-OUT (fold) fact.
 
-The autopilot close-out REPORT layer (the LLM reporter turn, on-demand
-``summarize_run``, the report content/translation, and the async summary
-daemon) was REMOVED — a clean [VU: TASK_DONE] and the budget-guard cutoff now
-conclude the run report-free. What remains, and is covered here, is the B-layer
-fold machinery both close-out paths still need:
+The autopilot close-out REPORT layer (the dedicated LLM reporter turn,
+on-demand ``summarize_run``, the report translation, and the async summary
+daemon) was REMOVED. The fold's report ``content`` is now sourced from the
+run's OWN terminal evidence: the last virtual-user verdict (machine tokens
+stripped), forwarded by the Flow lifecycle boundary as ``report=`` — so a
+concluded run always carries its own explanation of WHY it ended. What
+remains, and is covered here, is the B-layer fold machinery both close-out
+paths still need:
 
   • ``_store_run_record`` persists ONE authoritative per-run record in the
     conversation SIDECAR (``settings.autopilotSummaries[runId]``) carrying the
-    terminal ``status='concluded'`` + ``reason`` (NO report ``content``) — a
-    human-only record, NOT a ``role='assistant'`` chat message.
+    terminal ``status='concluded'`` + ``reason`` (+ ``content`` when a report
+    is supplied) — a human-only record, NOT a ``role='assistant'`` chat
+    message.
   • ``conclude_run`` is the manual-stop close-out seam (resolve run id → write
-    concluded(stopped) record → clear the run pin).
-  • ``_emit_run_concluded_event`` is the report-free close-out helper the clean
-    TASK_DONE + budget-guard paths route through (store record + feed pulse +
-    ``autopilot_run_concluded`` SSE).
+    concluded(stopped) record → clear the run pin). A manual stop has no VU
+    verdict, so it stores NO ``content``.
+  • ``_emit_run_concluded_event`` is the close-out helper the Flow TASK_DONE +
+    safety-cap paths route through (store record + feed pulse +
+    ``autopilot_run_concluded`` SSE), forwarding ``report=`` into the record.
   • the ``autopilot_run_concluded`` event is registered in the streaming
     contract and carries the sidecar ``record`` — the single
     BACKEND-AUTHORITATIVE run-end fact.
@@ -125,11 +130,12 @@ def test_conclude_run_writes_authoritative_stopped_record(monkeypatch):
     assert 'autopilotRunId' not in settings
 
 
-# ── _emit_run_concluded_event: the report-free close-out helper ────────
+# ── _emit_run_concluded_event: the close-out helper ──────────────────
 
 def test_emit_run_concluded_event_stores_and_emits(monkeypatch):
     """The helper persists the concluded record, fires the feed pulse, and
-    emits the autopilot_run_concluded SSE — with NO report content."""
+    emits the autopilot_run_concluded SSE. With no ``report=`` the record
+    stays content-free (the manual-stop shape)."""
     import lib.tasks_pkg.autopilot as ap
     # Post-slice-3 (pt_00459503): ``_emit_run_concluded_event`` lives in
     # ``lib.tasks_pkg.autopilot_run_lifecycle`` (a leaf module). Its
@@ -141,11 +147,12 @@ def test_emit_run_concluded_event_stores_and_emits(monkeypatch):
     import lib.tasks_pkg.autopilot_run_lifecycle as apl
 
     stored = {}
-    monkeypatch.setattr(apl, '_store_run_record',
-                        lambda conv_id, run_id, *, user_id, reason='task_done':
-                        stored.update(conv_id=conv_id, run_id=run_id,
-                                      user_id=user_id, reason=reason)
-                        or {'runId': run_id, 'status': 'concluded', 'reason': reason})
+    monkeypatch.setattr(
+        apl, '_store_run_record',
+        lambda conv_id, run_id, *, user_id, reason='task_done', text='':
+        stored.update(conv_id=conv_id, run_id=run_id,
+                      user_id=user_id, reason=reason, text=text)
+        or {'runId': run_id, 'status': 'concluded', 'reason': reason})
     concluded = []
     monkeypatch.setattr(apl, '_emit_run_concluded',
                         lambda conv_id, run_id, text, cfg, *, user_id:
@@ -160,13 +167,47 @@ def test_emit_run_concluded_event_stores_and_emits(monkeypatch):
     assert rec is not None and rec['status'] == 'concluded'
     assert stored == {
         'conv_id': 'conv-rc', 'run_id': 'ar-rc', 'user_id': 1,
-        'reason': 'task_done',
+        'reason': 'task_done', 'text': '',
     }
-    # Feed pulse fired with EMPTY report text (report layer removed).
+    # Feed pulse fired with EMPTY report text (no report supplied).
     assert concluded == [('', 1)]
     # The SSE run-concluded event was emitted with the record.
     assert any(ev.get('type') == 'autopilot_run_concluded'
                and ev.get('runId') == 'ar-rc' for ev in events)
+
+
+def test_emit_run_concluded_event_forwards_report_into_record(monkeypatch):
+    """``report=`` (the terminal VU verdict) lands in the record AND the feed
+    pulse — a concluded run is never explanation-free again."""
+    import lib.tasks_pkg.autopilot as ap
+    import lib.tasks_pkg.autopilot_run_lifecycle as apl
+
+    stored = {}
+    monkeypatch.setattr(
+        apl, '_store_run_record',
+        lambda conv_id, run_id, *, user_id, reason='task_done', text='':
+        stored.update(reason=reason, text=text)
+        or {'runId': run_id, 'status': 'concluded', 'reason': reason,
+            'content': text})
+    concluded = []
+    monkeypatch.setattr(apl, '_emit_run_concluded',
+                        lambda conv_id, run_id, text, cfg, *, user_id:
+                        concluded.append(text))
+    monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
+                        lambda task, ev: None)
+
+    task = {'id': 'task-rc-2', 'convId': 'conv-rc2', 'config': {},
+            '_userId': 1}
+    rec = ap._emit_run_concluded_event(
+        task, 'conv-rc2', 'ar-rc2', reason='no_progress',
+        report='Last gap: the payout path was never reconciled.')
+
+    assert stored == {
+        'reason': 'no_progress',
+        'text': 'Last gap: the payout path was never reconciled.',
+    }
+    assert concluded == ['Last gap: the payout path was never reconciled.']
+    assert rec['content'] == 'Last gap: the payout path was never reconciled.'
 
 
 def test_emit_run_concluded_event_none_record_short_circuits(monkeypatch):
@@ -225,6 +266,10 @@ def test_task_done_concludes_report_free_and_settles(monkeypatch):
 
     def _fake_vu(task, vu_msg_id=None):
         task['_vu_emitted_done'] = True
+        # run_virtual_user now registers a carrier sub-task (which sets
+        # task['_vu_carrier']) before running the decision; the conclude
+        # path emits AUTOPILOT_VU_CANCEL onto that carrier stream.
+        task['_vu_carrier'] = {'id': 'vu-carrier'}
         return None
     monkeypatch.setattr(ap, 'run_virtual_user', _fake_vu)
 

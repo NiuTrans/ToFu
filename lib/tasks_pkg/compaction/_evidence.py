@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
+from lib.tool_history_pairing import adjacent_tool_call_result_pairs
 
 
 logger = get_logger(__name__)
@@ -127,7 +129,6 @@ def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
             toolCallId=archive.get('toolCallId'),
             toolName=archive.get('toolName'))
 
-    calls: dict[str, tuple[str, dict]] = {}
     for message in messages or []:
         if not isinstance(message, dict):
             continue
@@ -143,7 +144,6 @@ def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
                     exc)
                 args = {}
             call_id = str(call.get('id') or '')
-            calls[call_id] = (str(fn.get('name') or ''), args)
             def _add_paths(value: Any) -> None:
                 if isinstance(value, dict):
                     for key, child in value.items():
@@ -159,12 +159,34 @@ def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
 
             _add_paths(args)
 
+    paired_call_by_result_object = {
+        id(result): call
+        for call, result in adjacent_tool_call_result_pairs(messages or [])
+    }
     for message in messages or []:
         if not isinstance(message, dict) or message.get('role') != 'tool':
             continue
         call_id = str(message.get('tool_call_id') or '')
-        tool_name, args = calls.get(
-            call_id, (str(message.get('name') or ''), {}))
+        paired_call = paired_call_by_result_object.get(id(message))
+        if isinstance(paired_call, Mapping):
+            fn = paired_call.get('function') or {}
+            tool_name = str(fn.get('name') or '') \
+                if isinstance(fn, dict) else ''
+            try:
+                args = json.loads(fn.get('arguments') or '{}') \
+                    if isinstance(fn, dict) else {}
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                logger.debug(
+                    '[CompactionEvidence] malformed paired arguments ignored: %s',
+                    exc)
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+        else:
+            # Orphan/blank-id legacy receipts keep only their explicit name.
+            # Guessing from a conversation-global id would be less honest.
+            tool_name = str(message.get('name') or '')
+            args = {}
         content = _text(message.get('content') or '')
         command = _text(args.get('command') or args.get('cmd') or '')
         source = f'tool:{tool_name or "unknown"}:{call_id}'

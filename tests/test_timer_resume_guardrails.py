@@ -138,6 +138,19 @@ def test_resume_cap_limits_respawns(monkeypatch):
     assert len(still_active) == 5
 
 
+def test_durable_create_admission_is_owner_atomic(monkeypatch):
+    from lib.storage import StorageError
+
+    capacity = timer_mod.timer_live_capacity()
+    admitted = [_new_timer() for _ in range(capacity)]
+    with pytest.raises(StorageError) as error:
+        _new_timer()
+
+    assert error.value.code == 'database_conflict'
+    assert 'capacity' in error.value.message.lower()
+    assert all(_status(timer_id) == 'active' for timer_id in admitted)
+
+
 # ── Fix 4: skipped polls advance poll_count ─────────────────────────────────
 
 def test_skipped_poll_increments_count():

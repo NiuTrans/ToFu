@@ -53,7 +53,7 @@ import sys
 
 import pytest
 
-from tests._runtime_sections import native_module_path, runtime_sections_dir
+from tests._runtime_sections import native_module_path, runtime_sections_dir, shipped_source_text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
@@ -62,7 +62,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS = runtime_sections_dir()
 FINISH_INFO = os.path.join(JS, 'ui', 'finish_info.js')
-ERROR_ENVELOPE = os.path.join(JS, 'core', 'error_envelope.js')
+ERROR_ENVELOPE = native_module_path(
+    '.native/error-presentation.js',
+    os.path.join(ROOT, 'frontend/src/error-presentation.ts'))
 TYPED_ERRORS = native_module_path(
     '.native/api-errors.js', os.path.join(ROOT, 'frontend/src/api/errors.ts'))
 
@@ -125,7 +127,17 @@ global._i18nLang = win._i18nLang = 'en';
 eval(fs.readFileSync(TYPED_ERRORS, 'utf8'));     // api/errors.ts owner
 global.normalizeTypedErrorEnvelope = global.normalizeErrorEnvelope;
 global.isTypedErrorEnvelope = global.isErrorEnvelope;
-eval(fs.readFileSync(ERROR_ENVELOPE, 'utf8'));   // core/error_envelope.js
+eval(fs.readFileSync(ERROR_ENVELOPE, 'utf8'));   // error-presentation.ts owner
+// Production binds the typed presentation through the ESM prelude; mirror that
+// composition so the retained finish_info.js adapter sees the same ports.
+global.errorEnvelopePresentation = createErrorEnvelopePresentation({
+  translate: t, iconHtml: Icon,
+});
+global.fallbackCauseParts = errorEnvelopePresentation.fallbackCauseParts;
+global.fallbackKindLabel = errorEnvelopePresentation.fallbackKindLabel;
+global.errorEnvelopeKindLabel = errorEnvelopePresentation.errorEnvelopeKindLabel;
+global.errorEnvelopeMessage = errorEnvelopePresentation.errorEnvelopeMessage;
+global.renderErrorEnvelope = errorEnvelopePresentation.renderErrorEnvelope;
 eval(fs.readFileSync(FINISH_INFO, 'utf8'));      // ui/finish_info.js
 
 const h = document.getElementById('h');
@@ -276,13 +288,14 @@ def test_single_cause_formatter_no_duplicate_stripping():
     """Charter #2: ONE normalization throat. The cause formatter lives in
     core/error_envelope.js; neither renderer may carry a private copy of the
     stripping/label logic, or the two surfaces drift."""
-    env = open(ERROR_ENVELOPE).read()
-    for sym in ('function distillFallbackDetail',
-                'function fallbackKindLabel',
-                'function fallbackCauseParts'):
-        assert sym in env, f'core/error_envelope.js must define {sym}'
-    assert 'runtimeScope.fallbackCauseParts' in env, (
-        'fallbackCauseParts must be exported for cross-file use')
+    env = shipped_source_text('frontend/src/error-presentation.ts')
+    for sym in ('export function distillFallbackDetail',
+                'const fallbackKindLabel =',
+                'const fallbackCauseParts ='):
+        assert sym in env, f'error-presentation.ts must define {sym}'
+    prelude = shipped_source_text('frontend/src/runtime/sections/_prelude.js')
+    assert 'fallbackCauseParts' in prelude, (
+        'fallbackCauseParts must be bound for cross-file use by the prelude')
 
     fi = open(FINISH_INFO).read()
     assert 'fallbackCauseParts(msg)' in fi, (
@@ -291,9 +304,9 @@ def test_single_cause_formatter_no_duplicate_stripping():
         'finish_info.js contains a private tag-stripping regex — cause '
         'formatting belongs in core/error_envelope.js only')
 
-    css = open(os.path.join(ROOT, 'static', 'styles.css')).read()
+    css = shipped_source_text('frontend/src/styles/application/05-paper-report-media.css')
     for sel in ('.fb-cause', '.fb-cause-kind', '.fb-cause-detail'):
-        assert sel in css, f'styles.css must style {sel}'
+        assert sel in css, f'report-media styles must style {sel}'
 
 
 @pytest.mark.skipif(not shutil.which('node'), reason='node not installed')

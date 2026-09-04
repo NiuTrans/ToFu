@@ -80,7 +80,7 @@ check('entry_exposed', true);
   ], false);
   const d = frag(html);
   // code_exec renders as an inline TERMINAL block (not a .ptool-line) —
-  // chat parity: _renderCmdDoneBlock with the ok status class.
+  // Chat parity: typed command execution owner with the ok status class.
   check('exec_cmd_block_rendered', !!d.querySelector('.ptool-cmd-block'));
   check('exec_cmd_block_ok', !!d.querySelector('.ptool-cmd-ok'));
   check('exec_command_present', html.includes('echo paper-full-tools-routing-ok'));

@@ -22,6 +22,34 @@ from lib.orchestration_chat_launch import (
 logger = get_logger(__name__)
 
 
+# Bound the report persisted into conversation settings (one record per run,
+# re-serialized on every settings write) — a VU sign-off is model output and
+# needs a hard cap for settings-blob hygiene.
+GOAL_STOP_REPORT_MAX_CHARS = 2000
+
+
+def _vu_stop_report(messages: list[dict]) -> str:
+    """Source the concluded run's fold report from its own terminal evidence.
+
+    The last virtual-user utterance IS the run's explanation of why it ended:
+    the sign-off justification on a clean TASK_DONE, or the last unmet gap on
+    a safety-cap cutoff (stuck / no_progress / max_iterations). Machine
+    control tokens (the DONE sentinel, the [PROGRESS:] receipt) are stripped
+    so the fold renders prose, not protocol.
+    """
+    from lib.agent_verdict import strip_machine_tokens
+    for message in reversed(messages or []):
+        if not isinstance(message, dict):
+            continue
+        if message.get('role') != 'user':
+            continue
+        content = str(message.get('content') or '')
+        if content.strip():
+            return strip_machine_tokens(content).strip()[
+                :GOAL_STOP_REPORT_MAX_CHARS]
+    return ''
+
+
 @dataclass(frozen=True)
 class OrchestrationChatFlowRuntimePorts:
     """All delivery side effects required by the chat-flow runtime."""
@@ -131,7 +159,8 @@ def execute_orchestration_chat_flow_task(
         emit=turn_persistence,
         on_stream=task_event_sink,
         vu_flow=virtual_user_flow,
-        vu_run_id=(task_id if virtual_user_flow else ''),
+        vu_run_id=(str(task.get('_goalRunId') or '')
+                   if virtual_user_flow else ''),
         projection=projection,
     )
     turn_persistence.bind(adapter.messages)
@@ -158,6 +187,7 @@ def execute_orchestration_chat_flow_task(
     )
     terminal = completion.prepare()
     if virtual_user_flow:
+        task['_goalStopReport'] = _vu_stop_report(adapter.messages)
         ports.complete_autopilot(task, terminal)
     completion.finish()
 

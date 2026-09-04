@@ -7,8 +7,10 @@ half of the v2 surface):
 1. **Working-tab memory** — the last tab a tool acted on is remembered, so
    ``tab_id`` is optional everywhere: omit it and the action lands on the
    tab you were already working with (seeded from the browser's active tab
-   on first use). This kills the list_tabs-first ceremony for single-tab
-   flows and the per-call id plumbing.
+   on first use; tabs the extension flags ``isClient`` — the Tofu app
+   itself — are never seeded, so a tool call cannot replace the chat the
+   user is working in). This kills the list_tabs-first ceremony for
+   single-tab flows and the per-call id plumbing.
 2. **Intent-based element resolution** — ``text=`` params are resolved
    server-side: enumerate interactive elements once, fuzzy-rank them
    (exact > prefix > substring; role/tag-aware boost), act on the winner.
@@ -28,9 +30,14 @@ half of the v2 surface):
 Every stateful function requires an explicit ``(owner_user_id, client_id)``
 route key and every bridge operation requires an injected sender. Browser
 state can therefore never cross users or devices through a module global.
+Working-tab memory is reconstructible, inactivity-expiring, and bounded by
+the same launch-probed route capacity as the browser device registry.
 """
 
 import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 
 from lib.log import get_logger
 
@@ -38,7 +45,8 @@ logger = get_logger(__name__)
 
 __all__ = [
     'remember_work_tab', 'forget_work_tab', 'resolve_work_tab',
-    'current_work_tab', 'resolve_element', 'auto_wait', 'action_receipt',
+    'current_work_tab', 'clear_work_tab_cache', 'resolve_element',
+    'auto_wait', 'action_receipt',
 ]
 
 
@@ -47,7 +55,52 @@ __all__ = [
 # ══════════════════════════════════════════════════════════
 
 _work_tab_lock = threading.Lock()
-_work_tabs: dict[tuple[str, str], int] = {}
+_WORK_TAB_TTL_S = 1800.0
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkTabEntry:
+    tab_id: int
+    last_action_at: float
+
+
+_work_tabs: OrderedDict[tuple[str, str], _WorkTabEntry] = OrderedDict()
+
+
+def _work_tab_capacity() -> int:
+    from lib.browser.queue._limits import client_registry_limits
+    process_limit, _owner_limit = client_registry_limits()
+    return process_limit
+
+
+def _prune_expired_work_tabs_locked(*, now: float) -> None:
+    """Drop the expired LRU prefix; action touches keep time order exact."""
+    while _work_tabs:
+        _route_key, entry = next(iter(_work_tabs.items()))
+        if now - entry.last_action_at < _WORK_TAB_TTL_S:
+            return
+        _work_tabs.popitem(last=False)
+
+
+def _lookup_work_tab_locked(
+    route_key: tuple[str, str],
+    *,
+    now: float,
+    touch_action: bool,
+) -> int | None:
+    entry = _work_tabs.get(route_key)
+    if entry is None:
+        return None
+    if now - entry.last_action_at >= _WORK_TAB_TTL_S:
+        _work_tabs.pop(route_key, None)
+        return None
+    if touch_action:
+        _work_tabs.move_to_end(route_key)
+        _work_tabs[route_key] = _WorkTabEntry(
+            tab_id=entry.tab_id,
+            last_action_at=now,
+        )
+    return entry.tab_id
 
 
 def _normalize_route_key(route_key) -> tuple[str, str]:
@@ -72,8 +125,17 @@ def remember_work_tab(route_key, tab_id):
         logger.debug('Non-numeric work tab id ignored: %s', tab_id)
         return
     route_key = _normalize_route_key(route_key)
+    now = time.monotonic()
     with _work_tab_lock:
-        _work_tabs[route_key] = tab_id
+        _prune_expired_work_tabs_locked(now=now)
+        _work_tabs.pop(route_key, None)
+        _work_tabs[route_key] = _WorkTabEntry(
+            tab_id=tab_id,
+            last_action_at=now,
+        )
+        capacity = max(1, int(_work_tab_capacity()))
+        while len(_work_tabs) > capacity:
+            _work_tabs.popitem(last=False)
 
 
 def forget_work_tab(route_key, tab_id):
@@ -86,7 +148,8 @@ def forget_work_tab(route_key, tab_id):
         return
     route_key = _normalize_route_key(route_key)
     with _work_tab_lock:
-        if _work_tabs.get(route_key) == tab_id:
+        entry = _work_tabs.get(route_key)
+        if entry is not None and entry.tab_id == tab_id:
             _work_tabs.pop(route_key, None)
 
 
@@ -97,7 +160,19 @@ def current_work_tab(route_key):
     """
     route_key = _normalize_route_key(route_key)
     with _work_tab_lock:
-        return _work_tabs.get(route_key)
+        return _lookup_work_tab_locked(
+            route_key,
+            now=time.monotonic(),
+            touch_action=False,
+        )
+
+
+def clear_work_tab_cache() -> int:
+    """Release reconstructible route memory; return entries removed."""
+    with _work_tab_lock:
+        dropped = len(_work_tabs)
+        _work_tabs.clear()
+        return dropped
 
 
 def resolve_work_tab(fn_args, *, route_key, send):
@@ -105,7 +180,9 @@ def resolve_work_tab(fn_args, *, route_key, send):
 
     Priority: explicit ``tabId`` arg (which also becomes the new working
     tab) → remembered working tab → the browser's currently active tab
-    (seeded via one list_tabs call) → None (caller renders the error).
+    (seeded via one list_tabs call, skipping ``isClient`` rows — the Tofu
+    client tab is never an implicit action target) → None (caller renders
+    the error).
     """
     explicit = fn_args.get('tabId')
     if explicit is not None:
@@ -119,7 +196,11 @@ def resolve_work_tab(fn_args, *, route_key, send):
         return tab_id
     route_key = _normalize_route_key(route_key)
     with _work_tab_lock:
-        current = _work_tabs.get(route_key)
+        current = _lookup_work_tab_locked(
+            route_key,
+            now=time.monotonic(),
+            touch_action=True,
+        )
     if current is not None:
         return current
     try:
@@ -129,13 +210,14 @@ def resolve_work_tab(fn_args, *, route_key, send):
         return None
     if error or not isinstance(result, list) or not result:
         return None
-    for t in result:
+    eligible = [t for t in result if not t.get('isClient')]
+    for t in eligible:
         if t.get('active') and t.get('id') is not None:
             remember_work_tab(route_key, t['id'])
             return int(t['id'])
-    if result[0].get('id') is not None:
-        remember_work_tab(route_key, result[0]['id'])
-        return int(result[0]['id'])
+    if eligible and eligible[0].get('id') is not None:
+        remember_work_tab(route_key, eligible[0]['id'])
+        return int(eligible[0]['id'])
     return None
 
 
@@ -380,6 +462,7 @@ def action_receipt(tab_id, before, *, route_key, send):
             current = t
             break
     if current is None:
+        forget_work_tab(route_key, tab_id)
         parts.append('→ note: the tab no longer exists (closed or crashed)')
         return '\n' + '\n'.join(parts)
     title, url = current.get('title', ''), current.get('url', '')

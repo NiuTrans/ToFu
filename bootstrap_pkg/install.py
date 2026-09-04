@@ -42,6 +42,8 @@ _CONDA_PYTHON_DEPS = [
     'playwright>=1.40',
     'pillow>=10.0',
     'python-pptx>=0.6.21',
+    'fonttools>=4.40',
+    'brotli>=1.1',
     'lxml>=5.3',
     'lxml_html_clean>=0.4',
     # Bounded on BOTH sides — see requirements.txt. Tofu's client speaks the

@@ -39,6 +39,7 @@ def run_round_message_hygiene(
     *,
     round_num: int,
     tid: str,
+    model: str = '',
     project_path: str | None,
     project_enabled: bool,
     remaining_api_rounds: int | None = None,
@@ -56,6 +57,9 @@ def run_round_message_hygiene(
         round 0 (system contexts were just injected).
     tid : str
         8-char task id for logging.
+    model : str
+        Resolved logical model for this round. Used only to resolve whether
+        every eligible provider route has a native compaction protocol.
     project_path : str | None
         Project root path (attachments context).
     project_enabled : bool
@@ -63,6 +67,40 @@ def run_round_message_hygiene(
     remaining_api_rounds : int | None
         Hard-budget calls still available, including the current call.
     """
+    # Resolve provider-native compaction before the provider-neutral pipeline
+    # runs.  The resolver is deliberately unanimous: a mixed/unknown slot pool
+    # leaves local L2 authoritative, while public OpenAI/Anthropic routes may
+    # defer the price-aware economic working-set trigger to their server.
+    # Refresh every round so provider fallback or a model swap cannot leave a
+    # stale capability latch.
+    try:
+        from lib.llm_dispatch.compaction_policy import (
+            resolve_task_native_compaction_mode,
+        )
+        _native_mode = resolve_task_native_compaction_mode(
+            task,
+            model=(model or (task.get('config') or {}).get('model') or ''),
+        )
+        # Public Responses currently omits explicit compaction while its
+        # native multi-agent beta is active. Honor an explicit request and the
+        # previous round's exact orchestration decision so local L2 remains the
+        # working-set owner for that combination.
+        from lib.context_experiment_flags import (
+            normalize_context_experiment_flags,
+        )
+        _multi_agent_requested = normalize_context_experiment_flags(
+            task.get('config') or {})['orchestration']['multiAgent']
+        _previous_orchestration = task.get('_toolOrchestration') or {}
+        if (_multi_agent_requested == 'read_only'
+                or _previous_orchestration.get('multiAgent') == 'read_only'):
+            _native_mode = ''
+    except Exception as e:
+        logger.debug('[Task:%s] native compaction policy unavailable: %s',
+                     tid, e)
+        _native_mode = ''
+    task['_nativeCompactionMode'] = _native_mode
+    task['_nativeCompactionPrimary'] = bool(_native_mode)
+
     # Context compaction: two-layer pipeline
     #   L1: micro-compact cold tool results (every round, zero LLM cost)
     #   L2: smart summary as synthetic tool result (on context overflow)

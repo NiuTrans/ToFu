@@ -166,6 +166,43 @@ class DefaultConversationStore:
         latest = _storage_client().query("event.latest", {"task_id": str(task_id)})
         return max(int(floor), int((latest or {}).get("sequence", -1)) + 1)
 
+    def confirm_project_context_delivery(self, delivery):
+        """Confirm one model-consumed Project Context page."""
+        from lib.conversations.project_identity import (
+            normalize_project_path, project_channel_key,
+        )
+
+        project_key = normalize_project_path(
+            str(delivery.get('projectPath') or ''))
+        conversation_id = str(delivery.get('conversationId') or '')
+        token = str(delivery.get('deliveryToken') or '')
+        user_id = int(delivery.get('userId') or 0)
+        if not project_key or not conversation_id or not token or user_id < 1:
+            return False
+        result = _storage_client(write=True).command(
+            'project_brain.cursor.confirm',
+            {
+                'owner_user_id': user_id,
+                'project_key': project_key,
+                'conversation_id': conversation_id,
+                'from_sequence': int(delivery.get('fromSequence') or 0),
+                'delivered_sequence': int(delivery.get('toSequence') or 0),
+                'delivery_token': token,
+            },
+            f'project-cursor-confirm:{conversation_id}:{token}',
+        )
+        hint = (result or {}).get('pushHint') if isinstance(result, dict) else None
+        if hint:
+            try:
+                from lib.agent_core.push import push_event
+                push_event(
+                    'project', project_channel_key(project_key), dict(hint),
+                    user_id=user_id,
+                )
+            except Exception as exc:
+                logger.debug('[Store] project cursor push hint skipped: %s', exc)
+        return True
+
     def load_transcript(self, conv_id, *, user_id):
         """Return ``(derived_messages, updated_at_ms, revision)`` or ``None``."""
         document = _storage_client().query(
@@ -350,7 +387,12 @@ class DefaultConversationStore:
         from lib.conversations import notify_conv_changed
 
         document = _storage_client().query(
-            "conversation.get", {"conv_id": conv_id, "user_id": user_id}
+            "conversation.get",
+            {
+                "conv_id": conv_id,
+                "user_id": user_id,
+                "derive_messages": False,
+            },
         )
         notify_conv_changed(
             conv_id,

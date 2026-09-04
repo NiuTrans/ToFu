@@ -38,11 +38,13 @@ holds that spec in one place; the request pre-flight
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 import uuid
 
 from lib.log import get_logger
+from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
 
@@ -247,16 +249,19 @@ def _fake_user_id() -> str:
             f'_session_{uuid.uuid4()}')
 
 
-#: Per-token stable X-Claude-Code-Session-Id (process-lifetime cache, keyed
-#: by a hash of the token so the raw token is never the dict key).
-_session_ids: dict = {}
+#: Per-token stable X-Claude-Code-Session-Id, keyed by a token hash so the raw
+#: secret is never retained. OAuth rotations are open-ended over process life;
+#: reuse the shared bounded cache instead of a permanent bespoke dict.
+_session_ids = TTLCache(
+    ttl=0,
+    max_size=256,
+    name='claude_oauth_session_ids',
+)
 
 
 def _session_id_for_token(token: str) -> str:
     fp = hashlib.sha256((token or '').encode()).hexdigest()[:16]
-    if fp not in _session_ids:
-        _session_ids[fp] = str(uuid.uuid4())
-    return _session_ids[fp]
+    return _session_ids.get_or_compute(fp, lambda: str(uuid.uuid4()))
 
 
 def _rename_tool_name(name: str, reverse: dict) -> str:
@@ -447,8 +452,8 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
         body: the OpenAI-shaped request body (pre-translation).
         extra_headers: caller headers to merge the identity headers onto.
         user_id: caller's tenant — threaded through the token-refresh chain
-            into egress routing (desktop agent tenant scoping); ``''`` is the
-            legacy single-user fallback.
+            into desktop-agent egress routing. Request/task boundaries must
+            provide a positive owner; ownerless desktop routing fails closed.
 
     Returns:
         ``(api_key, extra_headers, body)`` with the live token and merged
@@ -555,16 +560,12 @@ def _merge_betas(existing: str, has_tools: bool = False) -> str:
 
 
 # ══════════════════════════════════════════════════════════
-#  Managed provider provisioning (server_config.json)
+#  Managed provider provisioning (model-routing v2)
 # ══════════════════════════════════════════════════════════
 #
-# On a successful subscription login we register a synthetic provider in
-# server_config.json so the model shows up in dispatch with no manual
-# Settings work. The provider carries an ``oauth`` marker (resolved live at
-# request time) and a SENTINEL api_key (never used — the real token is
-# fetched per request) so the slot builder treats it as a normal cloud
-# provider. ``managed_oauth: True`` lets us cleanly remove it on logout
-# without touching user-curated providers.
+# On successful subscription login we replace one owner-scoped managed
+# ProviderAccess bundle. OAuth tokens remain in their dedicated token store;
+# model-routing credentials contain only the OAuth provider marker.
 
 #: Codex model tables per subscription plan tier, ported from CLIProxyAPI
 #: ``internal/registry/models/models.json`` (v7, synced 2026-08-08).
@@ -621,7 +622,7 @@ def _codex_tier_models(plan_type: str) -> list:
     return _CODEX_MODEL_TIERS.get(tier) or _CODEX_MODEL_TIERS['pro']
 
 
-#: provider id → spec used to build the managed server_config entry.
+#: OAuth provider id → facts used to compile the managed v2 bundle.
 _MANAGED_SPECS = {
     'codex': {
         'id': 'oauth_codex',
@@ -665,8 +666,8 @@ _MANAGED_SPECS = {
     },
 }
 
-#: Sentinel key — the slot builder requires a non-empty api_key for cloud
-#: providers, but the real subscription token is resolved live per request.
+#: Compatibility marker inside the one-way legacy-plan compiler. The real
+#: subscription token is resolved live per request and is never stored here.
 _OAUTH_SENTINEL_KEY = 'oauth-managed'
 
 
@@ -712,120 +713,289 @@ def _managed_oauth_entry(provider: str, plan_type: str = None) -> dict:
 
 
 def _activate_oauth_config_change() -> None:
-    from lib import reload_config
     from lib.llm_dispatch import reset_dispatcher
 
-    reload_config()
     reset_dispatcher()
 
 
-def provision_oauth_provider(provider: str, plan_type: str = None) -> bool:
-    """Add or refresh the server-owned provider for a subscription."""
+def _oauth_owner_boundary(
+    owner_user_id: int | None,
+    tenant_id: str | None = None,
+):
+    """Resolve the explicit owner, with a personal-mode-only legacy caller seam."""
+    from lib.identity import PERSONAL_USER_ID, require_user_id
+    from lib.model_routing import OwnerBoundary
+
+    if owner_user_id is None:
+        from runtime_guards import load_deployment_configuration
+        deployment = load_deployment_configuration()
+        if deployment.mode != 'personal':
+            raise ValueError(
+                'OAuth model access requires an explicit owner in distributed mode')
+        owner_user_id = PERSONAL_USER_ID
+    return OwnerBoundary.create(
+        require_user_id(owner_user_id, context='OAuth model-routing owner'),
+        tenant_id,
+    )
+
+
+def _remove_v2_provider(document: dict, provider_id: str) -> list[str]:
+    access_ids = {
+        row['provider_access_id'] for row in document['provider_accesses']
+        if row['provider_id'] == provider_id
+    }
+    connection_ids = {
+        row['connection_id'] for row in document['connections']
+        if row['provider_access_id'] in access_ids
+    }
+    offering_ids = {
+        row['offering_id'] for row in document['offerings']
+        if row['provider_access_id'] in access_ids
+    }
+    secret_references = [
+        row['secret_reference'] for row in document['credentials']
+        if row['provider_access_id'] in access_ids and row['secret_reference']
+    ]
+    document['providers'] = [
+        row for row in document['providers']
+        if row['provider_id'] != provider_id
+    ]
+    document['provider_accesses'] = [
+        row for row in document['provider_accesses']
+        if row['provider_id'] != provider_id
+    ]
+    document['connections'] = [
+        row for row in document['connections']
+        if row['connection_id'] not in connection_ids
+    ]
+    document['credentials'] = [
+        row for row in document['credentials']
+        if row['provider_access_id'] not in access_ids
+    ]
+    document['offerings'] = [
+        row for row in document['offerings']
+        if row['offering_id'] not in offering_ids
+    ]
+    document['deployments'] = [
+        row for row in document['deployments']
+        if row['offering_id'] not in offering_ids
+        and row['connection_id'] not in connection_ids
+    ]
+    return secret_references
+
+
+def _merge_v2_catalog_entities(document: dict, imported: dict) -> None:
+    creators = {row['creator_id']: row for row in document['creators']}
+    for row in imported['creators']:
+        creators.setdefault(row['creator_id'], copy.deepcopy(row))
+    document['creators'] = list(creators.values())
+
+    models = {
+        (row['creator_id'], row['model_id']): row
+        for row in document['models']
+    }
+    for incoming in imported['models']:
+        key = (incoming['creator_id'], incoming['model_id'])
+        current = models.get(key)
+        if current is None:
+            models[key] = copy.deepcopy(incoming)
+            continue
+        current['capabilities'] = sorted(
+            set(current['capabilities']) | set(incoming['capabilities']))
+        current['context_window'] = max(
+            current['context_window'], incoming['context_window'])
+        current['quality_rank'] = max(
+            current['quality_rank'], incoming['quality_rank'])
+    document['models'] = list(models.values())
+
+
+def _upsert_oauth_provider(
+    entry: dict,
+    *,
+    owner_user_id: int | None,
+    tenant_id: str | None,
+    repository=None,
+) -> bool:
+    """Replace one OAuth ProviderAccess inside the sole v2 authority."""
+    from lib.model_routing import (
+        ModelRoutingError,
+        ModelRoutingRepository,
+        normalize_document,
+        plan_legacy_migration,
+    )
+
+    boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
+    repo = repository or ModelRoutingRepository()
+    plan = plan_legacy_migration({'providers': [entry]})
+    if plan.blocking_issues:
+        raise ModelRoutingError(
+            '; '.join(issue.message for issue in plan.blocking_issues),
+            kind='oauth_model_routing_import_failed',
+        )
+    current = repo.get(boundary)
+    candidate = copy.deepcopy(current.document)
+    old_secret_references = _remove_v2_provider(candidate, entry['id'])
+    _merge_v2_catalog_entities(candidate, plan.document)
+    for collection in (
+        'providers', 'provider_accesses', 'connections', 'credentials',
+        'offerings', 'deployments',
+    ):
+        candidate[collection].extend(copy.deepcopy(plan.document[collection]))
+    candidate['revision'] = current.revision
+    normalized = normalize_document(candidate)
+    if normalized == current.document:
+        return False
+
+    for pending in plan._secrets:
+        repo.put_secret(
+            boundary,
+            pending.plaintext,
+            secret_reference=pending.secret_reference,
+        )
+    committed = repo.compare_and_swap(
+        boundary, normalized, expected_revision=current.revision)
+    active_references = {
+        row['secret_reference'] for row in committed.document['credentials']
+        if row['secret_reference']
+    }
+    for reference in old_secret_references:
+        if reference not in active_references:
+            try:
+                repo.delete_secret(boundary, reference)
+            except Exception as exc:
+                logger.warning(
+                    '[OAuth] stale model-routing secret cleanup failed: %s',
+                    str(exc)[:300],
+                )
+    return True
+
+
+def provision_oauth_provider(
+    provider: str,
+    plan_type: str = None,
+    *,
+    owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+    repository=None,
+) -> bool:
+    """Add or refresh one subscription ProviderAccess in model-routing v2."""
     entry = _managed_oauth_entry(provider, plan_type)
     if not entry:
         return False
-    from lib import _SERVER_CONFIG_PATH
-    from lib.json_store import update_json_atomic
-
-    changed = {'yes': False}
-
-    def _mutate(cfg):
-        providers = list(cfg.get('providers') or [])
-        found = False
-        out = []
-        for current in providers:
-            if current.get('id') != entry['id']:
-                out.append(current)
-                continue
-            if not found:
-                out.append(entry)
-                found = True
-                if current != entry:
-                    changed['yes'] = True
-            else:
-                changed['yes'] = True
-        if not found:
-            out.append(entry)
-            changed['yes'] = True
-        if not changed['yes']:
-            return None
-        cfg['providers'] = out
-        return cfg
-
-    update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-    if changed['yes']:
+    changed = _upsert_oauth_provider(
+        entry,
+        owner_user_id=owner_user_id,
+        tenant_id=tenant_id,
+        repository=repository,
+    )
+    if changed:
         _activate_oauth_config_change()
-        logger.info('[OAuth] Provisioned managed provider %s (%d models)',
+        logger.info('[OAuth] Provisioned ProviderAccess %s (%d models)',
                     entry['id'], len(entry['models']))
-    return changed['yes']
+    return changed
 
 
-def reconcile_oauth_providers() -> dict:
-    """Repair token-to-managed-provider drift for all direct OAuth logins."""
-    from lib import _SERVER_CONFIG_PATH
-    from lib.json_store import update_json_atomic
+def reconcile_oauth_providers(
+    *,
+    owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+    repository=None,
+) -> dict:
+    """Repair token-to-ProviderAccess drift for direct OAuth logins."""
     from lib.oauth.token_store import load_token
 
-    desired = {}
+    desired: dict[str, dict] = {}
     for provider in OAUTH_PROVIDERS:
         token = load_token(provider) or {}
         if token.get('access_token'):
             desired[provider] = _managed_oauth_entry(
                 provider, token.get('plan_type'))
-
-    managed_ids = {spec['id']: provider
-                   for provider, spec in _MANAGED_SPECS.items()}
-    changed = {'yes': False}
-
-    def _mutate(cfg):
-        out = []
-        seen = set()
-        for current in (cfg.get('providers') or []):
-            provider = managed_ids.get(current.get('id'))
-            if not provider:
-                out.append(current)
-                continue
-            wanted = desired.get(provider)
-            if wanted and provider not in seen:
-                out.append(wanted)
-                seen.add(provider)
-                if current != wanted:
-                    changed['yes'] = True
-            else:
-                changed['yes'] = True
-        for provider in OAUTH_PROVIDERS:
-            if provider in desired and provider not in seen:
-                out.append(desired[provider])
-                changed['yes'] = True
-        if not changed['yes']:
-            return None
-        cfg['providers'] = out
-        return cfg
-
-    update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-    if changed['yes']:
-        _activate_oauth_config_change()
-        logger.info('[OAuth] Reconciled managed subscription providers: %s',
+    changed = False
+    for provider in OAUTH_PROVIDERS:
+        if provider in desired:
+            changed = provision_oauth_provider(
+                provider,
+                plan_type=(load_token(provider) or {}).get('plan_type'),
+                owner_user_id=owner_user_id,
+                tenant_id=tenant_id,
+                repository=repository,
+            ) or changed
+        else:
+            changed = deprovision_oauth_provider(
+                provider,
+                owner_user_id=owner_user_id,
+                tenant_id=tenant_id,
+                repository=repository,
+            ) or changed
+    if changed:
+        logger.info('[OAuth] Reconciled subscription ProviderAccess resources: %s',
                     ', '.join(sorted(desired)) or '(none)')
-    return {provider: managed_oauth_provider_status(provider)
+    return {provider: managed_oauth_provider_status(
+                provider,
+                owner_user_id=owner_user_id,
+                tenant_id=tenant_id,
+                repository=repository,
+            )
             for provider in OAUTH_PROVIDERS}
 
 
-def managed_oauth_provider_status(provider: str) -> dict:
+def managed_oauth_provider_status(
+    provider: str,
+    *,
+    owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+    repository=None,
+) -> dict:
     """Read-only readiness projection used by the OAuth status UI."""
     spec = _MANAGED_SPECS.get(provider)
     if not spec:
         return {'provider_ready': False, 'provider_id': '', 'model_ids': []}
-    from lib import _SERVER_CONFIG_PATH
-    from lib.json_store import read_json
+    from lib.model_routing import ModelRoutingRepository
 
-    cfg = read_json(_SERVER_CONFIG_PATH, default={}) or {}
-    entry = next((p for p in (cfg.get('providers') or [])
-                  if p.get('id') == spec['id']), None)
-    models = [m.get('model_id') for m in ((entry or {}).get('models') or [])
-              if isinstance(m, dict) and m.get('model_id')]
-    ready = bool(entry and entry.get('enabled', True)
-                 and entry.get('oauth') == provider and models)
+    boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
+    repo = repository or ModelRoutingRepository()
+    try:
+        document = repo.get(boundary).document
+    except Exception as exc:
+        logger.debug(
+            '[OAuth] model-routing status unavailable for owner=%s: %s',
+            boundary.owner_user_id,
+            str(exc)[:300],
+        )
+        return {
+            'provider_ready': False,
+            'provider_id': spec['id'],
+            'model_ids': [],
+            'model_count': 0,
+        }
+    access_ids = {
+        row['provider_access_id'] for row in document['provider_accesses']
+        if row['provider_id'] == spec['id'] and row['enabled']
+    }
+    offerings = [
+        row for row in document['offerings']
+        if row['provider_access_id'] in access_ids
+    ]
+    offering_ids = {row['offering_id'] for row in offerings if row['enabled']}
+    models = sorted({
+        str((row.get('model') or {}).get('model_id')
+            or row.get('pending_model_id') or '')
+        for row in offerings
+        if (row.get('model') or {}).get('model_id') or row.get('pending_model_id')
+    })
+    oauth_credentials = any(
+        row['provider_access_id'] in access_ids
+        and row['enabled']
+        and row['kind'] == 'oauth'
+        for row in document['credentials']
+    )
+    routable_deployment = any(
+        row['offering_id'] in offering_ids
+        and row['enabled']
+        and row['probe_status'] == 'passed'
+        for row in document['deployments']
+    )
+    ready = bool(access_ids and models and oauth_credentials and routable_deployment)
     status = {
         'provider_ready': ready,
         'provider_id': spec['id'],
@@ -838,33 +1008,54 @@ def managed_oauth_provider_status(provider: str) -> dict:
     return status
 
 
-def deprovision_oauth_provider(provider: str) -> bool:
-    """Remove the managed server_config provider for a subscription (logout).
+def deprovision_oauth_provider(
+    provider: str,
+    *,
+    owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+    repository=None,
+) -> bool:
+    """Remove the subscription ProviderAccess for an owner (logout).
 
     Returns True when an entry was removed.
     """
     spec = _MANAGED_SPECS.get(provider)
     if not spec:
         return False
-    from lib import _SERVER_CONFIG_PATH
-    from lib.json_store import update_json_atomic
+    from lib.model_routing import ModelRoutingRepository, normalize_document
 
-    removed = {'n': 0}
-
-    def _mutate(cfg):
-        before = cfg.get('providers') or []
-        after = [p for p in before if p.get('id') != spec['id']]
-        removed['n'] = len(before) - len(after)
-        if not removed['n']:
-            return None
-        cfg['providers'] = after
-        return cfg
-
-    update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-    if removed['n']:
+    boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
+    repo = repository or ModelRoutingRepository()
+    current = repo.get(boundary)
+    candidate = copy.deepcopy(current.document)
+    secret_references = _remove_v2_provider(candidate, spec['id'])
+    if candidate == current.document:
+        return False
+    candidate['revision'] = current.revision
+    committed = repo.compare_and_swap(
+        boundary,
+        normalize_document(candidate),
+        expected_revision=current.revision,
+    )
+    active_references = {
+        row['secret_reference'] for row in committed.document['credentials']
+        if row['secret_reference']
+    }
+    for reference in secret_references:
+        if reference not in active_references:
+            try:
+                repo.delete_secret(boundary, reference)
+            except Exception as exc:
+                logger.warning(
+                    '[OAuth] stale model-routing secret cleanup failed: %s',
+                    str(exc)[:300],
+                )
+    if spec['id'] not in {
+        row['provider_id'] for row in committed.document['providers']
+    }:
         _activate_oauth_config_change()
-        logger.info('[OAuth] Deprovisioned managed provider %s', spec['id'])
-    return bool(removed['n'])
+        logger.info('[OAuth] Deprovisioned ProviderAccess %s', spec['id'])
+    return True
 
 
 __all__ = [

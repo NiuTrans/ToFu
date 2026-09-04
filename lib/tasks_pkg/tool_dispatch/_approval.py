@@ -443,22 +443,6 @@ def _approval_meta_timer_manage(approval_meta, fn_args):
           note=f"{action or 'manage'} a polling watcher")
 
 
-def _approval_meta_charter_commit(approval_meta, fn_args):
-    """Enrich approval metadata for ``project_charter_commit``.
-
-    The committed text becomes shared intent injected into EVERY sibling
-    conversation of the project, so it gets the widest blast radius in this
-    family — show the full decision text.
-    """
-    decision = fn_args.get('decision', '') or ''
-    approval_meta['decisionChars'] = len(decision)
-    _risk(
-        approval_meta,
-        ('Decision text (every sibling conversation reads it)', decision),
-        note='Commit a project-wide charter decision',
-    )
-
-
 # ══════════════════════════════════════════════════════════
 #  browser interaction — the SELECTOR/TARGET is the risk
 #
@@ -739,13 +723,57 @@ def _approval_meta_motion_video_narrate(approval_meta, fn_args):
     )
 
 
+def _approval_meta_local_serve_deploy(approval_meta, fn_args):
+    """``local_serve_deploy`` — installs packages + spawns a long-lived server.
+
+    The MODEL PATH and the ENGINE are the risk: approval permits a network
+    install into data/local_serve/ and a managed server binding 127.0.0.1.
+    """
+    path = str(fn_args.get('model_path') or '')
+    approval_meta['path'] = path
+    _risk(
+        approval_meta,
+        ('Model path to deploy', path),
+        ('Engine override', fn_args.get('engine') or None),
+        note=('Download & install an inference engine into an isolated venv '
+              '(bounded 20 GiB budget), start it as a managed local server, '
+              'and register it as a selectable model provider'),
+    )
+
+
+def _approval_meta_local_serve_stop(approval_meta, fn_args):
+    """``local_serve_stop`` — kills a running server others may be using."""
+    iid = str(fn_args.get('instance_id') or '')
+    approval_meta['path'] = iid
+    _risk(
+        approval_meta,
+        ('Deployment to stop', iid),
+        note=('Stop the managed local server (frees GPU/RAM; conversations '
+              'using this model lose it until redeployed)'),
+    )
+
+
+def _approval_meta_local_serve_remove(approval_meta, fn_args):
+    """``local_serve_remove`` — unregisters the provider, forgets the row."""
+    iid = str(fn_args.get('instance_id') or '')
+    approval_meta['path'] = iid
+    _risk(
+        approval_meta,
+        ('Deployment to REMOVE', iid),
+        note=('Stop the server, unregister its provider (the model vanishes '
+              'from the picker), and delete the deployment record. Engine '
+              'venv and model files are kept'),
+    )
+
+
 #: The adjustable knobs of ``update_search_settings`` (schema order). Every
 #: one is optional and any subset may change in one call, so the dialog must
 #: name each knob being touched — a bare "update settings" row is the blind
 #: approval this enricher exists to prevent.
 _SEARCH_SETTINGS_KNOBS = (
-    'fetch_top_n', 'fetch_timeout', 'max_chars_search', 'max_chars_direct',
-    'max_chars_pdf', 'max_download_mb', 'llm_content_filter',
+    'profile', 'overrides', 'fetch_top_n', 'fetch_timeout',
+    'max_chars_search', 'max_chars_direct', 'max_chars_pdf',
+    'max_download_mb', 'llm_content_filter',
     'block_domain', 'unblock_domain',
 )
 
@@ -833,7 +861,6 @@ _APPROVAL_META_ENRICHERS = {
     'schedule_manage':        _approval_meta_schedule_manage,
     'timer_create':           _approval_meta_timer_create,
     'timer_manage':           _approval_meta_timer_manage,
-    'project_charter_commit': _approval_meta_charter_commit,
     # ── browser interaction: the selector/target is the risk ──
     'browser_click':            _approval_meta_browser_click,
     'browser_close_tab':        _approval_meta_browser_close_tab,
@@ -857,6 +884,10 @@ _APPROVAL_META_ENRICHERS = {
     'motion_video_narrate':     _approval_meta_motion_video_narrate,
     # ── search settings: server-wide config mutation ──
     'update_search_settings':   _approval_meta_update_search_settings,
+    # ── local_serve: installs engines / spawns & kills managed servers ──
+    'local_serve_deploy':         _approval_meta_local_serve_deploy,
+    'local_serve_stop':           _approval_meta_local_serve_stop,
+    'local_serve_remove':         _approval_meta_local_serve_remove,
     # ── progressive MCP: remote target + payload are otherwise hidden ──
     'call_mcp_write_tool':       _approval_meta_call_mcp_write_tool,
 }
@@ -922,7 +953,12 @@ def _handle_approval(
         tid, fn_name, fn_args.get('path', ''), round_num, model,
     )
 
-    approved = request_write_approval(approval_id, timeout=120)
+    from lib.tasks_pkg.manager import task_user_id
+    approved = request_write_approval(
+        approval_id,
+        timeout=120,
+        owner_user_id=task_user_id(task),
+    )
 
     if not approved:
         tool_content = f'⚠️ User rejected this {fn_name} operation on {fn_args.get("path", "")}.'

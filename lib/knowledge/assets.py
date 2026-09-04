@@ -15,6 +15,13 @@ import re
 import zipfile
 
 from lib.log import get_logger
+from lib.pdf_parser.admission import CLASSIC_PDF_ADMISSION
+from lib.pdf_parser.policy import resolve_classic_pdf_budget
+
+from .resource_policy import (
+    KnowledgeVisualBudget,
+    resolve_knowledge_visual_budget,
+)
 
 logger = get_logger(__name__)
 
@@ -35,15 +42,6 @@ class KnowledgeImageError(ValueError):
     """A safe, user-facing image validation failure."""
 
 
-def _bounded_env(name: str, default: int, low: int, high: int) -> int:
-    raw = os.environ.get(name, str(default))
-    try:
-        return max(low, min(int(raw), high))
-    except (TypeError, ValueError):
-        logger.debug('[Knowledge] invalid %s=%r; using %d', name, raw, default)
-        return default
-
-
 def detect_image_mime(raw: bytes) -> str:
     """Return a supported raster MIME from magic bytes, or ``''``."""
     if raw.startswith(b'\x89PNG\r\n\x1a\n'):
@@ -59,16 +57,20 @@ def detect_image_mime(raw: bytes) -> str:
     return ''
 
 
-def inspect_image(raw: bytes, *, expected_mime: str = '') -> dict:
+def inspect_image(
+    raw: bytes,
+    *,
+    expected_mime: str = '',
+    _budget: KnowledgeVisualBudget | None = None,
+) -> dict:
     """Validate image structure and return canonical immutable metadata."""
+    budget = _budget or resolve_knowledge_visual_budget()
     mime = detect_image_mime(raw)
     if not mime:
         raise KnowledgeImageError('Unsupported or corrupt image')
     if expected_mime and mime != expected_mime:
         raise KnowledgeImageError('Image contents do not match their declared type')
-    max_bytes = _bounded_env(
-        'TOFU_KNOWLEDGE_MAX_ASSET_BYTES', 25 * 1024 * 1024,
-        64 * 1024, 100 * 1024 * 1024)
+    max_bytes = budget.max_asset_bytes
     if len(raw) > max_bytes:
         raise KnowledgeImageError(
             f'Image exceeds the {max_bytes // 1048576} MB visual-asset limit')
@@ -82,9 +84,7 @@ def inspect_image(raw: bytes, *, expected_mime: str = '') -> dict:
             image.verify()
     except (OSError, ValueError) as exc:
         raise KnowledgeImageError(f'Invalid image data: {exc}') from exc
-    max_pixels = _bounded_env(
-        'TOFU_KNOWLEDGE_MAX_IMAGE_PIXELS', 40_000_000,
-        1_000_000, 100_000_000)
+    max_pixels = budget.max_image_pixels
     if width <= 0 or height <= 0 or width * height > max_pixels:
         raise KnowledgeImageError(
             f'Image dimensions exceed the {max_pixels:,}-pixel safety limit')
@@ -135,7 +135,8 @@ def _ocr_image(raw: bytes, mime_type: str) -> str:
 
 
 def standalone_image(raw: bytes, filename: str) -> dict:
-    metadata = inspect_image(raw)
+    budget = resolve_knowledge_visual_budget()
+    metadata = inspect_image(raw, _budget=budget)
     return {
         **metadata,
         'raw': raw,
@@ -150,8 +151,14 @@ def standalone_image(raw: bytes, filename: str) -> dict:
     }
 
 
-def _asset_from_raw(raw: bytes, **values) -> dict:
-    metadata = inspect_image(raw)
+def _asset_from_raw(
+    raw: bytes,
+    *,
+    _budget: KnowledgeVisualBudget | None = None,
+    _metadata: dict | None = None,
+    **values,
+) -> dict:
+    metadata = _metadata or inspect_image(raw, _budget=_budget)
     return {
         **metadata,
         'raw': raw,
@@ -167,15 +174,29 @@ def _asset_from_raw(raw: bytes, **values) -> dict:
 
 
 def extract_pdf_assets(raw: bytes) -> tuple[list[dict], list[str]]:
-    """Extract captioned figures/tables and render image-only PDF pages."""
+    """Admit and extract captioned figures/tables and image-only pages."""
+    classic_pdf = resolve_classic_pdf_budget()
+    lease = CLASSIC_PDF_ADMISSION.reserve(
+        classic_pdf.unfinished_capacity)
+    try:
+        return _extract_pdf_assets_without_admission(raw)
+    finally:
+        lease.release()
+
+
+def _extract_pdf_assets_without_admission(
+    raw: bytes,
+    *,
+    _budget: KnowledgeVisualBudget | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Extract visuals after the caller has reserved classic PDF capacity."""
+    budget = _budget or resolve_knowledge_visual_budget()
     warnings: list[str] = []
     assets: list[dict] = []
     seen_embedded_xrefs: set[int] = set()
-    max_pages = _bounded_env('TOFU_KNOWLEDGE_VISUAL_MAX_PAGES', 80, 1, 500)
-    max_assets = _bounded_env('TOFU_KNOWLEDGE_MAX_VISUAL_ASSETS', 160, 1, 1000)
-    max_total_bytes = _bounded_env(
-        'TOFU_KNOWLEDGE_MAX_VISUAL_BYTES', 160 * 1024 * 1024,
-        1024 * 1024, 1024 * 1024 * 1024)
+    max_pages = budget.pdf_max_pages
+    max_assets = budget.max_assets
+    max_total_bytes = budget.max_total_bytes
     total_bytes = 0
     byte_limit_reached = False
 
@@ -222,6 +243,7 @@ def extract_pdf_assets(raw: bytes) -> tuple[list[dict], list[str]]:
                             source = str(figure.get('source') or 'figure_clip')
                             keep(_asset_from_raw(
                                 image_raw,
+                                _budget=budget,
                                 kind='table' if source.startswith('table') else 'figure',
                                 page=figure.get('page') or page_index + 1,
                                 pages=figure.get('pages') or [page_index + 1],
@@ -277,7 +299,8 @@ def extract_pdf_assets(raw: bytes) -> tuple[list[dict], list[str]]:
                             extracted = doc.extract_image(xref) or {}
                             image_raw = extracted.get('image') or b''
                             try:
-                                metadata = inspect_image(image_raw)
+                                metadata = inspect_image(
+                                    image_raw, _budget=budget)
                             except KnowledgeImageError:
                                 pix = pymupdf.Pixmap(doc, xref)
                                 try:
@@ -292,13 +315,16 @@ def extract_pdf_assets(raw: bytes) -> tuple[list[dict], list[str]]:
                                         image_raw = pix.tobytes('png')
                                 finally:
                                     pix = None
-                                metadata = inspect_image(image_raw)
+                                metadata = inspect_image(
+                                    image_raw, _budget=budget)
                             if (metadata['width'] < 100
                                     or metadata['height'] < 60
                                     or metadata['size_bytes'] < 2_000):
                                 continue
                             keep(_asset_from_raw(
-                                image_raw, kind='image', page=page_index + 1,
+                                image_raw, _budget=budget,
+                                _metadata=metadata,
+                                kind='image', page=page_index + 1,
                                 pages=[page_index + 1],
                                 caption=f'Embedded image on page {page_index + 1}',
                                 ocr_text=page_text[:20_000],
@@ -314,7 +340,8 @@ def extract_pdf_assets(raw: bytes) -> tuple[list[dict], list[str]]:
                             pix = page.get_pixmap(dpi=130, alpha=False)
                             page_raw = pix.tobytes('jpeg')
                             keep(_asset_from_raw(
-                                page_raw, kind='page', page=page_index + 1,
+                                page_raw, _budget=budget,
+                                kind='page', page=page_index + 1,
                                 pages=[page_index + 1],
                                 caption=f'Page {page_index + 1}',
                                 ocr_text=page_text, source='scanned_page'))
@@ -341,12 +368,11 @@ def extract_pdf_assets(raw: bytes) -> tuple[list[dict], list[str]]:
 
 def extract_package_assets(raw: bytes) -> tuple[list[dict], list[str]]:
     """Extract raster media embedded in OOXML/OpenDocument packages."""
+    budget = resolve_knowledge_visual_budget()
     assets: list[dict] = []
     warnings: list[str] = []
-    max_assets = _bounded_env('TOFU_KNOWLEDGE_MAX_VISUAL_ASSETS', 160, 1, 1000)
-    max_total_bytes = _bounded_env(
-        'TOFU_KNOWLEDGE_MAX_VISUAL_BYTES', 160 * 1024 * 1024,
-        1024 * 1024, 1024 * 1024 * 1024)
+    max_assets = budget.max_assets
+    max_total_bytes = budget.max_total_bytes
     total_bytes = 0
     byte_limit_reached = False
     seen: set[str] = set()
@@ -364,7 +390,8 @@ def extract_package_assets(raw: bytes) -> tuple[list[dict], list[str]]:
                     if digest in seen:
                         continue
                     asset = _asset_from_raw(
-                        image_raw, kind='image', caption=os.path.basename(name),
+                        image_raw, _budget=budget, kind='image',
+                        caption=os.path.basename(name),
                         source=name)
                     if total_bytes + len(image_raw) > max_total_bytes:
                         byte_limit_reached = True

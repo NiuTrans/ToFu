@@ -5,7 +5,7 @@ coverage:
     server-push fan-out relocated into ``agent_core`` in the 2026-06 leaf move.
     We exercise the no-event-loop delivery path (frames enqueued directly),
     per-channel/per-task and wildcard subscription routing, in-process listener
-    fan-out + exception isolation, and the queue-full drop-oldest policy.
+    fan-out + exception isolation, and the bounded slow-client policy.
 
   * ``routes/plugin_registry.py`` — the Blueprint / startup-hook / TaskRuntime
     discovery seam added when the trading subsystem was extracted. We assert it
@@ -23,6 +23,9 @@ import logging
 import pytest
 
 from lib.agent_core.push import PushClient, PushHub
+
+
+pytestmark = pytest.mark.unit
 
 
 # ═══════════════════════════════════════════════════════════
@@ -48,6 +51,27 @@ class TestPushHub:
 
         assert client._queue.empty()
         assert set(hub._subscriptions) == {'chat'}
+
+    def test_local_fanout_serializes_once_for_every_target(self, monkeypatch):
+        import lib.agent_core.push as push_module
+
+        hub = PushHub()
+        clients = [PushClient(user_id=1), PushClient(user_id=1)]
+        for client in clients:
+            assert hub.register(client) is True
+            hub.subscribe(client, 'chat', 'task-1')
+        measured = []
+        monkeypatch.setattr(
+            push_module, '_serialized_frame_bytes',
+            lambda frame: measured.append(frame) or 42)
+
+        hub._deliver_frame({
+            'channel': 'chat', 'taskId': 'task-1', 'type': 'delta',
+            'content': 'hello', '_ownerUserId': '1',
+        })
+
+        assert len(measured) == 1
+        assert all(client.event_retained_bytes == 42 for client in clients)
 
     def test_push_routes_to_exact_task_subscriber(self):
         hub = PushHub()
@@ -217,10 +241,99 @@ class TestPushClientQueue:
         client.enqueue({'type': 'delta'})
         assert client._queue.empty()
 
+    def test_sustained_queue_overflow_disconnects_once_grace_expires(
+            self, caplog):
+        client = PushClient(user_id=1, req_id='socket-rid')
+        client._queue = asyncio.Queue(maxsize=1)
+        ticks = iter((100.0, 116.0))
+        client._event_overflow_clock = lambda: next(ticks)
+        client._event_overflow_grace_seconds = 15.0
+        client._event_overflow_min_drops = 2
+        client._event_overflow_reset_seconds = 30.0
+
+        client.enqueue({'channel': 'paper', 'taskId': 'task-1',
+                        'type': 'progress', 'n': 1})
+        with caplog.at_level(logging.WARNING):
+            # First loss keeps the connection and newest-frame contract.
+            client.enqueue({'channel': 'paper', 'taskId': 'task-1',
+                            'type': 'progress', 'n': 2})
+            assert client._connected is True
+            # Continued loss past the grace closes the slow socket instead of
+            # paying unbounded drop/log churn.
+            client.enqueue({'channel': 'paper', 'taskId': 'task-1',
+                            'type': 'progress', 'n': 3})
+
+        assert client._connected is False
+        messages = [record.getMessage() for record in caplog.records]
+        assert sum('saturated' in message for message in messages) == 2
+        assert any('client=socket-rid channel=paper' in message
+                   for message in messages)
+
+    def test_half_drained_queue_resets_overflow_episode(self):
+        client = PushClient(user_id=1)
+        client._queue = asyncio.Queue(maxsize=2)
+        ticks = iter((100.0, 200.0))
+        client._event_overflow_clock = lambda: next(ticks)
+        client._event_overflow_grace_seconds = 15.0
+        client._event_overflow_min_drops = 2
+        client._event_overflow_reset_seconds = 300.0
+
+        client.enqueue({'n': 1})
+        client.enqueue({'n': 2})
+        client.enqueue({'n': 3})
+        assert asyncio.run(client.drain()) == {'n': 2}
+        assert client._event_overflow_started_at is None
+
+        client.enqueue({'n': 4})
+        client.enqueue({'n': 5})
+        assert client._connected is True
+
     def test_drain_after_disconnect_returns_none(self):
         client = PushClient(user_id=1)
         client.disconnect()
         assert asyncio.run(client.drain()) is None
+
+    def test_byte_saturation_drops_oldest_and_releases_on_drain(self):
+        client = PushClient(user_id=1)
+        client._queue = asyncio.Queue(maxsize=10)
+        client._event_queue_byte_capacity = 100
+        client._event_max_bytes = 80
+
+        client.enqueue({'n': 1}, retained_bytes=60)
+        client.enqueue({'n': 2}, retained_bytes=60)
+
+        assert client.event_retained_bytes == 60
+        assert asyncio.run(client.drain()) == {'n': 2}
+        assert client.event_retained_bytes == 0
+
+    def test_single_oversized_frame_disconnects_without_retention(self):
+        client = PushClient(user_id=1)
+        client._event_queue_byte_capacity = 100
+        client._event_max_bytes = 80
+
+        client.enqueue({'n': 1}, retained_bytes=81)
+
+        assert client._connected is False
+        assert client._queue.empty()
+        assert client.event_retained_bytes == 0
+
+
+def test_push_hub_bounds_total_and_owner_connections():
+    hub = PushHub(client_capacity=2, owner_client_capacity=1)
+    owner_one = PushClient(user_id=1)
+    same_owner = PushClient(user_id=1)
+    owner_two = PushClient(user_id=2)
+    owner_three = PushClient(user_id=3)
+
+    assert hub.register(owner_one) is True
+    assert hub.register(same_owner) is False
+    assert hub.register(owner_two) is True
+    assert hub.register(owner_three) is False
+    assert hub.client_count == 2
+    health = hub.bus_health()
+    assert health['local_clients'] == 2
+    assert health['client_capacity'] == 2
+    assert health['owner_client_capacity'] == 1
 
 
 # ═══════════════════════════════════════════════════════════

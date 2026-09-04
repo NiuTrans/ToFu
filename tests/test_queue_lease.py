@@ -241,3 +241,96 @@ def test_explicit_cancel_and_disarm_delete_only_their_target(
         conversation_id, user_id=USER_ID) is True
     assert [item['queueId'] for item in queue.get_queue(
         conversation_id, user_id=USER_ID)] == [keep_id]
+
+
+def test_goal_continuation_is_deduped_and_kind_clear_preserves_human_intent(
+    conversation_factory,
+):
+    conversation_id = conversation_factory()
+    human_id = _enqueue(conversation_id, 'keep this human turn')
+    first = queue.enqueue_message(
+        conversation_id,
+        {'text': 'continue', '_goalContinuation': True},
+        {'autopilot': True, '_goalObjective': 'durable objective'},
+        kind=queue.KIND_GOAL_CONTINUATION,
+        user_id=USER_ID,
+    )
+    second = queue.enqueue_message(
+        conversation_id,
+        {'text': 'duplicate continue', '_goalContinuation': True},
+        {'autopilot': True, '_goalObjective': 'durable objective'},
+        kind=queue.KIND_GOAL_CONTINUATION,
+        user_id=USER_ID,
+    )
+
+    assert second['deduped'] is True
+    assert second['queueId'] == first['queueId']
+    assert queue.clear_queue_kind(
+        conversation_id,
+        queue.KIND_GOAL_CONTINUATION,
+        user_id=USER_ID,
+    ) == 1
+    assert [item['queueId'] for item in queue.get_queue(
+        conversation_id, user_id=USER_ID)] == [human_id]
+
+
+def test_new_human_queue_intent_supersedes_stale_goal_continuation(
+    conversation_factory,
+):
+    conversation_id = conversation_factory()
+    queue.enqueue_message(
+        conversation_id,
+        {'text': 'continue old objective', '_goalContinuation': True},
+        {'autopilot': True, '_goalObjective': 'old objective'},
+        kind=queue.KIND_GOAL_CONTINUATION,
+        user_id=USER_ID,
+    )
+    workflow = queue.enqueue_message(
+        conversation_id,
+        {'text': 'preserve workflow'},
+        {'model': 'test'},
+        kind=queue.KIND_WORKFLOW,
+        user_id=USER_ID,
+    )
+
+    human = _enqueue(conversation_id, 'new human objective')
+
+    rows = queue.get_queue(conversation_id, user_id=USER_ID)
+    assert [row['queueId'] for row in rows] == [human, workflow['queueId']]
+    assert [row['kind'] for row in rows] == [queue.KIND_REAL, queue.KIND_WORKFLOW]
+    assert sorted(row['position'] for row in rows) == [1, 2]
+
+
+def test_goal_continuation_dispatch_restores_authoritative_objective(
+    conversation_factory, monkeypatch,
+):
+    conversation_id = conversation_factory()
+    queue.enqueue_message(
+        conversation_id,
+        {
+            'text': 'continue',
+            '_user_msg': {
+                'role': 'user', 'content': 'continue',
+                '_goalContinuation': True,
+            },
+        },
+        {'autopilot': True, '_goalObjective': 'durable objective'},
+        kind=queue.KIND_GOAL_CONTINUATION,
+        user_id=USER_ID,
+    )
+    seen = []
+
+    def submit(conversation_id, user_id, command, **kwargs):
+        seen.append((conversation_id, user_id, command, kwargs))
+        return {'attempt': {'attemptId': 'goal-attempt'}}
+
+    monkeypatch.setattr(queue, '_submit_queued_turn_command', submit)
+    monkeypatch.setattr(
+        queue, '_conv_has_live_task',
+        lambda _conversation_id, *, user_id: False,
+    )
+
+    assert queue.dispatch_next_queued(
+        conversation_id, user_id=USER_ID) == 'goal-attempt'
+    assert seen[0][3] == {'trusted_goal_objective': 'durable objective'}
+    assert seen[0][2]['inputTurn']['_goalContinuation'] is True

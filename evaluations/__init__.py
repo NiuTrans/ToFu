@@ -1,1 +1,1 @@
-"""Reproducible offline evaluations for ChatUI capabilities."""
+"""Reproducible offline evaluations for Tofu capabilities."""

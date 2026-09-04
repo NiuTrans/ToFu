@@ -658,10 +658,6 @@ def resolve_namespaced_path(rel_path, conv_id=None):
         return primary, rel_path
 
 
-class _ScanAborted(Exception):
-    pass
-
-
 class ReadOnlyRootError(ValueError):
     """Raised when a write/edit/create targets a root marked read-only.
 
@@ -823,12 +819,26 @@ def save_recent_project(path, *, user_id: int):
     RecentProjectRepository(user_id).touch(path)
 
 
+def save_recent_projects(paths, *, user_id: int):
+    """Touch a bounded project-path batch in one owner-scoped transaction."""
+    from lib.project_mod.recent_repository import RecentProjectRepository
+
+    return RecentProjectRepository(user_id).touch_many(paths)
+
+
 def clear_recent_projects(*, user_id: int):
     """Delete all recent project entries."""
     from lib.project_mod.recent_repository import RecentProjectRepository
 
     RecentProjectRepository(user_id).clear()
 
+
+
+def relink_project_path(old_path, new_path, *, user_id: int):
+    """Re-key recent, conversation, and Project Brain state after a move."""
+    from lib.project_mod.recent_repository import RecentProjectRepository
+
+    return RecentProjectRepository(user_id).relink(old_path, new_path)
 
 # ═══════════════════════════════════════════════════════
 #  Modification History (后悔药 / Undo)

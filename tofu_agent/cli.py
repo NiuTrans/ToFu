@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Mapping
 import json
 import os
 from pathlib import Path
 
-from tofu_agent.models import AgentConfigurationError, ProviderConfig
-from tofu_agent.provider_setup import ProviderSetupService
-from tofu_agent.provider_store import ProviderSettingsStore, ProviderStoreError
+from tofu_agent.models import (
+    AgentConfigurationError,
+    AgentTimeoutError,
+    ModelRoutingConfig,
+)
+from tofu_agent.provider_setup import ModelRoutingSetupService
+from lib.trajectory import AVAILABLE_FORMATS
+from tofu_agent.provider_store import (
+    ModelRoutingSettingsStore,
+    ModelRoutingStoreError,
+)
 from tofu_agent.runtime import AgentRuntime
 from tofu_agent.server import HeadlessServerConfig, create_app
 
@@ -23,62 +32,36 @@ def _load_dotenv(path: str) -> None:
     load_dotenv_file(Path(path))
 
 
-def _headers(values: list[str]) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for value in values:
-        name, separator, content = value.partition('=')
-        if not separator or not name.strip():
+def _model_routing_from_args(args) -> ModelRoutingConfig | None:
+    if args.model_routing_json and args.model_routing_file:
+        raise AgentConfigurationError(
+            'pass only one of --model-routing-json and --model-routing-file')
+    raw = str(args.model_routing_json or '').strip()
+    if args.model_routing_file:
+        try:
+            raw = Path(args.model_routing_file).read_text(encoding='utf-8')
+        except OSError as exc:
             raise AgentConfigurationError(
-                f'invalid --provider-header {value!r}; expected NAME=VALUE')
-        headers[name.strip()] = content
-    return headers
-
-
-def _provider_from_args(args) -> ProviderConfig | None:
-    environment_provider = ProviderConfig.from_env()
-    explicit = bool(
-        args.provider_base_url or args.provider_api_key
-        or args.provider_model or args.provider_header)
-    if not explicit:
-        return environment_provider
-    return ProviderConfig(
-        base_url=(args.provider_base_url
-                  or (environment_provider.base_url
-                      if environment_provider else '')),
-        api_key=(args.provider_api_key
-                 or (environment_provider.api_key
-                     if environment_provider else '')),
-        model=(args.provider_model
-               or (environment_provider.model if environment_provider else '')
-               or args.model),
-        extra_headers={
-            **(dict(environment_provider.extra_headers)
-               if environment_provider else {}),
-            **_headers(args.provider_header),
-        },
-        thinking_format=(environment_provider.thinking_format
-                         if environment_provider else ''),
-    )
-
-
-def _has_explicit_provider_arguments(args) -> bool:
-    return bool(
-        args.provider_base_url or args.provider_api_key
-        or args.provider_model or args.provider_header)
+                'model-routing file could not be read') from exc
+    if not raw:
+        return ModelRoutingConfig.from_env()
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AgentConfigurationError(
+            'model-routing input must be valid JSON') from exc
+    return ModelRoutingConfig.from_mapping(decoded)
 
 
 def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument('--model', default=os.environ.get(
-        'TOFU_AGENT_MODEL', ''), help='Managed/default model id.')
-    parser.add_argument('--provider-base-url', default='',
-                        help='OpenAI-compatible provider endpoint.')
-    parser.add_argument('--provider-api-key', default='',
-                        help='Provider key; prefer the environment variable.')
-    parser.add_argument('--provider-model', default='',
-                        help='Provider model id (defaults to --model).')
     parser.add_argument(
-        '--provider-header', action='append', default=[], metavar='NAME=VALUE',
-        help='Extra provider header; may be repeated.',
+        '--model-routing-json', default='',
+        help='Complete v2 access envelope JSON; prefer the environment variable.',
+    )
+    parser.add_argument(
+        '--model-routing-file', default=os.environ.get(
+            'TOFU_AGENT_MODEL_ROUTING_FILE', ''),
+        help='Read a complete v2 access envelope from this file.',
     )
     parser.add_argument('--max-inflight', type=int, default=int(
         os.environ.get('TOFU_AGENT_MAX_INFLIGHT', '4')))
@@ -88,7 +71,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='tofu-agent',
         description=(
-            'Embed or serve Tofu Agent without the database or ChatUI '
+            'Embed or serve Tofu Agent without the database or full Tofu '
             'application frontend.'),
     )
     parser.add_argument('--env-file', default=os.environ.get(
@@ -116,12 +99,50 @@ def _parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         '--no-setup', action='store_false', dest='setup_enabled',
         default=setup_enabled,
-        help='Disable the built-in /setup Provider control panel.',
+        help='Disable the built-in /setup model-routing control panel.',
     )
 
     doctor_parser = subparsers.add_parser(
         'doctor', help='Validate and print redacted runtime configuration.')
     _add_runtime_arguments(doctor_parser)
+
+    run_parser = subparsers.add_parser(
+        'run',
+        help='Run one task to completion and print the JSON result.',
+        description=(
+            'Single-shot agent invocation: one process, one task, one JSON '
+            'result. Intended for harness/eval integrations that cannot or '
+            'should not manage a long-lived serve process. Exit codes: '
+            '0=done, 2=usage, 3=run timeout, 4=permanent error, '
+            '5=aborted, 6=retriable upstream error (the error envelope in '
+            'the JSON result carries kind/retryable for attribution).'),
+    )
+    _add_runtime_arguments(run_parser)
+    run_parser.add_argument(
+        '--task', default=os.environ.get('TOFU_AGENT_RUN_TASK', ''),
+        help='Task instruction text.')
+    run_parser.add_argument(
+        '--task-file', default=os.environ.get('TOFU_AGENT_RUN_TASK_FILE', ''),
+        help='Read the task instruction from this file (wins over --task).')
+    run_parser.add_argument(
+        '--cwd', default=os.environ.get('TOFU_AGENT_RUN_CWD', ''),
+        help='Project root exposed to the agent tools (run_command and file '
+             'tools resolve against it). Defaults to the process cwd.')
+    run_parser.add_argument(
+        '--timeout-s', type=float, default=float(os.environ.get(
+            'TOFU_AGENT_RUN_TIMEOUT', '600')),
+        help='Wall-clock budget for the whole run (default 600s).')
+    run_parser.add_argument(
+        '--tools', default=os.environ.get('TOFU_AGENT_RUN_TOOLS', ''),
+        help="Comma-separated tool tags (see README) or '*'. Default keeps "
+             'the storage-free runtime policy.')
+    run_parser.add_argument(
+        '--trajectory', default=os.environ.get('TOFU_AGENT_RUN_TRAJECTORY', ''),
+        choices=['', *AVAILABLE_FORMATS],
+        help='Embed a flattened trajectory of this run in the JSON result.')
+    run_parser.add_argument(
+        '--output', default=os.environ.get('TOFU_AGENT_RUN_OUTPUT', ''),
+        help='Write the JSON result to this path instead of stdout.')
     return parser
 
 
@@ -132,31 +153,30 @@ def _is_loopback_host(host: str) -> bool:
 
 def _runtime_and_setup(
     args,
-) -> tuple[AgentRuntime, ProviderSetupService]:
-    store = ProviderSettingsStore()
-    provider = _provider_from_args(args)
-    explicit = _has_explicit_provider_arguments(args)
+) -> tuple[AgentRuntime, ModelRoutingSetupService]:
+    store = ModelRoutingSettingsStore()
+    access = _model_routing_from_args(args)
+    explicit = bool(args.model_routing_json or args.model_routing_file)
     if explicit:
         source = 'arguments'
-    elif provider is not None:
+    elif access is not None:
         source = 'environment'
     else:
         source = 'none'
     load_error = ''
-    if provider is None:
+    if access is None:
         try:
-            provider = store.load()
-        except ProviderStoreError as exc:
+            access = store.load()
+        except ModelRoutingStoreError as exc:
             load_error = str(exc)
-        if provider is not None:
+        if access is not None:
             source = 'saved'
     runtime = AgentRuntime.local(
-        provider=provider,
-        provider_source=source,
-        default_model=(args.model or (provider.model if provider else '')),
+        model_routing=access,
+        model_routing_source=source,
         max_inflight=args.max_inflight,
     )
-    setup = ProviderSetupService(
+    setup = ModelRoutingSetupService(
         runtime,
         store,
         source=source,
@@ -172,13 +192,91 @@ def _runtime(args) -> AgentRuntime:
     return runtime
 
 
+def _run_task(args) -> int:
+    task_text = ''
+    if args.task_file:
+        task_text = Path(args.task_file).read_text(encoding='utf-8')
+    if not task_text.strip():
+        task_text = args.task
+    if not task_text.strip():
+        raise AgentConfigurationError(
+            'no task given; pass --task or --task-file')
+
+    config: dict = {}
+    if args.cwd:
+        config['project'] = args.cwd
+    if args.tools:
+        tags = [tag.strip() for tag in args.tools.split(',') if tag.strip()]
+        config['tools'] = tags[0] if len(tags) == 1 else tags
+
+    runtime = _runtime(args)
+    try:
+        result = runtime.run(
+            [{'role': 'user', 'content': task_text}],
+            config=config,
+            trajectory=args.trajectory or None,
+            timeout_s=args.timeout_s,
+        )
+    except AgentTimeoutError:
+        runtime.close(abort=True)
+        _emit({
+            'ok': False,
+            'status': 'timeout',
+            'error': {'kind': 'timeout',
+                      'message': f'run exceeded {args.timeout_s}s'},
+        }, args.output)
+        return 3
+    finally:
+        runtime.close(abort=False)
+
+    document = {
+        'ok': result.status == 'done',
+        'id': result.id,
+        'task_id': result.task_id,
+        'model': result.model,
+        'status': result.status,
+        'finish_reason': result.finish_reason,
+        'content': result.content,
+        'thinking': result.thinking,
+        'usage': dict(result.usage),
+        'n_tool_rounds': result.n_tool_rounds,
+        'error': result.error,
+        'provider_id': result.provider_id,
+    }
+    if result.trajectory_format:
+        document['trajectory_format'] = result.trajectory_format
+        document['trajectory'] = result.trajectory
+
+    _emit(document, args.output)
+
+    if result.status == 'done':
+        return 0
+    if result.status == 'aborted':
+        return 5
+    if isinstance(result.error, Mapping) \
+            and result.error.get('retryable') is True:
+        # Transient upstream failure (ratelimit / upstream_error / network …)
+        # after the in-run retry budgets: the harness may rerun this trial
+        # and plausibly succeed, unlike a permanent payload/permission error.
+        return 6
+    return 4
+
+
+def _emit(document: dict, output: str) -> None:
+    payload = json.dumps(document, ensure_ascii=False, indent=2)
+    if output:
+        Path(output).write_text(payload + '\n', encoding='utf-8')
+    else:
+        print(payload)
+
+
 async def _serve(args) -> None:
     if (not _is_loopback_host(args.host) and not args.token
             and not args.allow_unauthenticated):
         raise AgentConfigurationError(
             'refusing a non-loopback bind without authentication; set '
             'TOFU_AGENT_TOKEN or explicitly pass --allow-unauthenticated')
-    runtime, provider_setup = _runtime_and_setup(args)
+    runtime, model_routing_setup = _runtime_and_setup(args)
     auth_mode = 'open' if args.allow_unauthenticated else 'auto'
     config = HeadlessServerConfig(
         bind_host=args.host,
@@ -187,7 +285,8 @@ async def _serve(args) -> None:
         setup_enabled=args.setup_enabled,
     )
     app = create_app(
-        runtime=runtime, config=config, provider_setup=provider_setup)
+        runtime=runtime, config=config,
+        model_routing_setup=model_routing_setup)
     from hypercorn.asyncio import serve
     from hypercorn.config import Config
     hypercorn = Config()
@@ -198,7 +297,7 @@ async def _serve(args) -> None:
     if args.setup_enabled:
         browser_host = args.host if _is_loopback_host(args.host) else '127.0.0.1'
         print(
-            f'Provider setup: http://{browser_host}:{args.port}/setup',
+            f'Model-routing setup: http://{browser_host}:{args.port}/setup',
             flush=True,
         )
     try:
@@ -217,28 +316,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == 'doctor':
-            runtime, provider_setup = _runtime_and_setup(args)
+            runtime, model_routing_setup = _runtime_and_setup(args)
             try:
                 print(json.dumps({
                     'ok': True,
                     'ready': bool(runtime.default_model),
                     'model': runtime.default_model,
-                    'provider': (runtime.provider.public_dict()
-                                 if runtime.provider else None),
+                    'model_routing': (runtime.model_routing.public_dict()
+                                      if runtime.model_routing else None),
                     'capacity': runtime.capacity,
                     'database': False,
                     'frontend': False,
-                    'provider_setup_ui': True,
-                    'provider_setup': {
+                    'model_routing_setup_ui': True,
+                    'model_routing_setup': {
                         'url_path': '/setup',
-                        'source': provider_setup.source,
-                        'editable': provider_setup.editable,
-                        'load_error': provider_setup.load_error,
+                        'source': model_routing_setup.source,
+                        'editable': model_routing_setup.editable,
+                        'load_error': model_routing_setup.load_error,
                     },
                 }, ensure_ascii=False, indent=2))
             finally:
                 runtime.close(abort=False)
             return 0
+        if args.command == 'run':
+            return _run_task(args)
         asyncio.run(_serve(args))
         return 0
     except (AgentConfigurationError, ValueError) as exc:

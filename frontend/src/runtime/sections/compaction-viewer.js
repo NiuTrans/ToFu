@@ -4,10 +4,8 @@
  * context snapshots persisted in transcript_archive.
  *
  * Public API:
- *   runtimeScope.openCompactionViewer(convId, archiveId?)   — open drawer (lazy-loads)
- *   runtimeScope.closeCompactionViewer()                     — close drawer
- *   runtimeScope.loadCompactionHistory(convId)               — refresh read-only history
- *   runtimeScope.getCompactionHistory(convId)                — synchronous history read
+ *   openCompactionViewer(convId, archiveId?) — demand-loaded drawer entry
+ *   closeCompactionViewer()                  — close and release open state
  *
  * Design decisions:
  *   - Drawer, NOT a modal, so the main conversation stays readable (main
@@ -21,10 +19,9 @@
  *     fired — NOT the user's original prose. We surface that caveat in
  *     the drawer header to avoid confusion.
  * ══════════════════════════════════════════════════════════════════════════ */
-(function () {
-  'use strict';
+'use strict';
 
-  // Bundled global escapeHtml (core/escape_html.js) — no local re-impl.
+  // Composition-injected typed escapeHtml — no local re-implementation.
   const _esc = escapeHtml;
 
   const _fmtTokens = (n) => {
@@ -81,8 +78,7 @@
   const _PAYLOAD_CACHE_MAX_BYTES = 8 * 1024 * 1024;
   const _payloadCache = new Map();
   let _payloadCacheBytes = 0;
-  const _historyByConversation = new Map();
-  let _currentConv = null;
+  let _payloadCacheConv = null;
 
   function _cacheGet(key) {
     const record = _payloadCache.get(key);
@@ -184,7 +180,7 @@
       const t = e.target;
       if (t && (t.dataset && t.dataset.close !== undefined
                 || t.closest && t.closest('[data-close]'))) {
-        runtimeScope.closeCompactionViewer();
+        closeCompactionViewer();
       }
     });
     // Tab switching
@@ -198,7 +194,7 @@
     // Escape key
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && el.classList.contains('is-open')) {
-        runtimeScope.closeCompactionViewer();
+        closeCompactionViewer();
       }
     });
     // Footer actions
@@ -213,41 +209,15 @@
   let _state = null;  // { convId, archiveId, listData, activeArchive, activeMessages }
 
   async function _fetchList(convId) {
-    if (_currentConv !== convId) {
+    if (_payloadCacheConv !== convId) {
       _payloadCache.clear();
       _payloadCacheBytes = 0;
-      _currentConv = convId;
+      _payloadCacheConv = convId;
     }
-    const data = await Api.compactions.list(convId);
-    const history = (Array.isArray(data?.compactions) ? data.compactions : []).map((a) =>
-      Object.freeze({
-        schemaVersion: a.schemaVersion || '',
-        archiveId: a.id,
-        convId: a.convId || convId,
-        snapshotKind: a.snapshotKind || '',
-        trigger: a.trigger || 'force',
-        roundNum: a.roundNum || 0,
-        tokensBefore: a.tokensBefore || 0,
-        tokensAfter: a.tokensAfter || 0,
-        tokenCountKind: a.tokenCountKind || '',
-        msgsBefore: a.msgsBefore || 0,
-        msgsAfter: a.msgsAfter || 0,
-        model: a.model || '',
-        taskModel: a.taskModel || a.model || '',
-        reason: a.reason || '',
-        payloadSize: a.payloadSize || 0,
-        payloadSizeUnit: a.payloadSizeUnit || '',
-        summaryPreview: a.summaryPreview || '',
-        hasSummary: !!a.hasSummary,
-        hasReceipt: !!a.hasReceipt,
-        resultStatus: a.resultStatus || 'legacy',
-        resultStrategy: a.resultStrategy || '',
-        ts: a.createdAt || 0,
-        status: 'done',
-      }));
-    history.sort((left, right) => (left.ts || 0) - (right.ts || 0));
-    _historyByConversation.set(convId, Object.freeze(history));
-    return data;
+    // Explicit inspection is authoritative. It shares an already-running
+    // hydration request, but otherwise bypasses the shell's short freshness
+    // window so a newly-created archive is immediately discoverable.
+    return CompactionHistoryState.list(convId, { force: true });
   }
 
   async function _fetchPayload(convId, archiveId, includeMessages = false) {
@@ -622,34 +592,49 @@
   }
 
   async function _selectArchive(convId, archiveId) {
+    const selectionState = _state;
+    if (!selectionState || selectionState.convId !== convId) return;
+    selectionState.selectionVersion =
+      Number(selectionState.selectionVersion || 0) + 1;
+    const selectionVersion = selectionState.selectionVersion;
     _showLoading(true);
     try {
       const payload = await _fetchPayload(convId, archiveId, false);
+      if (_state !== selectionState
+          || selectionState.selectionVersion !== selectionVersion) return;
       _state.archiveId = archiveId;
       _state.activeArchive = payload.archive || {};
       _state.activeMessages = null;
       _renderMeta();
       await _renderActiveTab();
     } catch (e) {
+      if (_state !== selectionState
+          || selectionState.selectionVersion !== selectionVersion) return;
       console.error('[compaction-viewer] load failed:', e);
       const el = _ensureDrawer().querySelector('.compaction-drawer-content');
       el.innerHTML = `<div class="cd-empty cd-error">${_esc(_t('compactionViewer.loadFailed', { err: (e.message || String(e)) }))}</div>`;
     } finally {
-      _showLoading(false);
+      if (_state === selectionState
+          && selectionState.selectionVersion === selectionVersion) {
+        _showLoading(false);
+      }
     }
   }
 
   // ────────────────────────────────────────────────────────────────────
   //  Public API
   // ────────────────────────────────────────────────────────────────────
-  runtimeScope.openCompactionViewer = async function (convId, archiveId) {
+  async function openCompactionViewer(convId, archiveId) {
     if (!convId) {
       console.warn('[compaction-viewer] openCompactionViewer: missing convId');
       return;
     }
     const el = _ensureDrawer();
-    _state = { convId, archiveId: null, listData: null,
-               activeArchive: null, activeMessages: null };
+    const openingState = {
+      convId, archiveId: null, listData: null,
+      activeArchive: null, activeMessages: null, selectionVersion: 0,
+    };
+    _state = openingState;
     // Fade main UI
     document.body.classList.add('compaction-drawer-open');
     el.classList.add('is-open');
@@ -663,6 +648,7 @@
     try {
       // Fetch list of archives (for history tab + latest-selection fallback)
       const listData = await _fetchList(convId);
+      if (_state !== openingState) return;
       _state.listData = listData;
       const archives = listData.compactions || [];
 
@@ -680,32 +666,33 @@
       }
       await _selectArchive(convId, targetId);
     } catch (e) {
+      if (_state !== openingState) return;
       console.error('[compaction-viewer] list failed:', e);
       _showLoading(false);
       const bodyEl = el.querySelector('.compaction-drawer-content');
       bodyEl.innerHTML = `<div class="cd-empty cd-error">${_esc(_t('compactionViewer.historyFailed', { err: (e.message || String(e)) }))}</div>`;
     }
-  };
+  }
 
-  runtimeScope.closeCompactionViewer = function () {
+  function closeCompactionViewer() {
     const el = document.getElementById('compactionViewerDrawer');
     if (!el) return;
     el.classList.remove('is-open');
     el.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('compaction-drawer-open');
     _state = null;
-  };
+  }
 
   // Live language-switch hook (called by i18n.js::_onLanguageChange). The
   // drawer's static chrome re-translates via the whole-DOM _applyI18n() scan;
   // here we re-render the JS-built meta rows + active tab so they follow the
   // new language too. No-op when the drawer is closed / has no state.
-  runtimeScope._cvOnLanguageChange = function () {
+  function _cvOnLanguageChange() {
     const el = document.getElementById('compactionViewerDrawer');
     if (!el || !el.classList.contains('is-open') || !_state) return;
     if (_state.activeArchive) _renderMeta();
     _renderActiveTab();
-  };
+  }
 
   async function _copyJson() {
     if (!_state) return;
@@ -752,16 +739,4 @@
     }
   }
 
-  runtimeScope.getCompactionHistory = function (convId) {
-    return _historyByConversation.get(convId) || [];
-  };
-
-  runtimeScope.loadCompactionHistory = async function (convId) {
-    if (!convId) return [];
-    await _fetchList(convId);
-    if (typeof runtimeScope.updateContextBar === 'function') {
-      runtimeScope.updateContextBar();
-    }
-    return runtimeScope.getCompactionHistory(convId);
-  };
-})();
+window.addEventListener('tofu:language-change', _cvOnLanguageChange);

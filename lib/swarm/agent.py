@@ -24,17 +24,24 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.agent_core.events import Phase
+
+from lib.agent_core.events import EventType, build_event
 from lib.agent_core.store import get_conversation_store
 from lib.llm import build_body as _default_build_body
 from lib.llm_dispatch import dispatch_stream as _default_dispatch_stream
 from lib.llm_dispatch.retry_i18n import (
     RetryPhaseEventBudget,
+    display_model_name,
     retry_phase_fields,
 )
 from lib.log import audit_log, get_logger
 from lib.project_mod import format_tool_args_brief
 from lib.protocols import BodyBuilder
 from lib.swarm.liveness import ProgressBeacon, thread_progress_sink
+from lib.swarm.presentation_budget import (
+    SWARM_TOOL_TIMELINE_DETAIL_CHARS,
+    SWARM_TOOL_TIMELINE_ROW_LIMIT,
+)
 from lib.swarm.protocol import (
     ArtifactStore,
     SubAgentResult,
@@ -50,9 +57,12 @@ from lib.swarm.registry import (
     scope_tools_for_role,
 )
 from lib.swarm.tools import ARTIFACT_TOOLS
+from lib.tool_caller_identity import normalize_tool_caller
 from lib.tool_input_repair import ingest_tool_call
+from lib.tool_call_identity import ensure_unique_tool_call_ids
 from lib.tools.contracts import compile_execution_contract_documents
 from lib.tools.result_envelope import (
+    model_text_from_tool_result,
     nonretryable_tool_error_code,
     tool_result_error,
 )
@@ -199,14 +209,48 @@ def _build_dispatch_retry_phase(attempt: int, reason: str,
 # Default truncation limit for tool results (chars)
 DEFAULT_TOOL_RESULT_MAX_CHARS = 30_000
 
-#: Chars of a tool result carried on the LIVE ``agent_tool_call`` SSE frame.
-#: The swarm panel is a DEBUGGING surface, so this must be wide enough to read
-#: a real tool return (a fetch_url staging note, a grep block) end to end — the
-#: previous 300 cut mid-path through ``/mnt/your-fs`` and made the panel
-#: misreport what the sub-agent actually saw. The full text is ALSO persisted
-#: onto ``tool_log`` (see ``_execute_one_tool_call``) so a reloaded panel keeps
-#: it; this bound only governs the live wire frame.
-_SSE_TOOL_PREVIEW_CHARS = 4000
+#: Compatibility name retained for tests and diagnostics. Live and durable
+#: timelines share one presentation budget; authoritative child messages and
+#: the final answer remain complete outside this reconstructible preview.
+_SSE_TOOL_PREVIEW_CHARS = SWARM_TOOL_TIMELINE_DETAIL_CHARS
+
+
+def _tool_timeline_text(value) -> str:
+    if value is None:
+        return ''
+    return value if isinstance(value, str) else str(value)
+
+
+#: Structured first-result meta keys each tool may contribute to its durable
+#: tool_log row. The swarm row otherwise keeps only the prose preview, so the
+#: flow chat projection cannot rebuild a tool's rich card — todo_write's
+#: checklist payload is exactly what lets a goal-mode turn render the
+#: localized progress card instead of the generic English receipt line.
+#: Heavy engine state (``todoState`` — full stack + history) is deliberately
+#: excluded: the card and the revision-collapser read only the flat keys.
+_FLOW_STRUCTURED_META_KEYS = {
+    'todo_write': (
+        'todos', 'todoOperation', 'todoNoop', 'todoRejected',
+        'todoAutoPopped', 'todoUpdateCount', 'todoBreadcrumbs',
+        'checklistId', 'todoRevision', 'badge',
+    ),
+}
+
+
+def flow_structured_result_meta(fn_name: str, results) -> dict:
+    """Harvest a tool's structured display payload off its finalized round.
+
+    ``results`` is the meta list the executor's ``_finalize_tool_round``
+    stamped onto the dispatch stub. Pure: unknown tools, malformed input,
+    and missing keys all harvest nothing.
+    """
+    keys = _FLOW_STRUCTURED_META_KEYS.get(fn_name)
+    if not keys or not isinstance(results, list) or not results:
+        return {}
+    meta = results[0]
+    if not isinstance(meta, dict):
+        return {}
+    return {key: meta[key] for key in keys if key in meta}
 
 # Max parallel tool calls per round. Keep the swarm path on the same
 # deployment profile as the primary agent tool dispatcher.
@@ -269,7 +313,8 @@ class SubAgent:
                  tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
                  build_body_fn: BodyBuilder | None = None,
                  dispatch_stream_fn: Callable | None = None,
-                 stream_sink: Callable | None = None):
+                 stream_sink: Callable | None = None,
+                 tool_event_sink: Callable[[dict], None] | None = None):
         self.spec = spec
         self.parent_task = parent_task
         self.agent_id = f'agent-{spec.role}-{spec.id}'
@@ -285,6 +330,12 @@ class SubAgent:
         # into a chat bubble, identical to a first-class agent turn. No-op when
         # unset (tests / swarm use).
         self.stream_sink = stream_sink
+
+        # Optional canonical tool-lifecycle observer. Unlike ``on_event``
+        # (the swarm-card channel), this emits standard chat ``tool_*`` frames
+        # for a caller that owns a visible parent turn. Flow explicitly opts
+        # in; ordinary swarm agents remain isolated and unchanged.
+        self.tool_event_sink = tool_event_sink
         self.abort_check = abort_check or (lambda: False)
         self.project_path = project_path
         self.artifact_store = artifact_store  # shared across agents
@@ -316,6 +367,10 @@ class SubAgent:
 
         # Result tracking
         self.result = SubAgentResult()
+        # Parallel tool calls append and settle shared timeline rows. Keeping
+        # one small lock prevents same-name calls from attaching a result to a
+        # sibling row and makes historical-detail compaction deterministic.
+        self._tool_log_lock = threading.Lock()
 
         # Internal message history
         self.messages = self._build_initial_messages(system_prompt_base)
@@ -383,8 +438,19 @@ class SubAgent:
         tier = get_role_model_hint(spec.role)
         provider_id = ((self.parent_task or {}).get('config') or {}).get(
             '_pinned_provider_id', '')
+        owner_user_id = (
+            self._presence_user_id()
+            if (self.parent_task or {}).get('_userId') is not None
+            else None
+        )
         return resolve_model_for_tier(
-            tier, default_model, role=spec.role, provider_id=provider_id)
+            tier,
+            default_model,
+            role=spec.role,
+            provider_id=provider_id,
+            owner_user_id=owner_user_id,
+            tenant_id=(self.parent_task or {}).get('_tenant_id'),
+        )
 
     # ─────────────────────────────────────────────────
     #  Artifact tool injection
@@ -984,6 +1050,12 @@ class SubAgent:
                 if not _output_path or not _log_buffer:
                     return
                 try:
+                    _output_parent = os.path.dirname(_output_path)
+                    if (_output_parent
+                            and getattr(self, '_output_parent_path', '')
+                            != _output_parent):
+                        os.makedirs(_output_parent, exist_ok=True)
+                        self._output_parent_path = _output_parent
                     with open(_output_path, 'a', encoding='utf-8') as fp:
                         fp.write(''.join(_log_buffer))
                 except OSError as _e:
@@ -1043,9 +1115,13 @@ class SubAgent:
             # cooldown (rate-limited strict_model) — the exact 5-minute
             # first-token stall the user saw as a "hang". Phase, not delta:
             # transient UI, never pollutes the assistant content.
-            self._emit_stream_phase(Phase.WAITING_MODEL,
-                                    'Sent to the model, waiting for it to '
-                                    'start replying…')
+            _model_label = display_model_name(self.model)
+            self._emit_stream_phase(
+                Phase.WAITING_MODEL,
+                f'Sent to {_model_label}, waiting for it to start replying…',
+                detailKey='stream.phase.waitingForModel',
+                detailArgs={'model': _model_label},
+                model=self.model)
             _retry_phase_budget = RetryPhaseEventBudget()
 
             def _on_dispatch_retry(attempt=0, reason='', status_code=0):
@@ -1097,9 +1173,13 @@ class SubAgent:
                 _flush_log()
                 # On LLM error, try to extract partial answer from previous rounds
                 self.result.error_message = f'LLM call failed at round {round_num}: {e}'
-                self._extract_partial_answer(f'LLM error at round {round_num}')
-                if self.result.final_answer and round_num > 1:
-                    # We have partial results — mark completed with caveat
+                has_partial = self._extract_partial_answer(
+                    f'LLM error at round {round_num}')
+                if has_partial and round_num > 1:
+                    # Genuine partial results — mark completed with caveat.
+                    # A synthesized "no substantive answer" placeholder is
+                    # NOT a completion: it must stay a failure so the real
+                    # error_message reaches the transcript and the UI.
                     self.result.status = SubAgentStatus.COMPLETED.value
                 else:
                     self.result.status = SubAgentStatus.FAILED.value
@@ -1545,9 +1625,14 @@ class SubAgent:
 
         Scans backwards through messages looking for the last substantive
         assistant content. Sets result.final_answer if found.
+
+        Returns True when real assistant content was recovered (or an
+        answer already existed); False when only the synthetic
+        "No substantive answer" placeholder (or nothing) was produced —
+        callers must not treat the placeholder as a successful outcome.
         """
         if self.result.final_answer:
-            return  # Already have an answer
+            return True  # Already have an answer
 
         # Walk backwards through messages for assistant content
         for msg in reversed(self.messages):
@@ -1556,61 +1641,117 @@ class SubAgent:
                 if len(content) > 20:  # Skip trivial responses
                     prefix = f'[Partial — {reason}]\n\n' if reason else ''
                     self.result.final_answer = prefix + content
-                    return
+                    return True
 
         # If nothing found, note the reason
         if reason:
             self.result.final_answer = f'[{reason}] No substantive answer was produced.'
+        return False
 
     # ─────────────────────────────────────────────────
     #  Tool execution
     # ─────────────────────────────────────────────────
 
     def _execute_tool_calls(self, tool_calls: list, round_num: int):
-        """Execute tools and summarize explicit terminal failures for chassis."""
+        """Execute every occurrence in one provider tool-call batch.
 
-        if len(tool_calls) == 1:
-            # Single tool call — run directly (no thread overhead)
-            tc = tool_calls[0]
-            result = self._execute_single_tool(tc, round_num)
-            self.messages.append({
-                'role': 'tool',
-                # ``or``, NOT ``get('id', default)``: the SSE accumulator always
-                # SETS the key (to ''), so a default-arg fallback is
-                # unreachable and a blank id would reach the wire verbatim — a
-                # malformed turn the gateway cannot match to its tool_call.
-                'tool_call_id': tc.get('id') or str(uuid.uuid4())[:8],
-                'content': result,
-            })
-            return {
-                'nonretryable_failure_signatures':
-                    _nonretryable_failure_signatures([result]),
-            }
-        else:
-            # Multiple tool calls — run in parallel.
-            #
-            # Results are keyed by the tool call's POSITION, never by its id.
-            # Keying by ``tc.get('id', uuid4())`` was silently lossy, because
-            # the SSE accumulator creates every tool-call slot with
-            # ``'id': ''`` (lib/llm/_sse_core.py:854/922) — the KEY always
-            # exists, so the uuid fallback never fires and cannot de-collide
-            # anything:
-            #   * two parallel calls that both kept ``id=''`` collapse onto ONE
-            #     dict key, so the first tool is fed the SECOND tool's output —
-            #     silently, with no error anywhere (verified);
-            #   * had the fallback ever fired it would mint a DIFFERENT uuid at
-            #     execution and at lookup, yielding the literal string
-            #     ``(no result)`` as that tool's content.
-            # Position is intrinsic to the batch and cannot collide, so the
-            # mapping is total by construction.
-            results: dict[int, str] = {}
-            max_workers = min(len(tool_calls), MAX_PARALLEL_TOOLS)
+        Every logical call keeps a unique wire id and receives a tool result.
+        Distinct response positions remain distinct even when name/arguments
+        match exactly; only correlation IDs are repaired. Malformed entries are
+        isolated so valid siblings still settle.
+        """
+        if not tool_calls:
+            return {'nonretryable_failure_signatures': []}
+
+        original_count = len(tool_calls)
+        tool_calls[:] = [
+            tool_call for tool_call in tool_calls
+            if isinstance(tool_call, dict)
+        ]
+        if len(tool_calls) != original_count:
+            logger.warning(
+                '[Agent:%s] Round %d: discarded %d non-object tool-call '
+                'entries before history/result settlement',
+                self.agent_id, round_num, original_count - len(tool_calls))
+        if not tool_calls:
+            return {'nonretryable_failure_signatures': []}
+
+        # Repair identity on the assistant tool_call objects themselves before
+        # results are emitted. ``self.messages`` owns these same dicts, so the
+        # next provider request sees a structurally valid assistant/tool pair.
+        current_objects = {id(tool_call) for tool_call in tool_calls}
+        claimed_ids: set[str] = set()
+        for message in self.messages:
+            if not isinstance(message, dict):
+                continue
+            result_id = str(message.get('tool_call_id') or '').strip()
+            if result_id:
+                claimed_ids.add(result_id)
+            for historical_call in message.get('tool_calls') or ():
+                if (isinstance(historical_call, dict)
+                        and id(historical_call) not in current_objects):
+                    historical_id = str(
+                        historical_call.get('id') or '').strip()
+                    if historical_id:
+                        claimed_ids.add(historical_id)
+        repaired_ids = ensure_unique_tool_call_ids(
+            tool_calls,
+            claimed_ids,
+            id_prefix=f'swarm_r{round_num}',
+        )
+        if repaired_ids:
+            logger.warning(
+                '[Agent:%s] Round %d: repaired %d blank/recycled tool-call '
+                'id(s) before result settlement',
+                self.agent_id, round_num, repaired_ids)
+
+        results: dict[int, str] = {}
+        executable_positions: list[int] = []
+        for position, tool_call in enumerate(tool_calls):
+            if ('caller' not in tool_call
+                    or tool_call.get('caller') is None):
+                executable_positions.append(position)
+                continue
+            normalized_caller, caller_error = normalize_tool_caller(
+                tool_call.get('caller'))
+            if caller_error is None and normalized_caller is not None:
+                tool_call['caller'] = normalized_caller
+                if normalized_caller.get('type') != 'program':
+                    executable_positions.append(position)
+                    continue
+                caller_error = (
+                    'program-attributed calls are not admitted inside a local '
+                    'swarm worker; use its bounded execute_program surface')
+            with self._tool_authority_lock:
+                self._tool_authority_rejections += 1
+                rejection_count = self._tool_authority_rejections
+            function = tool_call.get('function')
+            tool_name = (str(function.get('name') or '?')
+                         if isinstance(function, dict) else '?')
+            results[position] = (
+                '[SYSTEM: ATTRIBUTED TOOL CALL DID NOT RUN]\n'
+                f'Tool call `{tool_name}` carried an unsupported or invalid '
+                f'caller authority envelope ({caller_error}). It was rejected '
+                'before execution instead of being promoted to this worker. '
+                f'Authority rejection {rejection_count}/2.')
+            logger.warning(
+                '[Agent:%s] Round %d rejected attributed tool occurrence '
+                '%s: %s', self.agent_id, round_num, tool_name, caller_error)
+
+        if len(executable_positions) == 1:
+            # Preserve the direct exception boundary for a one-call batch.
+            position = executable_positions[0]
+            results[position] = self._execute_single_tool(
+                tool_calls[position], round_num)
+        elif executable_positions:
+            max_workers = min(len(executable_positions), MAX_PARALLEL_TOOLS)
             with ThreadPoolExecutor(
                 max_workers=max_workers,
                 thread_name_prefix=f'{self.agent_id}-tools',
             ) as pool:
                 futures = {}
-                for idx, tc in enumerate(tool_calls):
+                for idx in executable_positions:
+                    tc = tool_calls[idx]
                     future = pool.submit(self._execute_single_tool, tc, round_num)
                     futures[future] = idx
 
@@ -1638,33 +1779,35 @@ class SubAgent:
                         result = f'Tool execution error ({fn_name}): {type(e).__name__}: {e}'
                     results[idx] = result
 
-            # Append results in original order (important for reproducibility).
-            # ``tool_call_id`` still carries the wire id the model sent (that is
-            # what the gateway matches on) — only the internal RESULT lookup is
-            # position-keyed. A blank id is repaired here too: two tool results
-            # sharing '' is a malformed turn on the wire. A missing position
-            # would be a real internal bug, so it is logged loudly instead of
-            # quietly degrading to '(no result)'.
-            for idx, tc in enumerate(tool_calls):
-                if idx not in results:
-                    logger.error(
-                        '[%s] Round %d: no result recorded for tool %s at '
-                        'position %d — internal bookkeeping bug, not a tool '
-                        'failure', self.agent_id, round_num,
-                        tc.get('function', {}).get('name', '?'), idx)
-                self.messages.append({
-                    'role': 'tool',
-                    'tool_call_id': tc.get('id') or str(uuid.uuid4())[:8],
-                    'content': results.get(idx, '(no result)'),
-                })
-            ordered_results = [
-                results.get(idx, '(no result)')
-                for idx in range(len(tool_calls))
-            ]
-            return {
-                'nonretryable_failure_signatures':
-                    _nonretryable_failure_signatures(ordered_results),
+        # Append results in original order (important for reproducibility).
+        # Position owns result lookup; the repaired id owns wire pairing.
+        for idx, tc in enumerate(tool_calls):
+            if idx not in results:
+                logger.error(
+                    '[%s] Round %d: no result recorded for tool %s at '
+                    'position %d — internal bookkeeping bug, not a tool '
+                    'failure', self.agent_id, round_num,
+                    tc.get('function', {}).get('name', '?'), idx)
+            raw_result = results.get(idx, '(no result)')
+            result_message = {
+                'role': 'tool',
+                'tool_call_id': tc.get('id'),
+                'content': model_text_from_tool_result(raw_result),
             }
+            if 'caller' in tc and tc.get('caller') is not None:
+                raw_caller = tc.get('caller')
+                result_message['caller'] = (
+                    dict(raw_caller) if isinstance(raw_caller, dict)
+                    else raw_caller)
+            self.messages.append(result_message)
+        ordered_results = [
+            results.get(idx, '(no result)')
+            for idx in range(len(tool_calls))
+        ]
+        return {
+            'nonretryable_failure_signatures':
+                _nonretryable_failure_signatures(ordered_results),
+        }
 
     def _known_tool_names(self) -> set[str]:
         """Live set of REAL tool names available to THIS sub-agent this turn.
@@ -1685,11 +1828,27 @@ class SubAgent:
                     names.add(n)
         return names
 
+    def _emit_tool_event(self, event: dict) -> None:
+        """Notify an opted-in parent turn without weakening agent isolation."""
+        sink = getattr(self, 'tool_event_sink', None)
+        if not sink:
+            return
+        try:
+            sink(dict(event))
+        except Exception as exc:
+            logger.debug(
+                '[Agent:%s] tool lifecycle sink failed (non-fatal): %s',
+                self.agent_id, exc)
+
     def _execute_single_tool(self, tool_call: dict, round_num: int) -> str:
         """Execute a single tool call and return the result string."""
         fn_info = tool_call.get('function', {})
         _raw_name = fn_info.get('name', '?')
-        tc_id = tool_call.get('id') or str(uuid.uuid4())[:8]
+        provider_call_id = tool_call.get('id') or str(uuid.uuid4())[:8]
+        # Provider ids are only unique inside one model transcript and can be
+        # recycled by another Flow node. Mint one occurrence identity here and
+        # persist it on the same row used for terminal replay.
+        timeline_call_id = f'flow-tool-{uuid.uuid4().hex}'
         tool_start = time.time()
 
         # ── Unified tool-call ingestion ──
@@ -1749,16 +1908,57 @@ class SubAgent:
         self._touch_progress(f'tool_start:{fn_name}')
 
         # Log the tool call
-        self.result.tool_log.append({
+        tool_log_row = {
             'round': round_num,
             'tool': fn_name,
             'args_brief': args_brief,
             'timestamp': time.time(),
+            'tool_call_id': timeline_call_id,
+            'provider_tool_call_id': provider_call_id,
+            'status': 'running',
             # Filled in by _emit_finish once the call returns. Persisted so the
             # durable snapshot can rebuild the panel's timeline WITH the result
             # text, not just the tool name.
             'preview': '',
-        })
+        }
+        with self._tool_log_lock:
+            self.result.tool_log.append(tool_log_row)
+            historical_index = (
+                len(self.result.tool_log) - SWARM_TOOL_TIMELINE_ROW_LIMIT - 1)
+            if historical_index >= 0:
+                historical = self.result.tool_log[historical_index]
+                if isinstance(historical, dict):
+                    # Old rows still retain tool identity for usage/file-write
+                    # accounting, but their display-only strings cannot grow
+                    # the resumable checkpoint forever.
+                    for field in ('preview', 'error'):
+                        old_text = _tool_timeline_text(historical.get(field))
+                        if old_text:
+                            try:
+                                declared_chars = int(historical.get(
+                                    f'{field}_full_chars') or 0)
+                            except (TypeError, ValueError):
+                                declared_chars = 0
+                            historical[f'{field}_full_chars'] = max(
+                                declared_chars, len(old_text))
+                            historical[f'{field}_truncated'] = True
+                            historical[field] = ''
+                    historical['args_brief'] = ''
+                    # Display-only structured payload (todo checklist state):
+                    # same bounded-checkpoint rationale as the prose fields.
+                    historical.pop('result_meta', None)
+
+        self._emit_tool_event(build_event(
+            EventType.TOOL_START,
+            roundNum=round_num,
+            llmRound=round_num,
+            toolCallId=timeline_call_id,
+            toolName=fn_name,
+            toolArgs=dict(fn_args),
+            query=args_brief or fn_name,
+            status='searching',
+            tStart=int(tool_start * 1000),
+        ))
 
         # ── Per-tool-call SSE event: started ──
         # Surfaces the agent's execution timeline in the swarm panel —
@@ -1769,7 +1969,7 @@ class SubAgent:
             f'🔧 [{self.spec.role}] {fn_name}',
             status='running', phase='tool_use',
             round_num=round_num,
-            callId=tc_id, toolName=fn_name,
+            callId=provider_call_id, toolName=fn_name,
             argsBrief=args_brief, callStatus='running',
         )
 
@@ -1777,30 +1977,76 @@ class SubAgent:
             # The other end of the tool window — a returning tool is proof of
             # forward motion even when it emitted nothing while it ran.
             self._touch_progress(f'tool_done:{fn_name}')
-            _full_len = len(preview or '')
-            _sent = (preview or '')[:_SSE_TOOL_PREVIEW_CHARS]
+            _preview = _tool_timeline_text(preview)
+            _error = _tool_timeline_text(error)
+            _full_len = len(_preview)
+            _error_full_len = len(_error)
+            _sent = _preview[:_SSE_TOOL_PREVIEW_CHARS]
+            _error_sent = _error[:_SSE_TOOL_PREVIEW_CHARS]
             # Persist the preview onto the tool_log row this call already
             # appended, so the DURABLE snapshot (and therefore a reloaded
             # panel) carries what the live frame showed. Without this the
             # text exists only on a transient SSE frame.
-            if self.result.tool_log:
-                _row = self.result.tool_log[-1]
-                if isinstance(_row, dict) and _row.get('tool') == fn_name:
-                    _row['preview'] = preview or ''
-                    if error:
-                        _row['error'] = error
+            with self._tool_log_lock:
+                tool_log_row['preview'] = _sent
+                tool_log_row['preview_full_chars'] = _full_len
+                tool_log_row['preview_truncated'] = _full_len > len(_sent)
+                tool_log_row['error'] = _error_sent
+                tool_log_row['error_full_chars'] = _error_full_len
+                tool_log_row['error_truncated'] = (
+                    _error_full_len > len(_error_sent))
+
+                tool_log_row['status'] = status
+                tool_log_row['tool_content'] = _error_sent or _sent
+                structured_meta = dict(tool_log_row.get('result_meta') or {})
+            terminal_status = 'done' if status == 'done' else 'error'
+            result_meta = {
+                'toolName': fn_name,
+                'title': fn_name,
+                'snippet': (_error_sent or _sent)[:120].replace('\n', ' '),
+                'source': 'Flow',
+                'fetched': status == 'done',
+                'fetchedChars': _error_full_len or _full_len,
+                **structured_meta,
+            }
+            self._emit_tool_event(build_event(
+                EventType.TOOL_RESULT,
+                roundNum=round_num,
+                llmRound=round_num,
+                toolCallId=timeline_call_id,
+                toolName=fn_name,
+                query=args_brief or fn_name,
+                results=[result_meta],
+                status=terminal_status,
+                tEnd=int(time.time() * 1000),
+            ))
+            complete_fields = {
+                'roundNum': round_num,
+                'llmRound': round_num,
+                'toolCallId': timeline_call_id,
+                'toolName': fn_name,
+                'toolContent': _error_sent or _sent,
+                'isError': status != 'done',
+                'tEnd': int(time.time() * 1000),
+            }
+            if status != 'done':
+                complete_fields['status'] = terminal_status
+            self._emit_tool_event(build_event(
+                EventType.TOOL_COMPLETE, **complete_fields))
             self._emit_event(
                 'agent_tool_call',
                 f'{"✅" if status == "done" else "❌"} [{self.spec.role}] {fn_name}',
                 status='running', phase='tool_use',
                 round_num=round_num,
-                callId=tc_id, toolName=fn_name,
+                callId=provider_call_id, toolName=fn_name,
                 argsBrief=args_brief, callStatus=status,
                 callElapsed=round(time.time() - tool_start, 2),
                 preview=_sent,
                 previewTruncated=(_full_len > len(_sent)),
                 previewFullChars=_full_len,
-                error=error or '',
+                error=_error_sent,
+                errorTruncated=(_error_full_len > len(_error_sent)),
+                errorFullChars=_error_full_len,
             )
 
         # ── Handle artifact tools locally ──
@@ -1827,8 +2073,17 @@ class SubAgent:
         try:
             logger.debug('[Agent:%s] Dispatching tool %s args=%s',
                          self.agent_id, fn_name, str(fn_args)[:200])
+            meta_sink: dict = {}
             with thread_progress_sink(self.progress_beacon, self.spec.id):
-                result = self._dispatch_tool(tool_call, fn_name, fn_args, round_num)
+                result = self._dispatch_tool(
+                    tool_call, fn_name, fn_args, round_num,
+                    meta_sink=meta_sink)
+            if meta_sink:
+                # Persist the structured payload onto the durable row so the
+                # flow chat projection (and a reloaded panel) can rebuild the
+                # rich card — the proxy round it came from is discarded.
+                with self._tool_log_lock:
+                    tool_log_row['result_meta'] = meta_sink
             truncated = self._truncate_tool_result(result)
             tool_elapsed = time.time() - tool_start
             logger.debug('[Agent:%s] Tool %s completed in %.2fs result_len=%d',
@@ -1839,7 +2094,7 @@ class SubAgent:
             if typed_error is not None:
                 _emit_finish(
                     'failed',
-                    preview=truncated,
+                    preview=model_text_from_tool_result(truncated),
                     error=typed_error.message or typed_error.code,
                 )
                 return truncated
@@ -1931,11 +2186,15 @@ class SubAgent:
     # ─────────────────────────────────────────────────
 
     def _dispatch_tool(self, tool_call: dict, fn_name: str, fn_args: dict,
-                       round_num: int) -> str:
+                       round_num: int, *, meta_sink: dict | None = None) -> str:
         """Execute a tool by name using the project tools executor.
 
         Delegates to ``_execute_tool_one`` from the executor module, which
         handles web_search, fetch_url, project tools, browser tools, etc.
+        ``meta_sink``, when given, receives the structured display payload
+        harvested off the finalized proxy round (see
+        ``flow_structured_result_meta``) so the caller can persist it onto
+        the durable tool_log row before the proxy is discarded.
         """
         from lib.tasks_pkg.executor import _execute_tool_one
 
@@ -2046,13 +2305,56 @@ class SubAgent:
         # run_command polls task['aborted'] every ~200 ms. Mirror the parent's
         # live abort callback (and an explicit agent deadline) into the proxy
         # while the executor is blocked so Stop reaches the subprocess tree.
+        #
+        # The proxy membrane also hides the live subprocess from the
+        # stuck-task reaper: run_command registers ``_subprocess_pid`` on the
+        # PROXY, but the reaper scans the PARENT — so a sub-agent blocked in
+        # a silent command looked like a wedged task and the whole parent
+        # (an autopilot run, via FlowExecutor's leaf workers) was
+        # force-failed, where a main-task command gets the gentle per-command
+        # interrupt (partial output back to the model, turn continues).
+        # Bridge ONLY the cooperative-control fields across the membrane
+        # (transcript fields stay proxy-local):
+        #   proxy → parent: ``_subprocess_pid``/``_subprocess_pgid`` while the
+        #     command runs, so the reaper arms its watchdog interrupt instead
+        #     of reaping, and the interrupt-command endpoint can target it;
+        #   parent → proxy: a pending ``_cmd_interrupt`` whose pid matches, so
+        #     the planted interrupt reaches THIS command's read loop. The
+        #     parent's copy is popped only after the proxy consumes it — if
+        #     the read loop itself is wedged the flag stays on the parent and
+        #     the reaper's grace escalation to a full reap still fires.
         monitor_stop = threading.Event()
+        parent_task = (self.parent_task
+                       if isinstance(self.parent_task, dict) else None)
+        bridge = {'pid': None, 'intr': False}
 
         def _mirror_abort():
             while not monitor_stop.wait(0.1):
                 if _tool_abort_requested():
                     task_proxy['aborted'] = True
                     return
+                if parent_task is None:
+                    continue
+                pid = task_proxy.get('_subprocess_pid')
+                if pid:
+                    bridge['pid'] = pid
+                    if parent_task.get('_subprocess_pid') != pid:
+                        parent_task['_subprocess_pid'] = pid
+                        parent_task['_subprocess_pgid'] = task_proxy.get(
+                            '_subprocess_pgid')
+                intr = parent_task.get('_cmd_interrupt')
+                if (intr and not bridge['intr']
+                        and '_cmd_interrupt' not in task_proxy):
+                    flag_pid = (intr.get('pid')
+                                if isinstance(intr, dict) else None)
+                    if flag_pid is None or flag_pid == pid:
+                        task_proxy['_cmd_interrupt'] = intr
+                        bridge['intr'] = True
+                if bridge['intr'] and '_cmd_interrupt' not in task_proxy:
+                    # The read loop consumed the transfer: drop the parent's
+                    # copy so the reaper sees the interrupt as acknowledged.
+                    parent_task.pop('_cmd_interrupt', None)
+                    bridge['intr'] = False
 
         monitor = None
         if fn_name == 'run_command':
@@ -2068,6 +2370,9 @@ class SubAgent:
                 self.project_path, bool(self.project_path),
                 self.tools,
             )
+            if meta_sink is not None:
+                meta_sink.update(flow_structured_result_meta(
+                    fn_name, round_entry.get('results')))
             if isinstance(tool_content, dict):
                 # Some tools (e.g. browser_screenshot) return dicts
                 return json.dumps(tool_content, ensure_ascii=False)
@@ -2079,6 +2384,17 @@ class SubAgent:
             monitor_stop.set()
             if monitor is not None:
                 monitor.join(timeout=0.3)
+            if parent_task is not None and bridge['pid'] is not None:
+                # Command finished: retract the mirrored registration, but
+                # only if it is still OURS (a concurrent sibling sub-agent
+                # may have overwritten it). A leftover ``_cmd_interrupt`` is
+                # deliberately NOT popped here — it carries the pid guard and
+                # the next command voids it as stale, same as the main task.
+                if parent_task.get('_subprocess_pid') == bridge['pid']:
+                    parent_task.pop('_subprocess_pid', None)
+                    parent_task.pop('_subprocess_pgid', None)
+                if bridge['intr'] and '_cmd_interrupt' not in task_proxy:
+                    parent_task.pop('_cmd_interrupt', None)
 
     # ─────────────────────────────────────────────────
     #  Result truncation

@@ -17,6 +17,8 @@ Pinned behaviours (real jsdom click through the REAL registry source):
   5. Unknown nested names refuse LOUDLY: console.error ``[actions] refused``,
      target handler never invoked, click does not throw.
   6. Controls: plain literal args and quoted strings unchanged.
+  7. Data attributes resolve as arguments, so approval ids never need to be
+     interpolated into executable action text.
 
 Skips when node+jsdom dev-deps are absent (convention of
 test_frontend_cmd_collapse.py).
@@ -63,6 +65,7 @@ const dom = new JSDOM(`<!DOCTYPE html><html><body>
   </div>
   <div id="m4" class="item"><button id="b4" data-tofu-action="captureValue(_nope(this))">Unknown</button></div>
   <div id="m5" class="item"><button id="b5" data-tofu-action="captureValue(7,'x')">Control</button></div>
+  <div id="m6" class="item"><button id="b6" data-approval-id="ap');unsafe()//" data-tofu-action="captureValue(this.dataset.approvalId)">Dataset</button></div>
 </body></html>`, { url: 'http://localhost/' });
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
@@ -138,6 +141,11 @@ check('unknown_nested_target_not_called', received.copy.length === copyCountBefo
 document.getElementById('b5').click();
 check('plain_args_control', JSON.stringify(received.copy.at(-1)) === '[7,"x"]');
 
+// ── 7. untrusted ids stay in data attributes, outside action grammar ──
+document.getElementById('b6').click();
+check('dataset_argument_resolved_without_code_interpolation',
+  JSON.stringify(received.copy.at(-1)) === '["ap\');unsafe()//"]');
+
 console.log(out.join('\n'));
 process.exit(0);
 """
@@ -166,7 +174,7 @@ def test_nested_call_grammar_contract():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'action-registry nested-call failures:\n' + output
-    assert output.count('PASS') >= 10, f'expected >=10 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 12, f'expected >=12 PASS lines, got:\n{output}'
 
 
 @pytest.mark.unit

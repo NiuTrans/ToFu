@@ -11,8 +11,12 @@
 export const CODEX_RESET_NOTICE_STORAGE_KEY = 'tofu_codex_reset_notice_v1';
 export const CODEX_RESET_NOTICE_INTERVAL_MS = 30 * 60 * 1000;
 export const CODEX_RESET_NOTICE_REFRESH_RETRY_MS = 2500;
+export const CODEX_RESET_NOTICE_PUSH_FALLBACK_MS = 15 * 1000;
 export const CODEX_RESET_NOTICE_MAX_REFRESH_RETRIES = 6;
 export const CODEX_RESET_NOTICE_MAX_SEEN_KEYS = 16;
+export const CODEX_RESET_NOTICE_PUSH_CHANNEL = 'oauth';
+export const CODEX_RESET_NOTICE_PUSH_TASK_ID = 'codex-reset';
+export const CODEX_RESET_NOTICE_PUSH_EVENT_TYPE = 'codex.reset_offer.updated';
 
 interface ResetOfferRecord {
   state?: unknown;
@@ -54,6 +58,9 @@ export interface SubscriptionResetNoticeDependencies {
   setInterval?(callback: () => void, delayMs: number): unknown;
   clearInterval?(handle: unknown): void;
   isVisible?(): boolean;
+  subscribeOfferUpdates?(
+    listener: (frame: unknown) => void,
+  ): (() => void) | null;
 }
 
 export interface SubscriptionResetNoticeController {
@@ -121,6 +128,16 @@ export function extractAuthenticatedCodexResetOffer(value: unknown): CodexResetO
   const codex = record(root?.codex);
   if (!codex || codex.authenticated !== true) return null;
   return normalizeCodexResetOffer(codex.reset_offer);
+}
+
+export function extractCodexResetOfferPush(value: unknown): CodexResetOffer | null {
+  const frame = record(value);
+  if (frame?.type !== CODEX_RESET_NOTICE_PUSH_EVENT_TYPE
+      || frame.provider !== 'codex') return null;
+  const offer = normalizeCodexResetOffer(frame.reset_offer);
+  // This event is a completion receipt. A busy projection is either from an
+  // incompatible producer or malformed input and must not extend polling.
+  return offer?.refreshing ? null : offer;
 }
 
 function interpolate(template: string, values?: Record<string, unknown>): string {
@@ -244,6 +261,10 @@ export function createSubscriptionResetNoticeController(
   let failureRetryUsed = false;
   let retryTimer: unknown = null;
   let intervalTimer: unknown = null;
+  let releaseOfferUpdates: (() => void) | null = null;
+  let offerUpdatesSubscribed = false;
+  let pushedOfferVersion = 0;
+  let pendingVisibleOffer: CodexResetOffer | null = null;
   const inMemorySeen = new Set(readSeenKeys(dependencies.storage));
 
   function rememberSeen(key: string): void {
@@ -268,40 +289,75 @@ export function createSubscriptionResetNoticeController(
     }, Math.max(250, delayMs));
   }
 
+  function cancelRetry(): void {
+    if (retryTimer !== null) cancelTimeout(retryTimer);
+    retryTimer = null;
+  }
+
+  function processOffer(offer: CodexResetOffer, refreshDelayMs: number): void {
+    if (offer.refreshing) {
+      if (refreshRetryCount < CODEX_RESET_NOTICE_MAX_REFRESH_RETRIES) {
+        refreshRetryCount += 1;
+        scheduleRetry(refreshDelayMs);
+      }
+      return;
+    }
+    refreshRetryCount = 0;
+    if (offer.stale || offer.state === 'unknown') {
+      if (!failureRetryUsed && offer.retryAfterSeconds > 0) {
+        failureRetryUsed = true;
+        scheduleRetry(Math.min(offer.retryAfterSeconds * 1000, 5 * 60 * 1000));
+      }
+      return;
+    }
+    failureRetryUsed = false;
+    if (offer.state !== 'available' || !offer.notificationKey) return;
+    if (alreadySeen(offer.notificationKey)) return;
+    const notice = noticeFor(offer, dependencies);
+    if (dependencies.notify(notice) === false) return;
+    rememberSeen(offer.notificationKey);
+  }
+
+  function acceptOfferUpdate(frame: unknown): void {
+    if (destroyed) return;
+    const offer = extractCodexResetOfferPush(frame);
+    if (!offer) return;
+    pushedOfferVersion += 1;
+    lastCheckedAt = now();
+    cancelRetry();
+    if (dependencies.isVisible?.() === false) {
+      // Preserve the old visible-page notification contract. Keep only the
+      // latest bounded projection and consume it on visibility reconciliation
+      // without issuing another status request.
+      pendingVisibleOffer = offer;
+      return;
+    }
+    processOffer(offer, CODEX_RESET_NOTICE_PUSH_FALLBACK_MS);
+  }
+
   async function checkNow(): Promise<void> {
     if (destroyed || checking) return;
     if (dependencies.isVisible?.() === false) return;
     checking = true;
     lastCheckedAt = now();
+    const pushVersionAtRequestStart = pushedOfferVersion;
     try {
       const status = await dependencies.readStatus();
+      // A completion frame published while this request was in flight is the
+      // newer observation. Never let an earlier HTTP projection re-arm a poll.
+      if (pushedOfferVersion !== pushVersionAtRequestStart) return;
       const offer = extractAuthenticatedCodexResetOffer(status);
       if (!offer) {
         refreshRetryCount = 0;
         failureRetryUsed = false;
         return;
       }
-      if (offer.refreshing) {
-        if (refreshRetryCount < CODEX_RESET_NOTICE_MAX_REFRESH_RETRIES) {
-          refreshRetryCount += 1;
-          scheduleRetry(CODEX_RESET_NOTICE_REFRESH_RETRY_MS);
-        }
-        return;
-      }
-      refreshRetryCount = 0;
-      if (offer.stale || offer.state === 'unknown') {
-        if (!failureRetryUsed && offer.retryAfterSeconds > 0) {
-          failureRetryUsed = true;
-          scheduleRetry(Math.min(offer.retryAfterSeconds * 1000, 5 * 60 * 1000));
-        }
-        return;
-      }
-      failureRetryUsed = false;
-      if (offer.state !== 'available' || !offer.notificationKey) return;
-      if (alreadySeen(offer.notificationKey)) return;
-      const notice = noticeFor(offer, dependencies);
-      if (dependencies.notify(notice) === false) return;
-      rememberSeen(offer.notificationKey);
+      processOffer(
+        offer,
+        offerUpdatesSubscribed
+          ? CODEX_RESET_NOTICE_PUSH_FALLBACK_MS
+          : CODEX_RESET_NOTICE_REFRESH_RETRY_MS,
+      );
     } catch (error: unknown) {
       console.warn('[CodexResetNotice] status check failed', error);
     } finally {
@@ -310,6 +366,13 @@ export function createSubscriptionResetNoticeController(
   }
 
   async function checkIfDue(): Promise<void> {
+    if (pendingVisibleOffer && dependencies.isVisible?.() !== false) {
+      const offer = pendingVisibleOffer;
+      pendingVisibleOffer = null;
+      lastCheckedAt = now();
+      processOffer(offer, CODEX_RESET_NOTICE_PUSH_FALLBACK_MS);
+      return;
+    }
     if (now() - lastCheckedAt < CODEX_RESET_NOTICE_INTERVAL_MS) return;
     await checkNow();
   }
@@ -317,6 +380,15 @@ export function createSubscriptionResetNoticeController(
   function start(): void {
     if (started || destroyed) return;
     started = true;
+    try {
+      const release = dependencies.subscribeOfferUpdates?.(acceptOfferUpdate);
+      if (typeof release === 'function') {
+        releaseOfferUpdates = release;
+        offerUpdatesSubscribed = true;
+      }
+    } catch (error: unknown) {
+      console.warn('[CodexResetNotice] push subscription failed', error);
+    }
     intervalTimer = scheduleInterval(() => {
       void checkIfDue();
     }, CODEX_RESET_NOTICE_INTERVAL_MS);
@@ -326,9 +398,17 @@ export function createSubscriptionResetNoticeController(
   function destroy(): void {
     if (destroyed) return;
     destroyed = true;
-    if (retryTimer !== null) cancelTimeout(retryTimer);
+    cancelRetry();
     if (intervalTimer !== null) cancelInterval(intervalTimer);
-    retryTimer = null;
+    if (releaseOfferUpdates) {
+      try { releaseOfferUpdates(); }
+      catch (error: unknown) {
+        console.warn('[CodexResetNotice] push unsubscribe failed', error);
+      }
+    }
+    releaseOfferUpdates = null;
+    offerUpdatesSubscribed = false;
+    pendingVisibleOffer = null;
     intervalTimer = null;
   }
 

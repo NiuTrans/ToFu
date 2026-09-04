@@ -20,10 +20,14 @@ from lib.tasks_pkg.message_builder._prefetch import (  # noqa: E402,F401
     inject_prefetched_urls,
 )
 from lib.tasks_pkg.message_builder._tool_history import (  # noqa: E402,F401
+    PreparedContinueToolHistory,
     inject_tool_history,
+    prepare_tool_history,
 )
 
 __all__ = [
     'inject_prefetched_urls',
     'inject_tool_history',
+    'prepare_tool_history',
+    'PreparedContinueToolHistory',
 ]

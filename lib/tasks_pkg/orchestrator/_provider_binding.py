@@ -8,12 +8,12 @@ and reused.
 
 Two bindings, one branch:
 
-1. **Hard provider pin (multi-tenant isolation).** When this task was
-   created from an inline ``provider`` block or a registered ``@prov_xxx``
-   BYO endpoint, bind THIS worker thread to that provider so every LLM
+1. **Hard route-group pin (multi-tenant isolation).** When this task owns a
+   request-scoped model-routing v2 candidate group, bind THIS worker thread
+   to that group so every LLM
    dispatch on it (main solve, L2/advanced compaction summaries, Flow role
-   replan turns) can only pick that provider's slot — never silently fall
-   back to an operator key and eat a 429. See
+   replan turns) can only pick that group's slots — never silently cross
+   into another request or operator credential. See
    ``lib/llm_dispatch/provider_pin.py``. BRANCH: only when
    ``task['_pinned_provider_id']`` is truthy.
 

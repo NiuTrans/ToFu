@@ -79,6 +79,24 @@ def test_run_async_passes_per_server_timeout(monkeypatch):
     assert seen['timeout'] == 370
 
 
+def test_internal_diagnostic_timeout_overrides_server_wait(monkeypatch):
+    bridge, namespaced = _make_bridge_with_server(timeout=360)
+    seen = {}
+
+    def _fake_run_async(coro, timeout=None):
+        seen['timeout'] = timeout
+        coro.close()
+        return 'OK'
+
+    monkeypatch.setattr(bridge, '_run_async', _fake_run_async)
+
+    assert bridge.call_tool(
+        namespaced, {}, timeout_override=30) == 'OK'
+    assert seen['timeout'] == 40
+    with pytest.raises(ValueError, match='1..300'):
+        bridge.call_tool(namespaced, {}, timeout_override=301)
+
+
 @pytest.mark.skipif(
     is_opensource_build(),
     reason='hope is a Meituan-internal MCP server, stripped from opensource builds',

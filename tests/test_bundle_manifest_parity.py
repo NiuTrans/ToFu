@@ -59,7 +59,8 @@ def test_main_routes_every_declared_domain_to_an_explicit_esm_owner():
     expected = {
         'settings', 'memory', 'skills', 'paper', 'image', 'project-brain',
         'myday', 'misc', 'orchestration', 'infrastructure', 'background',
-        'debug', 'diagnostics',
+        'diagnostics', 'knowledge', 'utility-panels', 'project',
+        'local-control', 'diagnostics-presenters', 'compaction-viewer',
     }
     assert domains == expected
     for domain in domains:

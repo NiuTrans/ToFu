@@ -42,7 +42,7 @@ BENCHMARK_PROVIDER_ID = str(os.environ.get(
 _BENCHMARK_REQUESTED_ALLOW_HOSTS = str(os.environ.get(
     'CONTEXT_BENCH_ALLOW_HOSTS',
     ('chatgpt.com' if BENCHMARK_PROVIDER_ID == 'oauth_codex'
-     else 'your-llm-gateway.example.com'))).strip()
+     else ''))).strip()
 # The frozen dispatcher validates every registered route when it builds its
 # slot table. OAuth/Codex is provisioned at boot even for a non-OpenAI test,
 # so its fixed endpoint must pass that validation without becoming eligible

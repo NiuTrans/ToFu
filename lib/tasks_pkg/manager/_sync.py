@@ -26,6 +26,7 @@ from lib.log import get_logger
 from lib.tasks_pkg.manager._events import snapshot_task_text
 from lib.tasks_pkg.manager._persist import (
     _merge_tool_rounds,
+    _task_result_segments_json,
     _tool_rounds_have_dedicated_home,
     _upsert_task_row,
     terminal_state_log_summary,
@@ -157,13 +158,7 @@ def checkpoint_task_partial(task: dict, force: bool = False):
 
             metadata["todoState"] = public_todo_state(task["_todoState"])
 
-        segments_json = None
-        if task.get("segments"):
-            from lib.tasks_pkg.segments import segments_to_json
-
-            segments_json = json.dumps(
-                segments_to_json(task["segments"]), ensure_ascii=False
-            )
+        segments_json = _task_result_segments_json(task)
         error_json = (
             _error_to_json(task["error"])
             if task.get("error") is not None
@@ -209,11 +204,13 @@ def checkpoint_task_partial(task: dict, force: bool = False):
     concurrent_tasks = [
         (str(other.get("id") or "")[:8], str(other.get("convId") or "")[:8])
         for other in chat_task_runtime.snapshot()
-        if other.get("status") == "running" and other.get("id") != task_id
+        if other.get("status") in ("pending", "running")
+        and other.get("id") != task_id
     ]
     if concurrent_tasks:
         logger.debug(
-            "[Checkpoint %s] %d other executor(s) are running: %s",
+            "[Checkpoint %s] %d other executor(s) are live "
+            "(pending/running): %s",
             task_id[:8],
             len(concurrent_tasks),
             concurrent_tasks,

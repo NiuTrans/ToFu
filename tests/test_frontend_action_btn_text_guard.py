@@ -11,7 +11,7 @@ class and squashed the button into a tiny box (the CJK label wrapped one glyph
 per line, the icon overflowed).
 
 The orphan-resume button itself is GONE now (the capability was replaced by
-automatic self-heal in core/health_stream_timer.js), so the old single-selector
+typed conversation wake recovery), so the old single-selector
 guard rotted to zero hits. But the INVARIANT it taught us is still real and
 still worth guarding, and it is bigger than one button:
 

@@ -234,6 +234,15 @@
   background: var(--bg-secondary);
 }
 
+.pm-apply-hint {
+  flex: 1 1 260px;
+  margin-right: auto;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+}
+
 /* ── Section card ── */
 .pm-section {
   background: var(--bg-primary);
@@ -512,6 +521,14 @@
   display: flex; align-items: center;
   margin-bottom: 10px; flex-shrink: 0;
 }
+/* Folder-browser filter row — reuses the recent-search input/clear component
+   (including its .modal-input specificity guards), just re-framed as a row
+   under the browser header. */
+.browse-search {
+  margin-bottom: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
 /* Selector is chained (.recent-search .recent-search-input → (0,2,0)) because the
    base `.modal input` bleed (styles.css .modal mega-line, (0,1,1)) out-specifies a
    bare .recent-search-input (0,1,0): its margin-bottom:16px inflated .recent-search
@@ -603,6 +620,29 @@
   text-overflow: ellipsis;
 }
 .recent-path-item:hover .recent-path-name { color: var(--accent); }
+
+.recent-path-item.recent-path-missing { opacity: 0.75; border-style: dashed; }
+.recent-path-item.recent-path-missing:hover .recent-path-name { color: var(--error-text, #c0392b); }
+.recent-missing-badge {
+  margin-left: 6px; padding: 0 5px; font-size: 10px; line-height: 16px;
+  border-radius: 4px; background: var(--error-bg, rgba(192, 57, 43, 0.12));
+  color: var(--error-text, #c0392b); vertical-align: 1px;
+}
+.pm-hint {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  padding: 8px 10px; font-size: 12px; border-radius: var(--radius-xs);
+  border: 1px solid var(--border, #d8d2c4);
+  background: var(--bg-hover, rgba(0, 0, 0, 0.03));
+}
+.pm-hint-text { flex: 1; word-break: break-all; }
+.pm-hint-btn {
+  flex: none; padding: 3px 10px; font-size: 12px; cursor: pointer;
+  border-radius: var(--radius-xs); border: 1px solid var(--border, #d8d2c4);
+  background: transparent; color: inherit;
+}
+.pm-hint-btn-primary {
+  background: var(--accent); color: #fff; border-color: transparent;
+}
 .recent-path-full {
   font-size: 10.5px;
   color: var(--text-tertiary);

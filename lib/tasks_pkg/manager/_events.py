@@ -12,12 +12,44 @@ from contextlib import nullcontext
 import time
 import uuid
 
+from lib.agent_core.events import EventType
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
+from lib.error_envelope import make_envelope
 from lib.log import get_logger
+from lib.task_replay import (
+    TASK_REPLAY_TERMINAL_EVENT_TYPES,
+    TASK_REPLAY_TERMINAL_STATUSES,
+)
 
 from lib.tasks_pkg.manager.runtime import chat_task_runtime
+from lib.tasks_pkg.manager._provider_ingress_guard import (
+    active_provider_ingress_token,
+    record_deferred_observer_event,
+)
 
 logger = get_logger(__name__)
+
+
+_TERMINAL_TASK_STATUSES = frozenset(TASK_REPLAY_TERMINAL_STATUSES)
+_POST_SETTLEMENT_OBSERVER_EVENT_TYPES = frozenset({
+    EventType.ROUND_COMMITTED,
+    EventType.PREFERENCE_LEARNED,
+})
+
+
+def _is_post_settlement_observer_event(task, event) -> bool:
+    """Return whether ``event`` is a sanctioned settled-Turn observer.
+
+    These two producers start only after terminal persistence and own an
+    explicit settled-Turn CAS for their projection enrichment.  Their event
+    frame remains valuable for live/cold task replay, but can never be carried
+    by the already-settled attempt transaction.  Keep the allowlist exact so
+    every late model/tool/lifecycle frame still hits the stale-attempt fence.
+    """
+    return (
+        task.get('status') in _TERMINAL_TASK_STATUSES
+        and event.get('type') in _POST_SETTLEMENT_OBSERVER_EVENT_TYPES
+    )
 
 
 def _assign_message_ids(messages):
@@ -65,30 +97,6 @@ def _assign_message_ids(messages):
     return changed
 
 
-def _new_assistant_slot(task):
-    """Build a fresh trailing assistant message slot for a task's DB commit.
-
-    Adopts the CLIENT-shipped stable id (``task['_assistantMsgId']``, minted in
-    the browser before the send POST and shipped as ``config.assistantMsgId``)
-    as the slot's ``_msgId`` — instead of letting ``_assign_message_ids`` mint a
-    DIFFERENT server UUID. This is the assistant-side analogue of the user-side
-    fix in ``build_user_msg_from_payload`` (turn_builder.py): if the ids diverge,
-    the live frontend bubble (which carries the ``tmp_`` client id) is never
-    recognised as the SAME message as the committed row on a reconnect / rescue
-    PUT, so the frontend appends it a SECOND time → duplicate assistant bubbles.
-    Preserving the id makes server and client agree on one identity for the turn.
-
-    Empty ``_assistantMsgId`` (headless / external / legacy callers that never
-    shipped one) falls through with NO ``_msgId``; ``_assign_message_ids`` then
-    mints a UUID as before — no regression for those paths.
-    """
-    slot = {'role': 'assistant', 'content': '', 'thinking': ''}
-    _amid = (task or {}).get('_assistantMsgId')
-    if _amid:
-        slot['_msgId'] = _amid
-    return slot
-
-
 def find_message_by_id(messages, msg_id):
     """Locate a message by ``_msgId``. Returns (idx, msg) or (None, None)."""
     if not msg_id or not isinstance(messages, list):
@@ -100,10 +108,16 @@ def find_message_by_id(messages, msg_id):
 
 
 def _strip_base64_for_snapshot(messages):
-    """Strip large base64 data from messages for debug snapshot (keep structure, save bandwidth)."""
+    """Project bounded public messages for a diagnostic snapshot."""
     stripped = []
     for msg in messages:
         m = dict(msg)
+        # A canonical in-process body can carry protocol replay sidecars that
+        # provider adapters consume later. They are neither OpenAI message
+        # fields nor Request Inspector data and may contain duplicated payloads.
+        m.pop('_responses_items', None)
+        m.pop('_anthropic_content_blocks', None)
+        m.pop('_tofuSameRoleSeam', None)
         content = m.get('content')
         if isinstance(content, list):
             new_blocks = []
@@ -201,7 +215,7 @@ def _try_readopt_task(task) -> bool:
     task_id = str((task or {}).get('id') or '')
     if not task_id:
         return False
-    if task.get('status') in ('done', 'error', 'aborted'):
+    if task.get('status') in TASK_REPLAY_TERMINAL_STATUSES:
         return False
     if task.get('_discarded_at'):
         return False
@@ -270,6 +284,47 @@ def append_event(task, event):
     if task.get('_suppressEvents'):
         return
 
+    if event.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES:
+        # Resource settlement precedes every terminal persistence/push. This is
+        # the one operational lifecycle seam shared by normal, Flow, reaper,
+        # queued-abort, and compatibility entry points. A hard cleanup failure
+        # cannot be published as success; durable/TTL-backed recovery is
+        # represented by the session receipt as a satisfied ``deferred`` debt.
+        try:
+            from lib.agent_core.execution_session import settle_task_execution
+            receipt = settle_task_execution(task, event=event)
+        except ValueError:
+            # Explicit legacy/test carriers that bypass TaskRuntime own no
+            # request resources and retain their existing terminal projection.
+            receipt = None
+        if receipt is not None and not receipt.invariants_satisfied:
+            envelope = make_envelope(
+                'internal', context='execution-settlement',
+                source='lib.tasks_pkg.manager._events',
+            )
+            task['status'] = 'error'
+            task['finishReason'] = 'error'
+            task['error'] = envelope
+            event['finishReason'] = 'error'
+            event['error'] = envelope
+            logger.error(
+                '[Task %s] terminal success refused: execution resource '
+                'invariant failed', str(task.get('id') or '?')[:8],
+            )
+
+    # Fold the exact canonical event into the bounded phase ledger before
+    # provider-ingress isolation can make this frame memory-local. The ledger
+    # is presentation evidence only; a failure here must never affect task
+    # execution or event delivery.
+    _trace_observed_at = int(time.time() * 1000)
+    try:
+        from lib.tasks_pkg.turn_trace import observe_task_trace_event
+        observe_task_trace_event(
+            task, event, observed_at_ms=_trace_observed_at)
+    except Exception as exc:
+        logger.debug('[TaskTrace] phase observation skipped task=%s: %s',
+                     str(task.get('id') or '?')[:8], exc)
+
     # Keep the correlation envelope identical on the TaskRuntime and legacy
     # fallback paths.  ``taskId``/``requestId`` are data fields, never metric
     # labels, so they remain safe for end-to-end diagnostics.
@@ -308,7 +363,13 @@ def append_event(task, event):
     #   frontend folds the stage text exactly when v1 would (pt: v2 lane had
     #   no stream phase text at all — the projection never carried it).
     if event.get('type') == 'phase':
-        p = {'phase': event['phase'], 'detail': event.get('detail', '')}
+        p = {
+            'phase': event['phase'],
+            'detail': event.get('detail', ''),
+            # Server wall clock for the browser's transport/render receipt.
+            # It lives on the v3 phase snapshot, not on every raw delta.
+            'emittedAt': _trace_observed_at,
+        }
         # i18n plumb: forward the stable detailKey (+ optional detailArgs) so
         #   the poll-fallback consumer localizes the label the same way the
         #   live SSE consumer does. Empty/absent keys fall back to `detail`.
@@ -316,6 +377,13 @@ def append_event(task, event):
             p['detailKey'] = event['detailKey']
         if event.get('detailArgs'):
             p['detailArgs'] = event['detailArgs']
+        if event.get('model'):
+            p['model'] = event['model']
+        if isinstance(event.get('modelRoute'), dict):
+            # Flow role routing is user-visible execution policy. Preserve it
+            # on the v3 live-phase snapshot so reconnect/poll consumers see
+            # the same selected→resolved disclosure as the raw phase frame.
+            p['modelRoute'] = dict(event['modelRoute'])
         if event.get('toolContext'): p['toolContext'] = event['toolContext']
         if event.get('toolContextTools'):
             p['toolContextTools'] = event['toolContextTools']
@@ -327,7 +395,7 @@ def append_event(task, event):
         task['phase'] = p
     elif event.get('type') == 'delta':
         task['phase'] = None  # Clear phase when LLM starts producing tokens
-    elif event.get('type') in ('done', 'error', 'aborted'):
+    elif event.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES:
         # Terminal events retire the phase snapshot. Previously ONLY deltas
         #   cleared it, so a task that ended while its last phase was still up
         #   (killed mid-compaction-summary, error right after a retrying beat)
@@ -355,12 +423,17 @@ def append_event(task, event):
             _wire.setdefault('attemptId', task.get('_attemptId', ''))
 
     if _wire is not None:
-        # Durable-before-visible ordering: the persistent task_events row MUST
-        #   commit before the frame is pushed to the client, so a cold reconnect
-        #   folding the log (event_fold.fold_cold_state_text) can never be behind
-        #   the bytes the client already holds. We hand the persist to the
-        #   runtime's before_push hook (fired after seq assignment, before push).
-        #   Best-effort: a DB blip is logged, never blocks the stream.
+        # Outside provider ingress, durable-before-visible ordering remains
+        # strict: the persistent task_events row commits before browser/webhook
+        # push.  While an upstream model stream is actively being drained, both
+        # storage and push are observers and are deliberately bypassed here;
+        # otherwise a slow Sidecar or synchronous push listener can stop socket
+        # consumption long enough to break an otherwise healthy model request.
+        # The bounded TaskRuntime replay buffer remains live, API SSE waiters
+        # are still nudged below, and the first post-ingress authoritative event
+        # carries the cumulative projection and restores the ordinary contract.
+        _ingress_token = active_provider_ingress_token(task)
+
         def _persist_before_push(_seq):
             if (event.get('type') == 'phase'
                     and isinstance(task.get('phase'), dict)):
@@ -370,6 +443,28 @@ def append_event(task, event):
             if task.get('_transientRuntime'):
                 return
             if is_conversation_attempt(task):
+                from lib.tasks_pkg.event_log import (
+                    append_persistent_event,
+                    project_persistent_event,
+                    reset_persistent_event_projection,
+                )
+                # The live frame remains byte-identical. Only its durable
+                # storage_events carrier receives the shared storage
+                # projection (usage diagnostics stripped; messages snapshots
+                # prefix-delta encoded). The August 20 atomic carrier
+                # originally bypassed this boundary and reintroduced
+                # multi-GiB O(rounds²) snapshot growth.
+                durable_wire = project_persistent_event(task['id'], _wire)
+                if _is_post_settlement_observer_event(task, _wire):
+                    # Commit-round/profile daemons own dedicated settled-Turn
+                    # CAS paths.  The attempt is terminal by construction, so
+                    # attempting turn.event.record here can only fail, plant a
+                    # false zombie-abort on successful work, and then fall
+                    # back to this exact standalone replay append.  Preserve
+                    # durable-before-visible ordering without re-entering the
+                    # closed attempt authority.
+                    append_persistent_event(task['id'], _seq, durable_wire)
+                    return
                 from lib.turn_lifecycle import record_task_event
                 # One frame = one authority transaction (2026-08-20
                 # double-write root fix): the storage_events row rides INSIDE
@@ -378,11 +473,20 @@ def append_event(task, event):
                 # dance let one commit while the other timed out — the
                 # "conflicting payload" family).  Only a stale/coalesced
                 # outcome persists the row standalone, exactly as before.
-                outcome = record_task_event(task, _wire, task_event={
-                    'task_id': task['id'], 'sequence': _seq, 'event': _wire,
-                })
+                try:
+                    outcome = record_task_event(task, _wire, task_event={
+                        'task_id': task['id'], 'sequence': _seq,
+                        'event': durable_wire,
+                    })
+                except Exception:
+                    # The transaction may not have committed. Force the next
+                    # snapshot to be a self-contained baseline rather than a
+                    # delta that depends on this uncertain row.
+                    reset_persistent_event_projection(
+                        task['id'], durable_wire)
+                    raise
                 if (outcome and event.get('type') in
-                        ('done', 'error', 'aborted')):
+                        TASK_REPLAY_TERMINAL_EVENT_TYPES):
                     # The turn projection is now durably terminal. Translation
                     # may start only after this authority boundary, otherwise
                     # its projection CAS races the final model projection.
@@ -391,8 +495,7 @@ def append_event(task, event):
                     )
                     schedule_terminal_turn_translations(task)
                 if outcome != 'carried':
-                    from lib.tasks_pkg.event_log import append_persistent_event
-                    append_persistent_event(task['id'], _seq, _wire)
+                    append_persistent_event(task['id'], _seq, durable_wire)
                 if not outcome:
                     # The conversation authority permanently rejected this attempt
                     # (settled or superseded): this worker is a zombie with no
@@ -422,21 +525,34 @@ def append_event(task, event):
                 from lib.tasks_pkg.event_log import append_persistent_event
                 append_persistent_event(task['id'], _seq, _wire)
 
-        seq = chat_task_runtime.append_event(task['id'], _wire,
-                                         before_push=_persist_before_push)
-        if seq is None and _try_readopt_task(task):
+        _before_push = None if _ingress_token else _persist_before_push
+        seq = chat_task_runtime.append_event(
+            task['id'],
+            _wire,
+            before_push=_before_push,
+            deliver_push=not bool(_ingress_token),
+        )
+        if (seq is None and not _ingress_token
+                and _try_readopt_task(task)):
             # Live task that had fallen out of the registry — re-registered
             # with a durable-aligned seq seed; retry through the runtime's
             # monotonic path instead of the legacy fallback's len() mint.
-            seq = chat_task_runtime.append_event(task['id'], _wire,
-                                             before_push=_persist_before_push)
+            # Provider ingress deliberately does not attempt this DB-backed
+            # repair: cumulative task content remains intact and the first
+            # post-provider event performs the re-adoption/convergence.
+            seq = chat_task_runtime.append_event(
+                task['id'],
+                _wire,
+                before_push=_before_push,
+                deliver_push=not bool(_ingress_token),
+            )
         if seq is None:
             # The TaskRuntime owns event sequence allocation. Minting from a
             # detached dict created a second sequence authority and caused
             # durable conflicts after retained windows were trimmed. A live
             # task may recover through _try_readopt_task on a later event; a
             # terminal or deliberately discarded task is simply retired.
-            if task.get('status') in ('done', 'error', 'aborted') \
+            if task.get('status') in TASK_REPLAY_TERMINAL_STATUSES \
                     or task.get('_discarded_at'):
                 logger.debug(
                     '[Manager] ignored event for retired task=%s type=%s',
@@ -451,6 +567,16 @@ def append_event(task, event):
                         'type=%s count=%d; no alternate sequence authority exists',
                         task['id'][:8], event.get('type'), withheld_count)
             return None
+        if _ingress_token:
+            if (event.get('type') == 'phase'
+                    and isinstance(task.get('phase'), dict)):
+                task['phase']['seq'] = seq
+            record_deferred_observer_event(
+                task,
+                token=_ingress_token,
+                sequence=seq,
+                event_type=event.get('type') or '',
+            )
 
     # Liveness clock #1 (see reap_stuck_running_tasks): REAL progress events
     #   — deltas / tool results / tool stdout chunks / retry & waiting phases —
@@ -498,8 +624,10 @@ def append_event(task, event):
     #   release the admission slot + fire BYO/tool-env disposal callbacks.
     try:
         from lib.agent_core.admission import notify_task
-        _is_terminal = (event.get('type') in ('done', 'error', 'aborted')
-                        or task.get('status') in ('done', 'error', 'aborted'))
+        _is_terminal = (
+            event.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES
+            or task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
+        )
         notify_task(task['id'], terminal=_is_terminal)
     except Exception as e:
         logger.debug('[Manager] admission notify failed task=%s: %s',

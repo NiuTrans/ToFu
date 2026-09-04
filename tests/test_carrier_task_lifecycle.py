@@ -26,6 +26,7 @@ tasks and include NEGATIVE CONTROLS (documented NEUTER toggles): flip the
 carrier filter off and the guard counts the invisible carrier again.
 """
 
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -76,6 +77,55 @@ def test_predicate_classifies_carriers():
     assert is_carrier_task(_mk('r', 'c', created=now)) is False
     # The autopilot-KICK carrier is a REAL streaming task — must stay reconnectable.
     assert is_carrier_task(_mk('k', 'c', created=now, _autopilot_kick=True)) is False
+
+
+def test_carriers_fail_closed_even_with_stale_turn_identity():
+    """A copied parent identity cannot grant an internal carrier authority."""
+    from lib.conversation_sync.attempt_identity import is_conversation_attempt
+
+    identity = {'_turnId': 'turn-parent', '_attemptId': 'attempt-parent'}
+    assert is_conversation_attempt(identity) is True
+    assert is_conversation_attempt({**identity, '_vu_subtask': True}) is False
+    assert is_conversation_attempt({**identity, '_inline_messages': True}) is False
+
+
+def test_isolated_vu_parent_patch_has_constant_size_budget():
+    """A carrier frame cannot make replay scale with the parent's history."""
+    from lib.turn_projection_patch import build_projection_patch
+
+    block = 'x' * (8 * 1024)
+    parent_projection = {
+        'content': 'parent answer',
+        'toolRounds': [
+            {'roundNum': index, 'toolContent': block}
+            for index in range(64)
+        ],
+        'segments': [
+            {'type': 'tool', 'roundNum': index, 'text': block}
+            for index in range(128)
+        ],
+    }
+    carrier_projection = {
+        'content': 'virtual-user reply',
+        'toolRounds': parent_projection['toolRounds'][:8],
+        'segments': parent_projection['segments'][:16],
+    }
+
+    contaminated = build_projection_patch(
+        carrier_projection, parent_projection,
+        base_revision=1, target_revision=2,
+    )
+    isolated = build_projection_patch(
+        parent_projection, parent_projection,
+        base_revision=1, target_revision=2,
+    )
+    contaminated_bytes = len(json.dumps(
+        contaminated, separators=(',', ':')).encode())
+    isolated_bytes = len(json.dumps(isolated, separators=(',', ':')).encode())
+
+    assert contaminated_bytes > 1024 * 1024
+    assert isolated_bytes < 256
+    assert contaminated_bytes > isolated_bytes * 1000
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -199,6 +249,60 @@ def test_vu_carrier_discarded_on_normal_return(monkeypatch):
         ]
     assert leaked == [], \
         'the VU carrier must be discarded from the registry after the turn'
+
+
+def test_vu_carrier_does_not_inherit_parent_turn_authority(monkeypatch):
+    """Carrier frames must never write through the parent's attempt identity."""
+    import lib.tasks_pkg.autopilot as ap
+    from lib.conversation_sync.attempt_identity import is_conversation_attempt
+
+    observed = {}
+
+    def _fake_single_turn(sub_task, messages_override=None):
+        observed['task'] = {
+            key: sub_task.get(key)
+            for key in ('_turnId', '_attemptId', '_turnActor', '_turnKind')
+        }
+        observed['config'] = dict(sub_task.get('config') or {})
+        observed['ownsAttempt'] = is_conversation_attempt(sub_task)
+        sub_task['content'] = 'keep going'
+        return {'content': 'keep going', 'error': None, 'thinking': '',
+                'usage': {}, 'finishReason': 'stop',
+                'messages': list(sub_task.get('messages') or [])}
+
+    import lib.tasks_pkg.orchestrator._turn as orch
+    monkeypatch.setattr(orch, '_run_single_turn', _fake_single_turn, raising=True)
+    monkeypatch.setattr(
+        ap, '_get_or_persist_objective', lambda c, m, *, user_id: '', raising=True)
+
+    task = _base_vu_task()
+    task.update({
+        '_turnId': 'turn-parent',
+        '_attemptId': 'attempt-parent',
+        '_turnActor': 'assistant',
+        '_turnKind': 'reply',
+    })
+    task['config'].update({
+        '_turnId': 'turn-parent',
+        '_attemptId': 'attempt-parent',
+        '_turnActor': 'assistant',
+        '_turnKind': 'reply',
+        'assistantMsgId': 'client-parent-message',
+        'msgId': 'legacy-parent-message',
+    })
+
+    ap.run_virtual_user(task)
+
+    assert observed['ownsAttempt'] is False
+    assert observed['task'] == {
+        '_turnId': '', '_attemptId': '', '_turnActor': 'assistant',
+        '_turnKind': 'reply',
+    }
+    for inherited_key in (
+        '_turnId', '_attemptId', '_turnActor', '_turnKind',
+        'assistantMsgId', 'msgId',
+    ):
+        assert inherited_key not in observed['config']
 
 
 def test_vu_carrier_discarded_even_when_turn_raises(monkeypatch):

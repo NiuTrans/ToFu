@@ -49,7 +49,14 @@ def apply_edited_deliverable(segments: list[dict[str, Any]] | None,
     """
     if not segments:
         return None
-    out = [dict(s) for s in segments]
+    if not isinstance(segments, (list, tuple)):
+        return None
+    # Malformed persisted siblings are isolated instead of crashing an edit.
+    # Keep only mapping segments; the authoritative projection normalizer uses
+    # the same fail-closed shape boundary on read.
+    out = [dict(s) for s in segments if isinstance(s, dict)]
+    if not out:
+        return None
     for s in out:
         if (s.get('type') == SEG_TEXT and s.get('terminal')
                 and s.get('deliverable')):

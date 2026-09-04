@@ -95,6 +95,10 @@ def test_ends_midsentence_pure():
     assert _ends_midsentence('done.') is False
     assert _ends_midsentence('(a full note)') is False
     assert _ends_midsentence('好的！') is False
+    # A protected block can legitimately be the final source item. The
+    # immutable placeholder is restored after validation, so its closing
+    # bracket is a complete boundary rather than evidence of truncation.
+    assert _ends_midsentence('说明已完成。 ⟦NT_0⟧') is False
     # Empty is not "mid-sentence" (the empty check owns that case).
     assert _ends_midsentence('') is False
     assert _ends_midsentence('   ') is False
@@ -129,6 +133,28 @@ def test_persistent_truncation_not_cached(monkeypatch):
     assert tr and tr['verdict'] == 'truncated'
     # The load-bearing guarantee: the truncated body was NOT cached.
     assert puts == [], f'a truncated translation must not be cached: {puts}'
+
+
+def test_artifact_workflow_rejects_persistent_truncation(monkeypatch):
+    """Artifact producers may fail closed instead of adopting a partial body."""
+    from lib.translate import TranslationContentRefused
+
+    puts = []
+    state = _patch_sequence(monkeypatch, [_TRUNCATED_ZH], capture_puts=puts)
+
+    with pytest.raises(TranslationContentRefused) as exc_info:
+        engine._translate_one_chunk(
+            _SOURCE,
+            system_prompt='translate',
+            source='English',
+            target='Chinese',
+            overall_deadline=30,
+            accept_truncated=False,
+        )
+
+    assert exc_info.value.verdict == 'truncated'
+    assert state['i'] >= 2
+    assert puts == []
 
 
 def test_complete_output_accepted_first_try_and_cached(monkeypatch):

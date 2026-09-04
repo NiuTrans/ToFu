@@ -51,7 +51,9 @@ def _autopilot_runner():
             if seq['vu'] < 2:
                 return {'output': 'Stop analyzing and execute — here is the '
                                   'checklist.', 'status': 'completed', 'error': ''}
-            return {'output': 'Looks complete. [VU: TASK_DONE]',
+            return {'output': (
+                        'Looks complete. [VU: TASK_DONE]\n'
+                        '[PROGRESS: resolved=1 remaining=0]'),
                     'status': 'completed', 'error': ''}
         return {'output': 'x', 'status': 'completed', 'error': ''}
 

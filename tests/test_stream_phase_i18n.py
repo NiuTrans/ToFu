@@ -52,7 +52,6 @@ CLASSIC_RENDERERS_TS = os.path.join(
     ROOT, 'frontend', 'src', 'conversation', 'ui',
     'classic-conversation-renderers.ts')
 TURN_STORE_JS = runtime_section_path('main/conversation_turn_store.js')
-HEALTH_STREAM_TIMER_JS = runtime_section_path('core/health_stream_timer.js')
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -111,6 +110,32 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
         self.assertEqual(p['detailKey'], 'stream.phase.analyzingRound')
         self.assertEqual(p['detailArgs'], {'round': 4})
 
+    def test_manager_phase_snapshot_forwards_model_route(self):
+        from lib.agent_core.events import EventType, build_event
+        from lib.tasks_pkg.manager import append_event
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        task = chat_task_runtime.create(user_id=1)
+        route = {
+            'selectedModel': 'kimi-k3',
+            'resolvedModel': 'deepseek-v4-pro',
+            'role': 'worker',
+            'tier': 'heavy',
+            'kind': 'role_tier',
+        }
+        append_event(task, build_event(
+            EventType.PHASE, phase='working',
+            detail='Model routing: kimi-k3 → deepseek-v4-pro',
+            detailKey='stream.phase.modelRouted',
+            detailArgs={
+                'from': 'kimi-k3', 'to': 'deepseek-v4-pro',
+                'role': 'worker', 'tier': 'heavy',
+            },
+            model='deepseek-v4-pro', modelRoute=route,
+        ))
+
+        self.assertEqual(task['phase']['model'], 'deepseek-v4-pro')
+        self.assertEqual(task['phase']['modelRoute'], route)
+
     def test_manager_phase_snapshot_omits_missing_keys(self):
         """Backwards-compat: a third-party emit with NO detailKey must not
         surface a spurious empty key in task['phase'] (would confuse the
@@ -162,6 +187,17 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
             src = f.read()
         self.assertIn("detailKey='stream.phase.waitingForModel'", src)
         self.assertIn("detailArgs={'model': _model_label}", src)
+
+    def test_swarm_waiting_model_phase_carries_i18n_key(self):
+        """The swarm sub-agent emitter must ship the same structured fields
+        as the main chat path — a bare English `detail` renders raw in the
+        worker bubble and never names the model."""
+        src_path = os.path.join(ROOT, 'lib', 'swarm', 'agent.py')
+        with open(src_path, encoding='utf-8') as f:
+            src = f.read()
+        self.assertIn("detailKey='stream.phase.waitingForModel'", src)
+        self.assertIn("detailArgs={'model': _model_label}", src)
+        self.assertNotIn("'Sent to the model, waiting for it to '", src)
 
     # ── _on_retry (dispatch retry HUD): the "Retrying… Endpoint unreachable
     #    (kimi-k3, attempt 1)" raw-English leak — must ship structured
@@ -286,6 +322,7 @@ const neuter = process.argv[4] === 'neuter-reasonkey';
 const zh = {
   'stream.phase.retryReason': '重试中…{reason}（{model}，第 {attempt} 次）',
   'stream.phase.retryCooldownWait': '{reason}（{model}）',
+  'stream.phase.modelRouted': '模型路由：{from} → {to}（{role}，{tier} 档）',
   'stream.retryReason.endpointUnreachable': '连不上模型服务器',
   'stream.retryReason.waitingBackoff': '等待模型（错误退避中，非限流）',
 };
@@ -337,6 +374,17 @@ if (neuter) {
     phase: 'plugin_work', detail: 'Plugin detail without a key',
   }}, {});
   check('legacy_detail_fallback', node.textContent.includes('Plugin detail without a key'));
+  renderers.renderBlock(node, {kind: 'live-status', blockId: 'live-status', value: {
+    phase: 'retrying', detail: 'Retrying after provider throttling',
+    modelRoute: {
+      selectedModel: 'kimi-k3', resolvedModel: 'deepseek-v4-pro',
+      role: 'worker', tier: 'heavy', kind: 'role_tier',
+    },
+  }}, {});
+  check('role_route_is_disclosed',
+    node.textContent.includes('模型路由')
+      && node.textContent.includes('kimi-k3')
+      && node.textContent.includes('deepseek-v4-pro'));
 }
 console.log(out.join('\n'));
 """
@@ -375,7 +423,7 @@ def _run_harness(neuter=False):
 def test_stream_phase_i18n_frontend():
     """Frontend renderer prefers detailKey → t() over raw detail."""
     output = _run_harness()
-    assert output.count('PASS') == 6, output
+    assert output.count('PASS') == 7, output
 
 
 def test_generic_waiting_key_retired_from_locales():

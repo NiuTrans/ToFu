@@ -155,6 +155,34 @@ This signing setup + the on-device cookie-persistence test are the parts that
 require a real Android SDK / device — the signed APK is first actually built by
 the tag build in CI.
 
+## Cleartext (http:// LAN servers)
+
+The add/edit-server form accepts both `http://` and `https://` base URLs, and a
+self-hosted Tofu on a private LAN is commonly reached over bare http
+(`http://192.168.1.20:8080`, `http://mynas.local`). The manifest previously set
+`android:usesCleartextTraffic="false"`, which made the WebView fail those URLs
+with `ERR_CLEARTEXT_NOT_PERMITTED` — and blocked the OkHttp-backed headless
+login the same way, since both consult Android's `NetworkSecurityPolicy`.
+
+The fix is `res/xml/network_security_config.xml`, referenced from the manifest
+via `android:networkSecurityConfig`. It permits cleartext at the **base config**
+level, because Android's network-security-config can only scope cleartext by
+**hostname** (exact match, or a single leading `*.example.com` wildcard). It has
+no notion of an IP range / CIDR, so there is no way to express "cleartext only
+for RFC1918 / LAN addresses" — a `10.*` domain entry is not valid (wildcards are
+subdomain wildcards, not address-octet wildcards), and a raw IP literal could
+only be listed one at a time, which is impossible for a user-typed URL.
+
+Why that is safe here rather than "cleartext for arbitrary sites": the shell is
+NOT a general-purpose browser. It has no address bar and its single navigation
+entry point is `loadUrl(profile.baseUrl)` — the exact URL the user typed into
+the profile form. OkHttp is likewise only ever pointed at the profile's own host
+(`login`, health probe, supervisor). So cleartext is effectively limited to
+user-configured `http://` profiles. If a future change adds general browsing, or
+the app moves to Play Store, revisit this — the smallest scoped form would be
+`base-config cleartextTrafficPermitted="false"` plus an explicit `domain-config`
+per known LAN hostname (which still cannot cover raw IPs).
+
 ## Remote start/stop (supervisor)
 
 Beyond "open" (the WebView), a profile can carry an optional **project path** so
@@ -175,7 +203,7 @@ rationale: [`docs/SUPERVISOR_DESIGN.md`](docs/SUPERVISOR_DESIGN.md).
 
 **Run the supervisor on the host** (owner-ratified: a systemd user unit):
 ```bash
-export TOFU_SUPERVISOR_PROJECTS=/abs/path/to/chatui   # ':'-separated allow-list
+export TOFU_SUPERVISOR_PROJECTS=/abs/path/to/tofu   # ':'-separated allow-list
 ./supervisor.sh install     # systemd --user unit, Restart=always
 # where user-lingering is unavailable:  ./supervisor.sh nohup
 ```
@@ -303,8 +331,9 @@ newest tagged release published, so cutting a version IS the delivery.
    `.github/workflows/build-android-apk.yml` (a plain push to `master` only
    builds/tests the debug APK — it does NOT publish a release).
 3. **Watch CI** (Actions → the `vX.Y.Z` run). On the tag it runs, in order:
-   `Assemble release APK` → `Rename release APK to canonical asset name` →
-   `Publish APK to GitHub Release`. All three must be green.
+   `keystore hash guard` → `versionCode guard` → `Assemble release APK` →
+   `Rename release APK to canonical asset name` → `Publish APK to GitHub
+   Release`. All must be green (the guards are described below).
 4. **Verify the asset name.** Open the `vX.Y.Z` Release page and confirm the
    attached asset is **exactly** `tofu-android.apk`. This is load-bearing: the
    backend deep link 404s on any other name. The coupling is guarded by the
@@ -327,6 +356,24 @@ newest tagged release published, so cutting a version IS the delivery.
    (a one-time step; subsequent same-key updates install over each other
    normally). Uninstalling clears the app's local data (saved profiles), which
    on a fresh single-user setup is harmless.
+
+### CI release guards (build-android-apk.yml)
+Two guards in `.github/workflows/build-android-apk.yml` make the
+in-place-update and version-monotonicity invariants fail loudly instead of
+silently breaking:
+
+- **`versionCode` guard (tag builds only).** On an `android-v*` tag, CI fetches
+  the previous `android-v*` tag, parses `versionCode` from that tag's
+  `android/app/build.gradle.kts`, and fails unless the current `versionCode` is
+  **strictly greater** (Android refuses a downgrade install). The first tagged
+  release has no previous tag, so the guard skips gracefully.
+- **Keystore hash guard (all builds).** Release APKs are signed with the
+  committed `app/debug.keystore`; if that file ever changes, in-place updates
+  silently break (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). CI compares the
+  keystore's sha256 against the previous `android-v*` tag's committed keystore
+  and fails on any difference (skips when no previous tag exists). Changing the
+  keystore is therefore a loud, deliberate act requiring a coordinated one-time
+  uninstall — never a silent signature break.
 
 ### Signing (why no secret is needed)
 `build.gradle.kts` binds BOTH the `debug` and `release` buildTypes to a fixed,

@@ -40,6 +40,10 @@ export interface ConversationSurfaceHost {
   >;
   onIntent?(intent: ConversationIntent): void;
   requestInspectorEnabled?(): boolean;
+  /** Synchronous client cost-cache signature per settled turn lacking an
+   *  authoritative projection cost. The async batch fill mutates no Turn
+   *  fact; the signature lets the surface footer compare see it. */
+  costSignatureSnapshot?(state: TurnState): ReadonlyMap<string, string>;
   scrollAnchor?: ScrollAnchorPort;
   getScrollViewport?(): HTMLElement | null;
   viewportOptions?: ConversationViewportOptions;
@@ -122,6 +126,9 @@ export function createConversationSurfaceController(
     translationActivityByTurn,
     artifactsByTurn,
     expandedBranchLaneId,
+    ...(host.costSignatureSnapshot && currentState
+      ? { costSignatureByTurnId: host.costSignatureSnapshot(currentState) }
+      : {}),
     requestInspectorEnabled: Boolean(host.requestInspectorEnabled?.()),
     ...(currentConversation?.autopilotSummaries
       ? { autopilotSummaries: currentConversation.autopilotSummaries } : {}),

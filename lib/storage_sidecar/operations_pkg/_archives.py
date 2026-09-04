@@ -7,13 +7,19 @@ import time
 from typing import Any
 
 from lib.storage.errors import StorageError
+from lib.storage.protocol import validate_finite_json_numbers
 from lib.storage_sidecar.adapters.base import Session
+from lib.storage_sidecar.archived_message_codec import (
+    decode_archived_message_sequence_from_storage,
+    encode_archived_message_sequence_with_metrics,
+)
 from lib.storage_sidecar.operations_pkg._common import (
     _dump,
     _integer,
     _load,
     _required_text,
 )
+from lib.storage_sidecar.projection_codec import ProjectionCodecError
 
 
 _MAX_RECEIPT_BYTES = 32 * 1024
@@ -68,6 +74,30 @@ def _decoded_receipt(row: Mapping[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _encoded_messages(messages: Any) -> bytes:
+    """Encode one public archive sequence or reject private/malformed input."""
+    validate_finite_json_numbers(messages)
+    try:
+        return encode_archived_message_sequence_with_metrics(
+            messages
+        ).stored_document
+    except ProjectionCodecError as exc:
+        raise StorageError(
+            "database_protocol_error", "Archive messages are invalid"
+        ) from exc
+
+
+def _decoded_messages(value: Any) -> list[dict[str, Any]]:
+    """Hydrate one stored archive sequence at the public integrity boundary."""
+    stored = _load(value)
+    try:
+        return decode_archived_message_sequence_from_storage(stored)
+    except ProjectionCodecError as exc:
+        raise StorageError(
+            "database_integrity", "Archive messages are malformed"
+        ) from exc
+
+
 def _metadata(row: Mapping[str, Any]) -> dict[str, Any]:
     summary = str(row["summary"] or "")
     task_model = str(row["model"] or "")
@@ -108,7 +138,7 @@ def _archive_create(session: Session, payload: Mapping[str, Any]) -> Any:
             "database_protocol_error", "Archive messages must be a list"
         )
     _require_owned_conversation(session, conversation_id, user_id)
-    encoded_messages = _dump(messages)
+    encoded_messages = _encoded_messages(messages)
     encoded_receipt = _encoded_receipt(payload)
     created_at_ms = _integer(
         payload, "created_at_ms", default=int(time.time() * 1000), minimum=0
@@ -151,7 +181,8 @@ def _archive_create(session: Session, payload: Mapping[str, Any]) -> Any:
             existing is None
             or str(existing["conversation_id"]) != conversation_id
             or int(existing["user_id"]) != user_id
-            or _dump(_load(existing["messages_json"])) != encoded_messages
+            or _dump(_decoded_messages(existing["messages_json"]))
+            != _dump(messages)
         ):
             raise StorageError(
                 "database_conflict", "Archive id has a conflicting payload"
@@ -206,9 +237,7 @@ def _archive_get(session: Session, payload: Mapping[str, Any]) -> Any:
     }
     if not include_messages:
         return {"archive": archive}
-    messages = _load(row["messages_json"])
-    if not isinstance(messages, list):
-        raise StorageError("database_integrity", "Archive messages are malformed")
+    messages = _decoded_messages(row["messages_json"])
     archive["messagesCount"] = len(messages)
     return {
         "archive": {

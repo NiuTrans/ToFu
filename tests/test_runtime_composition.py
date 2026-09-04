@@ -22,18 +22,45 @@ ROOT = Path(__file__).resolve().parents[1]
 SECTIONS = ROOT / "frontend/src/runtime/sections"
 MANIFEST = SECTIONS / "manifest.json"
 GENERATED_RUNTIME = ROOT / "frontend/src/runtime/app-runtime.js"
+GENERATED_PROJECT_BRAIN = (
+    ROOT / "frontend/src/runtime/project-brain-runtime.generated.js"
+)
+GENERATED_PAPER_READER = (
+    ROOT / "frontend/src/runtime/paper-reader-presenters.generated.js"
+)
+GENERATED_SETTINGS = (
+    ROOT / "frontend/src/runtime/settings-presenters.generated.js"
+)
+GENERATED_ORCHESTRATION = (
+    ROOT / "frontend/src/runtime/orchestration-presenters.generated.js"
+)
 pytestmark = pytest.mark.unit
 
 
 def test_runtime_manifest_is_complete_safe_and_ordered() -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
     assert manifest["output"] == "frontend/src/runtime/app-runtime.js"
     assert manifest["sections"]
+    assert manifest["lazyBundles"]
 
     names: list[str] = []
     paths: list[str] = []
-    for row in manifest["sections"]:
+    outputs = {manifest["output"]}
+    rows = list(manifest["sections"])
+    for bundle in manifest["lazyBundles"]:
+        assert re.fullmatch(r"[a-z][a-z0-9-]*", bundle["name"])
+        assert bundle["output"].startswith("frontend/src/runtime/")
+        assert bundle["output"].endswith(".generated.js")
+        assert bundle["output"] not in outputs
+        outputs.add(bundle["output"])
+        assert bundle["moduleImports"]
+        assert isinstance(bundle["registryImports"], list)
+        assert bundle["runtimeServices"]
+        assert isinstance(bundle["runtimeExports"], list)
+        assert isinstance(bundle["runtimeBindings"], list)
+        rows.extend(bundle["sections"])
+    for row in rows:
         name = row["source"]
         relative_path = row["path"]
         assert name.endswith(".js")
@@ -60,10 +87,186 @@ def test_generated_runtime_is_fresh_and_hidden_from_default_discovery() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stderr or result.stdout
-    assert GENERATED_RUNTIME.is_file()
-
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    generated_outputs = [
+        manifest["output"],
+        *(bundle["output"] for bundle in manifest["lazyBundles"]),
+    ]
     ignore = (ROOT / ".ignore").read_text(encoding="utf-8").splitlines()
-    assert "frontend/src/runtime/app-runtime.js" in ignore
+    for relative_output in generated_outputs:
+        assert (ROOT / relative_output).is_file()
+        assert relative_output in ignore
+
+
+def test_project_brain_sections_ship_only_in_the_lazy_runtime() -> None:
+    main = GENERATED_RUNTIME.read_text(encoding="utf-8")
+    lazy = GENERATED_PROJECT_BRAIN.read_text(encoding="utf-8")
+    marker = "/* ===== migrated source: project-brain.js ===== */"
+    assert marker not in main
+    assert marker in lazy
+    assert "featureRegistry as runtimeScope" in lazy
+    assert "import { _i18nLang, t } from '../i18n/index';" in lazy
+    assert "runtime dependency is unavailable" in lazy
+
+    feature = (ROOT / "frontend/src/features/project-brain.ts").read_text(
+        encoding="utf-8",
+    )
+    assert "import '../runtime/project-brain-runtime.generated.js';" in feature
+
+
+def test_paper_media_presenters_ship_only_in_the_paper_lazy_runtime() -> None:
+    main = GENERATED_RUNTIME.read_text(encoding="utf-8")
+    lazy = (
+        ROOT / "frontend/src/runtime/paper-media-presenters.generated.js"
+    ).read_text(encoding="utf-8")
+    for source in ("paper/podcast.js", "paper/video.js"):
+        marker = f"/* ===== migrated source: {source} ===== */"
+        assert marker not in main
+        assert marker in lazy
+    assert "featureRegistry as runtimeScope" in lazy
+    assert "runtime dependency is unavailable" in lazy
+
+    feature = (ROOT / "frontend/src/features/paper.ts").read_text(
+        encoding="utf-8",
+    )
+    assert "import '../runtime/paper-media-presenters.generated.js';" in feature
+
+
+def test_paper_reader_presenters_ship_only_in_the_paper_lazy_runtime() -> None:
+    main = GENERATED_RUNTIME.read_text(encoding="utf-8")
+    lazy = GENERATED_PAPER_READER.read_text(encoding="utf-8")
+    for source in ("paper/report.js", "paper-reader.js"):
+        marker = f"/* ===== migrated source: {source} ===== */"
+        assert marker not in main
+        assert marker in lazy
+    assert "featureRegistry as runtimeScope" in lazy
+    assert "runtime dependency is unavailable" in lazy
+    assert 'data-tofu-action-input="_setPaperDescribeDraft(this)"' in lazy
+    assert "runtimeScope._setPaperDescribeDraft = _setPaperDescribeDraft;" in lazy
+    generated_actions = re.search(
+        r"// BEGIN GENERATED LAZY RUNTIME ACTIONS.*?"
+        r"// END GENERATED LAZY RUNTIME ACTIONS",
+        lazy,
+        re.S,
+    )
+    assert generated_actions is not None
+    assert "runtimeScope._setPaperDescribeDraft = _setPaperDescribeDraft;" in (
+        generated_actions.group(0)
+    )
+    assert "_paperDescribeDraft=this.value" not in lazy
+
+    feature = (ROOT / "frontend/src/features/paper.ts").read_text(
+        encoding="utf-8",
+    )
+    assert "import '../runtime/paper-reader-presenters.generated.js';" in feature
+
+
+def test_settings_presenters_ship_only_in_the_settings_lazy_runtime() -> None:
+    main = GENERATED_RUNTIME.read_text(encoding="utf-8")
+    lazy = GENERATED_SETTINGS.read_text(encoding="utf-8")
+    for source in (
+        "settings.js", "settings/core_panel.js", "widgets/chip_input.js",
+        "settings/mcp.js",
+    ):
+        marker = f"/* ===== migrated source: {source} ===== */"
+        assert marker not in main
+        assert marker in lazy
+    generated_actions = re.search(
+        r"// BEGIN GENERATED LAZY RUNTIME ACTIONS — settings-presenters.*?"
+        r"// END GENERATED LAZY RUNTIME ACTIONS",
+        lazy,
+        re.S,
+    )
+    assert generated_actions is not None
+    assert "runtimeScope._mcpSaveServer = _mcpSaveServer;" in (
+        generated_actions.group(0)
+    )
+    feature = (ROOT / "frontend/src/features/settings.ts").read_text(
+        encoding="utf-8",
+    )
+    assert "import '../runtime/settings-presenters.generated.js';" in feature
+    assert "// BEGIN GENERATED LAZY RUNTIME PORTS — settings-presenters" in lazy
+    assert "let _stgModelRouting = null;" in lazy
+    assert "_stgProviders" not in lazy
+    assert "runtimeScope._renderProvidersTab = _renderProvidersTab;" in lazy
+
+
+def test_orchestration_owners_ship_only_in_the_orchestration_lazy_runtime() -> None:
+    main = GENERATED_RUNTIME.read_text(encoding="utf-8")
+    lazy = GENERATED_ORCHESTRATION.read_text(encoding="utf-8")
+    for source in (
+        "orchestration-catalog.js",
+        "orchestration-studio.js",
+        "orchestration.js",
+    ):
+        marker = f"/* ===== migrated source: {source} ===== */"
+        assert marker not in main
+        assert marker in lazy
+
+    # The lightweight saved-Flow catalogue and generated API client are typed
+    # startup owners; none of their retired classic sources may survive in
+    # either runtime.
+    for source in (
+        "api/orchestration-http-contract.generated.js",
+        "api/orchestration-response-contracts.js",
+        "api/orchestration-client-methods.js",
+        "api/orchestration-endpoint-transport.js",
+        "api/orchestration-endpoints.js",
+        "api/orchestrations.js",
+        "orchestration-flow-catalog.js",
+    ):
+        marker = f"/* ===== migrated source: {source} ===== */"
+        assert marker not in main
+        assert marker not in lazy
+    prelude = (ROOT / "frontend/src/runtime/sections/_prelude.js").read_text()
+    epilogue = (ROOT / "frontend/src/runtime/sections/_epilogue.js").read_text()
+    assert "from '../features/orchestration/flow-catalog'" in prelude
+    assert "from '../features/orchestration/api-client'" in prelude
+    assert "from '../core/feature-flags-loader'" in prelude
+    assert "installOrchestrationApiClient(Api);" in epilogue
+    assert "api: resolveOrchestrationApiClient" in epilogue
+    assert "request: () => Api.request('/api/v1/features'" in epilogue
+    assert "window.Api.request" not in epilogue
+
+    assert "const {\n  ORCHESTRATION_LAYOUT_BREAKPOINTS," in lazy
+    actions = re.search(
+        r"// BEGIN GENERATED LAZY RUNTIME ACTIONS — orchestration-presenters.*?"
+        r"// END GENERATED LAZY RUNTIME ACTIONS",
+        lazy,
+        re.S,
+    )
+    assert actions is not None
+    assert "runtimeScope.openOrchestration = openOrchestration;" in actions.group(0)
+    assert (
+        "runtimeScope.openTaskMode = orchestrationRegistry.openTaskMode;"
+        in actions.group(0)
+    )
+
+    feature = (ROOT / "frontend/src/features/orchestration.ts").read_text(
+        encoding="utf-8",
+    )
+    for owner in (
+        "./orchestration-core-owners",
+        "./orchestration-view-owners",
+        "./orchestration-studio-view-owners",
+    ):
+        assert feature.index(f"import '{owner}';") < feature.index(
+            "import '../runtime/orchestration-presenters.generated.js';",
+        )
+
+
+def test_lazy_runtime_has_no_accidental_browser_global_dependencies() -> None:
+    result = subprocess.run(
+        ["node", "scripts/check_lazy_runtime_bindings.mjs"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    expected = len(manifest["lazyBundles"])
+    assert f"Lazy runtime bindings verified ({expected} bundles)." in result.stdout
 
 
 def test_literal_runtime_section_references_resolve_to_live_owners() -> None:

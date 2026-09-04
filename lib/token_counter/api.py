@@ -22,7 +22,10 @@ from .base import CountResult
 from .config import API_THRESHOLD, MODE
 from .heuristic import cheap_estimate, cheap_estimate_text
 from .resolver import force_backend, resolve
-from .tiktoken_counter import count_text as _tiktoken_count_text
+from .tiktoken_counter import (
+    cached_cheap_estimate_text,
+    count_text as _tiktoken_count_text,
+)
 from .usage_cache import invalidate, record_usage
 
 logger = get_logger(__name__)
@@ -40,7 +43,8 @@ def count_tokens(messages: list, *,
                  context_limit: Optional[int] = None,
                  mode: str = 'auto',
                  api_base_url: Optional[str] = None,
-                 api_key: Optional[str] = None) -> dict:
+                 api_key: Optional[str] = None,
+                 measurement_out: Optional[dict[str, Any]] = None) -> dict:
     """Count tokens for a full request. **The public entry point.**
 
     Args:
@@ -60,6 +64,8 @@ def count_tokens(messages: list, *,
                   ``'heuristic'``. Defaults to env-configured MODE.
         api_base_url / api_key: Needed by the upstream API backends
                   (Anthropic / Gemini). Ignored by local backends.
+        measurement_out: Optional call-local, content-free counter evidence.
+                  Callers must never persist identity-keyed reuse hints.
 
     Returns:
         ``{'tokens': int, 'method': str, 'elapsed_ms': int,
@@ -87,6 +93,7 @@ def count_tokens(messages: list, *,
         'api_base_url': api_base_url,
         'api_key': api_key,
         'context_limit': context_limit,
+        'measurement_out': measurement_out,
     }
     # Most calls finish in the usage cache or a local tokenizer.  The cheap
     # estimate cannot affect either successful result, so do not scan a long
@@ -151,21 +158,23 @@ def count_tokens(messages: list, *,
 # count_text — fast single-string API
 # ───────────────────────────────────────────────────────────────────────────
 
-def count_text(text: str, *, model: str = '') -> int:
+def count_text(text: str, *, model: str = '', reusable: bool = False) -> int:
     """Cheap count for a single text blob. Uses tiktoken when available,
     heuristic otherwise. Used by code paths that count individual tool
-    results / args without building a full message list.
+    results / args without building a full message list. ``reusable`` lowers
+    the digest-cache admission floor for caller-proven repeated text; it never
+    changes tokenizer selection or the returned count.
     """
     if not text:
         return 0
     # Try tiktoken first (exact for OpenAI, good for others)
-    n = _tiktoken_count_text(text, model)
+    n = _tiktoken_count_text(text, model, reusable=reusable)
     if n > 0:
         return n
     return cheap_estimate_text(text)
 
 
 __all__ = [
-    'count_tokens', 'count_text',
+    'count_tokens', 'count_text', 'cached_cheap_estimate_text',
     'record_usage', 'invalidate',
 ]

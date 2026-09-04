@@ -5,6 +5,7 @@
 """
 
 import hashlib
+import json
 import math
 import re
 import time
@@ -26,8 +27,9 @@ from lib.tasks_pkg.compaction._constants import (
 from lib.tasks_pkg.compaction._tokens import (
     _compaction_trigger_threshold,
     _estimate_total_tokens,
-    _fixed_observed_survival_payback_horizon,
+    _fixed_compaction_cadence_payback_horizon,
     _get_context_limit,
+    _record_compaction_cadence,
     _should_force_compact,
     _usable_context,
 )
@@ -38,6 +40,7 @@ from lib.tasks_pkg.compaction._receipt import (
 from lib.tasks_pkg.compaction._layer2._anchor import (
     _collect_user_verbatim,
     _extract_current_query,
+    _extract_objective_anchor_text,
     _extract_recently_accessed_files,
     _find_turn_boundary,
     _fold_recent_intra_turn,
@@ -46,6 +49,8 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
 from lib.tasks_pkg.compaction._layer2._summary import _generate_query_aware_summary
 from lib.tasks_pkg.compaction._layer2._prompt import (
     _SUMMARY_SYSTEM_PROMPT,
+    _build_summary_user_content,
+    _extract_summary_objective,
     _format_messages_for_summary,
     _summary_input_char_budget,
 )
@@ -53,6 +58,9 @@ from lib.tasks_pkg.compaction._layer2._prompt import (
 logger = get_logger(__name__)
 
 _USER_VERBATIM_AUDIT_LATCH = {'done': False}
+_DETERMINISTIC_RECOVERY_SNAPSHOT_CHARS = 12_000
+_DETERMINISTIC_RECOVERY_EVIDENCE_CHARS = 8_000
+_DETERMINISTIC_RECOVERY_MAX_CHARS = 22_000
 
 
 def _task_owner(task):
@@ -78,6 +86,134 @@ def _audit_user_verbatim_once() -> None:
                   approved_by='user')
     except Exception as e:
         logger.debug('[Compact] user-verbatim config audit skipped: %s', e)
+
+
+def _bounded_task_state_text(snapshot, *, max_chars: int) -> str:
+    """Render a valid, globally bounded TaskStateSnapshotV1 JSON object."""
+    limit = max(1_000, int(max_chars))
+    raw = snapshot.to_dict()
+    payload = {}
+    sequences: dict[str, list] = {}
+    for key, value in raw.items():
+        if isinstance(value, (list, tuple)):
+            payload[key] = []
+            sequences[key] = list(value)
+        elif isinstance(value, str):
+            scalar_limit = 4_000 if key == 'goal' else 1_000
+            payload[key] = value[:scalar_limit]
+        else:
+            payload[key] = value
+
+    def _render() -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+            default=str,
+        )
+
+    rendered = _render()
+    while len(rendered) > limit:
+        candidates = [
+            key for key, value in payload.items()
+            if isinstance(value, str) and value
+        ]
+        if not candidates:
+            break
+        key = max(candidates, key=lambda candidate: len(payload[candidate]))
+        overflow = len(rendered) - limit
+        payload[key] = payload[key][:-max(1, overflow)]
+        rendered = _render()
+
+    # Round-robin allocation prevents one large state category from starving
+    # all later categories. Every accepted candidate keeps the JSON valid.
+    longest = max((len(values) for values in sequences.values()), default=0)
+    for index in range(longest):
+        for key, values in sequences.items():
+            if index >= len(values):
+                continue
+            payload[key].append(str(values[index])[:600])
+            rendered = _render()
+            if len(rendered) > limit:
+                payload[key].pop()
+                rendered = _render()
+    return rendered
+
+
+def _deterministic_recovery_summary(
+    messages: list, task: dict | None,
+) -> str:
+    """Build a provider-independent, bounded emergency compaction receipt.
+
+    This path is reserved for the final dispatch-admission guard. It makes no
+    completion claims from assistant prose: state and evidence are projected
+    from the current transcript/tool records, while user instructions and the
+    recent hot tail stay verbatim elsewhere in the compacted request.
+    """
+    sections = [
+        '## Deterministic Compaction Recovery\n'
+        'A model-written summary was unavailable. This receipt contains only '
+        'bounded projections from the current transcript and task records; it '
+        'does not claim that mutable files or tests are still current. The '
+        'opening request, a bounded set of earlier user messages, and recent '
+        'complete rounds remain separately preserved in the compacted request.',
+    ]
+
+    try:
+        from lib.tasks_pkg.context_composer.task_state import (
+            derive_task_state_snapshot,
+        )
+        snapshot = derive_task_state_snapshot(messages, task)
+        snapshot_text = _bounded_task_state_text(
+            snapshot,
+            max_chars=_DETERMINISTIC_RECOVERY_SNAPSHOT_CHARS,
+        )
+        sections.append('## TaskStateSnapshotV1\n' + snapshot_text)
+    except Exception as exc:
+        logger.warning(
+            '[Compact] deterministic task-state projection failed (%s)',
+            type(exc).__name__,
+        )
+        sections.append(
+            '## TaskStateSnapshotV1\n'
+            'Projection unavailable because local extraction failed; no '
+            'model-generated replacement claims were inserted.')
+
+    try:
+        from lib.tasks_pkg.compaction._evidence import (
+            bound_evidence_ledger,
+            build_evidence_ledger,
+            format_evidence_ledger,
+        )
+        ledger = ((task or {}).get('_contextEvidenceLedger')
+                  if isinstance(task, dict) else None)
+        if not isinstance(ledger, dict):
+            ledger = build_evidence_ledger(messages, task)
+        ledger = bound_evidence_ledger(
+            ledger,
+            max_chars=_DETERMINISTIC_RECOVERY_EVIDENCE_CHARS,
+        )
+        if isinstance(task, dict):
+            task['_contextEvidenceLedger'] = ledger
+        evidence_text = format_evidence_ledger(ledger).strip()
+        if evidence_text:
+            sections.append(evidence_text)
+    except Exception as exc:
+        logger.warning(
+            '[Compact] deterministic evidence projection failed (%s)',
+            type(exc).__name__,
+        )
+
+    rendered = '\n\n'.join(sections).strip()
+    if len(rendered) <= _DETERMINISTIC_RECOVERY_MAX_CHARS:
+        return rendered
+    # The evidence section is advisory and independently reconstructible.
+    # Drop it whole rather than cutting JSON or an evidence record mid-entry.
+    rendered_without_evidence = '\n\n'.join(sections[:2]).strip()
+    if len(rendered_without_evidence) <= _DETERMINISTIC_RECOVERY_MAX_CHARS:
+        return rendered_without_evidence
+    return sections[0]
 
 
 def _summary_covers_state_value(summary: str, value: str) -> bool:
@@ -122,6 +258,7 @@ def _projected_summary_usage_tokens(
     messages: list,
     current_query: str,
     task: dict | None,
+    anchor_text: str = '',
 ) -> int:
     """Conservative pre-dispatch cost estimate for proactive ROI gating.
 
@@ -136,16 +273,19 @@ def _projected_summary_usage_tokens(
         evidence_chars = max(2_000, min(16_000, char_budget // 4))
         history_budget = max(
             4_000,
-            char_budget - evidence_chars - len(current_query or '') - 500,
+            char_budget - evidence_chars - len(current_query or '')
+            - len(anchor_text or '') - 900,
         )
         formatted = _format_messages_for_summary(
             messages, char_budget=history_budget)
+        user_content = _build_summary_user_content(
+            anchor_text=anchor_text,
+            latest_user_message=current_query,
+            formatted_history=formatted,
+        )
         base_prompt = [
             {'role': 'system', 'content': _SUMMARY_SYSTEM_PROMPT},
-            {'role': 'user', 'content': (
-                f'## Current User Query\n{current_query}\n\n'
-                '## Conversation History to Compress\n\n'
-                f'{formatted}')},
+            {'role': 'user', 'content': user_content},
         ]
         base_tokens = _estimate_total_tokens(base_prompt)
         # Evidence is structured JSON and paths: ~3 chars/token is a more
@@ -160,7 +300,14 @@ def _projected_summary_usage_tokens(
 def _proactive_cache_economics(task: dict | None, *, tokens_before: int,
                                 candidate_tokens: int,
                                 summary_usage_tokens: int = 0) -> dict:
-    """Project cache rewrite break-even for one automatic L2 candidate."""
+    """Project cache rewrite break-even for one automatic L2 candidate.
+
+    Rates are resolved independently for the current and candidate prompt, so
+    crossing any provider-declared context-pricing tier is reflected without a
+    model-name special case. Recurring savings compare only the observed warm
+    cached prefix before/after the rewrite; uncached tail tokens are not
+    optimistically treated as future cache reads.
+    """
     conv_id = (task or {}).get('convId', '') or ''
     model = ((task or {}).get('config', {}) or {}).get('model', '') or ''
     provider_id = (task or {}).get('provider_id') or ''
@@ -172,25 +319,116 @@ def _proactive_cache_economics(task: dict | None, *, tokens_before: int,
         logger.debug('[Compact] warm-cache lookup failed: %s', e)
         cache_read = 0
 
+    total_before = max(0, int(tokens_before))
+    total_after = max(0, int(candidate_tokens))
+    dropped = max(0, total_before - total_after)
+    cache_replay_before = min(total_before, max(0, cache_read))
+    cache_replay_after = min(total_after, max(0, cache_read))
+
     cache_write_mul = 1.0
     cache_read_mul = 1.0
     pricing_source = 'conservative_default'
+    pricing_before = None
+    pricing_after = None
     try:
-        from lib.pricing import lookup_pricing
-        pricing = lookup_pricing(model, provider_id or None)
-        if pricing:
+        from lib.pricing import get_pricing_data, lookup_pricing
+        pricing_before = lookup_pricing(
+            model, provider_id or None, prompt_tokens=total_before)
+        pricing_after = lookup_pricing(
+            model, provider_id or None, prompt_tokens=total_after)
+        if pricing_after:
             cache_write_mul = max(0.0, float(
-                pricing.get('cacheWriteMul', 1.0)))
+                pricing_after.get('cacheWriteMul', 1.0)))
+        if pricing_before:
             cache_read_mul = max(0.0, float(
-                pricing.get('cacheReadMul', 1.0)))
+                pricing_before.get('cacheReadMul', 1.0)))
             pricing_source = str(
-                pricing.get('_pricingSource') or 'resolved_price')
+                pricing_before.get('_pricingSource') or 'resolved_price')
+
+        if pricing_before and pricing_after:
+            exchange_rate = float(
+                get_pricing_data().get('usdToCny') or 1.0)
+
+            def input_rate_usd(pricing: dict) -> float:
+                rate = max(0.0, float(pricing.get('input') or 0.0))
+                currency = str(pricing.get('currency') or 'USD').upper()
+                return (rate / exchange_rate
+                        if currency == 'CNY' and exchange_rate > 0 else rate)
+
+            before_input_usd = input_rate_usd(pricing_before)
+            after_input_usd = input_rate_usd(pricing_after)
+            before_read_mul = max(0.0, float(
+                pricing_before.get('cacheReadMul', 1.0)))
+            after_read_mul = max(0.0, float(
+                pricing_after.get('cacheReadMul', 1.0)))
+            after_write_mul = max(0.0, float(
+                pricing_after.get('cacheWriteMul', 1.0)))
+
+            replay_before_usd = (
+                cache_replay_before * before_input_usd * before_read_mul
+                / 1_000_000)
+            replay_after_usd = (
+                cache_replay_after * after_input_usd * after_read_mul
+                / 1_000_000)
+            savings_per_round_usd = max(
+                0.0, replay_before_usd - replay_after_usd)
+            cache_rewrite_tokens = cache_replay_after
+            rewrite_cost_usd = (
+                cache_rewrite_tokens * after_input_usd * after_write_mul
+                / 1_000_000)
+            summary_cost_usd = (
+                max(0, int(summary_usage_tokens)) * after_input_usd
+                / 1_000_000)
+            reference_input_usd = after_input_usd or before_input_usd
+            if reference_input_usd > 0:
+                token_scale = 1_000_000 / reference_input_usd
+                rewrite_cost = rewrite_cost_usd * token_scale
+                summary_cost = summary_cost_usd * token_scale
+                savings_per_round = savings_per_round_usd * token_scale
+                total_cost = rewrite_cost_usd + summary_cost_usd
+                payback_rounds = (
+                    total_cost / savings_per_round_usd
+                    if savings_per_round_usd > 0 else float('inf'))
+                before_tier = pricing_before.get('selectedTier') or {}
+                after_tier = pricing_after.get('selectedTier') or {}
+                return {
+                    'cache_read_tokens': cache_read,
+                    'cache_replay_tokens_before': cache_replay_before,
+                    'cache_replay_tokens_after': cache_replay_after,
+                    'cache_rewrite_tokens': cache_rewrite_tokens,
+                    'dropped_tokens': dropped,
+                    'cache_write_mul': after_write_mul,
+                    'cache_read_mul': before_read_mul,
+                    'marginal_savings_per_dropped_token': (
+                        before_input_usd * before_read_mul
+                        / reference_input_usd),
+                    'rewrite_cost_tokens': rewrite_cost,
+                    'summary_cost_tokens': summary_cost,
+                    'savings_per_round_tokens': savings_per_round,
+                    'rewrite_cost_usd': rewrite_cost_usd,
+                    'summary_cost_usd': summary_cost_usd,
+                    'savings_per_round_usd': savings_per_round_usd,
+                    'payback_rounds': payback_rounds,
+                    'pricing_source': pricing_source,
+                    'pricing_before': {
+                        'tier_id': before_tier.get('id'),
+                        'input_rate_usd': before_input_usd,
+                        'cache_read_mul': before_read_mul,
+                    },
+                    'pricing_after': {
+                        'tier_id': after_tier.get('id'),
+                        'input_rate_usd': after_input_usd,
+                        'cache_read_mul': after_read_mul,
+                        'cache_write_mul': after_write_mul,
+                    },
+                    'crosses_pricing_tier': (
+                        before_tier.get('id') != after_tier.get('id')),
+                }
     except Exception as e:
         logger.debug('[Compact] cache pricing lookup failed: %s', e)
 
-    dropped = max(0, int(tokens_before) - int(candidate_tokens))
     cache_rewrite_tokens = min(
-        max(0, int(candidate_tokens)), max(0, cache_read))
+        total_after, max(0, cache_read))
     rewrite_cost = cache_rewrite_tokens * cache_write_mul
     savings_per_round = dropped * cache_read_mul
     summary_cost = max(0, int(summary_usage_tokens))
@@ -199,12 +437,16 @@ def _proactive_cache_economics(task: dict | None, *, tokens_before: int,
                       if savings_per_round > 0 else float('inf'))
     return {
         'cache_read_tokens': cache_read,
+        'cache_replay_tokens_before': cache_replay_before,
+        'cache_replay_tokens_after': cache_replay_after,
         'cache_rewrite_tokens': cache_rewrite_tokens,
         'dropped_tokens': dropped,
         'cache_write_mul': cache_write_mul,
         'cache_read_mul': cache_read_mul,
+        'marginal_savings_per_dropped_token': cache_read_mul,
         'rewrite_cost_tokens': rewrite_cost,
         'summary_cost_tokens': summary_cost,
+        'savings_per_round_tokens': savings_per_round,
         'payback_rounds': payback_rounds,
         'pricing_source': pricing_source,
     }
@@ -223,20 +465,21 @@ def _proactive_payback_policy(
     veto candidates that the adaptive decision had explicitly admitted.  Use
     that same bounded remaining-round horizon for both exact candidate checks.
     The fixed strategy starts with the shipped one-round rule, then earns a
-    bounded wider horizon from observed task survival.  The task's remaining
-    hard API-round budget caps that horizon.
+    bounded wider horizon from observed prefix-rewrite cadence. The task's
+    remaining hard API-round budget caps that horizon.
     """
     fixed = max(0.0, float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
     cfg = ((task or {}).get('config') or {}) if isinstance(task, dict) else {}
     comp_cfg = cfg.get('compaction') if isinstance(cfg, dict) else None
     if not (isinstance(comp_cfg, dict)
             and str(comp_cfg.get('strategy') or '').lower() == 'adaptive'):
-        horizon = _fixed_observed_survival_payback_horizon(
+        horizon = _fixed_compaction_cadence_payback_horizon(
+            task,
             current_round,
             remaining_api_rounds=remaining_api_rounds,
         )
         if horizon > fixed:
-            return horizon, 'fixed_observed_survival'
+            return horizon, 'fixed_compaction_cadence'
         return fixed, 'fixed_one_round'
 
     decision = (task or {}).get('_adaptiveCompactionDecision')
@@ -281,8 +524,9 @@ def _proactive_retry_growth_tokens(
         if deficit > 0 and target < 1.0:
             proof_growth = math.ceil(deficit / (1.0 - target))
     elif reason == 'cache_negative':
-        read_multiplier = max(
-            0.0, float(economics.get('cache_read_mul') or 0.0))
+        marginal_savings = max(0.0, float(economics.get(
+            'marginal_savings_per_dropped_token',
+            economics.get('cache_read_mul') or 0.0)))
         try:
             target_rounds = float(economics.get(
                 'payback_limit_rounds', _AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
@@ -295,7 +539,7 @@ def _proactive_retry_growth_tokens(
             0.0, float(economics.get('rewrite_cost_tokens') or 0.0))
         summary_cost = max(
             0.0, float(economics.get('summary_cost_tokens') or 0.0))
-        denominator = read_multiplier * target_rounds
+        denominator = marginal_savings * target_rounds
         total_cost = rewrite_cost + summary_cost
         if denominator > 0 and math.isfinite(total_cost):
             required_dropped = math.ceil(total_cost / denominator)
@@ -394,6 +638,11 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 budget_tokens, max_turns)
 
     current_query = _extract_current_query(messages)
+    # The earliest-request anchor is re-supplied to the summary model as
+    # VERBATIM evidence (it is pulled out of ``summary_input`` below for live
+    # re-insertion, so the model would not see it otherwise); the model
+    # authors the receipt's Objective itself from that evidence.
+    anchor_text = _extract_objective_anchor_text(messages)
 
     boundary = _find_turn_boundary(
         messages, budget_tokens=budget_tokens, max_turns=max_turns,
@@ -438,14 +687,17 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     #   compaction → unbounded drift), so we PULL IT OUT and re-insert it
     #   verbatim exactly once, right after the system messages.  If it is
     #   already in ``recent_messages`` (short conversation) there is nothing to
-    #   do — it's preserved as-is.  Because the anchor is a genuine existing
-    #   message (not a synthesized prepend), a subsequent compaction finds the
-    #   SAME message already at the front of ``recent_messages`` and never
-    #   duplicates it — idempotent, byte-identical, cache-prefix-stable.
+    #   do — it's preserved as-is.  Re-insertion uses a shallow message copy so
+    #   the request projection can carry a private structural identity without
+    #   mutating the authoritative message. The API fields remain verbatim. A
+    #   subsequent compaction finds the SAME content at the front of
+    #   ``recent_messages`` and never duplicates it — idempotent,
+    #   byte-identical, cache-prefix-stable.
     anchor_idx = _objective_anchor_index(messages)
     anchor_msg = None
     if anchor_idx is not None and anchor_idx < boundary:
-        anchor_msg = messages[anchor_idx]
+        anchor_msg = dict(messages[anchor_idx])
+        anchor_msg['_isObjectiveAnchor'] = True
         # Summarize everything old EXCEPT the anchor.
         old_messages = [m for k, m in enumerate(messages[:boundary])
                         if k != anchor_idx]
@@ -512,7 +764,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     # goal is user intent or window correctness.
     _foldable_tokens = _estimate_total_tokens(summary_input)
     _projected_summary_cost = _projected_summary_usage_tokens(
-        summary_input, current_query, task) if _proactive else 0
+        summary_input, current_query, task,
+        anchor_text=anchor_text) if _proactive else 0
     if _proactive:
         _best_candidate_tokens = max(0, tokens_before - _foldable_tokens)
         _best_econ = _proactive_cache_economics(
@@ -584,12 +837,57 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
 
     _summary_usage: dict = {}
     _summary_started = time.monotonic()
-    summary_text = _generate_query_aware_summary(
-        summary_input, current_query, pfx, conv_id=conv_id, task=task,
-        usage_out=_summary_usage,
-    )
+    _summary_pipeline_failure_reason = ''
+    try:
+        summary_text = _generate_query_aware_summary(
+            summary_input, current_query, pfx, conv_id=conv_id, task=task,
+            usage_out=_summary_usage,
+            anchor_text=anchor_text,
+        )
+    except Exception as exc:
+        if not kwargs.get('_allow_deterministic_summary_fallback'):
+            raise
+        _summary_pipeline_failure_reason = 'summary_pipeline_exception'
+        summary_text = None
+        logger.exception(
+            '%s [Compact] Summary pipeline raised (%s) — attempting '
+            'deterministic recovery', pfx, type(exc).__name__)
     _summary_duration_ms = round(
         (time.monotonic() - _summary_started) * 1000)
+
+    _summary_fallback = False
+    _summary_fallback_reason = ''
+    if (not summary_text
+            and kwargs.get('_allow_deterministic_summary_fallback')):
+        try:
+            summary_text = _deterministic_recovery_summary(messages, task)
+        except Exception as exc:
+            _summary_pipeline_failure_reason = 'deterministic_recovery_failed'
+            summary_text = None
+            logger.exception(
+                '%s [Compact] Deterministic recovery pipeline raised (%s)',
+                pfx, type(exc).__name__)
+        _summary_fallback = bool(summary_text)
+        if _summary_fallback:
+            _summary_fallback_reason = (
+                _summary_pipeline_failure_reason
+                or 'model_summary_unavailable')
+            logger.warning(
+                '%s [Compact] Summary model unavailable — using bounded '
+                'deterministic recovery receipt', pfx)
+            try:
+                from lib.log import audit_log
+                audit_log(
+                    'compaction_summary_fallback',
+                    conv=str(conv_id or '')[:16],
+                    task=str((task or {}).get('id') or '')[:16],
+                    reason=_summary_fallback_reason,
+                    implementation='deterministic_recovery_receipt',
+                )
+            except Exception as exc:
+                logger.debug(
+                    '%s [Compact] deterministic fallback audit failed: %s',
+                    pfx, exc)
 
     if not summary_text:
         logger.warning('%s [Compact] Summary generation failed — keeping messages intact', pfx)
@@ -602,10 +900,13 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 'reason': kwargs.get('_compaction_reason') or '',
                 'summary_usage': dict(_summary_usage),
                 'summary_duration_ms': int(_summary_duration_ms),
-                'summaryFailureReason': 'summary_failed',
+                'summaryFailureReason': (
+                    _summary_pipeline_failure_reason or 'summary_failed'),
             })
         return ('Context compaction attempted but summary generation failed. '
                 'Messages preserved as-is.')
+
+    _recovery_base_summary = summary_text if _summary_fallback else ''
 
     # V2 validates critical state before accepting lossy model prose. If the
     # model omitted unfinished work or grounded mutation/test evidence, reject
@@ -613,7 +914,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     # projection. This evicts cold history without claiming the rejected
     # summary was faithful.
     _comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction') or {}
-    if str(_comp_cfg.get('strategy') or '').lower() == 'adaptive':
+    if (not _summary_fallback
+            and str(_comp_cfg.get('strategy') or '').lower() == 'adaptive'):
         try:
             import json as _json
             from lib.tasks_pkg.context_composer.task_state import (
@@ -674,14 +976,31 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             return ('Context compaction attempted but summary validation '
                     'failed. Messages preserved as-is.')
 
+    # The receipt's model-authored Objective is the current effective goal —
+    # re-pin the autopilot objective when it changed so the VU measures the
+    # assistant against the LATEST binding human goal, not a stale opening
+    # ask. No-ops without a pin, without an Objective section, or when the
+    # adaptive fallback replaced the model prose (no Objective → no re-pin).
+    # Fully fail-safe: run bookkeeping must never break compaction.
+    try:
+        from lib.tasks_pkg.autopilot_state import _update_objective_from_receipt
+        _update_objective_from_receipt(
+            conv_id, _extract_summary_objective(summary_text),
+            user_id=_task_owner(task))
+    except Exception as exc:
+        logger.debug('%s [Compact] autopilot objective re-pin skipped: %s',
+                     pfx, exc)
+
     recent_files = _extract_recently_accessed_files(messages)
+    _recent_files_block = ''
     if recent_files:
         file_list = '\n'.join(f'  - {f}' for f in recent_files)
-        summary_text += (
+        _recent_files_block = (
             f'\n\n### Recently Accessed Files\n'
             f'Use read_files to review current state if needed:\n'
             f'{file_list}'
         )
+        summary_text += _recent_files_block
 
     # Codex-inspired (turn_diff_tracker.rs): the summary must preserve WHAT
     # changed this turn, not just WHICH files. Journal pre-images make this
@@ -698,6 +1017,23 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             _turn_diff_included = True
     except Exception as e:
         logger.debug('%s [Compact] turn-diff block failed: %s', pfx, e)
+
+    if (_summary_fallback
+            and len(summary_text) > _DETERMINISTIC_RECOVERY_MAX_CHARS):
+        # Optional freshness hints must not break the emergency receipt's one
+        # global budget. Prefer the bounded recovery state, then add recent
+        # file handles only if the complete block still fits; drop the turn
+        # diff whole rather than cutting any record mid-entry.
+        summary_text = _recovery_base_summary
+        _turn_diff_included = False
+        if (_recent_files_block
+                and len(summary_text + _recent_files_block)
+                <= _DETERMINISTIC_RECOVERY_MAX_CHARS):
+            summary_text += _recent_files_block
+        logger.warning(
+            '%s [Compact] Recovery receipt extras exceeded %d chars; '
+            'dropped optional blocks to preserve the global budget',
+            pfx, _DETERMINISTIC_RECOVERY_MAX_CHARS)
 
     system_msgs = []
     for msg in old_messages:
@@ -911,6 +1247,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             'projected_summary_usage_tokens': int(_projected_summary_cost),
             'summary_usage': dict(_summary_usage),
             'summary_duration_ms': int(_summary_duration_ms),
+            'summaryFallback': bool(_summary_fallback),
+            'summaryFallbackReason': _summary_fallback_reason,
             'summarized_messages': int(compacted_message_count),
             'preserved_turns': int(preserved_turns),
             'folded_tool_rounds': sum(
@@ -920,6 +1258,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 and message.get('tool_calls')
             ),
             'objective_anchored': anchor_msg is not None,
+            'durable_objective_applied': bool(
+                _extract_summary_objective(summary_text)),
             'retained_user_messages': len(retained_user_texts),
             'recent_files': list(recent_files),
             'turn_diff_included': bool(_turn_diff_included),
@@ -1078,7 +1418,8 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
             'threshold')
     _skip_archive = bool(kwargs.get('_compaction_skip_archive')
                          if isinstance(kwargs, dict) else False)
-    _meta: dict = {}
+    _external_meta = kwargs.get('_result_meta')
+    _meta: dict = _external_meta if isinstance(_external_meta, dict) else {}
     compact_result = execute_compact_tool(
         messages, task=task,
         keep_recent_pairs=keep_recent_pairs,
@@ -1091,6 +1432,8 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         _compaction_remaining_api_rounds=kwargs.get(
             '_compaction_remaining_api_rounds'),
         _proactive_economic=not force,
+        _allow_deterministic_summary_fallback=bool(
+            kwargs.get('_allow_deterministic_summary_fallback')),
         _message_tokens_before=(
             _measurement_out.get('message_tokens')
             if _measurement_out is not None else None),
@@ -1240,6 +1583,8 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                     # Context was bounded — surface as a real compaction so
                     # the pipeline notifies the cache tracker (prefix changed)
                     # and the round proceeds with a smaller prompt.
+                    _record_compaction_cadence(
+                        task, kwargs.get('_compaction_round'))
                     return True
                 logger.warning(
                     '%s [ForceCompact] Head-truncate dropped 0 messages '
@@ -1378,11 +1723,14 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         status='completed',
         strategy='selective_summary',
         implementation=(
-            'deterministic_task_state_projection'
-            if _meta.get('summaryRejected') else 'model_summary'),
+            'deterministic_recovery_receipt'
+            if _meta.get('summaryFallback')
+            else 'deterministic_task_state_projection'
+            if _meta.get('summaryRejected')
+            else 'model_summary'),
         mode=_meta.get('mode') or 'turns',
         continuation_format='context_compact_tool',
-        summary_generated=True,
+        summary_generated=not bool(_meta.get('summaryFallback')),
         summary_text=summary_text,
         summary_usage=_meta.get('summary_usage'),
         summary_duration_ms=_meta.get('summary_duration_ms') or 0,
@@ -1391,10 +1739,14 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         summary_rejected=bool(_meta.get('summaryRejected')),
         summary_rejection_reason=(
             _meta.get('summaryRejectionReason') or ''),
+        outcome_reason=(
+            _meta.get('summaryFallbackReason') or ''),
         summarized_messages=_meta.get('summarized_messages') or 0,
         preserved_turns=_meta.get('preserved_turns') or 0,
         folded_tool_rounds=_meta.get('folded_tool_rounds') or 0,
         objective_anchored=bool(_meta.get('objective_anchored')),
+        durable_objective_applied=bool(
+            _meta.get('durable_objective_applied')),
         retained_user_messages=_meta.get('retained_user_messages') or 0,
         recent_files=_meta.get('recent_files') or (),
         turn_diff_included=bool(_meta.get('turn_diff_included')),
@@ -1452,5 +1804,7 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
             # generation and this retention measurement. Do not pin even its
             # bounded tool previews for the rest of a long-running task.
             task.pop('_contextEvidenceLedger', None)
+
+    _record_compaction_cadence(task, _meta.get('round_num'))
 
     return True

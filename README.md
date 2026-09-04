@@ -27,7 +27,7 @@ Choose the boundary that matches your product:
 | A remote Python/TypeScript service | `tofu-sdk` / `@rangehow/tofu-sdk` | Tofu URL/token only | Chosen by the server |
 | The full AI workspace | Installer or source checkout | Provider in Settings or env | SQLite/PostgreSQL + UI |
 
-The first three options do not start the ChatUI application frontend and
+The first three options do not start the full Tofu application frontend and
 require no database. They execute the same `lib.tasks_pkg` orchestrator as the
 full application—not a smaller second agent loop. The sidecar adds only a tiny
 static `/setup` control plane for no-code default-model configuration.
@@ -135,7 +135,7 @@ docker run --rm --name tofu-agent \
 Open `/setup` and enter the sidecar token to configure the model. The named
 volume retains both the encrypted configuration and its key across container
 replacement. The image contains the installed wheel, agent dependencies, and
-small setup page only: no source checkout, ChatUI application bundle,
+small setup page only: no source checkout, full Tofu application bundle,
 application data, SQLAlchemy, or database driver.
 
 ## Let the server own the model
@@ -235,6 +235,47 @@ Both SDKs generate a stable idempotency key for retried runs. `agents.start`
 returns HTTP 202 immediately; `agents.stream` submits once and resumes the task
 stream from the last absolute event sequence after a transport drop.
 
+## Single-shot runs (harness integration)
+
+Eval harnesses and CI jobs that cannot manage a long-lived sidecar use the
+single-shot contract: one process, one task, one JSON result.
+
+```bash
+export TOFU_AGENT_PROVIDER_BASE_URL=https://api.openai.com/v1
+export TOFU_AGENT_PROVIDER_API_KEY=sk-...
+export TOFU_AGENT_PROVIDER_MODEL=gpt-5.6
+
+tofu-agent run --task-file /tmp/task.txt --cwd /work/repo \
+  --timeout-s 7200 --trajectory tofu-native --output result.json
+```
+
+- `--task` / `--task-file`: the instruction (file wins). `--cwd` exposes a
+  project root to the agent tools; `run_command` and the file tools resolve
+  against it.
+- `--tools`: comma-separated tool tags or `'*'`; the default keeps the
+  storage-free policy, under which project-file and shell tools are already
+  enabled and durable memory/scheduler stay off.
+- `--trajectory`: embed a flattened trajectory (`sharegpt`, `openai-finetune`,
+  `anthropic`, `tofu-native`, `atif`) in the result. `atif` is ATIF v1.3
+  (Agent Trajectory Interchange Format), the shape harbor/terminal-bench
+  trajectory viewers consume.
+- Exit codes: `0` done, `2` configuration error, `3` timeout, `4` permanent
+  agent error, `5` aborted, `6` retriable upstream error (rate-limit /
+  gateway outage / network after the in-run retry budgets — a harness may
+  rerun the trial). The result JSON carries `ok`, `status`,
+  `finish_reason`, `content`, `usage`, `n_tool_rounds`, and `error`; the
+  `error` envelope carries `kind` and `retryable` for attribution.
+
+Unattended semantics: write tools (file edits, `run_command`) execute
+without human approval because no client is attending; tools in the
+always-confirm partition (scheduling, durable memory, ...) fail closed
+instead of blocking.
+
+The default `pip install tofu-agent` is the slim headless runtime: the LLM
+loop, tools, network, and MCP — sized for eval containers. Document/media
+parsing (PDF, Office formats, web extraction) is lazy-imported by the
+features that need it and lives in `pip install tofu-agent[full]`; the full
+workspace installer pulls that extra automatically.
 ## Headless state contract
 
 The lightweight runtime deliberately has one simple guarantee:
@@ -264,23 +305,41 @@ papers and media libraries, scheduling, and operational controls.
 | Platform | Start |
 |---|---|
 | Windows | Download `Tofu-Setup-*-win64.exe` from the [latest release](https://github.com/rangehow/ToFu/releases/latest). |
-| Linux / macOS | `curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \| bash` |
+| macOS | Download `Tofu-<ver>-macos-arm64.dmg` or `Tofu-<ver>-macos-x86_64.dmg` from the [latest release](https://github.com/rangehow/ToFu/releases/latest), or use `install.sh`. |
+| Linux | `curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \| bash` |
+| Android | Install [tofu-android.apk](https://github.com/rangehow/tofu-android/releases/latest/download/tofu-android.apk). |
 | Source / full Docker | `git clone https://github.com/rangehow/ToFu.git && cd ToFu && docker compose up -d` |
 
 Open <http://localhost:15000> and configure a provider under **Settings →
 Providers**, or use the existing `LLM_BASE_URL`, `LLM_API_KEYS`, and `LLM_MODEL`
 deployment variables. SQLite is the personal default; PostgreSQL is an explicit
-distributed alternative behind the same storage contract. The Kubernetes
+distributed alternative behind the same storage contract. After the first
+login, install the browser extension below — every browser-facing feature
+depends on it. The Kubernetes
 package remains a single-replica preview; its enforced activation and scaling
 boundary is documented in the
 [distributed rollout runbook](docs/EPIC_D_SCALE_ROLLOUT_RUNBOOK.md#preview-safety-boundary).
 
 ## Browser Extension
 
-The full workspace supports the same unpacked extension in Chrome and Edge.
-Open **Settings → Local Control** for the canonical install or upgrade action;
-it detects which supported browser is available and opens that browser's own
-extensions page when Tofu and the browser run on the same machine.
+Install the companion extension once after your first login. It is the bridge
+that lets the agent work inside your real browser instead of a blank, logged-out
+fetch, and it unlocks capabilities the server alone cannot provide:
+
+- **Browser control**: navigate, read, scroll, click, and fill pages in a real
+  tab the agent leases from your browser.
+- **Pages behind login and verification**: tasks run in your logged-in session,
+  so pages that block server-side fetchers — sign-in walls, CAPTCHA or anti-bot
+  checks, paywalled or intranet-only pages — remain reachable.
+- **Web debugging evidence**: DevTools Bridge, console reads, network capture,
+  and screenshots give the agent direct evidence from the page under test.
+- **Cookie-gated file transfer**: a URL that needs your browser cookies streams
+  through the extension into bounded server staging.
+
+The same unpacked build supports Chrome and Edge. Open **Settings → Local
+Control** for the canonical install or upgrade action; it detects which
+supported browser is available and opens that browser's own extensions page
+when Tofu and the browser run on the same machine.
 
 For a manual local install, enable Developer mode on `chrome://extensions` in
 Chrome or `edge://extensions` in Edge, then load the repository's
@@ -342,6 +401,10 @@ its integration boundaries. The full subsystem catalogue lives in
 │   │   └── orchestrator/
 │   ├── byo_egress.py
 │   └── provider_probe.py
+├── packages/
+│   └── tofu-search/       # standalone search/fetch distribution
+├── plugins/
+│   └── tofu-trading/      # optional entry-point application plugin
 ├── docs/
 │   ├── README.md
 │   ├── DEVELOPER_RUNTIME.md

@@ -37,6 +37,15 @@ logger = get_logger(__name__)
 api_v1_mcp_bp = Blueprint('api_v1_mcp', __name__)
 
 
+def _enabled_tool_summary(bridge) -> dict:
+    """Best-effort compact projection; never fail the owning MCP operation."""
+    try:
+        return bridge.get_enabled_tool_summary()
+    except Exception as exc:
+        logger.debug('[MCP.v1] enabled tool summary unavailable: %s', exc)
+        return {'servers': [], 'total': 0}
+
+
 # ── Config CRUD ──────────────────────────────────────────────────────
 
 @api_v1_mcp_bp.route('/api/v1/mcp/servers', methods=['GET'])
@@ -338,10 +347,15 @@ def set_server_tools_v1(name):
     disabled_tools = sorted(set(disabled))
     if cfg_patch(name, {'disabled_tools': disabled_tools}) is None:
         return api_not_found(f'Server "{name}" not in config')
-    get_bridge().set_disabled_tools(name, disabled_tools)
+    bridge = get_bridge()
+    bridge.set_disabled_tools(name, disabled_tools)
     logger.info('[MCP.v1] tool filter set: %s → %d disabled tool(s)',
                 name, len(disabled_tools))
-    return api_ok({'server': name, 'disabled_tools': disabled_tools})
+    return api_ok({
+        'server': name,
+        'disabled_tools': disabled_tools,
+        'mcp_tool_summary': _enabled_tool_summary(bridge),
+    })
 
 
 # ── Catalog (App-Store) ─────────────────────────────────────────────
@@ -470,8 +484,14 @@ def get_catalog_v1():
     # into background credential verification — reflected from the canonical
     # schema, never hand-typed here (so it can't drift).
     from lib.mcp.health_probe import HEALTH_PROBE_SCHEMA
-    return api_ok({'catalog': entries,
-                   'health_probe_contract': HEALTH_PROBE_SCHEMA})
+    return api_ok({
+        'catalog': entries,
+        'health_probe_contract': HEALTH_PROBE_SCHEMA,
+        # Settings already paid for this catalog response.  Carry the same
+        # compact authority used by server-config so it never follows with a
+        # full /mcp/tools schema fetch merely to repaint the context rail.
+        'mcp_tool_summary': _enabled_tool_summary(bridge),
+    })
 
 
 @api_v1_mcp_bp.route('/api/v1/mcp/catalog/install', methods=['POST'])

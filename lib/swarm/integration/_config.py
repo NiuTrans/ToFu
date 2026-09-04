@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 
 from lib.log import get_logger
+from lib.swarm.resource_policy import swarm_session_capacity
 
 logger = get_logger(__name__)
 
@@ -24,17 +25,20 @@ logger = get_logger(__name__)
 
 #: Sessions older than this are auto-aborted/evicted.
 SESSION_TTL_SECONDS = 1800
-#: Concurrent session ceiling. Oldest evicted past the ceiling.
-MAX_SESSIONS = 20
+#: Concurrent process session ceiling derived once at launch. New work is
+#: rejected at capacity; productive sessions are never sacrificed merely to
+#: admit a newer conversation.
+MAX_SESSIONS = swarm_session_capacity()
 #: Background cleanup tick.
 _CLEANUP_INTERVAL = 300
 
 #: Output dir override — falls back to ``./data/swarm`` when unset.
 SWARM_OUTPUT_DIR = os.environ.get('TOFU_SWARM_OUTPUT_DIR', '')
 #: Hard-cap how long ``await_agents`` may block. The model can ask for
-#: up to 120 s, beyond which we degrade to "still running" and let the
-#: main agent move on rather than freeze the UI for 5 minutes.
-AWAIT_AGENTS_HARD_CAP_SEC = 120
+#: up to 60 s, beyond which we degrade to "still running" and let the
+#: main agent move on. An identical no-progress retry is suppressed by the
+#: session receipt in ``MasterOrchestrator`` instead of blocking for 60 s again.
+AWAIT_AGENTS_HARD_CAP_SEC = 60
 
 
 # ═══════════════════════════════════════════════════════════

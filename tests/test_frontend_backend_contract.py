@@ -59,8 +59,12 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 API_JS = runtime_section_path('api.js')
-ORCHESTRATION_API_JS = runtime_section_path('api/orchestrations.js')
-API_SURFACE_FILES = (API_JS, ORCHESTRATION_API_JS)
+ORCHESTRATION_API_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'orchestration', 'api-client.ts')
+ORCHESTRATION_CONTRACT_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'orchestration',
+    'request-contracts.generated.ts')
+API_SURFACE_FILES = (API_JS, ORCHESTRATION_CONTRACT_TS)
 
 
 def _api_surface_source() -> str:
@@ -243,8 +247,11 @@ def _registered_templates(app) -> set[str]:
 # ── Tests ─────────────────────────────────────────────────────────────
 def test_api_js_exists():
     assert 'api.js' in runtime_section_names(), 'migrated api.js owner is missing'
-    assert os.path.isfile(ORCHESTRATION_API_JS), (
-        'focused orchestration API transport is missing')
+    assert os.path.isfile(ORCHESTRATION_API_TS), (
+        'typed orchestration API transport is missing')
+    assert os.path.isfile(ORCHESTRATION_CONTRACT_TS), (
+        'generated orchestration request contract is missing')
+    assert 'api/orchestrations.js' not in runtime_section_names()
 
 
 def test_normalise_truncates_dangling_query_interpolation():

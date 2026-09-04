@@ -7,8 +7,6 @@ and Lark client singleton initialization.
 import json
 
 from lib.feishu._state import (
-    APP_ID,
-    APP_SECRET,
     FEISHU_MSG_LIMIT,
     _lark_client_lock,
 )
@@ -22,16 +20,16 @@ __all__ = ['split_message', 'send_text']
 
 def _get_lark_client():
     """Lazy-initialize the Lark API client singleton (thread-safe)."""
-    global _lark_client
-    # Module-level global is in _state, but we write to it here
     import lib.feishu._state as _st
     if _st._lark_client is None:
         with _lark_client_lock:
             if _st._lark_client is None:
                 import lark_oapi as lark
+                # Read credentials through the module so GUI-saved config
+                # (applied via _state.apply_config) is honoured on rebuild.
                 _st._lark_client = lark.Client.builder() \
-                    .app_id(APP_ID) \
-                    .app_secret(APP_SECRET) \
+                    .app_id(_st.APP_ID) \
+                    .app_secret(_st.APP_SECRET) \
                     .log_level(lark.LogLevel.WARNING) \
                     .build()
     return _st._lark_client

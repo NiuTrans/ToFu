@@ -220,6 +220,49 @@ class ResponseTranslationTest(unittest.TestCase):
         self.assertIsNone(missing['choices'][0]['finish_reason'])
         self.assertEqual(unknown['choices'][0]['finish_reason'], 'future_limit')
 
+    def test_malformed_response_shapes_fail_closed(self):
+        malformed_payloads = [
+            ['not-an-object'],
+            {'content': {}},
+            {'content': ['not-a-block']},
+            {'content': [{'type': 'text', 'text': []}]},
+            {'content': [{'type': 'thinking', 'thinking': {}}]},
+            {'content': [{'type': 'thinking', 'thinking': 'ok',
+                          'signature': {}}]},
+            {'content': [{'type': [], 'text': 'not typed'}]},
+            {'content': [{'type': 'tool_use', 'id': [], 'name': 'f',
+                          'input': {}}]},
+            {'content': [{'type': 'tool_use', 'id': 'tu', 'name': [],
+                          'input': {}}]},
+            {'content': [{'type': 'tool_use', 'id': 'tu', 'name': 'f',
+                          'input': []}]},
+            {'content': [{'type': 'tool_use', 'id': 'tu', 'name': 'f',
+                          'input': {'bad': float('nan')}}]},
+            {'content': [], 'stop_reason': {}},
+        ]
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                out = anthropic_response_to_openai(payload)
+                self.assertEqual(out['error']['type'], 'invalid_response')
+
+    def test_malformed_usage_is_ignored_without_crashing(self):
+        out = anthropic_response_to_openai({
+            'content': [{'type': 'text', 'text': 'ok'}],
+            'usage': ['not-an-object'],
+        })
+        self.assertEqual(out['choices'][0]['message']['content'], 'ok')
+        self.assertEqual(out['usage']['total_tokens'], 0)
+
+    def test_non_text_compaction_is_not_replayed(self):
+        out = anthropic_response_to_openai({
+            'content': [
+                {'type': 'compaction', 'content': {'not': 'text'}},
+                {'type': 'text', 'text': 'answer'},
+            ],
+        })
+        self.assertNotIn(
+            '_anthropic_content_blocks', out['choices'][0]['message'])
+
     def test_hosted_tool_blocks_are_kept_for_protocol_replay(self):
         blocks = [
             {'type': 'server_tool_use', 'id': 'srv_1',
@@ -246,6 +289,66 @@ class ResponseTranslationTest(unittest.TestCase):
             ],
         })
         self.assertEqual(wire['messages'][1]['content'], blocks)
+
+    def test_compaction_and_redacted_thinking_blocks_round_trip_verbatim(self):
+        blocks = [
+            {'type': 'compaction', 'content': '<summary>state</summary>'},
+            {'type': 'redacted_thinking', 'data': 'opaque-redacted-state'},
+            {'type': 'text', 'text': 'continued answer'},
+        ]
+        translated = anthropic_response_to_openai({
+            'stop_reason': 'end_turn',
+            'content': blocks,
+            'usage': {'input_tokens': 100, 'output_tokens': 20,
+                      'thinking_tokens': 12},
+        })
+        message = translated['choices'][0]['message']
+        self.assertEqual(message['content'], 'continued answer')
+        self.assertEqual(message['_anthropic_content_blocks'], blocks)
+        self.assertEqual(translated['usage']['reasoning_tokens'], 12)
+
+        replay = openai_body_to_anthropic({
+            'model': 'claude-opus-5', 'max_tokens': 64,
+            'messages': [
+                {'role': 'user', 'content': 'continue'},
+                message,
+            ],
+        })
+        self.assertEqual(replay['messages'][1]['content'], blocks)
+
+    def test_null_compaction_failure_is_not_replayed_as_authoritative(self):
+        translated = anthropic_response_to_openai({
+            'stop_reason': 'end_turn',
+            'content': [
+                {'type': 'compaction', 'content': None},
+                {'type': 'text', 'text': 'answer from intact history'},
+            ],
+        })
+        message = translated['choices'][0]['message']
+        self.assertNotIn('_anthropic_content_blocks', message)
+        self.assertEqual(message['content'], 'answer from intact history')
+
+    def test_compaction_iterations_are_billed_but_effective_prompt_is_separate(self):
+        translated = anthropic_response_to_openai({
+            'stop_reason': 'end_turn',
+            'content': [{'type': 'text', 'text': 'done'}],
+            'usage': {
+                'input_tokens': 23_000,
+                'output_tokens': 1_000,
+                'iterations': [
+                    {'type': 'compaction', 'input_tokens': 180_000,
+                     'output_tokens': 3_500},
+                    {'type': 'message', 'input_tokens': 23_000,
+                     'output_tokens': 1_000},
+                ],
+            },
+        })
+        usage = translated['usage']
+        self.assertEqual(usage['prompt_tokens'], 203_000)
+        self.assertEqual(usage['completion_tokens'], 4_500)
+        self.assertEqual(usage['effective_prompt_tokens'], 23_000)
+        self.assertEqual(usage['compaction_input_tokens'], 180_000)
+        self.assertEqual(usage['compaction_output_tokens'], 3_500)
 
 
 class SSETranslationTest(unittest.TestCase):
@@ -289,6 +392,168 @@ class SSETranslationTest(unittest.TestCase):
         self.assertEqual(args, '{"a":1}')
         self.assertEqual(fr, 'tool_calls')
         self.assertTrue(done)
+
+    def test_replayed_tool_start_same_position_is_suppressed(self):
+        translator = AnthropicSSETranslator(model='x')
+        start = {
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {
+                'type': 'tool_use', 'id': 'tu1', 'name': 'read_files',
+                'input': {},
+            },
+        }
+        first = translator.translate(json.dumps(start))
+        replay = translator.translate(json.dumps(start))
+        self.assertEqual(len(first), 1)
+        self.assertEqual(replay, [])
+
+    def test_nonempty_initial_tool_input_is_not_discarded(self):
+        translator = AnthropicSSETranslator(model='x')
+        chunks = translator.translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {
+                'type': 'tool_use', 'id': 'tu1', 'name': 'read_files',
+                'input': {'path': 'a.py'},
+            },
+        }))
+        arguments = (chunks[0]['choices'][0]['delta']['tool_calls'][0]
+                     ['function']['arguments'])
+        self.assertEqual(json.loads(arguments), {'path': 'a.py'})
+
+    def test_nonempty_initial_text_and_thinking_are_not_discarded(self):
+        text_chunks = AnthropicSSETranslator().translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {'type': 'text', 'text': 'answer'},
+        }))
+        thinking_chunks = AnthropicSSETranslator().translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {
+                'type': 'thinking', 'thinking': 'reason',
+                'signature': 'signed',
+            },
+        }))
+        self.assertEqual(
+            text_chunks[0]['choices'][0]['delta']['content'], 'answer')
+        self.assertEqual(thinking_chunks[0]['choices'][0]['delta'], {
+            'reasoning_content': 'reason', 'thinking_signature': 'signed'})
+
+    def test_initial_complete_input_followed_by_delta_fails_closed(self):
+        translator = AnthropicSSETranslator(model='x')
+        translator.translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {
+                'type': 'tool_use', 'id': 'tu1', 'name': 'read_files',
+                'input': {'path': 'a.py'},
+            },
+        }))
+        chunks = translator.translate(json.dumps({
+            'type': 'content_block_delta', 'index': 0,
+            'delta': {'type': 'input_json_delta', 'partial_json': '{}'},
+        }))
+        self.assertEqual(chunks[0]['error']['type'], 'server_error')
+
+    def test_incomplete_tool_json_fails_at_block_or_message_stop(self):
+        for terminal in (
+            {'type': 'content_block_stop', 'index': 0},
+            {'type': 'message_stop'},
+        ):
+            with self.subTest(terminal=terminal):
+                translator = AnthropicSSETranslator(model='x')
+                translator.translate(json.dumps({
+                    'type': 'content_block_start', 'index': 0,
+                    'content_block': {
+                        'type': 'tool_use', 'id': 'tu1',
+                        'name': 'read_files', 'input': {},
+                    },
+                }))
+                translator.translate(json.dumps({
+                    'type': 'content_block_delta', 'index': 0,
+                    'delta': {
+                        'type': 'input_json_delta', 'partial_json': '{"path":',
+                    },
+                }))
+                chunks = translator.translate(json.dumps(terminal))
+                self.assertEqual(chunks[0]['error']['type'], 'server_error')
+
+    def test_delta_cannot_cross_block_semantics_or_follow_stop(self):
+        translator = AnthropicSSETranslator(model='x')
+        translator.translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {'type': 'text', 'text': ''},
+        }))
+        wrong_kind = translator.translate(json.dumps({
+            'type': 'content_block_delta', 'index': 0,
+            'delta': {'type': 'input_json_delta', 'partial_json': '{}'},
+        }))
+        self.assertEqual(wrong_kind[0]['error']['type'], 'server_error')
+
+        translator = AnthropicSSETranslator(model='x')
+        translator.translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {'type': 'text', 'text': ''},
+        }))
+        translator.translate(json.dumps({
+            'type': 'content_block_stop', 'index': 0,
+        }))
+        after_stop = translator.translate(json.dumps({
+            'type': 'content_block_delta', 'index': 0,
+            'delta': {'type': 'text_delta', 'text': 'late'},
+        }))
+        self.assertEqual(after_stop[0]['error']['type'], 'server_error')
+
+    def test_equal_tools_at_distinct_positions_remain_distinct(self):
+        translator = AnthropicSSETranslator(model='x')
+        chunks = []
+        for index, call_id in enumerate(('tu1', 'tu2')):
+            chunks.extend(translator.translate(json.dumps({
+                'type': 'content_block_start', 'index': index,
+                'content_block': {
+                    'type': 'tool_use', 'id': call_id,
+                    'name': 'read_files', 'input': {},
+                },
+            })))
+        calls = [chunk['choices'][0]['delta']['tool_calls'][0]
+                 for chunk in chunks]
+        self.assertEqual([call['id'] for call in calls], ['tu1', 'tu2'])
+
+    def test_reused_block_position_with_changed_identity_fails(self):
+        translator = AnthropicSSETranslator(model='x')
+        translator.translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {
+                'type': 'tool_use', 'id': 'tu1', 'name': 'read_files'},
+        }))
+        chunks = translator.translate(json.dumps({
+            'type': 'content_block_start', 'index': 0,
+            'content_block': {
+                'type': 'tool_use', 'id': 'tu2', 'name': 'run_command'},
+        }))
+        self.assertEqual(chunks[0]['error']['type'], 'server_error')
+        self.assertIn('different identity', chunks[0]['error']['message'])
+
+    def test_malformed_stream_shapes_return_typed_protocol_error(self):
+        malformed_events = [
+            [],
+            {'type': []},
+            {'type': 'message_start', 'message': []},
+            {'type': 'message_start', 'message': {'usage': []}},
+            {'type': 'content_block_start', 'index': {},
+             'content_block': {}},
+            {'type': 'content_block_start', 'index': 0,
+             'content_block': []},
+            {'type': 'content_block_start', 'index': 0,
+             'content_block': {'type': 'tool_use', 'id': 'tu1',
+                               'name': 'f', 'input': []}},
+            {'type': 'content_block_delta', 'index': 0, 'delta': {}},
+            {'type': 'message_delta', 'delta': []},
+            {'type': 'message_delta', 'delta': {'stop_reason': []}},
+            {'type': 'message_delta', 'delta': {}, 'usage': []},
+        ]
+        for event in malformed_events:
+            with self.subTest(event=event):
+                chunks = AnthropicSSETranslator().translate(json.dumps(event))
+                self.assertEqual(chunks[0]['error']['type'], 'server_error')
+                self.assertEqual(chunks[0]['error']['http_code'], '500')
 
     def test_error_event_surfaces(self):
         t = AnthropicSSETranslator()
@@ -346,6 +611,31 @@ class SSETranslationTest(unittest.TestCase):
             {'type': 'tool_use', 'id': 'tu_1',
              'name': 'mcp__xuecheng__update_doc',
              'input': {'doc_id': '42'}},
+        ])
+
+    def test_streamed_compaction_block_is_captured_not_displayed(self):
+        t = AnthropicSSETranslator(model='claude-opus-5')
+        events = [
+            {'type': 'content_block_start', 'index': 0,
+             'content_block': {'type': 'compaction', 'content': None}},
+            {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'compaction_delta',
+                       'content': '<summary>state</summary>'}},
+            {'type': 'content_block_start', 'index': 1,
+             'content_block': {'type': 'text', 'text': ''}},
+            {'type': 'content_block_delta', 'index': 1,
+             'delta': {'type': 'text_delta', 'text': 'answer'}},
+        ]
+        projected_text = ''
+        for event in events:
+            for chunk in t.translate(json.dumps(event)):
+                projected_text += (chunk.get('choices', [{}])[0]
+                                   .get('delta', {}).get('content', ''))
+
+        self.assertEqual(projected_text, 'answer')
+        self.assertEqual(t.anthropic_content_blocks, [
+            {'type': 'compaction', 'content': '<summary>state</summary>'},
+            {'type': 'text', 'text': 'answer'},
         ])
 
     def _last_usage(self, events):

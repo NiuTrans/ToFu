@@ -188,6 +188,28 @@ def _is_forbidden_create_path(abs_path):
     return False
 
 
+class OutsideWorkspaceError(ValueError):
+    """An absolute-path write targets a location outside every registered
+    workspace root and the caller did NOT pass explicit confirmation.
+
+    Carries the resolved ``abs_path`` and the ``anchor`` directory that WOULD
+    have been auto-registered as a new workspace root, so the refusal names
+    the exact workspace expansion being gated. Subclasses ValueError so every
+    existing ``except ValueError`` rejection path keeps working unchanged.
+    """
+
+    def __init__(self, abs_path, anchor):
+        self.abs_path = abs_path
+        self.anchor = anchor
+        super().__init__(
+            f'Refusing to write to {abs_path}: it is outside every registered '
+            f'workspace root, and the write would auto-register '
+            f'"{anchor}" as a new workspace root. If the user has explicitly '
+            f'confirmed they want this exact file written there, re-issue the '
+            f'same call with allow_outside_workspace=true. Otherwise write '
+            f'inside the project workspace instead.')
+
+
 # ═══════════════════════════════════════════════════════
 #  Absolute-path write safety
 # ═══════════════════════════════════════════════════════
@@ -225,7 +247,7 @@ def _enforce_not_readonly(target, conv_id=None):
             f'writable).')
 
 
-def _resolve_write_path(base, rel_path, conv_id=None):
+def _resolve_write_path(base, rel_path, conv_id=None, allow_outside=False):
     """Return the on-disk target for a write/edit tool, accepting either
     a project-relative path or an absolute path.
 
@@ -233,12 +255,25 @@ def _resolve_write_path(base, rel_path, conv_id=None):
     Resolution rules for an absolute path:
 
       1. If it already resolves INSIDE some registered root, use it directly.
+
+         The scan covers the process-global roots AND — when ``conv_id`` is
+         present — that conversation's own scoped registry, so a root the
+         user confirmed for this task earlier (§2) makes repeat writes to it
+         resolve without re-asking for confirmation.
       2. Otherwise, as long as the destination is NOT a forbidden system
          path (``/etc``, ``/usr``, ``$HOME`` itself, …), auto-register the
          deepest existing ancestor directory as an extra workspace root and
-         allow the write.  This makes absolute-path writes "just work" the
-          same way absolute-path reads already do — no separate scaffold step.
-       3. Forbidden system paths are still rejected outright.
+         allow the write — but ONLY when ``allow_outside`` is True. That
+         flag is the model-facing ``allow_outside_workspace`` schema
+         parameter, passed solely after the user has explicitly confirmed
+         the exact out-of-workspace destination (2026-08-31 decision:
+         explicit confirmation instead of silent auto-register — a bare
+         absolute path must never expand the workspace invisibly). Without
+         it an :class:`OutsideWorkspaceError` is raised BEFORE any root
+         mutation. Temp-dir scratch paths (§1.5) are exempt: they register
+         nothing, so there is no silent expansion to confirm.
+      3. Forbidden system paths are still rejected outright, confirmation
+         or not.
 
     Raises ``ValueError`` on rejection so callers can surface the error
     consistently with the existing ``_safe_path`` code path.
@@ -251,9 +286,14 @@ def _resolve_write_path(base, rel_path, conv_id=None):
         # principal can neither escape the sandbox nor expand it.
         from lib.project_mod.abs_path_guard import enforce_abs_write
         enforce_abs_write(abs_path)
-        # 1) Already under a registered root → use directly.
+        # 1) Already under a registered root → use directly. Includes the
+        #    calling conversation's scoped registry so a §2-confirmed root
+        #    resolves on repeat writes without another confirmation round.
         with _lock:
             roots_snapshot = [rs['path'] for rs in _roots.values()]
+        if conv_id:
+            from lib.project_mod.config import get_conv_roots
+            roots_snapshot += [rs['path'] for rs in get_conv_roots(conv_id).values()]
         for root_path in roots_snapshot:
             norm_root = os.path.abspath(root_path).rstrip(os.sep) or root_path
             if abs_path == norm_root or abs_path.startswith(norm_root + os.sep):
@@ -280,9 +320,14 @@ def _resolve_write_path(base, rel_path, conv_id=None):
                 f'Choose a user-writable location.'
             )
 
-        # 2) Auto-register the nearest existing ancestor as an extra root.
+        # 2) Auto-register the nearest existing ancestor as an extra root —
+        #    gated on the caller's explicit confirmation (see docstring §2).
+        #    The refusal happens BEFORE add_project_root/add_conv_root so a
+        #    rejected attempt leaves both registries byte-identical.
         anchor = _nearest_existing_dir(abs_path)
         if anchor and not _is_forbidden_create_path(anchor):
+            if not allow_outside:
+                raise OutsideWorkspaceError(abs_path, anchor)
             try:
                 _anchor_norm = os.path.abspath(anchor).rstrip(os.sep) or anchor
                 # 2026-07-12 — scope the auto-register to the CALLER.
@@ -408,8 +453,9 @@ def _resolve_write_path(base, rel_path, conv_id=None):
         raise ValueError(
             f'Absolute path {abs_path} could not be resolved to a writable '
             f'workspace location. Use a "rootname:relative" prefix for a '
-            f'registered root, or choose a writable absolute location whose '
-            f'containing directory can auto-register on first write.'
+            f'registered root, or a writable absolute location whose '
+            f'containing directory can register on first write (requires '
+            f'allow_outside_workspace=true after the user confirms).'
         )
     target = _safe_path(base, rel_path)
     _enforce_not_readonly(target, conv_id=conv_id)

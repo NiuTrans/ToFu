@@ -57,6 +57,38 @@ def test_read_json_invalid_returns_default():
     _ok('read_json on garbage file → default (with warning)')
 
 
+def test_read_json_byte_limit_is_enforced_during_read(tmp_path):
+    from lib.json_store import JsonStoreReadError, read_json
+
+    path = tmp_path / 'bounded.json'
+    path.write_text('{"value":"oversized"}', encoding='utf-8')
+    assert read_json(
+        str(path), default={'safe': True}, max_bytes=8) == {'safe': True}
+    try:
+        read_json(str(path), strict=True, max_bytes=8)
+    except JsonStoreReadError as error:
+        assert 'exceeds 8 bytes' in str(error)
+    else:
+        raise AssertionError('strict bounded read accepted an oversized file')
+
+    assert read_json(str(path), max_bytes=64) == {'value': 'oversized'}
+
+
+def test_read_json_rejects_invalid_byte_limits(tmp_path):
+    from lib.json_store import read_json
+
+    path = tmp_path / 'valid.json'
+    path.write_text('{}', encoding='utf-8')
+    for invalid_limit in (0, -1, True, 1.5):
+        try:
+            read_json(str(path), max_bytes=invalid_limit)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f'invalid max_bytes was accepted: {invalid_limit!r}')
+
+
 def test_read_json_jsonc_with_comments():
     """jsonc=True strips // and /* */ comments and trailing commas."""
     from lib.json_store import read_json

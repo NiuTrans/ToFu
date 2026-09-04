@@ -17,19 +17,35 @@ the same subscription concurrently.
 from __future__ import annotations
 
 import copy
+import hashlib
 import threading
 import time
 from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
+from lib.ttl_cache import TTLCache
 
 
 USAGE_QUOTA_KEY = '_subscription_quota'
 logger = get_logger(__name__)
 
-_cache_lock = threading.Lock()
-_latest_snapshots: dict[str, dict[str, Any]] = {}
+_MAX_QUOTA_IDENTITIES = 256
+_MAX_CACHE_KEY_CHARS = 256
+_latest_snapshots = TTLCache(
+    ttl=0,
+    max_size=_MAX_QUOTA_IDENTITIES,
+    name='subscription_quota',
+)
+_quota_update_lock = threading.Lock()
+
+
+def _normalize_cache_key(value: object) -> str:
+    key = str(value or 'codex').strip() or 'codex'
+    if len(key) <= _MAX_CACHE_KEY_CHARS:
+        return key
+    digest = hashlib.sha256(key.encode('utf-8')).hexdigest()
+    return f'sha256:{digest}'
 
 
 def _headers_lower(headers: Mapping | None) -> dict[str, str]:
@@ -75,14 +91,14 @@ def _window(headers: dict[str, str], name: str) -> dict[str, Any] | None:
         'remaining_percent': round(100.0 - used, 3),
     }
     minutes = _integer(headers.get(prefix + 'window-minutes'))
-    if minutes is not None and minutes > 0:
+    if minutes is not None and 0 < minutes <= 10 * 366 * 24 * 60:
         out['window_minutes'] = minutes
     # These names are accepted defensively for compatible relays.  Current
     # Codex clients only require used-percent/window-minutes, so absence of a
     # reset timestamp is normal and must not be replaced by a fabricated one.
     resets_at = (_integer(headers.get(prefix + 'resets-at'))
                  or _integer(headers.get(prefix + 'reset-at')))
-    if resets_at is not None and resets_at > 0:
+    if resets_at is not None and 0 < resets_at <= 253_402_300_799:
         out['resets_at'] = resets_at
     return out
 
@@ -106,7 +122,7 @@ def parse_codex_quota_headers(
     }
     plan_type = str(lower.get('x-codex-plan-type') or '').strip()
     if plan_type:
-        snapshot['plan_type'] = plan_type
+        snapshot['plan_type'] = plan_type[:64]
     return snapshot
 
 
@@ -150,11 +166,11 @@ def record_codex_quota(
     snapshot = parse_codex_quota_headers(headers, now=now)
     if snapshot is None:
         return usage
-    cache_key = str(cache_key or 'codex')
-    with _cache_lock:
+    cache_key = _normalize_cache_key(cache_key)
+    with _quota_update_lock:
         previous = _latest_snapshots.get(cache_key)
         _add_observed_deltas(snapshot, previous)
-        _latest_snapshots[cache_key] = copy.deepcopy(snapshot)
+        _latest_snapshots.set(cache_key, copy.deepcopy(snapshot))
     target = usage if isinstance(usage, dict) else {}
     target[USAGE_QUOTA_KEY] = snapshot
     return target
@@ -164,10 +180,9 @@ def latest_subscription_quota(provider: str = 'codex', *,
                               now: float | None = None,
                               cache_key: str | None = None) -> dict | None:
     """Return a copy of the process's latest successful quota snapshot."""
-    lookup_key = str(cache_key or provider)
-    with _cache_lock:
-        cached = _latest_snapshots.get(lookup_key)
-        snapshot = copy.deepcopy(cached) if cached else None
+    lookup_key = _normalize_cache_key(cache_key or provider)
+    cached = _latest_snapshots.get(lookup_key)
+    snapshot = copy.deepcopy(cached) if cached else None
     if snapshot is None:
         return None
     captured_at = int(snapshot.get('captured_at') or 0)
@@ -179,13 +194,11 @@ def latest_subscription_quota(provider: str = 'codex', *,
 def clear_subscription_quota(provider: str = 'codex', *,
                              cache_key: str | None = None) -> None:
     """Forget a cached snapshot when its subscription identity logs out."""
-    with _cache_lock:
-        _latest_snapshots.pop(str(cache_key or provider), None)
+    _latest_snapshots.invalidate(_normalize_cache_key(cache_key or provider))
 
 
 def _reset_subscription_quota_cache_for_tests() -> None:
-    with _cache_lock:
-        _latest_snapshots.clear()
+    _latest_snapshots.clear()
 
 
 __all__ = [

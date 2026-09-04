@@ -33,9 +33,17 @@ function translate(key: I18nKey, fallback: string): string {
   return typeof fn === 'function' ? String(fn(key, fallback)) : fallback;
 }
 
-function render(): void { globals()._pvRender?.(); }
-function renderProgress(): void { globals()._pvRenderProgress?.(); }
-function renderActivity(): void { globals()._pvRenderActivity?.(); }
+function requiredPresentationPort(name: string): (...args: any[]) => any {
+  const port = globals()[name];
+  if (typeof port !== 'function') {
+    throw new Error(`Video presentation port ${name} is unavailable`);
+  }
+  return port;
+}
+
+function render(): void { requiredPresentationPort('_pvRender')(); }
+function renderProgress(): void { requiredPresentationPort('_pvRenderProgress')(); }
+function renderActivity(): void { requiredPresentationPort('_pvRenderActivity')(); }
 
 export function resetVideoRun(): void {
   const state = video();
@@ -402,7 +410,7 @@ export async function loadVideoScenes(cacheBust = false): Promise<void> {
         || (state._doneTaskId || state.taskId || '') !== taskId) return;
     if (response?.ok) {
       state.scenes = response.scenes || [];
-      globals()._pvRenderSceneGrid?.(cacheBust ? Date.now() : 0);
+      requiredPresentationPort('_pvRenderSceneGrid')(cacheBust ? Date.now() : 0);
     }
   } catch (error: unknown) {
     console.warn('[Paper:Video] scenes load failed:', error);
@@ -414,7 +422,7 @@ export async function regenerateVideoScene(sceneId: string): Promise<void> {
   const taskId = state._doneTaskId || state.taskId;
   if (!taskId || state.regenSceneId) return;
   state.regenSceneId = sceneId;
-  globals()._pvRenderSceneGrid?.(0);
+  requiredPresentationPort('_pvRenderSceneGrid')(0);
   try {
     const response = await apiDomain('motion')?.regenScene(taskId, sceneId);
     if (response?.ok && response.task_id) {
@@ -430,7 +438,7 @@ export async function regenerateVideoScene(sceneId: string): Promise<void> {
     console.warn('[Paper:Video] regen failed:', error);
   }
   state.regenSceneId = '';
-  globals()._pvRenderSceneGrid?.(0);
+  requiredPresentationPort('_pvRenderSceneGrid')(0);
 }
 
 export function destroyVideoRuntime(): void {

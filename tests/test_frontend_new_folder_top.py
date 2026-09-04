@@ -93,6 +93,8 @@ global.sidebarSearchQuery = '';
 global.formatRelativeTime = () => '';
 global.highlightMatch = (s) => s;
 global.stripNoTranslateTags = (s) => s;
+global._conversationDisplayTitle = (title, fallback) => title || fallback;
+global.conversationTimestampLabels = () => null;
 global.activeStreams = new Map();
 global.pendingMessageQueue = new Map();
 global.streamBufs = new Map();

@@ -119,6 +119,10 @@ class BoundedTextDeltaCoalescer:
             try:
                 flushed = self._flush_locked()
             except BaseException as exc:
+                logger.debug(
+                    '[DeltaCoalescer] final flush failed before close: %s',
+                    type(exc).__name__,
+                )
                 flushed = False
                 error = exc
             self._closed = True

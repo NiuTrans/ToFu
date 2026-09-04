@@ -127,10 +127,9 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             from lib.agent_verdict import strip_machine_tokens
             user_response = strip_machine_tokens(
                 vu_reply.get('text') or '') or '(no further input)'
-            # Resolve so the SSE event consumer (frontend) sees a synthetic
-            # response, matching the live human-guidance event shape.
-            from lib.tasks_pkg.human_guidance import resolve_human_guidance
-            resolve_human_guidance(guidance_id, user_response)
+            # No waiter is registered on the virtual-user path. The synthetic
+            # response event is the complete UI contract; attempting to
+            # resolve the live registry here always targeted a missing entry.
             append_event(task, {
                 'type': 'human_guidance_response',
                 'roundNum': rn,
@@ -179,11 +178,20 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         user_response = request_human_guidance(guidance_id, task=task)
 
     if task.get('aborted') or user_response is None:
-        tool_content = '[Task was aborted while waiting for human guidance]'
         logger.warning('[Executor] ask_human aborted/cancelled: '
-                       'guidance_id=%s, task=%s, aborted=%s',
+                       'guidance_id=%s, task=%s, aborted=%s — round left '
+                       'awaiting_human so the turn settlement keeps '
+                       'offering the answer_guidance late-answer resume',
                        guidance_id, task.get('id', '?')[:8],
                        task.get('aborted', False))
+        # Do NOT finalize this round with a placeholder result. Finalizing
+        # closes the replayable gap: the settlement then stops offering
+        # answer_guidance and the interactive question card collapses into
+        # a dead static receipt the moment the user presses Stop. The
+        # dangling-round sweep never touches awaiting_human rounds, and
+        # the settlement's missing_tool_result handling offers the
+        # late-answer resume for exactly this shape.
+        return tc_id, '[Task was aborted while waiting for human guidance]', False
     else:
         tool_content = f'Human response: {user_response}'
         logger.info('[Executor] ask_human received response: '
@@ -230,6 +238,19 @@ def _handle_todo_write(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     from lib.tools.todo import apply_todo_write_to_task, public_todo_state
 
     todos, tool_content, outcome = apply_todo_write_to_task(task, fn_args)
+    if project_enabled and project_path:
+        try:
+            from lib.conversations.project_brain import note_todo_signal
+            note_todo_signal(
+                task,
+                project_path,
+                todos,
+                accepted=not bool(outcome.get('rejected')),
+            )
+        except Exception as exc:
+            # Coordination derivation is fail-soft; a valid checklist must
+            # never be rolled back by an unavailable project projection.
+            logger.debug('[ProjectBrain] todo signal skipped: %s', exc)
     state = public_todo_state(outcome['state'])
     stack = state.get('stack') or []
     active = stack[-1] if stack else {}

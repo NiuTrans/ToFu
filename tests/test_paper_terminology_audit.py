@@ -36,9 +36,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+import pytest  # noqa: E402
 
 TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
+pytestmark = pytest.mark.unit
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -186,15 +188,16 @@ def _make_task(tid, lang='en'):
     from lib.paper.report_runtime import _new_report_task
     task = _new_report_task(
         tid, 'phashterm00000000000000000000000', lang, None,
-        client_title='Efficient RLHF Training', user_id=TEST_OWNER_USER_ID)
-    # This suite owns the primary report/audit boundary.  Keep independently
-    # tested post-report agents from making real dispatcher calls as their
-    # defaults evolve.
-    task['config'] = {
-        'paperInsightEnabled': False,
-        'paperTermfillEnabled': False,
-        'paperCheckpointsEnabled': False,
-    }
+        client_title='Efficient RLHF Training',
+        # This suite owns the body/audit boundary, not canonical persistence.
+        config={
+            'responses': {'promptProfile': 'full'},
+            'paperInsightEnabled': False,
+            'paperTermfillEnabled': False,
+            'paperCheckpointsEnabled': False,
+        },
+        user_id=TEST_OWNER_USER_ID,
+    )
     return task
 
 

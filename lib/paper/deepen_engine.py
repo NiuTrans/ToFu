@@ -41,7 +41,7 @@ import time
 import uuid
 
 import lib as _lib
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
@@ -49,6 +49,8 @@ from lib.tasks_pkg.tool_display import tool_round_label as _display_query_for
 from lib.tool_input_repair import parse_and_repair_tool_args
 
 from .deepen_runtime import _deepen_runtime
+from .agent_loop_policy import run_guarded_paper_agent_loop
+from .agent_usage import PaperAgentUsageMeter
 from .qa_context import build_qa_messages
 from .request_policy import paper_request_policy_telemetry
 from .tools import (
@@ -336,6 +338,9 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
         return abort_event.is_set()
 
     model_name = model or _lib.LLM_MODEL
+    _agent_usage = PaperAgentUsageMeter.for_stage(
+        'deepen', fallback_model=model_name)
+    task['agentUsageV1'] = _agent_usage.snapshot()
     t0 = time.time()
     full_content = ''
     mode = task['mode']
@@ -409,6 +414,7 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
 
     def _on_round_result(rnd, msg, finish, usage):
         _acc_usage(usage)
+        task['agentUsageV1'] = _agent_usage.snapshot()
 
     def _begin_tool_round(rnd, msg):
         nonlocal full_content
@@ -478,7 +484,10 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
             tool_arguments=fn_args)
 
     try:
-        _outcome = run_agent_loop(
+        _outcome = run_guarded_paper_agent_loop(
+            context='Paper Deepen agent',
+            allow_aborted_outcome=True,
+            usage_meter=_agent_usage,
             abort=abort_signal,
             round_tools=paper_tools,
             dispatch=_dispatch,
@@ -494,6 +503,7 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
                 task_id,
                 terminal_event_fields={
                     'type': 'aborted', 'partial': full_content,
+                    'agentUsageV1': _agent_usage.snapshot(),
                 },
             )
             return
@@ -530,6 +540,7 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
                 'type': 'done', 'content': full_content,
                 'paperHash': paper_hash, 'sectionIdx': section_idx, 'mode': mode,
                 'usage': dict(_usage_total), 'model': report_model,
+                'agentUsageV1': _agent_usage.snapshot(),
             },
         )
 
@@ -539,6 +550,7 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
             task_id,
             terminal_event_fields={
                 'type': 'aborted', 'partial': full_content,
+                'agentUsageV1': _agent_usage.snapshot(),
             },
         )
     except Exception as e:
@@ -553,8 +565,12 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
             task_id,
             error=envelope,
             error_context='paper-deepen',
+            terminal_event_fields={
+                'agentUsageV1': _agent_usage.snapshot(),
+            },
         )
     finally:
+        task['agentUsageV1'] = _agent_usage.snapshot()
         with _deepen_dedup_lock:
             dedup_key = task.get('_dedupKey')
             if isinstance(dedup_key, tuple):

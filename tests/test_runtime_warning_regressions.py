@@ -13,24 +13,16 @@ pytestmark = pytest.mark.unit
 TEST_OWNER_USER_ID = 1
 
 
-def test_project_feed_clamps_to_sidecar_contract(monkeypatch):
-    import lib.conversations.project_feed as feed
-    seen = {}
-
-    class Client:
-        def query(self, operation, payload):
-            seen.update(operation=operation, payload=payload)
-            return {'events': [], 'maxSeq': 0}
-    monkeypatch.setattr(feed, 'get_storage_client', lambda **_kw: Client())
-    assert feed.read_project_feed('/project', limit=500, user_id=TEST_OWNER_USER_ID)['events'] == []
-    assert seen['operation'] == 'project.feed.list'
-    assert seen['payload']['limit'] == 200
-
-
-def test_queue_reap_command_id_matches_exact_payload(monkeypatch):
+def test_queue_reap_old_sidecar_fallback_command_ids_match_payload(
+        monkeypatch):
     import lib.message_queue as queue_mod
+    from lib.turn_source_queue_contract import (
+        QUEUE_REAP_PROBE_CONTRACT,
+        QUEUE_REAP_PROBE_REQUEST_FIELD,
+    )
 
     calls = []
+    queries = []
 
     class Client:
         def command(self, operation, payload, command_id):
@@ -39,7 +31,9 @@ def test_queue_reap_command_id_matches_exact_payload(monkeypatch):
 
         def query(self, operation, payload):
             assert operation == 'queue.conversations.list_all'
-            assert payload == {}
+            queries.append(dict(payload))
+            # Rolling old peer: ignores additive request members and returns
+            # the legacy bare list, so the writer repair must remain.
             return []
 
     times = iter((1000.001, 1000.002))
@@ -49,9 +43,80 @@ def test_queue_reap_command_id_matches_exact_payload(monkeypatch):
         time=lambda: next(times)))
     queue_mod.reap_expired_queue_leases()
     queue_mod.reap_expired_queue_leases()
+    assert queries == [
+        {QUEUE_REAP_PROBE_REQUEST_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+         'now_ms': 1_000_001},
+        {QUEUE_REAP_PROBE_REQUEST_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+         'now_ms': 1_000_002},
+    ]
     assert calls[0][2] != calls[1][2]
     for _, payload, command_id in calls:
         assert str(payload['now_ms']) in command_id
+
+
+def test_queue_reap_confirmed_idle_probe_never_enters_writer(monkeypatch):
+    import lib.message_queue as queue_mod
+    from lib.turn_source_queue_contract import (
+        QUEUE_REAP_PROBE_CONTRACT,
+        QUEUE_REAP_PROBE_CONVERSATIONS_FIELD,
+        QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD,
+        QUEUE_REAP_PROBE_RESPONSE_FIELD,
+    )
+
+    class Client:
+        def query(self, operation, payload):
+            assert operation == 'queue.conversations.list_all'
+            assert payload['now_ms'] == 1_000_001
+            return {
+                QUEUE_REAP_PROBE_RESPONSE_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+                QUEUE_REAP_PROBE_CONVERSATIONS_FIELD: [],
+                QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD: False,
+            }
+
+        def command(self, *_args, **_kwargs):
+            pytest.fail('an empty confirmed probe must not enter the writer')
+
+    monkeypatch.setattr(queue_mod, '_queue_client', lambda **_kw: Client())
+    monkeypatch.setattr(queue_mod, 'time', SimpleNamespace(
+        time=lambda: 1000.001))
+
+    assert queue_mod.reap_expired_queue_leases() == []
+
+
+def test_queue_reap_confirmed_expiry_still_runs_atomic_repair(monkeypatch):
+    import lib.message_queue as queue_mod
+    from lib.turn_source_queue_contract import (
+        QUEUE_REAP_PROBE_CONTRACT,
+        QUEUE_REAP_PROBE_CONVERSATIONS_FIELD,
+        QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD,
+        QUEUE_REAP_PROBE_RESPONSE_FIELD,
+    )
+
+    commands = []
+
+    class Client:
+        def query(self, _operation, _payload):
+            return {
+                QUEUE_REAP_PROBE_RESPONSE_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+                QUEUE_REAP_PROBE_CONVERSATIONS_FIELD: [],
+                QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD: True,
+            }
+
+        def command(self, operation, payload, command_id):
+            commands.append((operation, dict(payload), command_id))
+            return {'ok': True, 'conversations': []}
+
+    client = Client()
+    monkeypatch.setattr(queue_mod, '_queue_client', lambda **_kw: client)
+    monkeypatch.setattr(queue_mod, 'time', SimpleNamespace(
+        time=lambda: 1000.001))
+
+    assert queue_mod.reap_expired_queue_leases() == []
+    assert commands == [(
+        'queue.reap',
+        {'now_ms': 1_000_001, 'force_reclaim': False},
+        'queue-reap:1000001:normal',
+    )]
 
 
 def test_subscription_probe_failure_is_debug_but_request_failure_warns(caplog):

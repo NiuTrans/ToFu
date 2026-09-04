@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 import pytest
 
@@ -206,6 +207,76 @@ def test_topic_script_is_locked_to_requested_model(monkeypatch):
                'cards': rec._cards_from_results(_FAKE_RESULTS)}}}
     rec._run_script(ctx)
     assert seen['prefer_model'] == 'kimi-k3'
+    assert seen['strict_model'] is True
+
+
+def test_topic_script_dispatch_is_abortable_and_finitely_bounded(monkeypatch):
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', '7')
+    abort_event = threading.Event()
+    seen = {}
+
+    def fake_chat(messages, **kwargs):
+        seen.update(kwargs)
+        return ('{"title":"短片","segments":["第一幕。","第二幕。",'
+                '"第三幕。"]}', {})
+
+    monkeypatch.setattr(rec, '_llm_chat', fake_chat)
+    ctx = {'topic': 't', 'lang': 'zh', 'max_scenes': 8,
+           'abort_event': abort_event,
+           'artifacts': {'research': {
+               'cards': rec._cards_from_results(_FAKE_RESULTS)}}}
+    rec._run_script(ctx)
+
+    assert seen['max_retries'] == 2
+    assert seen['max_429_attempts'] == 7
+    assert seen['abort_check']() is False
+    abort_event.set()
+    assert seen['abort_check']() is True
+
+
+def test_topic_script_discards_reply_when_abort_lands_in_dispatch(monkeypatch):
+    abort_event = threading.Event()
+    calls = []
+
+    def late_reply(messages, **kwargs):
+        calls.append('dispatch')
+        abort_event.set()
+        return ('{"title":"late","segments":["第一幕。","第二幕。",'
+                '"第三幕。"]}', {})
+
+    monkeypatch.setattr(rec, '_llm_chat', late_reply)
+    ctx = {'topic': 't', 'lang': 'zh', 'max_scenes': 8,
+           'abort_event': abort_event,
+           'artifacts': {'research': {
+               'cards': rec._cards_from_results(_FAKE_RESULTS)}}}
+    with pytest.raises(st.StageAborted, match='after script dispatch'):
+        rec._run_script(ctx)
+    assert calls == ['dispatch']
+
+
+def test_source_beat_dispatch_honours_model_and_production_limits(monkeypatch):
+    seen = {}
+    reply = {'beats': [
+        {'text': '第一幕。', 'on_screen': '一', 'visual': 'wide'},
+        {'text': '第二幕。', 'on_screen': '二', 'visual': 'detail'},
+        {'text': '第三幕。', 'on_screen': '三', 'visual': 'resolve'},
+    ]}
+
+    def fake_chat(messages, **kwargs):
+        seen.update(kwargs)
+        return json.dumps(reply, ensure_ascii=False), {}
+
+    monkeypatch.setattr(rec, '_llm_chat', fake_chat)
+    result = rec.script_stage_for_source(
+        '一份已有报告。', model='picked-model', max_429_attempts=9,
+        abort_check=lambda: False)
+
+    assert len(result) == 3
+    assert seen['prefer_model'] == 'picked-model'
+    assert seen['strict_model'] is True
+    assert seen['max_retries'] == 2
+    assert seen['max_429_attempts'] == 9
+    assert callable(seen['abort_check'])
 
 
 def test_topic_script_carries_art_direction_into_scenes(monkeypatch):
@@ -495,16 +566,44 @@ def test_resume_interrupted_jobs_respawns_running(monkeypatch, tmp_path):
 
 
 def test_reusable_manifest_matches_scenes(tmp_path):
+    import hashlib
+    from lib.motion_video import _audio as narration_audio
+
     audio = tmp_path / 'audio'
     audio.mkdir()
     wav = audio / 'scene-001.wav'
-    wav.write_bytes(b'RIFF')
+    wav_bytes = b'RIFF-valid-checkpoint'
+    wav.write_bytes(wav_bytes)
     from lib.json_store import write_json_atomic
-    write_json_atomic(str(audio / 'manifest.json'), {'ok': True, 'scenes': [
-        {'scene_id': 'scene-001', 'wav': str(wav), 'audio_duration': 3.0,
-         'target_duration': 3.0, 'overflow': 0.0}]})
-    scenes = [{'id': 'scene-001'}]
+    manifest = {
+        'ok': True,
+        'manifest_version': 2,
+        'request': narration_audio._manifest_request_contract(
+            voice=None, speed=None, alignment='loose', tail_pad=0.35),
+        'scenes': [{
+            'scene_id': 'scene-001', 'wav': str(wav),
+            'text_sha256': narration_audio._scene_text_sha256('旁白。'),
+            'wav_bytes': len(wav_bytes),
+            'wav_sha256': hashlib.sha256(wav_bytes).hexdigest(),
+            'audio_duration': 3.0, 'srt_duration': 3.0,
+            'target_duration': 4.0, 'overflow': 0.0,
+        }],
+    }
+    write_json_atomic(str(audio / 'manifest.json'), manifest)
+    scenes = [{'id': 'scene-001', 'start': 0, 'end': 3, 'text': '旁白。'}]
     assert eng._reusable_manifest(str(audio), scenes) is not None
-    # A missing wav → not reusable.
+    rescaled_scenes = [{**scenes[0], 'end': 4}]
+    assert eng._reusable_manifest(str(audio), rescaled_scenes) is not None
+
+    # Every semantic input and output byte is lineage, not just the scene id.
+    changed_text = [{**scenes[0], 'text': '新旁白。'}]
+    assert eng._reusable_manifest(str(audio), changed_text) is None
+    assert eng._reusable_manifest(str(audio), scenes, voice='other') is None
+    corrupt_bytes = bytearray(wav_bytes)
+    corrupt_bytes[-1] ^= 1
+    wav.write_bytes(corrupt_bytes)
+    assert eng._reusable_manifest(str(audio), scenes) is None
+
+    # A missing wav is likewise not reusable.
     wav.unlink()
     assert eng._reusable_manifest(str(audio), scenes) is None

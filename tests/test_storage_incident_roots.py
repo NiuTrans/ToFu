@@ -108,89 +108,50 @@ def test_clean_none_command_result_is_not_a_permanent_receipt():
     assert receipt_cacheable(None) is False
 
 
-def test_board_refresh_and_repeated_lifecycle_do_not_replay_stale_receipts():
-    from lib.conversations.project_board import (
-        claim_task,
-        complete_task,
-        post_task,
-        read_board,
-        reopen_task,
-    )
-
-    project = '/incident/board-receipts'
-    task_id = post_task(
-        project, 'conv-a', 'repeatable lifecycle', user_id=1)['id']
-
-    first_claim = claim_task(
-        project, 'conv-worker', task_id, user_id=1,
-        ttl_ms=60_000, dispatched=False)
-    refreshed = claim_task(
-        project, 'conv-worker', task_id, user_id=1,
-        ttl_ms=120_000, dispatched=True)
-    assert first_claim['ok'] is True
-    assert refreshed['ok'] is True
-    assert refreshed['refreshed'] is True
-    assert refreshed['transitioned'] is False
-    assert refreshed['lease_expires_at'] > first_claim['lease_expires_at']
-    claimed = next(
-        t for t in read_board(project, user_id=1)['tasks']
-        if t['id'] == task_id)
-    assert claimed['dispatched'] is True
-
-    assert complete_task(
-        project, 'conv-worker', task_id, user_id=1)['transitioned'] is True
-    assert reopen_task(
-        project, 'human', task_id, user_id=1)['transitioned'] is True
-    # The old permanent board.complete receipt returned success here without
-    # executing, leaving the task open.
-    assert complete_task(
-        project, 'conv-worker', task_id, user_id=1)['transitioned'] is True
-    assert read_board(project, user_id=1)['done'] == 1
-    # The same stale-receipt bug existed in the other direction for reopen.
-    assert reopen_task(
-        project, 'human', task_id, user_id=1)['transitioned'] is True
-    assert read_board(project, user_id=1)['open'] == 1
-    repeated = reopen_task(project, 'human', task_id, user_id=1)
-    assert repeated['ok'] is False and repeated['error'] == 'already_open'
-
-
-def test_watch_set_operations_can_cycle_back_to_an_earlier_value():
-    from lib.conversations.project_watch import (
+def test_watch_updates_can_cycle_back_to_an_earlier_value():
+    from lib.conversations.project_brain import (
         add_watch_item,
-        edit_watch_item,
-        list_watch_items,
-        set_watch_status,
+        update_watch_item,
+        watch_projection,
     )
 
+    project = '/incident/watch-receipts'
     item = add_watch_item(
-        '/incident/watch-receipts', 'concern', 'A', user_id=1)['item']
-    item_id = item['item_id']
-    assert edit_watch_item(item_id, user_id=1, text='B')['ok']
-    assert edit_watch_item(item_id, user_id=1, text='A')['ok']
-    assert edit_watch_item(item_id, user_id=1, text='B')['ok']
+        project, kind='concern', text='A', user_id=1)
+    item_id = item['id']
+    assert update_watch_item(
+        project, item_id, user_id=1, text='B')['text'] == 'B'
+    assert update_watch_item(
+        project, item_id, user_id=1, text='A')['text'] == 'A'
+    assert update_watch_item(
+        project, item_id, user_id=1, text='B')['text'] == 'B'
     current = next(
-        row for row in list_watch_items(
-            '/incident/watch-receipts', user_id=1,
-            include_resolved=True)['items']
-        if row['item_id'] == item_id)
+        row for row in watch_projection(project, user_id=1)['items']
+        if row['id'] == item_id)
     assert current['text'] == 'B'
 
-    assert set_watch_status(item_id, 'resolved', user_id=1)['ok']
-    assert set_watch_status(item_id, 'open', user_id=1)['ok']
-    assert set_watch_status(item_id, 'resolved', user_id=1)['ok']
+    assert update_watch_item(
+        project, item_id, user_id=1, status='resolved')['status'] == 'resolved'
+    assert update_watch_item(
+        project, item_id, user_id=1, status='active')['status'] == 'active'
+    assert update_watch_item(
+        project, item_id, user_id=1, status='resolved')['status'] == 'resolved'
     current = next(
-        row for row in list_watch_items(
-            '/incident/watch-receipts', user_id=1,
-            include_resolved=True)['items']
-        if row['item_id'] == item_id)
+        row for row in watch_projection(project, user_id=1)['items']
+        if row['id'] == item_id)
     assert current['status'] == 'resolved'
 
 
 def test_oversized_response_encoding_returns_a_classified_error(monkeypatch):
+    from lib.storage.frame_admission import FrameByteAdmission
     from lib.storage_sidecar import server as sidecar_server
 
     handler = object.__new__(sidecar_server._StorageHandler)
     handler.request = object()
+    handler.server = type('Server', (), {
+        '_frame_byte_admission': FrameByteAdmission(
+            capacity_bytes=128 * 1024 * 1024),
+    })()
     sent = []
 
     def fake_send_frame(_socket, message):
@@ -213,6 +174,8 @@ def test_oversized_response_encoding_returns_a_classified_error(monkeypatch):
     assert fallback['ok'] is False
     assert fallback['error']['code'] == 'database_protocol_error'
     assert fallback['error']['message'] == 'Storage frame exceeds the size limit'
+    assert handler.server._frame_byte_admission.metrics()[
+        'frame_bytes_inflight'] == 0
 
 
 def test_reclaim_checks_wall_budget_between_single_page_units(monkeypatch):

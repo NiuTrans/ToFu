@@ -203,9 +203,9 @@ def test_vu_phase_behavior_gated_on_vu_startup_flag():
 
 
 # ── Slice 3: _prefetch submodule (memory + project prefetches) ──────
-# Extracts the pool creation + two prefetch closures + task-attach into
+# Extracts provider leasing + prefetch closure + task-attach into
 # lib/tasks_pkg/orchestrator/_prefetch.py; _run.py's finally block still
-# owns the pool.shutdown() teardown.
+# owns the lease.shutdown() cancellation boundary.
 
 @_unit
 def test_prefetch_submodule_exists_and_exposes_start_prefetches():
@@ -245,12 +245,12 @@ def test_prefetch_only_submits_project_rules_io():
       * project_enabled=False (or no project_path) → task['_prefetch_project'] is None
       * memory_enabled does not create a future; local memory selection runs
         synchronously after tool assembly
-      * returned pool is a live ThreadPoolExecutor the caller owns
-    Uses a synchronous fake pool that just records .submit()
+      * returned lease owns cancellation over the shared bounded executor
+    Uses a synchronous fake lease that just records .submit()
     calls, so the test is deterministic + doesn't leak threads."""
     import lib.tasks_pkg.orchestrator._prefetch as pf
 
-    # Fake executor to record submit() calls without spawning threads.
+    # Fake lease to record submit() calls without spawning threads.
     class _FakePool:
         def __init__(self):
             self.submitted = []
@@ -270,7 +270,7 @@ def test_prefetch_only_submits_project_rules_io():
 
     orig_pool = pf._PrefetchPool
     try:
-        # Force start_prefetches to construct our fake pool.
+        # Force start_prefetches to construct our fake lease.
         pf._PrefetchPool = lambda *a, **kw: _FakePool()
 
         # Project ON → exactly one project-context submit.
@@ -307,7 +307,7 @@ def test_prefetch_only_submits_project_rules_io():
         assert task3.get('_prefetch_project') is not None
         assert '_prefetch_memory' not in task3
 
-        # Case 4: both OFF → no submits at all, but the pool still exists
+        # Case 4: both OFF → no submits at all, but the lease still exists
         # (the caller expects a shutdown-able return value regardless).
         task4 = {'id': 'tid-neither'}
         pool4 = pf.start_prefetches(

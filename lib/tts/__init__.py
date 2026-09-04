@@ -1,9 +1,8 @@
 """lib/tts — provider-agnostic text-to-speech (TTS).
 
-Turns text into spoken audio by routing through the existing ``llm_dispatch``
-slot pool, exactly the way lib/transcription routes speech-to-text: a
-*capability* (``tts``) on a slot, not a hard-coded vendor branch
-(CLAUDE.md §3.5).
+Turns text into spoken audio by compiling an owner-authorized model-routing v2
+Offering into a bounded request-only ``llm_dispatch`` group. Selection is a
+*capability* (``tts``), not a hard-coded vendor branch.
 
 The wire shape is the OpenAI-compatible one::
 
@@ -13,9 +12,8 @@ The wire shape is the OpenAI-compatible one::
 Registration (owner directive 2026-07-25 — model name and voice are NEVER
 hardcoded in the feature code):
 
-  * Settings UI / server_config.json: add a provider whose model entry
-    declares ``capabilities: ["tts"]`` (explicit per-cell capabilities win
-    in the dispatcher), or
+  * Add an owner-scoped Provider Offering whose capabilities include
+    ``"tts"`` in model-routing v2, or
   * register a well-known public TTS model name (``tts-1``, ``tts-1-hd``,
     ``gpt-4o-mini-tts``) — these carry DEFAULT_SLOT_CONFIGS reference
     entries with the ``tts`` cap already attached (same pattern as the
@@ -25,7 +23,7 @@ Voice / format / speed resolve per request → ``data/config/tts.json``
 (``default_voice``, ``default_format``, ``speed``, ``max_input_chars``) →
 fallback constants (see ``_config``).
 
-Graceful disable (owner directive): with no tts-capable slot,
+Graceful disable (owner directive): with no owner-authorized TTS route,
 :func:`tts_available` is False and callers degrade (paper podcast delivers
 script + transcript only) instead of erroring.
 
@@ -45,7 +43,9 @@ __all__ = [
     'TTS_CAP',
     'TTSError',
     'SynthesizeResult',
+    'SynthesisSession',
     'synthesize',
+    'synthesis_session',
     'tts_available',
     'list_tts_models',
     'default_voice',
@@ -75,10 +75,12 @@ from lib.tts._config import (  # noqa: E402,F401
 
 # ── Synthesize: error/result types, provider seam, entry point ───────────
 from lib.tts._synthesize import (  # noqa: E402,F401
+    SynthesisSession,
     SynthesizeResult,
     TTSError,
     sniff_container,
     synthesize,
+    synthesis_session,
     _post_speech,
     _sniff_mime,
 )

@@ -47,19 +47,20 @@ def orchestration_client_methods() -> Mapping[str, tuple[str, str]]:
 def orchestration_browser_request_contract_dicts(
 ) -> dict[str, dict[str, object]]:
     """Join backend HTTP identity with its browser request policy."""
-    return {
-        name: {
+    contracts: dict[str, dict[str, object]] = {}
+    for name, endpoint in orchestration_http_endpoints().items():
+        contract = endpoint.as_dict()
+        contract.update({
             'resultMethod': ORCHESTRATION_CLIENT_METHODS[name][0],
             'directMethod': ORCHESTRATION_CLIENT_METHODS[name][1],
             'optionName': ORCHESTRATION_RESPONSE_OPTIONS[
                 endpoint.response_contract],
-            'responseContract': endpoint.response_contract,
             'responseRequiredFields': list(
                 ORCHESTRATION_RESPONSE_REQUIRED_FIELDS.get(
                     endpoint.response_contract, ())),
-        }
-        for name, endpoint in orchestration_http_endpoints().items()
-    }
+        })
+        contracts[name] = contract
+    return contracts
 
 
 __all__ = [

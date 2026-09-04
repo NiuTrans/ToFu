@@ -28,7 +28,7 @@ from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import BadRequest, parse_body, require_str
 
-from .auth import require_auth, require_scope
+from .auth import request_principal, require_auth, require_scope
 
 logger = get_logger(__name__)
 
@@ -36,14 +36,14 @@ api_v1_adapter_bp = Blueprint('api_v1_adapter', __name__)
 
 
 def _caller_uid() -> str:
-    from .auth import current_auth
-    auth = current_auth()
-    return str(auth.owner_user_id or '') if auth else ''
+    """Capture the authenticated owner; device control never has a global view."""
+    return str(request_principal().require_owner(
+        context='subscription adapter request'))
 
 
 def _known_agent(agent_id: str, uid: str) -> dict:
     from lib.desktop import list_agents
-    return next((a for a in list_agents(user_id=uid or None)
+    return next((a for a in list_agents(user_id=uid)
                  if a.get('agent_id') == agent_id), None)
 
 
@@ -65,6 +65,7 @@ def _valid_oauth_state(state: str) -> bool:
     tags=['capabilities'],
 )
 def adapter_status_route():
+    uid = _caller_uid()
     try:
         from lib.desktop import list_agents
         from lib.desktop.adapter import (
@@ -72,9 +73,8 @@ def adapter_status_route():
             adapter_status,
             ensure_task_state,
         )
-        uid = _caller_uid()
         agents = []
-        for a in list_agents(user_id=uid or None):
+        for a in list_agents(user_id=uid):
             caps = a.get('capabilities') or {}
             if not caps.get('egress'):
                 continue
@@ -90,7 +90,13 @@ def adapter_status_route():
                     aid, agent_name=a.get('name', ''), user_id=uid),
                 'policy': adapter_policy_public(aid),
             })
-        return api_ok({'agents': agents, 'ensure_tasks': ensure_task_state()})
+        ensure_tasks = {
+            agent['agent_id']: task
+            for agent in agents
+            if (task := ensure_task_state(
+                agent['agent_id'], user_id=uid))
+        }
+        return api_ok({'agents': agents, 'ensure_tasks': ensure_tasks})
     except Exception as e:
         logger.error('[Adapter.v1] status failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.adapter.status')
@@ -116,17 +122,21 @@ def adapter_ensure_route():
         agent_id = require_str(body, 'agent_id')
     except BadRequest as e:
         return api_bad_request(str(e), field=getattr(e, 'field', '') or 'agent_id')
+    uid = _caller_uid()
+    known_agent = _known_agent(agent_id, uid)
+    if not known_agent:
+        return api_bad_request('unknown agent_id', field='agent_id')
     try:
-        from lib.desktop import list_agents
-        from lib.desktop.adapter import ensure_adapter
-        uid = _caller_uid()
-        known = {a.get('agent_id'): a for a in list_agents(user_id=uid or None)}
-        if agent_id not in known:
-            return api_bad_request('unknown agent_id', field='agent_id')
+        from lib.desktop.adapter import (
+            AdapterEnsureCapacityError,
+            ensure_adapter,
+        )
         task = ensure_adapter(agent_id,
-                              agent_name=known[agent_id].get('name', ''),
+                              agent_name=known_agent.get('name', ''),
                               user_id=uid)
         return api_ok({'task': task})
+    except AdapterEnsureCapacityError as e:
+        return api_error(str(e), status=503)
     except Exception as e:
         logger.error('[Adapter.v1] ensure failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.adapter.ensure')
@@ -148,9 +158,11 @@ def adapter_stop_route():
         agent_id = require_str(body, 'agent_id')
     except BadRequest as e:
         return api_bad_request(str(e), field=getattr(e, 'field', '') or 'agent_id')
+    uid = _caller_uid()
+    if not _known_agent(agent_id, uid):
+        return api_bad_request('unknown agent_id', field='agent_id')
     try:
         from lib.desktop.adapter import stop_adapter
-        uid = _caller_uid()
         out = stop_adapter(agent_id, user_id=uid)
         return api_ok(out)
     except Exception as e:

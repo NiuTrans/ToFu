@@ -104,6 +104,11 @@ def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
         project_path: The active project root the probe should scan.
     """
     try:
+        if task.get('aborted') or task.get('status') in {
+                'done', 'error', 'aborted', 'interrupted'}:
+            logger.debug('[Task:%s] skipping external-edit probe — task is '
+                         'cancelled or terminal', task['id'][:8])
+            return
         if task.get('modifiedFileList') or task.get('modifiedFiles'):
             logger.debug('[Task:%s] skipping external-edit probe '
                          '— round already mutated files',
@@ -124,6 +129,12 @@ def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
         from lib import file_history as fh
         _ext = fh.detect_external_edits(
             project_path, known_task_ids=_known_task_ids)
+        if task.get('aborted') or task.get('status') in {
+                'done', 'error', 'aborted', 'interrupted'}:
+            logger.debug('[Task:%s] external-edit probe completed after task '
+                         'cancel/settlement — suppressing stale event',
+                         task['id'][:8])
+            return
         if _ext.get('siblingFiles'):
             logger.info('[Task:%s] external-edit probe attributed %d '
                         'drifted file(s) to concurrent Tofu task(s) — '
@@ -257,6 +268,21 @@ def setup_project_context(
         except Exception as _pe:
             logger.debug('[Task:%s] presence announce failed: %s',
                          task['id'][:8], _pe)
+
+    # Presence keepalive: a live task must read ACTIVE for its whole
+    #   lifetime, not only while the model streams text (a >25s tool call
+    #   otherwise drops the conversation out of every collaboration view).
+    #   One bounded daemon refreshes liveness from the task registry; a
+    #   keepalive failure must NEVER affect the task (same as announce).
+    if task.get('convId'):
+        try:
+            from lib.tasks_pkg.manager._presence_keepalive import (
+                ensure_started as _presence_keepalive_start,
+            )
+            _presence_keepalive_start()
+        except Exception as _pk:
+            logger.debug('[Task:%s] presence keepalive start failed: %s',
+                         task['id'][:8], _pk)
 
     # ── File-history: capture any external (IDE) edits made between
     #    rounds. Runs SILENTLY in a background thread — no phase event,

@@ -33,12 +33,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Iterator, Mapping
 
 from lib.log import audit_log, get_logger
 from lib.runtime_paths import data_root
 from lib import integration_state_repository as _state
-from lib.integration_state_repository import IntegrationStateError
 from lib.storage import StorageError
 from lib.git_checkpoint_policy import (
     PROJECT_GATE_REQUIRED_SUFFIXES as _PROJECT_GATE_REQUIRED_SUFFIXES,
@@ -194,7 +193,7 @@ def _push(project_root: str, *, user_id: int) -> None:
     _invalidate(project_root, user_id=owner_user_id)
     try:
         from lib.agent_core.push import push_event
-        from lib.conversations.project_feed import project_channel_key
+        from lib.conversations.project_identity import project_channel_key
         push_event('project', project_channel_key(project_root), {
             'type': 'integration', 'projectPath': project_root,
         }, user_id=owner_user_id)
@@ -246,12 +245,12 @@ def _ensure_refs(root: Path) -> tuple[str, str]:
 
 
 def _clean_origin(origin: Any) -> dict[str, Any]:
-    """Validate the caller-supplied origin metadata (epic/conv provenance).
+    """Validate bounded caller-supplied work/conversation provenance.
 
     Origin is how a workspace row answers "who started this and why" — the
-    epic id it was created for, the conversation that owns it, and the
-    creation channel ('board' / 'manual' / 'agent' / 'repair'). Keys and
-    values are coerced to short strings so the meta row stays small.
+    automatic work ID, the conversation that owns it, and the creation
+    channel. Keys and values are coerced to short strings so the row stays
+    small.
     """
     if not origin:
         return {}
@@ -278,7 +277,7 @@ def register_workspace(project_path: str, task_id: str, workspace_path: str,
     owner_user_id = _require_user_id(user_id)
     task_id = str(task_id or '').strip()
     if not task_id:
-        raise IntegrationError('taskId is required')
+        raise IntegrationError('workId is required')
     root = _repo_root(project_path)
     workspace = _repo_root(workspace_path)
     if workspace == root:
@@ -297,7 +296,7 @@ def register_workspace(project_path: str, task_id: str, workspace_path: str,
             managed=managed, base_sha=base, now=now,
             origin=cleaned_origin or None)
     _push(str(root), user_id=owner_user_id)
-    return {'ok': True, 'taskId': task_id, 'workspacePath': str(workspace),
+    return {'ok': True, 'workId': task_id, 'workspacePath': str(workspace),
             'baseSha': base, 'state': 'running', 'managed': bool(managed),
             'origin': cleaned_origin}
 
@@ -310,7 +309,7 @@ def create_workspace(project_path: str, task_id: str,
     root = _repo_root(project_path)
     task_id = str(task_id or '').strip()
     if not task_id:
-        raise IntegrationError('taskId is required')
+        raise IntegrationError('workId is required')
     repo_key = hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:12]
     destination = (
         _workspace_root() / repo_key / f'u{owner_user_id}' / _safe_task(task_id))
@@ -333,6 +332,21 @@ def create_workspace(project_path: str, task_id: str,
         with _repo_lock(str(root)):
             _remove_controlled_worktree(root, destination)
         raise
+
+
+def has_active_workspace_for_work(
+    project_path: str,
+    work_id: str,
+    *,
+    user_id: int,
+) -> bool:
+    """Return whether this owner/work ID has an editable isolated workspace."""
+    if not project_path or not work_id:
+        return False
+    root = _repo_root(project_path)
+    row = _state.find_workspace(
+        str(root), str(work_id).strip(), user_id=_require_user_id(user_id))
+    return bool(row and row.get('state') in {'running', 'checkpointed'})
 
 
 def _alternate_index_checkpoint(workspace: Path, parent: str,
@@ -383,7 +397,7 @@ def checkpoint_workspace(
         if row['state'] in {'discarded', 'merged'}:
             raise IntegrationError(
                 f"The workspace is {row['state']}; register a new isolated "
-                'epic instead of resurrecting a terminal integration record')
+                'work item instead of resurrecting a terminal integration record')
         workspace = Path(row['workspace_path'])
         if not workspace.exists():
             raise IntegrationError(f'Workspace is missing: {workspace}')
@@ -429,7 +443,7 @@ def checkpoint_workspace(
                 user_id=owner_user_id,
             )
     _push(root_s, user_id=owner_user_id)
-    return {'ok': True, 'taskId': task_id, 'checkpointSha': checkpoint,
+    return {'ok': True, 'workId': task_id, 'checkpointSha': checkpoint,
             'checkpointRef': _checkpoint_ref(owner_user_id, task_id),
             'state': 'checkpointed', 'reanchored': reanchored}
 
@@ -450,76 +464,6 @@ def submit_workspace(
     return result
 
 
-def board_completion_gate(
-    project_path: str, task_id: str, *, user_id: int,
-) -> dict[str, Any]:
-    """Require an isolated board epic to reach candidate before ``done``.
-
-    A board task without an integration row is ordinary shared-tree work and
-    is unaffected.  For an isolated task, only ``merged`` proves that its
-    immutable checkpoint has passed the gate and moved candidate; completing
-    earlier would release dependent epics against stale source.
-    """
-    owner_user_id = _require_user_id(user_id)
-    try:
-        project_root = str(_repo_root(project_path))
-    except IntegrationError:
-        # Ordinary board projects need not be Git repositories. Isolation
-        # creation cannot succeed there, but a previously registered row may
-        # still be found by its normalized path if the checkout was removed.
-        project_root = str(Path(project_path).expanduser().resolve())
-    row = _state.find_workspace(
-        project_root, str(task_id or '').strip(), user_id=owner_user_id)
-    if row is None:
-        return {'ok': True, 'integrationRequired': False, 'state': ''}
-    state = str(row.get('state') or '')
-    return {
-        'ok': state == 'merged',
-        'integrationRequired': True,
-        'state': state,
-        'error': '' if state == 'merged' else 'integration_not_merged',
-    }
-
-
-def update_workspace_write_set(
-    project_path: str,
-    task_id: str,
-    write_set: Iterable[str],
-    *,
-    user_id: int,
-) -> dict[str, Any]:
-    """Keep an active integration gate aligned with a board scope edit."""
-    owner_user_id = _require_user_id(user_id)
-    try:
-        project_root = str(_repo_root(project_path))
-    except IntegrationError:
-        project_root = str(Path(project_path).expanduser().resolve())
-    row = _state.find_workspace(
-        project_root, str(task_id or '').strip(), user_id=owner_user_id)
-    if row is None:
-        return {'ok': True, 'integrationRequired': False, 'updated': False}
-    state = str(row.get('state') or '')
-    if state in {'ready', 'integrating', 'merged', 'discarded'}:
-        raise IntegrationError(
-            f'Integration workspace is {state}; its submitted scope is immutable')
-    normalized = []
-    for item in write_set or ():
-        value = str(item or '').strip()[:300]
-        if value and value not in normalized:
-            normalized.append(value)
-    _set_meta(
-        project_root, str(task_id), {'writeSet': normalized},
-        user_id=owner_user_id)
-    _push(project_root, user_id=owner_user_id)
-    return {
-        'ok': True,
-        'integrationRequired': True,
-        'updated': True,
-        'state': state,
-        'writeSet': normalized,
-    }
-
-
 def retry_workspace(
     project_path: str, task_id: str, *, user_id: int,
 ) -> dict[str, Any]:
@@ -530,7 +474,7 @@ def retry_workspace(
         user_id=owner_user_id, project_root=str(root), task_id=task_id, now=now)
     _start_or_wake_worker()
     _push(str(root), user_id=owner_user_id)
-    return {'ok': True, 'taskId': task_id, 'state': 'ready'}
+    return {'ok': True, 'workId': task_id, 'state': 'ready'}
 
 def discard_workspace(
     project_path: str, task_id: str, *, user_id: int,
@@ -546,7 +490,7 @@ def discard_workspace(
     _state.discard_workspace(
         user_id=owner_user_id, project_root=str(root), task_id=task_id, now=now)
     _push(str(root), user_id=owner_user_id)
-    return {'ok': True, 'taskId': task_id, 'state': 'discarded'}
+    return {'ok': True, 'workId': task_id, 'state': 'discarded'}
 
 
 def _set_meta(
@@ -565,65 +509,6 @@ def _set_meta(
         logger.warning('[Integration] set_meta failed for %s: %s', task_id, exc)
 
 
-def peek_workspace_for_epic(
-    project_path: str, task_id: str, *, user_id: int,
-) -> dict[str, Any] | None:
-    """Light lookup used by dispatch: does an integration workspace exist for
-    this epic id? One storage read, no Git calls; None when absent or on any
-    error (dispatch must never break on an integration peek)."""
-    owner_user_id = _require_user_id(user_id)
-    if not project_path or not task_id:
-        return None
-    # Registration keys rows by ``str(_repo_root(...))`` — resolve() plus the
-    # git toplevel — so a raw board path that is symlinked or a subdirectory
-    # of the repo would miss the row.  No subprocess on this dispatch hot
-    # path: resolve() first, then a bounded parent walk for a .git marker.
-    try:
-        resolved = Path(project_path).expanduser().resolve()
-    except OSError:
-        resolved = Path(project_path)
-    candidates = [str(resolved)]
-    node = resolved
-    for _ in range(8):
-        if (node / '.git').exists():
-            candidates.append(str(node))
-            break
-        parent = node.parent
-        if parent == node:
-            break
-        node = parent
-    row = None
-    # get_workspace RAISES IntegrationStateError when no row exists for a
-    # candidate — that is the expected miss signal, not a failure: keep
-    # walking to the git-toplevel parent anchor.  Bailing out on the first
-    # miss (the previous except-Exception-return-None) made the whole parent
-    # walk dead code, so subdirectory/symlinked project paths never found
-    # their workspace and dispatch silently downgraded an isolated epic to
-    # shared-tree work on the canonical checkout.
-    for candidate in candidates:
-        try:
-            row = _state.get_workspace(
-                candidate, task_id, user_id=owner_user_id)
-        except IntegrationStateError:
-            continue
-        except Exception as exc:
-            logger.warning('[Integration] workspace peek failed for %s: %s',
-                           candidate, exc)
-            return None
-        if row:
-            break
-    if not row:
-        return None
-    # Only ACTIVE writer states mean "an isolated writer owns this epic".
-    # ready/integrating/merged/failed/quarantined rows describe a worktree
-    # that is sealed, under merge, or parked — injecting the ISOLATED brief
-    # for those sends the assignee to edit an immutable or already-merged
-    # checkout.
-    if row.get('state') not in ('running', 'checkpointed'):
-        return None
-    return row
-
-
 _CONFLICT_IN_FILE_RE = re.compile(r'merge conflict in (.+)', re.IGNORECASE)
 
 
@@ -640,27 +525,6 @@ def _conflict_files_from(text: str) -> list[str]:
     return files[:64]
 
 
-def _path_allowed_by_write_set(path: str, write_set: list[str]) -> bool:
-    normalized = str(path or '').replace('\\', '/').strip()
-    while normalized.startswith('./'):
-        normalized = normalized[2:]
-    normalized = normalized.lstrip('/')
-    for raw in write_set:
-        declared = str(raw or '').replace('\\', '/').strip()
-        while declared.startswith('./'):
-            declared = declared[2:]
-        declared = declared.lstrip('/')
-        if declared in {'', '*', '**'}:
-            if declared:
-                return True
-            continue
-        declared = declared.rstrip('/*')
-        if (normalized == declared
-                or normalized.startswith(declared + '/')):
-            return True
-    return False
-
-
 def _gate_argv(configured_command: str, old: str, target: str) -> list[str]:
     """Parse one direct command and expand safe SHA placeholders.
 
@@ -675,9 +539,7 @@ def _gate_argv(configured_command: str, old: str, target: str) -> list[str]:
 
 
 def _gate_commands(root: Path, old: str, target: str,
-                   configured_command: str = '',
-                   declared_write_set: list[str] | None = None,
-                   ) -> tuple[bool, str]:
+                   configured_command: str = '') -> tuple[bool, str]:
     diff_check = _git(root, ['diff', '--check', old, target])
     if diff_check.returncode != 0:
         return False, (diff_check.stdout or diff_check.stderr).strip()[:3000]
@@ -713,18 +575,6 @@ def _gate_commands(root: Path, old: str, target: str,
         return False, (
             'Checkpoint contains forbidden dependency/generated/runtime paths: '
             + ', '.join(forbidden))
-    write_set = [
-        str(item) for item in (declared_write_set or [])
-        if str(item or '').strip()
-    ]
-    outside_write_set = [
-        name for name in all_changed
-        if write_set and not _path_allowed_by_write_set(name, write_set)
-    ]
-    if outside_write_set:
-        return False, (
-            'Checkpoint changed paths outside the epic declared write-set: '
-            + ', '.join(outside_write_set[:64]))
     project_gate_files = [
         name for name in all_changed
         if Path(name).suffix.lower() in _PROJECT_GATE_REQUIRED_SUFFIXES
@@ -916,9 +766,14 @@ def _quarantine(root: Path, row: Mapping[str, Any], reason: str) -> None:
         )
     _state.quarantine(
         row_id=int(row['id']), reason=reason, now=_now())
-    # Structured quarantine context for the repair flow: the conflicting
-    # files become the repair epic's write_set, so the dispatcher avoids
-    # handing the fix to a conversation that will fight over the same paths.
+    try:
+        from lib.conversations.project_brain import record_integration_failure
+        record_integration_failure(
+            str(root), work_id=str(row['task_id']), reason=reason,
+            user_id=owner_user_id)
+    except Exception as exc:
+        logger.debug('[Integration] Project Attention emit failed: %s', exc)
+    # Keep bounded conflict paths for human review of the quarantined package.
     conflict_files = _conflict_files_from(reason)
     if conflict_files:
         _set_meta(
@@ -949,17 +804,13 @@ def _integrate_row(row: Mapping[str, Any]) -> None:
         command = os.environ.get('TOFU_INTEGRATION_TEST_CMD', '').strip()
         # The system-scoped claim/get_integrating rows deliberately stay
         # narrow and do not join owner metadata. Fetch the owner-scoped row
-        # before enforcing its declared write-set; otherwise the persisted
-        # contract silently disappears at the exact gate that needs it.
+        # before recording the merged package provenance.
         origin = fresh.get('origin') or {}
         if not origin:
             owner_row = _state.get_workspace(
                 str(root), str(task_id), user_id=owner_user_id)
             origin = owner_row.get('origin') or {}
-        passed, detail = _gate_commands(
-            root, candidate, target, command,
-            declared_write_set=(origin.get('writeSet') or []),
-        )
+        passed, detail = _gate_commands(root, candidate, target, command)
         if not passed:
             _quarantine(root, fresh, f'Gate failed:\n{detail}')
             _push(str(root), user_id=owner_user_id)
@@ -977,36 +828,23 @@ def _integrate_row(row: Mapping[str, Any]) -> None:
                 merged_origin = origin
     _push(str(root), user_id=owner_user_id)
     if merged_origin is not None:
-        _complete_board_epic_after_merge(
-            str(root), str(task_id), owner_user_id, merged_origin)
+        _record_project_integration_after_merge(
+            str(root), str(task_id), owner_user_id)
 
 
-def _complete_board_epic_after_merge(
+def _record_project_integration_after_merge(
     project_root: str,
     task_id: str,
     user_id: int,
-    origin: Mapping[str, Any],
 ) -> None:
-    """Release board dependencies only after candidate contains the epic."""
-    if str(origin.get('source') or '') != 'board':
-        return
-    epic_id = str(origin.get('epicId') or task_id).strip()
-    if not epic_id:
-        return
-    conv_id = str(origin.get('convId') or '').strip()
+    """Record the important integration outcome without mutating work state."""
     try:
-        from lib.conversations.project_board import complete_task
-
-        result = complete_task(
-            project_root, conv_id, epic_id, user_id=int(user_id))
-        if not result.get('ok'):
-            logger.warning(
-                '[Integration] candidate merged but board completion failed '
-                'task=%s error=%s', epic_id, result.get('error'))
+        from lib.conversations.project_brain import record_integration_success
+        record_integration_success(
+            project_root, work_id=task_id, user_id=int(user_id))
     except Exception as exc:
-        logger.warning(
-            '[Integration] candidate merged but board completion crashed '
-            'task=%s: %s', epic_id, exc, exc_info=True)
+        logger.debug(
+            '[Integration] success narrative failed work=%s: %s', task_id, exc)
 
 
 def _claim_next() -> dict | None:
@@ -1039,6 +877,15 @@ def process_ready_once() -> bool:
         _state.mark_failed(
             row_id=int(row['id']),
             error=str(exc), now=_now())
+        try:
+            from lib.conversations.project_brain import record_integration_failure
+            record_integration_failure(
+                str(row['project_root']), work_id=str(row['task_id']),
+                reason=str(exc), user_id=int(row['user_id']))
+        except Exception as attention_exc:
+            logger.debug(
+                '[Integration] Project Attention emit failed: %s',
+                attention_exc)
         _push(row['project_root'], user_id=int(row['user_id']))
     return True
 
@@ -1497,14 +1344,13 @@ def _row_payload(row: Mapping[str, Any], *, scan: bool = True) -> dict[str, Any]
                 if scan and checkpoint and base else
                 {'files': [], 'totalFiles': 0, 'adds': 0, 'dels': 0})
     return {
-        'taskId': row['task_id'], 'title': row['title'],
+        'workId': row['task_id'], 'title': row['title'],
         'workspacePath': row['workspace_path'], 'managed': bool(row['managed']),
         'exists': workspace.exists(), 'state': row['state'],
         'baseSha': row['base_sha'], 'checkpointSha': row['checkpoint_sha'],
         'candidateSha': row['candidate_sha'], 'error': row['error'],
         'origin': origin,
         'conflictFiles': [str(f) for f in (origin.get('conflict_files') or [])],
-        'repairEpicId': str(origin.get('repair_epic_id') or ''),
         'diffstat': diffstat,
         'dirty': dirty, 'createdAt': _iso(row['created_at']),
         'updatedAt': _iso(row['updated_at']),
@@ -1660,7 +1506,7 @@ def integration_status(
         full_detail = str(row['detail'] or '')
         detail = full_detail[:1200]
         events.append({
-            'id': row['id'], 'taskId': row['task_id'], 'kind': row['kind'],
+            'id': row['id'], 'workId': row['task_id'], 'kind': row['kind'],
             'message': row['message'], 'detail': detail,
             'detailTruncated': len(full_detail) > len(detail),
             'createdAt': _iso(row['created_at']),
@@ -1691,8 +1537,7 @@ def integration_status(
         'gates': {
             'builtIn': [
                 'git diff --check', 'forbidden-path policy',
-                'declared write-set', 'Python syntax', 'JavaScript syntax',
-                'JSON syntax',
+                'Python syntax', 'JavaScript syntax', 'JSON syntax',
             ],
             'testCommandConfigured': integration_gate_configured,
             'stableCommandConfigured': stable_gate_configured,
@@ -1708,7 +1553,7 @@ def integration_status(
 
 
 # ── Agent-facing tool executor (integration_checkpoint / _submit / _status) ──
-# The writer of an ISOLATED epic drives its worktree through these. Resolution
+# The writer of an isolated work item drives its worktree through these. Resolution
 # rule for an omitted task_id: exactly ONE active (running/checkpointed)
 # workspace whose origin.convId is the calling conversation — anything else is
 # a clear error naming the fix, never a guess.
@@ -1734,8 +1579,8 @@ def _resolve_writer_task_id(
         return str(owned[0]['task_id']), ''
     if not owned:
         return '', ('Error: this conversation owns no active isolated workspace. '
-                    'These tools are only for an epic whose kickoff said ISOLATED; '
-                    'pass its task_id (pt_…) explicitly if you meant another epic.')
+                    'These tools are only for an execution started in an isolated '
+                    'workspace; pass its work ID (pw_…) explicitly if needed.')
     ids = ', '.join(str(r['task_id']) for r in owned)
     return '', (f'Error: ambiguous — this conversation owns {len(owned)} active '
                 f'isolated workspaces ({ids}). Pass task_id explicitly.')
@@ -1744,8 +1589,7 @@ def _resolve_writer_task_id(
 def execute_integration_tool(fn_name: str, fn_args: dict, *,
                              project_path: str, user_id: int,
                              conv_id: str = '') -> str:
-    """Agent-tool entry: integration_status / integration_checkpoint /
-    integration_submit. Returns the model-facing text; never raises."""
+    """Agent entry for checkpoint/submit only; returns text and never raises."""
     owner_user_id = _require_user_id(user_id)
     if not project_path:
         return 'Error: integration tools require project mode (no active project).'
@@ -1755,35 +1599,6 @@ def execute_integration_tool(fn_name: str, fn_args: dict, *,
         # Never-raises contract: a non-git / empty project must surface as a
         # curated tool result, not a raw rev-parse traceback in error.log.
         return f'Error: {exc}'
-
-    if fn_name == 'integration_status':
-        try:
-            rows, _events = _state.status_rows(
-                root_s, user_id=owner_user_id)
-        except Exception as exc:
-            logger.warning('[Integration] integration_status tool failed: %s', exc)
-            return f'Error: could not read integration state: {exc}'
-        if not rows:
-            return ('No integration workspaces for this project yet. One appears '
-                    'when an epic is posted with isolated=true.')
-        lines = [f'{len(rows)} integration workspace(s), newest first:']
-        for r in rows:
-            origin = r.get('origin') or {}
-            owner = str(origin.get('convId') or '')
-            mine = ' ← yours' if owner and owner == conv_id else ''
-            cp = str(r.get('checkpoint_sha') or '')[:10] or '—'
-            summary = str(origin.get('submitSummary')
-                          or origin.get('lastCheckpointNote') or '')
-            extra = f' — {summary[:80]}' if summary else ''
-            lines.append(
-                f"- {r['task_id']} [{r['state']}] {(r.get('title') or '')[:60]} "
-                f"(checkpoint {cp}{mine}){extra}")
-        lines.append('States: running/checkpointed = writer active; ready = '
-                     'queued; integrating = gate/merge running; merged = '
-                     'candidate updated and the board epic auto-completed; '
-                     'quarantined = merge failed, needs repair; discarded = '
-                     'rejected by the human.')
-        return '\n'.join(lines)
 
     if fn_name in ('integration_checkpoint', 'integration_submit'):
         task_id = str((fn_args or {}).get('task_id') or '').strip()
@@ -1799,12 +1614,11 @@ def execute_integration_tool(fn_name: str, fn_args: dict, *,
             logger.debug('[Integration] get_workspace failed task=%s: %s',
                          task_id, e)
             return (f'Error: no integration workspace named {task_id}. '
-                    'Check the id from your kickoff or integration_status.')
+                    'The runtime-bound work ID has no isolated workspace.')
         state = str(row.get('state') or '')
         if state in ('discarded', 'merged'):
             return (f'Error: workspace {task_id} is {state} — it is no longer '
-                    'writable. Do not resurrect it; if more work is needed, '
-                    'post a NEW isolated epic.')
+                    'writable. A later request must create a new work item.')
         # Quarantined/failed workspaces remain writable so their assigned
         # conversation can repair the isolated checkout and resubmit it.
         try:
@@ -1824,7 +1638,7 @@ def execute_integration_tool(fn_name: str, fn_args: dict, *,
                         f"{str(res.get('checkpointSha') or '')[:12]} "
                         f'(ref {res.get("checkpointRef", "")}). The shared '
                         'checkout is untouched; keep working, and run '
-                        'integration_submit when the epic is DONE.')
+                        'integration_submit when this work is done.')
             summary = str((fn_args or {}).get('summary') or '').strip()
             if not summary:
                 return ('Error: integration_submit requires `summary` — tell '
@@ -1841,10 +1655,8 @@ def execute_integration_tool(fn_name: str, fn_args: dict, *,
             return (f'Submitted {task_id} for HUMAN review '
                     f"(final checkpoint {str(res.get('checkpointSha') or '')[:12]}). "
                     'The workspace is now IMMUTABLE — do not edit it further. '
-                    'The board epic completes automatically only after the '
-                    'checkpoint passes its gate and moves candidate. Use '
-                    'integration_status to inspect a delay or quarantine; do '
-                    'not complete the board epic early.')
+                    'Human review and project checker results determine '
+                    'whether it may move to the candidate branch.')
         except IntegrationError as exc:
             return f'Error: {exc}'
         except Exception as exc:
@@ -1858,7 +1670,7 @@ def execute_integration_tool(fn_name: str, fn_args: dict, *,
 __all__ = [
     'IntegrationError', 'checkpoint_workspace', 'create_workspace',
     'discard_workspace', 'ensure_worker_started', 'execute_integration_tool',
-    'integration_status', 'peek_workspace_for_epic',
+    'has_active_workspace_for_work', 'integration_status',
     'process_ready_once',
     'promote_stable', 'reconcile_candidate_with_head', 'register_workspace',
     'retry_workspace',

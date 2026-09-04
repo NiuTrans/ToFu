@@ -27,22 +27,24 @@ SECTIONS = REPO / "frontend" / "src" / "runtime" / "sections"
 MANIFEST = SECTIONS / "manifest.json"
 
 # Names whose cross-section bare references were rewritten to runtimeScope.X.
+# Eager typed imports (for example resolveOrchestrationApiClient) do not belong
+# here even when the epilogue also publishes them for a lazy consumer.
 PINNED_NAMES = [
     "openProjectBrain", "projectBrainRefresh", "presenceRefresh",
     "updateContextBar", "ConversationTurnStore",
     "renderTurnCtxNote", "buildTurnCtxSnapshot", "reconcileTurnCtxCapsule",
     "initVoiceInput", "ChipInput", "openCompactionViewer",
-    "resolveOrchestrationApiClient", "isChatModel", "modelGroupKey",
-    "modelGroupLabel", "modelGroupBrandNames", "effectiveProbeStatus",
-    "foldProbeHealth", "modelHealthLevelClass", "refreshMcpRailState",
+    "applyCapabilityTaxonomy", "isChatModel",
+    "modelGroupKey", "modelGroupLabel", "modelGroupBrandNames",
+    "modelDisplayUnits", "recentModels", "pushRecentModel",
+    "applyMcpToolSummary",
     "detectLogNoise",
 ]
 
-# Transitional globalThis bridges added while consumers migrated (search
-# core/model_group.js "Keep until every consumer reads runtimeScope"). New
-# bridges must be a conscious addition here — the end state is runtimeScope
-# routing for every consumer, then the bridge AND this entry are deleted.
-ALLOWED_GLOBAL_BRIDGES = ("modelGroupKey", "modelGroupLabel", "modelGroupBrandNames")
+# Every pinned service now stays behind the private runtime scope. A future
+# browser-global bridge must be justified here explicitly instead of silently
+# restoring the classic-script coupling this guard retired.
+ALLOWED_GLOBAL_BRIDGES = ()
 
 MARKER_RE = re.compile(r"^/\*\s*=====\s*migrated source:\s*(.+?)\s*=====\s*\*/\s*$")
 
@@ -52,6 +54,8 @@ def _runtime_source() -> str:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     paths = [manifest["prelude"]]
     paths.extend(row["path"] for row in manifest["sections"])
+    for bundle in manifest.get("lazyBundles", []):
+        paths.extend(row["path"] for row in bundle["sections"])
     paths.append(manifest["epilogue"])
     return "\n".join(
         (SECTIONS / path).read_text(encoding="utf-8")
@@ -83,6 +87,52 @@ def _mask_line(line: str) -> str:
     return out
 
 
+def _publishes_runtime_scope_name(source: str, name: str) -> bool:
+    """Recognize both direct writes and the canonical batched service table."""
+    direct = re.compile(
+        r"\bruntimeScope\.%s\s*=(?!=)" % re.escape(name),
+    )
+    if direct.search(source):
+        return True
+    member = re.compile(
+        r"^\s{2}%s(?:\s*:|\s*,\s*$)" % re.escape(name), re.M,
+    )
+    for match in re.finditer(
+        r"Object\.assign\(runtimeScope,\s*\{(?P<body>.*?)^\}\);",
+        source,
+        re.M | re.S,
+    ):
+        if member.search(match.group("body")):
+            return True
+    return False
+
+
+def _declared_lazy_export_owners() -> dict[str, set[str]]:
+    """Resolve manifest-declared ports back to their authored definition.
+
+    Lazy runtime ports are generated from ``runtimeExports`` and therefore do
+    not appear as handwritten ``runtimeScope.X =`` lines in the source graph.
+    The manifest remains the authority; identify the exact declaring section
+    so the bare-reference guard still scans every sibling section normally.
+    """
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    owners: dict[str, set[str]] = {name: set() for name in PINNED_NAMES}
+    for bundle in manifest.get("lazyBundles", []):
+        for name in bundle.get("runtimeExports", []):
+            if name not in owners:
+                continue
+            definition = re.compile(
+                r"\b(?:async\s+)?function\s+%s\b|"
+                r"\b(?:const|let|var)\s+%s\b"
+                % (re.escape(name), re.escape(name)),
+            )
+            for row in bundle.get("sections", []):
+                source = (SECTIONS / row["path"]).read_text(encoding="utf-8")
+                if definition.search(source):
+                    owners[name].add(row["source"])
+    return owners
+
+
 @pytest.mark.unit
 def test_no_bare_cross_section_refs_to_runtimescope_names():
     lines, sections = _sections()
@@ -91,10 +141,13 @@ def test_no_bare_cross_section_refs_to_runtimescope_names():
     # a name may be assigned by its defining section and re-bridged elsewhere)
     owners = {name: set() for name in PINNED_NAMES}
     for name in PINNED_NAMES:
-        pat = re.compile(r"\bruntimeScope\.%s\s*=(?!=)" % re.escape(name))
         for sec_name, start, end in sections:
-            if pat.search("\n".join(lines[start:end])):
+            if _publishes_runtime_scope_name(
+                "\n".join(lines[start:end]), name,
+            ):
                 owners[name].add(sec_name)
+    for name, declared in _declared_lazy_export_owners().items():
+        owners[name].update(declared)
     missing = [n for n in PINNED_NAMES if not owners[n]]
     assert not missing, f"pinned names with no runtimeScope owner: {missing}"
 
@@ -121,9 +174,7 @@ def test_no_bare_cross_section_refs_to_runtimescope_names():
 
 @pytest.mark.unit
 def test_runtimescope_is_not_window_backed():
-    """The migration contract: runtimeScope must NOT be window/globalThis,
-    and global bridges for pinned names stay limited to the transitional
-    allowlist above."""
+    """runtimeScope is private and pinned services are not browser globals."""
     text = _runtime_source()
     assert "const runtimeScope = Object.create(null);" in text, (
         "runtimeScope is no longer a null-prototype object — if it became "

@@ -33,9 +33,25 @@ from lib.tasks_pkg.handlers._write_freshness_gate import (
 from lib.desktop.remote import remote_worktree_binding
 from lib.tools.meta import build_project_tool_meta
 from lib.tools.project import PROJECT_TOOL_NAMES
-from lib.tools.result_projection import TOOL_RESULT_PROJECTION_ITEMS_KEY
+from lib.tools.result_projection import (
+    TOOL_RESULT_PRODUCER_METADATA_KEY,
+    TOOL_RESULT_PROJECTION_ITEMS_KEY,
+)
 
 logger = get_logger(__name__)
+
+
+def _record_producer_result_metadata(fn_name, content, round_entry):
+    """Carry producer-side omission evidence to the settlement boundary."""
+    if fn_name != 'grep_search' or not isinstance(round_entry, dict):
+        return
+    from lib.project_mod.read_tools import grep_result_was_truncated
+
+    if grep_result_was_truncated(content):
+        round_entry[TOOL_RESULT_PRODUCER_METADATA_KEY] = {
+            'status': 'partial',
+            'truncated': True,
+        }
 
 
 # ── RWA P3:远程工作树路由(拍板 3A 同名策略) ──
@@ -288,6 +304,7 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
         meta['remoteRoot'] = remote['root']
         if badge:
             meta['badge'] = badge
+        _record_producer_result_metadata(fn_name, text, round_entry)
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, text, False
 
@@ -697,9 +714,12 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         # absolute paths still work (routed inside tool_read_files via
         # lib.file_reader); project-relative paths error out helpfully.
         if fn_name in ('read_files', 'inspect_image') and not project_path:
-            # inspect_image needs the task so an /api/images/ or att_txt_ ref can
-            # be resolved (text refs scan task['messages']).
-            _no_proj_kw = {'task': task} if fn_name == 'inspect_image' else {}
+            # read_files / inspect_image need the task so an uploaded-attachment
+            # ref (att_media_ / att_txt_ / /api/images/) can be resolved under
+            # the owner scope (media refs require task['_userId'], legacy text
+            # refs scan task['messages']).
+            _no_proj_kw = ({'task': task}
+                           if fn_name in ('read_files', 'inspect_image') else {})
             if fn_name == 'read_files':
                 _no_proj_kw['result_projection_items'] = _result_projection_items
             tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id,
@@ -709,12 +729,18 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             _extra_kw = {}
             if fn_name == 'read_files':
                 _extra_kw['result_projection_items'] = _result_projection_items
-            if fn_name == 'inspect_image':
-                _extra_kw = {'task': task}
+            if fn_name in ('read_files', 'inspect_image'):
+                _extra_kw['task'] = task
             if fn_name == 'run_command':
                 _cmd = fn_args.get('command', '') or ''
                 _stdin_cb = _make_stdin_callback(task, rn, round_entry, _cmd)
-                _progress_cb = _make_run_command_progress_cb(task, rn, round_entry, _cmd)
+                from lib.tasks_pkg.tool_runtime import active_context_for_call
+                _runtime_context = active_context_for_call(
+                    task, round_num=rn, tool_call_id=tc_id,
+                    round_entry=round_entry)
+                _progress_cb = _make_run_command_progress_cb(
+                    task, rn, round_entry, _cmd,
+                    runtime_context=_runtime_context)
                 _extra_kw = {
                     'stdin_callback': _stdin_cb,
                     'on_chunk': _progress_cb,
@@ -728,6 +754,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     'on_grep_intercept': _make_grep_intercept_cb(
                         task, rn, round_entry),
                     'task': task,  # enable cooperative abort of subprocesses
+
+                    'runtime_context': _runtime_context,
                 }
             try:
                 tool_content = (execute_tool(fn_name, fn_args, project_path,
@@ -741,6 +769,34 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                         _progress_cb.flush()
                     except Exception as e:
                         logger.debug('[run_command] progress flush failed: %s', e)
+
+                    _finalize_output = getattr(
+                        _progress_cb, 'finalize_output', None)
+                    if callable(_finalize_output):
+                        _incomplete = (
+                            _runtime_context is not None
+                            and _runtime_context.cancellation_requested
+                        ) or '[Command timed out]' in tool_content or (
+                            '[Command interrupted by' in tool_content)
+                        _artifact = _finalize_output(complete=not _incomplete)
+                        from lib.tasks_pkg.handlers.code_exec import (
+                            _project_output_artifact,
+                            _register_output_artifact_origin,
+                        )
+                        tool_content = _project_output_artifact(
+                            tool_content, _artifact)
+                        _register_output_artifact_origin(
+                            task, round_entry, _artifact,
+                            tool_name='run_command', display=_cmd,
+                            tool_call_id=tc_id)
+                        if _artifact.spilled:
+                            round_entry['outputArtifact'] = {
+                                'artifactRef': _artifact.artifact_ref,
+                                'sizeBytes': _artifact.size_bytes,
+                                'complete': _artifact.complete,
+                                'degraded': _artifact.degraded,
+                                'degradedReason': _artifact.degraded_reason,
+                            }
     finally:
         reset_restricted(_abs_token)
 
@@ -914,6 +970,26 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         except Exception as e:
             logger.debug('[Executor] run_command fileChanges enrichment failed: %s', e)
 
+    # A successful project write is the runtime signal that derives the one
+    # immutable-conversation work item for this physical task.  The same hook
+    # records changed paths/artifacts and emits only in-memory overlap advice.
+    if project_path and (fn_name in (
+            'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
+            'insert_content', 'insert_contents')
+            or (fn_name == 'run_command' and meta.get('fileChanges'))):
+        try:
+            from lib.conversations.project_brain import note_file_signal
+            note_file_signal(
+                task,
+                project_path,
+                fn_name=fn_name,
+                fn_args=fn_args,
+                tool_content=tool_content,
+                meta=meta,
+            )
+        except Exception as e:
+            logger.debug('[ProjectBrain] file signal skipped: %s', e)
+
     # Prepend the read-gate skip note so the model sees which path(s) were
     # dropped. Done AFTER meta is built so the per-edit summaries parse the
     # unmodified batch header ("Applied N/M edits").
@@ -922,6 +998,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     if _gate_skip_note and isinstance(tool_content, str):
         tool_content = f'{_gate_skip_note}\n\n{tool_content}'
 
+    _record_producer_result_metadata(fn_name, tool_content, round_entry)
     _finalize_tool_round(task, rn, round_entry, [meta])
     if (fn_name == 'read_files' and isinstance(tool_content, str)
             and _result_projection_items and isinstance(round_entry, dict)):
@@ -931,3 +1008,22 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         round_entry[TOOL_RESULT_PROJECTION_ITEMS_KEY] = \
             _result_projection_items
     return tc_id, tool_content, False
+
+
+def _register_live_file_change_stamping() -> None:
+    """Subscribe the commit-round live stamp to journal records.
+
+    ``handlers/__init__`` imports this module at gateway build — before any
+    tool can execute — so the listener is in place ahead of the first
+    task-stamped journal write.  Lazy imports keep project_mod/commit_round
+    out of this HOT_PATH module's import graph.
+    """
+    try:
+        from lib.project_mod.modifications import register_live_change_listener
+        from lib.tasks_pkg.commit_round._derive import note_live_file_change
+        register_live_change_listener(note_live_file_change)
+    except Exception as e:
+        logger.warning('[Project] live file-change stamping unavailable: %s', e)
+
+
+_register_live_file_change_stamping()

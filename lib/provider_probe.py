@@ -9,15 +9,14 @@ each key's pool resolved through ``resolve_request_ids`` (an explicit
 a genuinely DIFFERENT upstream model, and a (key, id) pair the dispatcher
 never routes is not worth a verdict.
 
-The probe is a long-running fan-out: it runs in a background thread and its
-progress is persisted to disk (``data/config/probe_cache/``) as a secret-free
-snapshot, so closing Settings or restarting the server doesn't lose progress.
+The probe is a long-running fan-out admitted through a bounded process lane.
+Progress is persisted to disk (``data/config/probe_cache/``) as a secret-free
+snapshot, so closing Settings keeps live progress and a restart preserves the
+last evidence while visibly terminalising work the dead process cannot resume.
 
-``routes/config.py`` re-exports every public name here under its legacy
-private alias (``_probe_one_cell``, ``_probe_cell_multi``,
-``_run_cell_probe_task``, ``_probe_cache_path``, ``_probe_cell_key``,
-``_persist_probe_task``, ``_public_probe_snapshot``, ``CELL_PROBE_TASKS``,
-``CELL_PROBE_LOCK``, ``_time``) so existing call sites and tests keep working.
+This module is the only probe-policy owner. New work is admitted through
+``submit_provider_probe_task`` and its finite fair lane; delivery routes call
+that public boundary instead of re-exporting private probe functions.
 
 NOTE for tests: ``probe_cell_multi`` / ``run_cell_probe_task`` call
 ``probe_one_cell`` THROUGH THIS MODULE'S global, so
@@ -31,13 +30,20 @@ import json
 import re
 import threading
 import time as _time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from lib.agent_core.fair_work_lane import (
+    FairWorkLaneQueueFull,
+    OwnerFairWorkLane,
+)
 from lib.config_dir import config_path as _config_path
 from lib.error_envelope import from_exception
-from lib.json_store import read_json, write_json_atomic  # noqa: F401  (read_json re-used by routes)
+from lib.json_store import write_json_atomic
+from lib.llm_errors import ROUTE_MISSING_MARKERS as _ROUTE_MISSING_MARKERS
 from lib.log import get_logger
 from lib.model_info.capability_taxonomy import is_chat_model as _is_chat_model
+from lib.provider_probe_policy import resolve_provider_probe_budget
 
 # Verdict for cells whose capabilities have no probe surface we implement
 # (anything outside image_gen / embedding / transcription). Chat-probing a
@@ -71,7 +77,8 @@ logger = get_logger(__name__)
 
 
 def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
-                   protocol='openai', oauth='', adapter=None):
+                   protocol='openai', oauth='', adapter=None,
+                   owner_user_id: int | None = None):
     """Send a minimal completion to test one (key, model) pair.
 
     Returns one of: 'ok', 'rate_limited', 'unauthorized', 'not_found',
@@ -97,9 +104,16 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     ``x-api-key`` (Anthropic's 2026 block rejects ``Authorization: Bearer``
     for subscription tokens). A provider with no usable token is reported as
     the NEUTRAL verdict ``'not_logged_in'`` — never a model fault, never
-    recommend-disable.
+    recommend-disable. ``owner_user_id`` is optional only for direct-network
+    providers; OAuth and adapter probes need the request-captured owner to use
+    desktop egress and otherwise fail closed.
     """
     from lib.http_client import http_post
+    owner_scope = ''
+    if owner_user_id is not None:
+        from lib.identity import require_user_id
+        owner_scope = str(require_user_id(
+            owner_user_id, context='provider probe owner'))
 
     # ── Subscription-ADAPTER providers (E4) ─────────────────────────────
     # The provider IS a CLIProxyAPI sidecar on the user's desktop agent;
@@ -127,7 +141,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             resp = _ad.relay_http(
                 adapter.get('agent_id', ''), int(adapter.get('port') or 0),
                 path, method='POST', headers=headers,
-                body=_json.dumps(payload).encode(), timeout=timeout)
+                body=_json.dumps(payload).encode(), timeout=timeout,
+                user_id=owner_scope)
         except _EU as e:
             logger.debug('[CellProbe] %s @ %s desktop egress unavailable: %s',
                          model_id, base_url, e)
@@ -158,7 +173,7 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             from lib.oauth.codex import (
                 codex_get_valid_token, codex_translate_request)
             from lib.oauth.token_store import load_token
-            token = codex_get_valid_token()
+            token = codex_get_valid_token(user_id=owner_scope)
             if not token:
                 return 'not_logged_in', ('Codex subscription not logged in '
                                          '(no valid OAuth token)')
@@ -187,7 +202,7 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             import json as _json
             from lib.desktop import egress as _eg
             try:
-                route = _eg.route_request(url, user_id='')
+                route = _eg.route_request(url, user_id=owner_scope)
                 if route == 'direct':
                     resp = http_post(url, json=body, headers=hdrs,
                                      timeout=timeout)
@@ -201,7 +216,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                 else:
                     reader = _eg.open_stream(url, method='POST', headers=hdrs,
                                              body=_json.dumps(body).encode(),
-                                             agent_id=route)
+                                             agent_id=route,
+                                             user_id=owner_scope)
                     code = reader.status_code
                     resp_body = reader.read_all_text()[:65536]
             except _eg.EgressUnavailable as e:
@@ -226,8 +242,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             'max_tokens': _CHAT_PROBE_MAX_TOKENS,
         }
         try:
-            token, hdrs, body = resolve_oauth_request(oauth, payload,
-                                                      extra_headers)
+            token, hdrs, body = resolve_oauth_request(
+                oauth, payload, extra_headers, user_id=owner_scope)
         except RuntimeError as e:
             # Not logged in / refresh failed — a SESSION state, not a model
             # fault. Distinct from an authenticated 401.
@@ -246,7 +262,7 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
         import json as _json
         from lib.desktop import egress as _eg
         try:
-            route = _eg.route_request(url, user_id='')
+            route = _eg.route_request(url, user_id=owner_scope)
         except _eg.EgressUnavailable as e:
             logger.debug('[CellProbe] %s @ %s egress route unavailable: %s',
                          model_id, base_url, e)
@@ -258,7 +274,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             else:
                 resp = _eg.egress_http(url, method='POST', headers=headers,
                                        body=_json.dumps(payload).encode(),
-                                       timeout=timeout, user_id='')
+                                       timeout=timeout, user_id=owner_scope,
+                                       agent_id=route)
         except _eg.EgressUnavailable as e:
             logger.debug('[CellProbe] %s @ %s desktop egress unavailable: %s',
                          model_id, base_url, e)
@@ -342,20 +359,6 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                  else '/v1/messages' if protocol == 'anthropic'
                  else '/chat/completions'),
         secret_values=(api_key,))
-
-
-# Body markers that mean "this gateway has NO route for the model" — as
-# opposed to "route exists but the tiny probe shape was rejected". They ride
-# any status: the Meituan AIGC gateway answers a missing route with HTTP 400
-# stage=validation and a CHINESE message ("不支持的模型类型(model=…)"), which
-# the status ladder alone misreads as reachable (2026-08-04 opus-5 incident —
-# vertex./aws. cells showed green while every real chat call 400'd).
-_ROUTE_MISSING_MARKERS = (
-    'model_not_found', 'does not exist', 'no such model',
-    'unsupported model', 'unsupported_model', 'model not supported',
-    'invalid model name',
-    '不支持的模型类型',
-)
 
 
 def _redact_probe_text(body, secret_values=()):
@@ -797,7 +800,8 @@ _PROBE_DEFINITIVE = {
 
 def probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
                      attempts=3, retry_delay=0.8, protocol='openai',
-                     probe_fn=None, oauth='', adapter=None):
+                     probe_fn=None, oauth='', adapter=None,
+                     owner_user_id: int | None = None):
     """Probe a cell up to ``attempts`` times to filter out FALSE 429s.
 
     ``probe_fn`` defaults to :func:`probe_one_cell` (chat surface); the
@@ -813,7 +817,9 @@ def probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
         if probe_fn is None:
             status, detail = fn(base_url, api_key, model_id, extra_headers,
                                 timeout, protocol, oauth=oauth,
-                                **({'adapter': adapter} if adapter else {}))
+                                **({'adapter': adapter} if adapter else {}),
+                                **({'owner_user_id': owner_user_id}
+                                   if owner_user_id is not None else {}))
         else:
             status, detail = fn(base_url, api_key, model_id, extra_headers,
                                 timeout, protocol)
@@ -833,12 +839,104 @@ def probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
 # ══════════════════════════════════════════════════════
 #  Background task state
 # ══════════════════════════════════════════════════════
-CELL_PROBE_TASKS: dict = {}
+_PROBE_BUDGET = resolve_provider_probe_budget()
+CELL_PROBE_TASKS: OrderedDict[str, dict] = OrderedDict()
 CELL_PROBE_LOCK = threading.Lock()
+_CELL_PROBE_TERMINAL_FALLBACK_CAPACITY = max(
+    4, _PROBE_BUDGET.queue_capacity)
+_CELL_PROBE_LANE = OwnerFairWorkLane(
+    max_workers=_PROBE_BUDGET.task_workers,
+    queue_capacity=_PROBE_BUDGET.queue_capacity,
+    idle_seconds=_PROBE_BUDGET.idle_seconds,
+    thread_name_prefix='provider-probe',
+    metric_pool='provider-probe',
+)
 _PROBE_DISABLE_STATUSES = {
     'rate_limited', 'unauthorized', 'not_found', 'unavailable',
     'bad_request', 'invalid_response', 'error',
 }
+
+
+# A 429 whose message names a short rolling window (per minute / per hour)
+# means the (key, id) pair is HEALTHY but momentarily over its rate window —
+# the condition clears on its own. Recommending disable would convert a
+# one-minute cap into a permanent config removal (Meituan AIGC answers
+# "每分钟请求次数超过限制" even for the first probe of a busy key).
+_RATE_LIMIT_WINDOW_MARKERS = (
+    '每分钟', '每小时', 'per minute', 'per hour', 'per-minute', 'per-hour',
+)
+
+
+def _recommend_disable(status, detail) -> bool:
+    if status not in _PROBE_DISABLE_STATUSES:
+        return False
+    if status == 'rate_limited':
+        text = str(detail or '').lower()
+        if any(marker in text for marker in _RATE_LIMIT_WINDOW_MARKERS):
+            return False
+    return True
+
+
+def provider_probe_runtime_snapshot() -> dict[str, int | float | bool]:
+    """Expose identity-free lane/resource evidence for diagnostics and tests."""
+    snapshot = _CELL_PROBE_LANE.snapshot()
+    snapshot.update({
+        'cellWorkersPerTask': _PROBE_BUDGET.cell_workers_per_task,
+        'totalCellWorkers': _PROBE_BUDGET.total_cell_workers,
+        'terminalFallbackCapacity': _CELL_PROBE_TERMINAL_FALLBACK_CAPACITY,
+    })
+    return snapshot
+
+
+def _retire_registered_probe_task(task: dict, *, persisted: bool) -> None:
+    """Drop durable terminal work or retain one bounded secret-free fallback."""
+    provider_id = str(task.get('provider_id') or '')
+    with CELL_PROBE_LOCK:
+        if CELL_PROBE_TASKS.get(provider_id) is not task:
+            return
+        if persisted:
+            CELL_PROBE_TASKS.pop(provider_id, None)
+            return
+        CELL_PROBE_TASKS[provider_id] = public_probe_snapshot(task)
+        CELL_PROBE_TASKS.move_to_end(provider_id)
+        terminal_keys = [
+            key for key, value in CELL_PROBE_TASKS.items()
+            if value.get('status') != 'running'
+        ]
+        while len(terminal_keys) > _CELL_PROBE_TERMINAL_FALLBACK_CAPACITY:
+            CELL_PROBE_TASKS.pop(terminal_keys.pop(0), None)
+
+
+def _settle_registered_runner_exit(
+    task: dict,
+    error: BaseException | None,
+) -> None:
+    """Make an injected/crashed runner terminal when it did not settle itself."""
+    provider_id = str(task.get('provider_id') or '')
+    with CELL_PROBE_LOCK:
+        if CELL_PROBE_TASKS.get(provider_id) is not task:
+            return
+        if task.get('status') == 'running':
+            failure = error or RuntimeError(
+                'provider probe runner exited without terminal state')
+            task['status'] = 'error'
+            task['error'] = from_exception(
+                failure,
+                context='provider-cell-probe',
+                source='provider-probe',
+            )
+            task['finished_at'] = _time.time()
+    persisted = persist_probe_task(task)
+    _retire_registered_probe_task(task, persisted=persisted)
+
+
+def _scrub_probe_work_owner(task: dict, work: list) -> None:
+    """Release credentials even if an idle lane worker retains its closure."""
+    work.clear()
+    with CELL_PROBE_LOCK:
+        for key in tuple(task):
+            if isinstance(key, str) and key.startswith('_'):
+                task.pop(key, None)
 
 _PROOF_BY_SURFACE = {
     'chat': 'generated_text',
@@ -932,7 +1030,13 @@ def normalize_probe_snapshot(snapshot: dict) -> dict:
     return out
 
 
-def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
+def build_probe_work(
+    provider: dict,
+    models: list,
+    api_keys: list,
+    *,
+    maximum_cells: int | None = None,
+) -> list:
     """Build the probe work list: one item per (key × wire id) SLOT —
     exactly the pairs the dispatcher can route.
 
@@ -962,6 +1066,10 @@ def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
     resolution is visible to a test rather than hiding behind a re-implemented
     copy of the loop.
 
+    ``maximum_cells`` stops construction at an exact sentinel. Routes request
+    ``policy maximum + 1`` so oversized Cartesian products are rejected
+    without first materialising attacker-controlled keys × models × wire ids.
+
     A REFUSED entry (Claude with no anthropic face on a dual-face gateway)
     still gets probed on the provider default: the matrix reports
     reachability, and the refusal itself is surfaced by the dispatcher.
@@ -971,6 +1079,10 @@ def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
 
     base_url = provider.get('base_url') or ''
     protocol = (provider.get('protocol') or 'openai') or 'openai'
+    if maximum_cells is not None:
+        maximum_cells = int(maximum_cells)
+        if maximum_cells <= 0:
+            raise ValueError('maximum_cells must be positive')
     work = []
     for key_idx, api_key in enumerate(api_keys or []):
         for m in (models or []):
@@ -988,6 +1100,9 @@ def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
             for mid in resolve_request_ids(m, probe_cell):
                 work.append((key_idx, api_key, root, mid, caps,
                              cell_url, cell_proto))
+                if (maximum_cells is not None
+                        and len(work) >= maximum_cells):
+                    return work
     return work
 
 
@@ -1001,14 +1116,64 @@ def probe_cell_key(key_idx, model_id) -> str:
     return '%s::%s' % (key_idx, model_id)
 
 
-def persist_probe_task(task: dict):
-    """Atomically write a public (key-free) snapshot of the task to disk."""
+def persist_probe_task(task: dict) -> bool:
+    """Atomically write a public (key-free) snapshot; report durability."""
     try:
         write_json_atomic(probe_cache_path(task['provider_id']),
                           public_probe_snapshot(task), fsync=False)
+        return True
     except Exception as e:
         logger.warning('[CellProbe] persist failed for %s: %s',
                        task.get('provider_id'), e)
+        return False
+
+
+def submit_provider_probe_task(
+    task: dict,
+    work: list,
+    timeout: int,
+    *,
+    runner=None,
+):
+    """Admit one provider task to the finite fair lane without a race window.
+
+    The worker waits behind a tiny publication gate until the initial durable
+    snapshot exists.  This prevents a fast probe from persisting ``done`` and
+    then being overwritten by a late ``running`` snapshot in the route.
+    """
+    provider_id = str(task.get('provider_id') or '')
+    if not provider_id:
+        raise ValueError('provider_id must be non-empty')
+    run = runner or run_cell_probe_task
+    owned_work = list(work)
+    publication_gate = threading.Event()
+    task['_cell_workers'] = _PROBE_BUDGET.cell_workers_per_task
+
+    def execute():
+        publication_gate.wait()
+        try:
+            result = run(task, owned_work, timeout)
+        except BaseException as error:
+            _settle_registered_runner_exit(task, error)
+            raise
+        else:
+            _settle_registered_runner_exit(task, None)
+            return result
+        finally:
+            _scrub_probe_work_owner(task, owned_work)
+
+    future = _CELL_PROBE_LANE.submit_task(
+        f'provider-probe:{provider_id}:{id(task)}',
+        # TODO(enterprise): include the authenticated owner when the legacy
+        # global provider configuration becomes an owner-scoped repository.
+        provider_id,
+        execute,
+    )
+    try:
+        persist_probe_task(task)
+    finally:
+        publication_gate.set()
+    return future
 
 
 def _recount_summary(task: dict):
@@ -1059,20 +1224,8 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
     extra_headers = task['_extra_headers']
     protocol = task.get('_protocol', 'openai')
     oauth = task.get('_oauth', '')
+    owner_user_id = task.get('_owner_user_id')
     adapter = task.get('_adapter') or {}
-    if not adapter:
-        # Fallback: derive the marker from the stored provider card (the
-        # probe route predates the marker and only threads '_oauth').
-        try:
-            from lib import _load_server_config
-            from lib.desktop.adapter import is_adapter_provider
-            for _p in (_load_server_config().get('providers') or []):
-                if _p.get('id') == provider_id:
-                    adapter = is_adapter_provider(_p)
-                    break
-        except Exception as _ae:
-            logger.debug('[CellProbe] adapter marker lookup failed: %s', _ae)
-            adapter = {}
     attempts = task.get('attempts', 3)
     if task['cells']:
         _recount_summary(task)
@@ -1124,7 +1277,9 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
                                           cell_timeout, attempts=cell_attempts,
                                           protocol=cell_protocol, probe_fn=probe_fn,
                                           oauth=oauth,
-                                          **({'adapter': adapter} if adapter else {}))
+                                          **({'adapter': adapter} if adapter else {}),
+                                          **({'owner_user_id': owner_user_id}
+                                             if owner_user_id is not None else {}))
         http_status = _http_status_from_detail(detail)
         return {
             'key_idx': key_idx,
@@ -1132,7 +1287,7 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
             'root_model_id': root,
             'status': status,
             'detail': detail,
-            'recommend_disable': status in _PROBE_DISABLE_STATUSES,
+            'recommend_disable': _recommend_disable(status, detail),
             'probe_surface': surface,
             'http_status': http_status,
             'proof': (_PROOF_BY_SURFACE.get(surface)
@@ -1141,7 +1296,19 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
 
     last_persist = 0.0
     try:
-        workers = min(8, len(work))
+        if not work:
+            raise ValueError('provider probe work must not be empty')
+        try:
+            configured_workers = int(task.get('_cell_workers') or 0)
+        except (TypeError, ValueError, OverflowError):
+            configured_workers = 0
+        workers = min(
+            len(work),
+            max(1, min(
+                _PROBE_BUDGET.cell_workers_per_task,
+                configured_workers or _PROBE_BUDGET.cell_workers_per_task,
+            )),
+        )
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='cell-probe') as pool:
             futures = [pool.submit(_run, it) for it in work]
             for fut in as_completed(futures):
@@ -1168,7 +1335,6 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
         with CELL_PROBE_LOCK:
             task['status'] = 'done'
             task['finished_at'] = _time.time()
-        persist_probe_task(task)
         logger.info('[CellProbe] %s done: %d cells, %d flagged',
                     provider_id, task['done_count'], task['summary']['disable'])
     except Exception as e:
@@ -1179,7 +1345,8 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
             task['error'] = from_exception(
                 e, context='provider-cell-probe', source='provider-probe')
             task['finished_at'] = _time.time()
-        persist_probe_task(task)
+    persisted = persist_probe_task(task)
+    _retire_registered_probe_task(task, persisted=persisted)
 
 
 __all__ = [
@@ -1187,6 +1354,8 @@ __all__ = [
     'probe_embedding_cell', 'probe_transcription_cell', 'probe_image_cell',
     'probe_tts_cell', 'nonchat_probe_fn',
     'probe_cache_path', 'probe_cell_key', 'persist_probe_task',
+    'submit_provider_probe_task',
+    'provider_probe_runtime_snapshot', 'FairWorkLaneQueueFull',
     'build_probe_work',
     'public_probe_snapshot', 'normalize_probe_snapshot',
     'CELL_PROBE_TASKS', 'CELL_PROBE_LOCK', 'SKIPPED',

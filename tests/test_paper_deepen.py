@@ -324,6 +324,8 @@ def test_worker_done_cache_cost():
         assert task['status'] == 'done'
         done = [e for e in task['events'] if e.get('type') == 'done']
         assert done and done[0]['usage']['prompt_tokens'] == 500
+        assert done[0]['agentUsageV1']['stage'] == 'deepen'
+        assert done[0]['agentUsageV1']['agent_dispatches'] == 1
         # Cache row written for BOTH sections.
         row1 = p.db.rows.get(('hz', de.deepen_lang_key('deeper', 1, 'en')))
         row2 = p.db.rows.get(('hz', de.deepen_lang_key('derive', 3, 'en')))

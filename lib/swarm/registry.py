@@ -34,24 +34,24 @@ _resolved_tiers: dict[str, str] = {}
 _tier_lock = threading.Lock()
 
 
-def _detect_family(model: str) -> str:
-    """Backward-compatible family query over the profile parser."""
-    from lib.model_profiles import infer_model_family
-    return infer_model_family(model)
-
-
 def _derive_tiers(parent_model: str, *, provider_id: str = '',
-                  providers: list | None = None) -> dict[str, str]:
+                  providers: list | None = None,
+                  owner_user_id: int | None = None,
+                  tenant_id: str | None = None) -> dict[str, str]:
     from lib.model_profiles import select_model_for_tier
     return {
         tier: select_model_for_tier(
             tier, parent_model=parent_model, provider_id=provider_id,
-            providers=providers)
+            providers=providers, owner_user_id=owner_user_id,
+            tenant_id=tenant_id)
         for tier in ('light', 'standard', 'heavy')
     }
 
 
-def configure_model_tiers(user_model: str) -> dict[str, str]:
+def configure_model_tiers(
+    user_model: str, *, owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, str]:
     """Cache an inspectable snapshot; request-time calls still re-resolve.
 
     Catalogues and provider prices can refresh while a process is running, so
@@ -60,7 +60,11 @@ def configure_model_tiers(user_model: str) -> dict[str, str]:
     global _current_parent_model, _resolved_tiers
     with _tier_lock:
         _current_parent_model = user_model
-        _resolved_tiers = _derive_tiers(user_model)
+        _resolved_tiers = _derive_tiers(
+            user_model,
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+        )
     logger.info('[Registry] Model tiers configured from %r → %s',
                 user_model, _resolved_tiers)
     return dict(_resolved_tiers)
@@ -68,7 +72,9 @@ def configure_model_tiers(user_model: str) -> dict[str, str]:
 
 def resolve_model_for_tier(tier: str, parent_model: str = '', *,
                            role: str = '', provider_id: str = '',
-                           providers: list | None = None) -> str:
+                           providers: list | None = None,
+                           owner_user_id: int | None = None,
+                           tenant_id: str | None = None) -> str:
     """Resolve a role tier against the live configured model ecosystem.
 
     ``provider_id`` is a hard boundary for BYO/provider-pinned swarms. Weak or
@@ -80,7 +86,8 @@ def resolve_model_for_tier(tier: str, parent_model: str = '', *,
     from lib.model_profiles import select_model_for_tier
     return select_model_for_tier(
         tier, parent_model=parent, role=role, provider_id=provider_id,
-        providers=providers)
+        providers=providers, owner_user_id=owner_user_id,
+        tenant_id=tenant_id)
 
 
 # Backward-compatible property: read-only snapshot of the current tiers.
@@ -181,8 +188,9 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'when_to_use': (
             'Tasks that require interacting with already-open browser tabs '
             '— click buttons, fill forms, scrape JS-rendered pages, take '
-            'screenshots. Use this when web_search / fetch_url cannot reach '
-            'the content because it needs interaction.'
+            'screenshots, or download a visible page asset into server '
+            'staging. Use this when web_search / fetch_url cannot reach the '
+            'content because it needs interaction.'
         ),
         'system_prompt_suffix': (
             'You are a browser automation specialist. Use browser tools '
@@ -199,7 +207,8 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
                        'browser_click', 'browser_type', 'browser_press_key',
                        'browser_menu_click', 'browser_fill_form',
                        'browser_navigate', 'browser_close_tab',
-                       'browser_preview_page', 'fetch_url'],
+                       'browser_preview_page',
+                       'browser_download_url_to_server', 'fetch_url'],
         'model_hint': 'standard',
     },
 

@@ -12,7 +12,7 @@ Pipeline (mirrors .github/workflows/build-desktop.yml's Windows leg):
   nuget CPython (nupkg)   — a full Windows Python as a plain zip: no
                             installer, so no 32-bit bootstrapper is needed
                             (the open WoW64 question stays out of this path)
-  pip (CI's exact recipe) — tofu-search first (sibling → vendor → index,
+  pip (CI's exact recipe) — tofu-search first (workspace → vendor → index,
                             same order as builder.py), then requirements +
                             the build extras
   scripts/gen_desktop_icons.py
@@ -621,17 +621,18 @@ def _ensure_winpython(log_fh) -> str:
 
 
 def _tofu_search_source(workdir: str) -> str:
-    """Sibling checkout → vendor wheel → index name (builder.py's order).
+    """Workspace member → vendor wheel → index name (builder.py's order).
 
-    The sibling checkout lives OUTSIDE the guest rootfs, so it is copied
+    The workspace source lives outside the guest rootfs, so it is copied
     into the workdir (wine can only reach Z:).
     """
     import glob
-    sibling = os.path.join(_REPO_ROOT, '..', 'tofu-search')
-    if os.path.isfile(os.path.join(sibling, 'pyproject.toml')):
+    workspace_member = os.path.join(
+        _REPO_ROOT, 'packages', 'tofu-search')
+    if os.path.isfile(os.path.join(workspace_member, 'pyproject.toml')):
         dest = os.path.join(workdir, 'tofu-search')
         if not os.path.isfile(os.path.join(dest, 'pyproject.toml')):
-            shutil.copytree(os.path.abspath(sibling), dest)
+            shutil.copytree(os.path.abspath(workspace_member), dest)
         return dest
     wheels = sorted(glob.glob(
         os.path.join(_REPO_ROOT, 'vendor', 'tofu_search-*.whl')))

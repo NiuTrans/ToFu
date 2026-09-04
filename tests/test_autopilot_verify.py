@@ -283,7 +283,8 @@ def test_run_vu_injects_objective_anchor(monkeypatch):
 
     directive = captured['messages'][-1]
     assert directive.get('_isVuDirective') is True
-    assert 'ORIGINAL OBJECTIVE' in directive['content']
+    assert 'CURRENT OBJECTIVE' in directive['content']
+    assert 'newest human goal wins' in directive['content']
     assert 'Build the UTF-8 CSV exporter.' in directive['content']
     # ── Stale-vs-live prompt marker: the directive must carry the
     #    content-derived version both in the visible text and as a dict key

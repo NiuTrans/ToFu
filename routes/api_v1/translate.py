@@ -5,6 +5,7 @@ Routes:
   POST /api/v1/translate/start          — start async task
   GET  /api/v1/translate/poll/<id>      — poll single task
   POST /api/v1/translate/poll-batch     — poll multiple tasks
+  POST /api/v1/translate/abort/<id>     — cancel queued/running task
   POST /api/v1/translate/mt-test        — test MT provider config
 
 The PPTX multipart upload + binary download carve-outs stay in
@@ -21,14 +22,23 @@ import uuid
 from quart import Blueprint
 
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_ok, api_payload,
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    api_payload,
 )
 from lib.error_envelope import from_exception
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
 from lib.translate.constants import _SYNC_TRANSLATE_MAX_CHARS
-from lib.translate.errors import TranslationContentRefused
+from lib.translate.errors import (
+    TranslationContentRefused,
+    TranslationNoAdmissibleProvider,
+    TranslationProviderQueueFull,
+)
+from lib.translate.execution import (
+    abort_translation_task,
+    submit_translation_task,
+)
 from lib.translate.notranslate import (
     _extract_notranslate_blocks, _reattach_notranslate_blocks,
 )
@@ -37,6 +47,7 @@ from lib.translate.runtime._state import (
     _cleanup_translate_tasks, _translate_runtime,
 )
 from lib.turn_lifecycle import LifecycleNotFound, get_turn
+from routes._task_routes import register_task_routes
 
 from .auth import request_user_id, require_auth
 
@@ -161,6 +172,32 @@ def translate_text_v1():
             from_exception(e, kind='content_refused',
                            source='api_v1.translate.sync'),
             status=502)
+    except TranslationProviderQueueFull as e:
+        logger.info(
+            '[Translate.v1] provider capacity full (%d chars, target=%s)',
+            input_len,
+            target,
+        )
+        return api_error(
+            e,
+            kind='server_busy',
+            context='translation:provider_queue_saturated',
+            source='api_v1.translate.sync',
+            status=503,
+        )
+    except TranslationNoAdmissibleProvider as e:
+        logger.info(
+            '[Translate.v1] no admissible provider (%d chars, target=%s)',
+            input_len,
+            target,
+        )
+        return api_error(
+            e,
+            kind='no_slot',
+            context='translation:no_admissible_slot',
+            source='api_v1.translate.sync',
+            status=503,
+        )
     except Exception as e:
         logger.error('[Translate.v1] sync error (%d chars, %s): %s',
                      input_len, target, e, exc_info=True)
@@ -212,14 +249,18 @@ def translate_start_v1():
               'userId': user_id, 'field': field, 'targetLang': target,
               'textLen': len(text)},
     )
-    _translate_runtime.mark_running(
-        task['id'], fields={'model': None, 'progress': None})
-
-    _translate_runtime.spawn(
+    accepted = submit_translation_task(
+        _translate_runtime,
         task['id'], _do_translate,
         task['id'], text, target, source, conv_id, turn_id, field,
+        running_fields={'model': None, 'progress': None},
         user_id=user_id, message_id=msg_id,
     )
+    if not accepted:
+        return api_error(
+            'Translation worker capacity is unavailable; retry shortly',
+            status=503,
+        )
 
     logger.info('[Translate.v1] started %s: %d chars → %s, conv=%s turn=%s field=%s',
                 task['id'], len(text), target,
@@ -291,9 +332,11 @@ def mt_test_v1():
         tgt_lang = _normalize_lang(target)
 
         if app_id:
-            result = _niutrans_v2(text, src_lang, tgt_lang, api_key, app_id, api_url)
+            result = _niutrans_v2(
+                text, src_lang, tgt_lang, api_key, app_id, api_url)
         else:
-            result = _niutrans_v1(text, src_lang, tgt_lang, api_key, api_url)
+            result = _niutrans_v1(
+                text, src_lang, tgt_lang, api_key, api_url)
 
         logger.info('[MT-Test.v1] OK: "%s"→"%s" (%s→%s)',
                     text[:50], result[:50], source, target)
@@ -301,6 +344,27 @@ def mt_test_v1():
     except Exception as e:
         logger.warning('[MT-Test.v1] Failed: %s', e)
         return api_error(str(e), status=200)
+
+
+def _abort_translate_task(task_id: str, owner_user_id: int):
+    task = _translate_runtime.get_owned(task_id, user_id=owner_user_id)
+    if task is None:
+        return api_not_found()
+    if not abort_translation_task(
+            _translate_runtime, task_id, user_id=owner_user_id):
+        return api_ok(status=task['status'], note='already finished')
+    return api_ok(status='aborting')
+
+
+register_task_routes(
+    api_v1_translate_bp,
+    _translate_runtime,
+    url_prefix='/api/v1/translate',
+    enable_poll=False,
+    abort_handler=_abort_translate_task,
+    route_decorators=(require_auth,),
+    tags=('translate',),
+)
 
 
 __all__ = ['api_v1_translate_bp']

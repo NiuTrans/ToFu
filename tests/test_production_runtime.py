@@ -149,6 +149,19 @@ def test_dedup_retention_never_drops_active_authority():
     assert all(r.index_get((index,)) == f't{index}' for index in range(3))
 
 
+def test_dedup_capacity_cannot_widen_resolved_task_retention():
+    inherited = ProductionRuntime(
+        'dedup-inherited', id_prefix='di', max_tasks=4)
+    widened = ProductionRuntime(
+        'dedup-clamped', id_prefix='dc', max_tasks=4,
+        max_dedup_keys=99)
+
+    assert inherited.runtime.max_tasks == 4
+    assert inherited.max_dedup_keys == 4
+    assert widened.runtime.max_tasks == 4
+    assert widened.max_dedup_keys == 4
+
+
 def test_dedup_retention_prunes_terminal_and_orphan_keys_with_counts():
     r = ProductionRuntime(
         'dedup-prune', id_prefix='dp', max_tasks=4, max_dedup_keys=2)

@@ -14,8 +14,9 @@ export interface TurnSubmissionInput {
   /**
    * Per-send delivery decision from the post-send dialog when a turn is
    * already running on the lane: 'steer' injects into the running reply at
-   * the next tool-call boundary, 'queue' (default) holds the message for
-   * dispatch as a fresh turn once the lane settles. A no-op when idle.
+   * the next tool-call boundary, while 'queue' holds the message for dispatch
+   * as a fresh turn once the lane settles. Omitted when the lane was idle so
+   * a server-side lane-busy race is surfaced for an explicit decision.
    */
   injectMode?: 'steer' | 'queue';
 }
@@ -43,6 +44,42 @@ export interface TurnOperationOptions {
   commandId?: unknown;
   inputUpdate?: unknown;
   expectedInputProjectionRevision?: unknown;
+  /** Late ask_human answer carried by the ``answer_guidance`` operation. */
+  humanResponse?: unknown;
+}
+
+
+function turnProjectionRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+/**
+ * Build the input projection for an explicit regenerate action.
+ *
+ * Existing Turn context remains immutable historical evidence while the user
+ * only changes composer/project controls. Regenerate is the explicit boundary
+ * that creates a new attempt, so its atomic inputUpdate replaces that evidence
+ * with the context live at the click. The legacy `_ctx` field is removed to
+ * keep `contextSnapshot` as the single wire representation.
+ */
+export function rebindTurnInputContext(
+  inputProjection: unknown,
+  currentSnapshot: unknown,
+): Record<string, unknown> {
+  const projection = { ...turnProjectionRecord(inputProjection) };
+  delete projection._ctx;
+  if (currentSnapshot && typeof currentSnapshot === 'object'
+      && !Array.isArray(currentSnapshot)) {
+    projection.contextSnapshot = {
+      blockId: 'turn-context',
+      snapshot: { ...currentSnapshot as Record<string, unknown> },
+    };
+  } else {
+    delete projection.contextSnapshot;
+  }
+  return projection;
 }
 
 export function createTurnCommandId(): string {
@@ -84,6 +121,9 @@ export function buildTurnOperationRequest(
     request.inputUpdate = options.inputUpdate;
     request.expectedInputProjectionRevision = options.expectedInputProjectionRevision;
   }
+  if (options?.humanResponse != null) {
+    request.humanResponse = String(options.humanResponse);
+  }
   return request;
 }
 
@@ -109,7 +149,7 @@ export function buildTurnSubmissionExtra(
     actor: 'assistant',
     kind: flow ? 'flow_node' : 'reply',
     runId: String(config.autopilotRunId || config.flowRunId || ''),
-    injectMode: input.injectMode === 'steer' ? 'steer' : 'queue',
+    ...(input.injectMode ? { injectMode: input.injectMode } : {}),
     requestOptions,
   };
 }

@@ -29,7 +29,7 @@ import pytest
 import lib.mcp.client as mc
 from lib.mcp.client import MCPBridge
 from lib.mcp.registry import get_catalog_entry, is_opensource_build
-from lib.mcp.types import MCP_CRED_PROBE_INTERVAL
+from lib.mcp.types import MCP_CRED_PROBE_INTERVAL, MCP_CRED_PROBE_TIMEOUT
 
 pytestmark = pytest.mark.unit
 
@@ -52,8 +52,9 @@ def _bridge_with_overleaf(cred_result='ok text'):
         'openai_def': {}, 'read_only_hint': True,
     }
 
-    def _fake_call_tool(namespaced_name, arguments):
+    def _fake_call_tool(namespaced_name, arguments, *, timeout_override=None):
         assert namespaced_name == ns
+        bridge._cred_probe_timeout_seen = timeout_override
         if isinstance(cred_result, Exception):
             raise cred_result
         return cred_result
@@ -93,6 +94,7 @@ def test_probe_classifies_expired_cookie():
     assert rec is not None
     assert rec['status'] == 'expired'
     assert rec['detail']  # a short non-secret snippet is kept for the tooltip
+    assert bridge._cred_probe_timeout_seen == MCP_CRED_PROBE_TIMEOUT
     # And it is surfaced for the UI.
     assert bridge.get_cred_health('overleaf')['status'] == 'expired'
 
@@ -104,6 +106,7 @@ def test_probe_classifies_healthy_listing_as_ok():
     assert rec['status'] == 'ok'
     assert rec['detail'] == ''
     assert bridge.get_cred_health('overleaf')['status'] == 'ok'
+    assert bridge._cred_probe_timeout_seen == MCP_CRED_PROBE_TIMEOUT
 
 
 def test_probe_raise_is_unknown_not_expired():

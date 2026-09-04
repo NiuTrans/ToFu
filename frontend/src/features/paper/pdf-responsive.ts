@@ -1,6 +1,8 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
 
+import { scheduleAnimationFrame } from '../../conversation/ui/animation-frame-scheduler';
+
 type LegacyPaperWindow = Window & {
   __tofuPaperResponsiveOwned?: boolean;
   _paperResponsiveOnCrossing?: () => void;
@@ -34,8 +36,8 @@ export function attachPaperResponsive(): PaperResponsiveController {
   let startX = 0;
   let startLeftWidth = 0;
   let crossingPending = false;
-  let crossingFrame: number | null = null;
-  let fitFrame: number | null = null;
+  let cancelCrossingFrame: (() => void) | null = null;
+  let cancelFitFrame: (() => void) | null = null;
   let destroyed = false;
 
   let singlePaneQuery: MediaQueryList | null = null;
@@ -163,8 +165,9 @@ export function attachPaperResponsive(): PaperResponsiveController {
       else paperBody.setAttribute('data-paper-view', current);
     }
     if (typeof legacyWindow().paperFitWidth === 'function') {
-      fitFrame = window.requestAnimationFrame(() => {
-        fitFrame = null;
+      cancelFitFrame?.();
+      cancelFitFrame = scheduleAnimationFrame(window, () => {
+        cancelFitFrame = null;
         fitWidth();
       });
     }
@@ -173,8 +176,8 @@ export function attachPaperResponsive(): PaperResponsiveController {
   const scheduleCrossing = (): void => {
     if (crossingPending) return;
     crossingPending = true;
-    crossingFrame = window.requestAnimationFrame(() => {
-      crossingFrame = null;
+    cancelCrossingFrame = scheduleAnimationFrame(window, () => {
+      cancelCrossingFrame = null;
       crossingPending = false;
       onCrossing();
     });
@@ -216,8 +219,10 @@ export function attachPaperResponsive(): PaperResponsiveController {
       dragScope?.destroy();
       dragScope = null;
       scope.destroy();
-      if (crossingFrame != null) window.cancelAnimationFrame(crossingFrame);
-      if (fitFrame != null) window.cancelAnimationFrame(fitFrame);
+      cancelCrossingFrame?.();
+      cancelCrossingFrame = null;
+      cancelFitFrame?.();
+      cancelFitFrame = null;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       if (globals._paperResponsiveOnCrossing === onCrossing) {

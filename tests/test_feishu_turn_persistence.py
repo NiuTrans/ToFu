@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -94,3 +96,30 @@ def test_same_source_message_is_idempotent(sidecar, monkeypatch):
         "turn.list", {"conversation_id": "feishu-replay", "user_id": 17}
     )
     assert len(turns) == 2
+
+
+def test_concurrent_source_replay_settles_one_exchange(sidecar, monkeypatch):
+    import lib.feishu.conversation as conversation
+
+    monkeypatch.setattr(
+        conversation, "get_conv_id", lambda _user: "feishu-concurrent"
+    )
+    user = {"id": "concurrent-message", "role": "user", "content": "q"}
+    answer = {"role": "assistant", "content": "a", "model": "m"}
+    start_barrier = threading.Barrier(2)
+
+    def persist() -> bool:
+        start_barrier.wait(timeout=5)
+        return conversation.persist_exchange(
+            "ou_a", user, answer, owner_user_id=17
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: persist(), range(2)))
+
+    assert results == [True, True]
+    turns = sidecar.client.query(
+        "turn.list", {"conversation_id": "feishu-concurrent", "user_id": 17}
+    )
+    assert len(turns) == 2
+    assert turns[1]["status"] == "completed"

@@ -85,6 +85,63 @@ def test_null_kept_when_required():
     assert log == []
 
 
+@pytest.mark.parametrize('zero', [0, 0.0, '0', ' 00 '])
+def test_get_conversation_zero_cursor_is_audibly_omitted(zero):
+    """A model's conventional first-page sentinel must not waste a tool call."""
+    args = {'conversation_id': 'conv-old', 'before': zero, 'limit': 20}
+
+    out, log = validate_then_repair('get_conversation', args)
+
+    assert out == {'conversation_id': 'conv-old', 'limit': 20}
+    assert log == [('before', 'zero_cursor_omission')]
+    assert args['before'] == zero, 'repair must not mutate provider input'
+
+
+@pytest.mark.parametrize('invalid', [False, -1, 0.5, '-1', '0.5'])
+def test_get_conversation_ambiguous_cursor_is_not_repaired(invalid):
+    out, log = validate_then_repair(
+        'get_conversation', {'conversation_id': 'conv-old', 'before': invalid})
+    assert 'before' in out
+    assert all(pattern != 'zero_cursor_omission' for _, pattern in log)
+
+
+def test_zero_cursor_repair_precedes_authoritative_minimum_validation():
+    """The unified ingest accepts only the curated zero sentinel repair."""
+    import json
+
+    from lib.tool_input_repair import ingest_tool_call
+    from lib.tools.contracts import compile_execution_contract_documents
+    from lib.tools.conversation import CONV_REF_GET_TOOL
+
+    contracts = compile_execution_contract_documents([CONV_REF_GET_TOOL])
+    zero = ingest_tool_call(
+        {'id': 'call-zero', 'function': {
+            'name': 'get_conversation',
+            'arguments': json.dumps({
+                'conversation_id': 'conv-old', 'before': 0}),
+        }},
+        known_tools={'get_conversation'},
+        contract_documents_by_name=contracts,
+        emit_audit=False,
+    )
+    negative = ingest_tool_call(
+        {'id': 'call-negative', 'function': {
+            'name': 'get_conversation',
+            'arguments': json.dumps({
+                'conversation_id': 'conv-old', 'before': -1}),
+        }},
+        known_tools={'get_conversation'},
+        contract_documents_by_name=contracts,
+        emit_audit=False,
+    )
+
+    assert zero.parse_error is None
+    assert zero.fn_args == {'conversation_id': 'conv-old'}
+    assert zero.repair_log == [('before', 'zero_cursor_omission')]
+    assert negative.parse_error is not None
+    assert negative.contract_error is not None
+
+
 def test_empty_placeholder_unwrap():
     """{'a': 'x', 'b': 'y'} where array expected → ['x', 'y']."""
     out, log = validate_then_repair(
@@ -440,6 +497,98 @@ def test_salvage_valid_input_never_reaches_rung():
 
 
 # ═════════════════════════════════════════════════════
+#  todo_write nested-envelope transform (conv mtdqz4bkuyitzj)
+# ═════════════════════════════════════════════════════
+
+def _todo_contract_docs():
+    from lib.tools.contracts import adapt_legacy_tool_contract
+    from lib.tools.todo import TODO_WRITE_TOOL
+    return {'todo_write': adapt_legacy_tool_contract(
+        TODO_WRITE_TOOL).search_document()}
+
+
+def _ingest_todo(args_dict):
+    import json as _json
+    from lib.tool_input_repair import ingest_tool_call
+    return ingest_tool_call(
+        {'id': 'tc1', 'function': {
+            'name': 'todo_write', 'arguments': _json.dumps(args_dict)}},
+        emit_audit=False,
+        contract_documents_by_name=_todo_contract_docs())
+
+
+def test_todo_write_nested_envelope_unwrapped():
+    """kimi-k3 pushed the whole envelope one level down into todos[0] and
+    padded it with a junk id=\"\" that half-satisfied the item schema, then
+    died on minLength at $.todos[0].id. The intent is unambiguous — unwrap
+    deterministically: todos becomes the inner list, envelope keys hoist."""
+    nested = {'todos': [{
+        'todos': [
+            {'id': 'a', 'content': 'one', 'status': 'pending'},
+            {'id': 'b', 'content': 'two', 'status': 'in_progress'},
+        ],
+        'operation': 'sync',
+        'reason': 'initial plan',
+        'id': '',
+    }]}
+    out, log = validate_then_repair('todo_write', nested)
+    assert out == {
+        'todos': [
+            {'id': 'a', 'content': 'one', 'status': 'pending'},
+            {'id': 'b', 'content': 'two', 'status': 'in_progress'},
+        ],
+        'operation': 'sync',
+        'reason': 'initial plan',
+    }
+    assert ('todo_write', 'structural_transform') in log
+
+
+def test_todo_write_nested_envelope_survives_contract_validation():
+    """The unwrapped call must pass the authoritative contract — the
+    incident shape previously died fail-closed at $.todos[0].id."""
+    result = _ingest_todo({'todos': [{
+        'todos': [{'id': 'a', 'content': 'one', 'status': 'pending'}],
+        'operation': 'sync', 'reason': 'r', 'id': ''}]})
+    assert result.parse_error is None
+    assert result.fn_args['todos'] == [
+        {'id': 'a', 'content': 'one', 'status': 'pending'}]
+    assert result.fn_args['operation'] == 'sync'
+    assert result.fn_args['reason'] == 'r'
+
+
+def test_todo_write_correct_calls_never_unwrapped():
+    """A genuine single item has `content` and no nested todos list — the
+    transform must stay a strict no-op on well-formed input."""
+    good = {'operation': 'sync',
+            'todos': [{'id': 'a', 'content': 'one', 'status': 'pending'}]}
+    out, log = validate_then_repair('todo_write', good)
+    assert log == []
+    assert out == good
+
+
+def test_todo_write_multi_element_outer_list_not_unwrapped():
+    """Two+ elements means the outer array is real data, not a wrapper —
+    leave it to contract validation, never guess."""
+    args = {'todos': [
+        {'todos': [], 'id': ''},
+        {'id': 'a', 'content': 'x', 'status': 'pending'}]}
+    out, log = validate_then_repair('todo_write', args)
+    assert out['todos'][0] == {'todos': [], 'id': ''}
+    assert ('todo_write', 'structural_transform') not in log
+
+
+def test_todo_write_contract_rejection_carries_schema_hint():
+    """The recovery round must see the expected shape, not a bare path —
+    the observed retry loop misdiagnosed the failure without it."""
+    result = _ingest_todo(
+        {'todos': [{'id': 'x' * 65, 'content': 'c', 'status': 'pending'}]})
+    assert result.parse_error is not None
+    assert '[invalid_argument_length]' in result.parse_error
+    assert 'expects a JSON object' in result.parse_error
+    assert 'todos' in result.parse_error
+
+
+# ═════════════════════════════════════════════════════
 #  Tool-NAME repair (resolve_tool_name)
 # ═════════════════════════════════════════════════════
 
@@ -447,6 +596,7 @@ _KNOWN = {
     'read_files', 'grep_search', 'list_dir', 'find_files', 'write_file',
     'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents',
     'run_command', 'web_search', 'fetch_url',
+    'browser_download_url_to_server',
     'mcp__github__create_issue',
 }
 
@@ -470,6 +620,7 @@ def test_resolve_static_aliases():
         'edit': 'apply_diff',
         'find': 'find_files',
         'fetch': 'fetch_url',
+        'download_url_to_server': 'browser_download_url_to_server',
     }
     for wrong, canonical in cases.items():
         name, kind = resolve_tool_name(wrong, known=_KNOWN)
@@ -539,6 +690,115 @@ def test_resolve_mcp_tool_untouched():
 
 def test_resolve_empty_name():
     assert resolve_tool_name('', known=_KNOWN) == ('', None)
+
+
+# ══════════════════════════════════════════
+#  Repair-index coverage drift pin (conv mtdqz4bkuyitzj bug class)
+# ══════════════════════════════════════════
+
+_COVERAGE_SCAN_PACKAGES = (
+    'lib.tools', 'lib.skills', 'lib.swarm', 'lib.memory',
+    'lib.scheduler', 'lib.knowledge', 'lib.mcp', 'lib.paper',
+)
+# Dynamic per-server schemas with their own coercion (lib/mcp/client/_coerce.py);
+# per-vertical paper shims that would clobber the canonical web_search/fetch_url
+# index entries.
+_COVERAGE_EXEMPT_PREFIXES = ('lib.mcp',)
+_COVERAGE_EXEMPT_MODULES = {'lib.paper.tools'}
+
+
+def _walk_module_schema_names(mod) -> set:
+    """Mirror ``_build_schema_index``'s walk: literal dicts, lists, and
+    zero-arg ``build_*`` factories exposing ``{'type': 'function'}``."""
+    names = set()
+    for attr in dir(mod):
+        obj = getattr(mod, attr, None)
+        cands = []
+        if isinstance(obj, list):
+            cands = [e for e in obj if isinstance(e, dict)]
+        elif isinstance(obj, dict):
+            cands = [obj]
+        elif callable(obj) and attr.startswith('build_'):
+            try:
+                built = obj()
+            except Exception:
+                continue
+            if isinstance(built, list):
+                cands = [e for e in built if isinstance(e, dict)]
+            elif isinstance(built, dict):
+                cands = [built]
+        for e in cands:
+            if e.get('type') == 'function':
+                n = (e.get('function') or {}).get('name')
+                if n:
+                    names.add(n)
+    return names
+
+
+def test_all_static_schema_modules_are_indexed():
+    """Every module exposing static built-in tool schemas must be registered
+    in ``_schema_owner_modules()`` — otherwise its tools are fail-closed
+    contract-validated with ZERO repair, the exact gap that left todo_write
+    unprotected for months. If this fails, register the module in
+    ``lib/tool_input_repair/_schema.py`` (or exempt it here with a reason)."""
+    import importlib
+    import pkgutil
+
+    from lib.tool_input_repair._schema import _schemas
+    indexed = set(_schemas())
+    uncovered = {}
+    for pkg_name in _COVERAGE_SCAN_PACKAGES:
+        pkg = importlib.import_module(pkg_name)
+        mod_names = [pkg_name]
+        if hasattr(pkg, '__path__'):
+            mod_names += [f'{pkg_name}.{i.name}'
+                          for i in pkgutil.iter_modules(pkg.__path__)]
+        for mod_name in mod_names:
+            if mod_name in _COVERAGE_EXEMPT_MODULES or any(
+                    mod_name.startswith(p) for p in _COVERAGE_EXEMPT_PREFIXES):
+                continue
+            try:
+                mod = importlib.import_module(mod_name)
+            except Exception:
+                continue
+            missing = _walk_module_schema_names(mod) - indexed
+            if missing:
+                uncovered[mod_name] = sorted(missing)
+    assert not uncovered, (
+        'schema-owning modules missing from the repair index: '
+        f'{uncovered}')
+
+
+def test_newly_indexed_modules_get_type_repair():
+    """Tools from the six modules registered after the audit receive the
+    same stringified_json repair as the original set."""
+    repaired, log = validate_then_repair(
+        'create_memory', {'description': 'd', 'name': 'n', 'body': 'b',
+                          'tags': '["x", "y"]'})
+    assert repaired['tags'] == ['x', 'y']
+    assert ('tags', 'stringified_json') in log
+
+    repaired, log = validate_then_repair(
+        'spawn_agents', {'agents': '[{"objective": "o"}]'})
+    assert repaired['agents'] == [{'objective': 'o'}]
+    assert ('agents', 'stringified_json') in log
+
+
+def test_structural_transform_runs_without_index_entry(monkeypatch):
+    """Name-keyed transforms must fire even when the tool has no indexed
+    schema — index coverage must not gate them (the todo_write transform was
+    dead code until lib.tools.todo happened to be registered)."""
+    from lib.tool_input_repair import _transform as _tf
+
+    def _dummy(args):
+        return {**args, 'unwrapped': True}, True
+
+    monkeypatch.setitem(_tf._STRUCTURAL_TRANSFORMS,
+                        'never_indexed_tool_xyz', _dummy)
+    repaired, log = validate_then_repair(
+        'never_indexed_tool_xyz', {'a': 1})
+    assert repaired == {'a': 1, 'unwrapped': True}
+    assert ('never_indexed_tool_xyz', 'structural_transform') in log
 
 
 if __name__ == '__main__':

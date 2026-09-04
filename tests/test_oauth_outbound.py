@@ -2,14 +2,11 @@
 
 Covers lib/oauth/outbound: live-token + identity-header + body resolution
 for Claude / Codex, the Claude ``?beta=true`` URL helper, and the managed
-server_config provider provision/deprovision round-trip.
+model-routing v2 ProviderAccess provision/deprovision round-trip.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 import unittest
 from unittest import mock
 
@@ -18,6 +15,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 import lib.oauth.outbound as outbound
+from lib.model_routing import InMemoryModelRoutingRepository, OwnerBoundary
 
 
 class TestClaudeResolve(unittest.TestCase):
@@ -28,14 +26,38 @@ class TestClaudeResolve(unittest.TestCase):
         # swaps in the live token + the identity HEADER suite.
         body = {'messages': [{'role': 'user', 'content': 'hi'}]}
         with mock.patch('lib.oauth.claude.claude_get_valid_token',
-                        return_value='sk-ant-oat01-AAA'):
-            key, hdrs, out = outbound.resolve_oauth_request('claude', body, None)
+                        return_value='sk-ant-oat01-AAA') as get_token:
+            key, hdrs, out = outbound.resolve_oauth_request(
+                'claude', body, None, user_id='41')
         self.assertEqual(key, 'sk-ant-oat01-AAA')
         self.assertEqual(out['messages'], [{'role': 'user', 'content': 'hi'}])
         self.assertIn('claude-code-20250219', hdrs['anthropic-beta'])
         self.assertIn('oauth-2025-04-20', hdrs['anthropic-beta'])
         self.assertEqual(hdrs['x-app'], 'cli')
         self.assertTrue(hdrs['User-Agent'].startswith('claude-cli/'))
+        get_token.assert_called_once_with(user_id='41')
+
+    def test_stream_preflight_forwards_owner_to_oauth_refresh(self):
+        from lib.llm._sse_core import prepare_request
+
+        captured = {}
+
+        def _resolve(oauth, body, extra_headers, user_id=''):
+            captured.update(oauth=oauth, user_id=user_id)
+            return 'token', {}, body
+
+        with mock.patch(
+                'lib.oauth.outbound.resolve_oauth_request', _resolve):
+            prepare_request(
+                {'model': 'claude-sonnet-4',
+                 'messages': [{'role': 'user', 'content': 'hi'}],
+                 'stream': True},
+                api_key='stale', base_url='https://api.anthropic.com/v1',
+                api_protocol='anthropic', oauth='claude',
+                owner_user_id=41,
+            )
+
+        self.assertEqual(captured, {'oauth': 'claude', 'user_id': '41'})
 
     def test_merge_betas_leads_with_mandatory(self):
         body = {'messages': []}
@@ -116,52 +138,60 @@ class TestCodexResolve(unittest.TestCase):
 class TestProvisioning(unittest.TestCase):
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._cfg_path = os.path.join(self._tmp.name, 'server_config.json')
-        with open(self._cfg_path, 'w') as f:
-            json.dump({'providers': [
-                {'id': 'user_prov', 'name': 'mine', 'enabled': True,
-                 'api_keys': ['k'], 'models': [{'model_id': 'foo'}]},
-            ]}, f)
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def _patches(self):
-        # Patch the config path + the two side-effecting reloads so the test
-        # only exercises the JSON mutation.
-        return (
-            mock.patch('lib._SERVER_CONFIG_PATH', self._cfg_path),
-            mock.patch('lib.reload_config', lambda: None),
-            mock.patch('lib.llm_dispatch.reset_dispatcher', lambda: None),
-        )
+        self.repository = InMemoryModelRoutingRepository()
+        self.boundary = OwnerBoundary.create(41)
 
     def _run(self, fn, *a):
-        ctxs = self._patches()
-        with ctxs[0], ctxs[1], ctxs[2]:
-            return fn(*a)
+        with mock.patch('lib.llm_dispatch.reset_dispatcher', lambda: None):
+            return fn(
+                *a,
+                owner_user_id=self.boundary.owner_user_id,
+                repository=self.repository,
+            )
 
     def _load(self):
-        with open(self._cfg_path) as f:
-            return json.load(f)
+        return self.repository.get(self.boundary).document
+
+    @staticmethod
+    def _provider_models(document, provider_id):
+        access_ids = {
+            row['provider_access_id'] for row in document['provider_accesses']
+            if row['provider_id'] == provider_id
+        }
+        offerings = [
+            row for row in document['offerings']
+            if row['provider_access_id'] in access_ids
+        ]
+        return [
+            str((row.get('model') or {}).get('model_id')
+                or row.get('pending_model_id') or '')
+            for row in offerings
+        ]
 
     def test_provision_adds_managed_provider(self):
         ok = self._run(outbound.provision_oauth_provider, 'codex')
         self.assertTrue(ok)
-        cfg = self._load()
-        ids = [p['id'] for p in cfg['providers']]
-        self.assertIn('user_prov', ids)        # user provider preserved
+        document = self._load()
+        ids = [p['provider_id'] for p in document['providers']]
         self.assertIn('oauth_codex', ids)
-        managed = next(p for p in cfg['providers'] if p['id'] == 'oauth_codex')
-        self.assertEqual(managed['oauth'], 'codex')
-        self.assertTrue(managed['api_keys'])   # sentinel key present
-        self.assertTrue(all(m.get('stream_only') for m in managed['models']))
+        access_id = next(
+            row['provider_access_id'] for row in document['provider_accesses']
+            if row['provider_id'] == 'oauth_codex')
+        credentials = [
+            row for row in document['credentials']
+            if row['provider_access_id'] == access_id
+        ]
+        self.assertEqual([row['kind'] for row in credentials], ['oauth'])
+        self.assertTrue(credentials[0]['secret_reference'])
 
     def test_provision_is_idempotent(self):
         self._run(outbound.provision_oauth_provider, 'codex')
         self._run(outbound.provision_oauth_provider, 'codex')
-        cfg = self._load()
-        self.assertEqual(sum(1 for p in cfg['providers'] if p['id'] == 'oauth_codex'), 1)
+        document = self._load()
+        self.assertEqual(sum(
+            1 for row in document['providers']
+            if row['provider_id'] == 'oauth_codex'), 1)
+        self.assertEqual(document['revision'], 1)
 
     def test_cached_catalog_replaces_static_codex_table(self):
         dynamic = [{
@@ -174,21 +204,18 @@ class TestProvisioning(unittest.TestCase):
                 'lib.oauth.codex_catalog.cached_codex_provider_models',
                 return_value=dynamic):
             self._run(outbound.provision_oauth_provider, 'codex')
-        managed = next(p for p in self._load()['providers']
-                       if p['id'] == 'oauth_codex')
-        self.assertEqual(managed['catalog_source'], 'remote_cache')
-        self.assertEqual([m['model_id'] for m in managed['models']],
-                         ['gpt-from-live-catalog'])
-        self.assertTrue(managed['models'][0]['stream_only'])
+        self.assertEqual(
+            self._provider_models(self._load(), 'oauth_codex'),
+            ['gpt-from-live-catalog'],
+        )
 
     def test_deprovision_removes_only_managed(self):
         self._run(outbound.provision_oauth_provider, 'claude')
         removed = self._run(outbound.deprovision_oauth_provider, 'claude')
         self.assertTrue(removed)
-        cfg = self._load()
-        ids = [p['id'] for p in cfg['providers']]
+        document = self._load()
+        ids = [p['provider_id'] for p in document['providers']]
         self.assertNotIn('oauth_claude', ids)
-        self.assertIn('user_prov', ids)
 
     def test_managed_models_are_current(self):
         # Guards the preset model lists against silently drifting stale — the
@@ -198,11 +225,9 @@ class TestProvisioning(unittest.TestCase):
         # so the test never touches the real data/config token file.
         with mock.patch('lib.oauth.token_store.load_token', return_value=None):
             self._run(outbound.provision_oauth_provider, 'codex')
-        cfg = self._load()
-        claude = next(p for p in cfg['providers'] if p['id'] == 'oauth_claude')
-        codex = next(p for p in cfg['providers'] if p['id'] == 'oauth_codex')
-        claude_ids = [m['model_id'] for m in claude['models']]
-        codex_ids = [m['model_id'] for m in codex['models']]
+        document = self._load()
+        claude_ids = self._provider_models(document, 'oauth_claude')
+        codex_ids = self._provider_models(document, 'oauth_codex')
         # Latest verified flagships (Anthropic 2025-11-24 / CLIProxyAPI v7
         # codex registry, synced 2026-07-31). Unknown plan → full pro table.
         self.assertIn('claude-opus-4-5-20251101', claude_ids)
@@ -214,11 +239,14 @@ class TestProvisioning(unittest.TestCase):
         self.assertNotIn('gpt-5.2-codex', codex_ids)
         # Registry parity: all thinking-capable Claude entries advertise it;
         # legacy 3.5 Haiku correctly does not.
-        self.assertTrue(all('thinking' in m['capabilities']
-                            for m in claude['models']
-                            if m['model_id'] != 'claude-3-5-haiku-20241022'))
-        haiku35 = next(m for m in claude['models']
-                       if m['model_id'] == 'claude-3-5-haiku-20241022')
+        claude_models = {
+            row['model_id']: row for row in document['models']
+            if row['creator_id'] == 'anthropic' and row['model_id'] in claude_ids
+        }
+        self.assertTrue(all('thinking' in row['capabilities']
+                            for model_id, row in claude_models.items()
+                            if model_id != 'claude-3-5-haiku-20241022'))
+        haiku35 = claude_models['claude-3-5-haiku-20241022']
         self.assertNotIn('thinking', haiku35['capabilities'])
 
     def test_reconcile_repairs_missing_and_removes_orphan(self):
@@ -230,25 +258,23 @@ class TestProvisioning(unittest.TestCase):
 
         with mock.patch('lib.oauth.token_store.load_token', side_effect=token):
             result = self._run(outbound.reconcile_oauth_providers)
-        cfg = self._load()
-        ids = [p['id'] for p in cfg['providers']]
+        document = self._load()
+        ids = [p['provider_id'] for p in document['providers']]
         self.assertNotIn('oauth_claude', ids)
         self.assertIn('oauth_codex', ids)
-        self.assertIn('user_prov', ids)
         self.assertTrue(result['codex']['provider_ready'])
-        codex = next(p for p in cfg['providers'] if p['id'] == 'oauth_codex')
         self.assertNotIn('gpt-5.3-codex-spark',
-                         [m['model_id'] for m in codex['models']])
+                         self._provider_models(document, 'oauth_codex'))
 
     def test_reconcile_is_noop_when_projection_is_current(self):
         token = {'access_token': 'tok', 'plan_type': 'pro'}
         with mock.patch('lib.oauth.token_store.load_token', return_value=token):
             self._run(outbound.reconcile_oauth_providers)
-            with mock.patch.object(outbound, '_activate_oauth_config_change') as activate, \
-                 mock.patch('lib.json_store.write_json_atomic') as write:
+            revision = self._load()['revision']
+            with mock.patch.object(outbound, '_activate_oauth_config_change') as activate:
                 self._run(outbound.reconcile_oauth_providers)
         activate.assert_not_called()
-        write.assert_not_called()
+        self.assertEqual(self._load()['revision'], revision)
 
 
 if __name__ == '__main__':

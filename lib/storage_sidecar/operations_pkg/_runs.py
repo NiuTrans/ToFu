@@ -8,12 +8,31 @@ from typing import Any
 
 import orjson
 
+from lib.goal_runs.contract import (
+    GOAL_RUN_CREATED_BY,
+    GOAL_RUN_FORMAT,
+    GOAL_RUN_ORCHESTRATION_PREFIX,
+    GOAL_RUN_TERMINAL_STATUSES,
+    MAX_GOAL_OBJECTIVE_CHARS,
+    goal_orchestration_id,
+    goal_run_policy,
+    goal_status_from_storage,
+    is_valid_goal_transition,
+    storage_status_for_goal_status,
+)
+from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.orchestration.run_status import (
     TERMINAL_RUN_STATUSES,
     VALID_RUN_STATUSES,
     is_run_status,
     is_terminal_run_status,
+)
+from lib.swarm.persistence_contract import (
+    SWARM_SESSION_STATUS_QUARANTINED_OWNERLESS,
+    SWARM_SESSION_STATUS_RUNNING,
+    SWARM_SESSION_STATUS_TERMINATED,
+    SWARM_SESSION_WRITABLE_STATUSES,
 )
 from lib.storage.errors import StorageError
 from lib.storage_sidecar.adapters.base import Session
@@ -205,6 +224,12 @@ def _orchestration_run_retire(session: Session, payload: Mapping[str, Any]) -> A
     error = payload.get("error")
     error_text = error if isinstance(error, str) else _json_text(error)
     now = int(time.time() * 1000)
+    interrupted_goals = session.fetch_all(
+        "SELECT id, user_id, tenant_id FROM orchestration_runs "
+        "WHERE user_id = ? AND tenant_id = ? AND created_by = ? "
+        f"AND status NOT IN ({_TERMINAL_STATUS_SQL})",
+        (user_id, tenant_id, GOAL_RUN_CREATED_BY, *TERMINAL_RUN_STATUSES),
+    )
     count = session.execute(
         "UPDATE orchestration_runs SET status = 'error', final = '', "
         "error = ?, updated_at = ?, finished_at = CASE "
@@ -213,6 +238,8 @@ def _orchestration_run_retire(session: Session, payload: Mapping[str, Any]) -> A
         f"AND status NOT IN ({_TERMINAL_STATUS_SQL})",
         (error_text, now, now, user_id, tenant_id, *TERMINAL_RUN_STATUSES),
     )
+    _append_interrupted_goal_transitions(
+        session, interrupted_goals, error=error)
     return {"retired": count}
 
 
@@ -224,6 +251,12 @@ def _orchestration_run_retire_all(
     error = payload.get("error")
     error_text = error if isinstance(error, str) else _json_text(error)
     now = int(time.time() * 1000)
+    interrupted_goals = session.fetch_all(
+        "SELECT id, user_id, tenant_id FROM orchestration_runs "
+        "WHERE created_by = ? "
+        f"AND status NOT IN ({_TERMINAL_STATUS_SQL})",
+        (GOAL_RUN_CREATED_BY, *TERMINAL_RUN_STATUSES),
+    )
     count = session.execute(
         "UPDATE orchestration_runs SET status = 'error', final = '', "
         "error = ?, updated_at = ?, finished_at = CASE "
@@ -231,6 +264,8 @@ def _orchestration_run_retire_all(
         f"WHERE status NOT IN ({_TERMINAL_STATUS_SQL})",
         (error_text, now, now, *TERMINAL_RUN_STATUSES),
     )
+    _append_interrupted_goal_transitions(
+        session, interrupted_goals, error=error)
     return {"retired": count}
 
 
@@ -375,6 +410,395 @@ def _orchestration_run_delete(session: Session, payload: Mapping[str, Any]) -> A
     return {"deleted": bool(count)}
 
 
+def _goal_event_append(
+    session: Session,
+    *,
+    run_id: str,
+    user_id: int,
+    tenant_id: str,
+    event: Mapping[str, Any],
+) -> int:
+    """Append the next GoalRun event inside the caller's transaction."""
+    row = session.fetch_one(
+        "SELECT COALESCE(MAX(seq) + 1, 0) AS next_sequence "
+        "FROM orchestration_run_events WHERE run_id = ? AND user_id = ? "
+        "AND tenant_id = ?",
+        (run_id, user_id, tenant_id),
+    )
+    sequence = int(row["next_sequence"] or 0) if row else 0
+    document = dict(event)
+    document.setdefault("format", GOAL_RUN_FORMAT)
+    session.execute(
+        "INSERT INTO orchestration_run_events("
+        "run_id, user_id, tenant_id, seq, type, node_id, payload, ts) "
+        "VALUES (?, ?, ?, ?, ?, '', ?, ?)",
+        (
+            run_id,
+            user_id,
+            tenant_id,
+            sequence,
+            str(document.get("type") or ""),
+            _json_text(document),
+            int(time.time() * 1000),
+        ),
+    )
+    return sequence
+
+
+def _append_interrupted_goal_transitions(
+    session: Session,
+    rows: list[Mapping[str, Any]],
+    *,
+    error: Any,
+) -> None:
+    """Keep startup retirement typed for every affected GoalRun."""
+    error_projection: Any = (
+        dict(error) if isinstance(error, Mapping) else str(error or '')
+    )
+    for row in rows:
+        _goal_event_append(
+            session,
+            run_id=str(row['id']),
+            user_id=int(row['user_id']),
+            tenant_id=str(row['tenant_id'] or ''),
+            event={
+                'type': 'goal_run_transition',
+                'status': 'failed',
+                'reason': 'worker_lost',
+                'outcome': {'error': error_projection},
+            },
+        )
+
+
+def _goal_last_event(
+    session: Session,
+    *,
+    run_id: str,
+    user_id: int,
+    tenant_id: str,
+) -> dict[str, Any]:
+    row = session.fetch_one(
+        "SELECT payload FROM orchestration_run_events "
+        "WHERE run_id = ? AND user_id = ? AND tenant_id = ? "
+        "AND type IN ('goal_run_started', 'goal_run_transition') "
+        "ORDER BY seq DESC LIMIT 1",
+        (run_id, user_id, tenant_id),
+    )
+    if row is None:
+        return {}
+    decoded = _load(row["payload"])
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _goal_started_event(
+    session: Session,
+    *,
+    run_id: str,
+    user_id: int,
+    tenant_id: str,
+) -> dict[str, Any]:
+    row = session.fetch_one(
+        "SELECT payload FROM orchestration_run_events "
+        "WHERE run_id = ? AND user_id = ? AND tenant_id = ? "
+        "AND type = 'goal_run_started' ORDER BY seq LIMIT 1",
+        (run_id, user_id, tenant_id),
+    )
+    if row is None:
+        return {}
+    decoded = _load(row['payload'])
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _goal_run_projection(
+    session: Session,
+    *,
+    run_id: str,
+    user_id: int,
+    tenant_id: str,
+) -> dict[str, Any] | None:
+    row = session.fetch_one(
+        "SELECT id, orch_id, name, definition, input, status, final, error, "
+        "created_by, created_at, updated_at, finished_at "
+        "FROM orchestration_runs WHERE id = ? AND user_id = ? AND tenant_id = ? "
+        "AND created_by = ?",
+        (run_id, user_id, tenant_id, GOAL_RUN_CREATED_BY),
+    )
+    if row is None:
+        return None
+    event = _goal_last_event(
+        session, run_id=run_id, user_id=user_id, tenant_id=tenant_id)
+    started = _goal_started_event(
+        session, run_id=run_id, user_id=user_id, tenant_id=tenant_id)
+    physical_status = str(row["status"] or "pending")
+    status = str(event.get("status") or goal_status_from_storage(physical_status))
+    orch_id = str(row["orch_id"] or "")
+    conversation_id = (
+        orch_id.removeprefix(GOAL_RUN_ORCHESTRATION_PREFIX)
+        if orch_id.startswith(GOAL_RUN_ORCHESTRATION_PREFIX) else ''
+    )
+    return {
+        "format": GOAL_RUN_FORMAT,
+        "runId": row["id"],
+        "conversationId": conversation_id,
+        "objective": row["input"] or "",
+        "status": status,
+        "reason": str(event.get("reason") or ""),
+        "policy": (
+            dict(started.get('policy'))
+            if isinstance(started.get('policy'), Mapping) else {}
+        ),
+        "final": str(row['final'] or ''),
+        "outcome": (
+            dict(event.get('outcome'))
+            if isinstance(event.get('outcome'), Mapping) else {}
+        ),
+        "storageStatus": physical_status,
+        "terminal": status in GOAL_RUN_TERMINAL_STATUSES,
+        "createdAt": int(row["created_at"] or 0),
+        "updatedAt": int(row["updated_at"] or 0),
+        "finishedAt": int(row["finished_at"] or 0),
+    }
+
+
+def _goal_run_get(session: Session, payload: Mapping[str, Any]) -> Any:
+    run_id = _required_text(payload, 'run_id', 200)
+    user_id, tenant_id = _run_owner(payload)
+    return _goal_run_projection(
+        session, run_id=run_id, user_id=user_id, tenant_id=tenant_id)
+
+
+def _goal_run_latest(session: Session, payload: Mapping[str, Any]) -> Any:
+    conversation_id = _required_text(payload, 'conversation_id', 256)
+    user_id, tenant_id = _run_owner(payload)
+    row = session.fetch_one(
+        'SELECT id FROM orchestration_runs '
+        'WHERE user_id = ? AND tenant_id = ? AND orch_id = ? '
+        'AND created_by = ? ORDER BY created_at DESC, id DESC LIMIT 1',
+        (
+            user_id,
+            tenant_id,
+            goal_orchestration_id(conversation_id),
+            GOAL_RUN_CREATED_BY,
+        ),
+    )
+    if row is None:
+        return None
+    return _goal_run_projection(
+        session,
+        run_id=str(row['id']),
+        user_id=user_id,
+        tenant_id=tenant_id,
+    )
+
+
+def _goal_run_start(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Atomically supersede any prior active goal and start exactly one run."""
+    run_id = _required_text(payload, "run_id", 200)
+    conversation_id = _required_text(payload, "conversation_id", 256)
+    objective = _required_text(
+        payload, "objective", MAX_GOAL_OBJECTIVE_CHARS)
+    user_id, tenant_id = _run_owner(payload)
+    definition = payload.get("definition")
+    policy = payload.get("policy")
+    if not isinstance(definition, Mapping) or not isinstance(policy, Mapping):
+        raise StorageError(
+            "database_protocol_error", "Invalid GoalRun definition or policy")
+    if dict(policy) != goal_run_policy():
+        raise StorageError(
+            'database_protocol_error',
+            'GoalRun policy does not match the canonical contract',
+        )
+    orch_id = goal_orchestration_id(conversation_id)
+    existing = session.fetch_one(
+        "SELECT id, orch_id, input, definition, created_by "
+        "FROM orchestration_runs "
+        "WHERE id = ? AND user_id = ? AND tenant_id = ?",
+        (run_id, user_id, tenant_id),
+    )
+    if existing is not None:
+        if (
+            existing["created_by"] != GOAL_RUN_CREATED_BY
+            or existing["orch_id"] != orch_id
+            or existing["input"] != objective
+            or _load(existing['definition']) != dict(definition)
+        ):
+            raise StorageError(
+                "database_conflict", "GoalRun id belongs to another launch")
+        started = _goal_started_event(
+            session, run_id=run_id, user_id=user_id, tenant_id=tenant_id)
+        if started.get('policy') != dict(policy):
+            raise StorageError(
+                'database_conflict', 'GoalRun id has a different policy')
+        return {
+            "created": False,
+            "supersededRunIds": [],
+            "run": _goal_run_projection(
+                session, run_id=run_id, user_id=user_id, tenant_id=tenant_id),
+        }
+
+    active_rows = session.fetch_all(
+        "SELECT id FROM orchestration_runs WHERE user_id = ? AND tenant_id = ? "
+        "AND orch_id = ? AND created_by = ? "
+        f"AND status NOT IN ({_TERMINAL_STATUS_SQL}) "
+        "ORDER BY created_at, id",
+        (user_id, tenant_id, orch_id, GOAL_RUN_CREATED_BY,
+         *TERMINAL_RUN_STATUSES),
+    )
+    now = int(time.time() * 1000)
+    superseded: list[str] = []
+    for active in active_rows:
+        prior_run_id = str(active["id"])
+        cancellation = {
+            "format": GOAL_RUN_FORMAT,
+            "kind": "goal_run_cancelled",
+            "reason": "superseded_by_new_goal",
+            "supersededByRunId": run_id,
+        }
+        changed = session.execute(
+            "UPDATE orchestration_runs SET status = 'aborted', error = ?, "
+            "updated_at = ?, finished_at = CASE WHEN finished_at = 0 THEN ? "
+            "ELSE finished_at END WHERE id = ? AND user_id = ? AND tenant_id = ? "
+            f"AND status NOT IN ({_TERMINAL_STATUS_SQL})",
+            (_json_text(cancellation), now, now, prior_run_id, user_id,
+             tenant_id, *TERMINAL_RUN_STATUSES),
+        )
+        if not changed:
+            continue
+        _goal_event_append(
+            session,
+            run_id=prior_run_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            event={
+                "type": "goal_run_transition",
+                "status": "cancelled",
+                "reason": "superseded_by_new_goal",
+                "supersededByRunId": run_id,
+            },
+        )
+        superseded.append(prior_run_id)
+
+    session.execute(
+        "INSERT INTO orchestration_runs("
+        "id, user_id, tenant_id, orch_id, name, definition, input, status, "
+        "created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+        (
+            run_id,
+            user_id,
+            tenant_id,
+            orch_id,
+            "Goal Mode",
+            _json_text(dict(definition)),
+            objective,
+            GOAL_RUN_CREATED_BY,
+            now,
+            now,
+        ),
+    )
+    _goal_event_append(
+        session,
+        run_id=run_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        event={
+            "type": "goal_run_started",
+            "status": "active",
+            "reason": "started",
+            "conversationId": conversation_id,
+            "objective": objective,
+            "policy": dict(policy),
+        },
+    )
+    return {
+        "created": True,
+        "supersededRunIds": superseded,
+        "run": _goal_run_projection(
+            session, run_id=run_id, user_id=user_id, tenant_id=tenant_id),
+    }
+
+
+def _goal_run_transition(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Atomically append one typed terminal transition and settle its header."""
+    run_id = _required_text(payload, "run_id", 200)
+    user_id, tenant_id = _run_owner(payload)
+    status = payload.get("status")
+    reason = payload.get("reason")
+    if not is_valid_goal_transition(status, reason):
+        raise StorageError(
+            "database_protocol_error",
+            "Invalid GoalRun terminal status/reason pair",
+        )
+    final = payload.get("final", "")
+    outcome = payload.get("outcome", {})
+    if not isinstance(final, str) or not isinstance(outcome, Mapping):
+        raise StorageError(
+            "database_protocol_error", "Invalid GoalRun transition payload")
+    row = session.fetch_one(
+        "SELECT status, final, created_by FROM orchestration_runs "
+        "WHERE id = ? AND user_id = ? AND tenant_id = ?",
+        (run_id, user_id, tenant_id),
+    )
+    if row is None or row["created_by"] != GOAL_RUN_CREATED_BY:
+        return {"transitioned": False, "run": None}
+    current_event = _goal_last_event(
+        session, run_id=run_id, user_id=user_id, tenant_id=tenant_id)
+    current_goal_status = str(
+        current_event.get("status") or goal_status_from_storage(row["status"]))
+    if is_terminal_run_status(str(row["status"] or "")):
+        if (
+            current_goal_status != status
+            or current_event.get('reason') != reason
+            or str(row['final'] or '') != final
+            or current_event.get('outcome', {}) != dict(outcome)
+        ):
+            raise StorageError(
+                "database_conflict", "GoalRun terminal meaning is immutable")
+        return {
+            "transitioned": False,
+            "run": _goal_run_projection(
+                session, run_id=run_id, user_id=user_id, tenant_id=tenant_id),
+        }
+
+    physical_status = storage_status_for_goal_status(str(status))
+    now = int(time.time() * 1000)
+    error_value = ""
+    if status != "completed":
+        error_value = _json_text({
+            "format": GOAL_RUN_FORMAT,
+            "kind": f"goal_run_{status}",
+            "reason": reason,
+        })
+    changed = session.execute(
+        "UPDATE orchestration_runs SET status = ?, final = ?, error = ?, "
+        "updated_at = ?, finished_at = CASE WHEN finished_at = 0 THEN ? "
+        "ELSE finished_at END WHERE id = ? AND user_id = ? AND tenant_id = ? "
+        f"AND status NOT IN ({_TERMINAL_STATUS_SQL})",
+        (physical_status, final, error_value, now, now, run_id, user_id,
+         tenant_id, *TERMINAL_RUN_STATUSES),
+    )
+    if not changed:
+        raise StorageError(
+            "database_conflict", "GoalRun transition lost its active fence")
+    _goal_event_append(
+        session,
+        run_id=run_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        event={
+            "type": "goal_run_transition",
+            "status": status,
+            "reason": reason,
+            "outcome": dict(outcome),
+        },
+    )
+    return {
+        "transitioned": True,
+        "run": _goal_run_projection(
+            session, run_id=run_id, user_id=user_id, tenant_id=tenant_id),
+    }
+
+
 _SWARM_NONTERMINAL = frozenset({"pending", "running", "retrying"})
 
 
@@ -407,6 +831,13 @@ def _swarm_session_save(session: Session, payload: Mapping[str, Any]) -> Any:
         raise StorageError("database_protocol_error", "Invalid swarm config")
     config_json = _json_text(dict(config))
     now = _integer(payload, "now_ms", minimum=0)
+    status = _optional_text(
+        payload, "status", default="running", maximum=64, scope="swarm"
+    )
+    if status not in SWARM_SESSION_WRITABLE_STATUSES:
+        raise StorageError(
+            "database_protocol_error", "Invalid swarm session status"
+        )
     session.lock_key("swarm.session", swarm_key)
     session.execute(
         "INSERT INTO swarm_sessions("
@@ -420,9 +851,7 @@ def _swarm_session_save(session: Session, payload: Mapping[str, Any]) -> Any:
             swarm_key,
             _optional_text(payload, "conv_id", scope="swarm"),
             _optional_text(payload, "task_id", scope="swarm"),
-            _optional_text(
-                payload, "status", default="running", maximum=64, scope="swarm"
-            ),
+            status,
             specs_json,
             config_json,
             now,
@@ -435,9 +864,60 @@ def _swarm_session_save(session: Session, payload: Mapping[str, Any]) -> Any:
 def _swarm_session_terminate(session: Session, payload: Mapping[str, Any]) -> Any:
     swarm_key = _required_text(payload, "swarm_key", 512)
     count = session.execute(
-        "UPDATE swarm_sessions SET status = 'terminated', updated_at = ? "
-        "WHERE swarm_key = ?",
-        (_integer(payload, "now_ms", minimum=0), swarm_key),
+        "UPDATE swarm_sessions SET status = ?, updated_at = ? "
+        "WHERE swarm_key = ? AND status = ?",
+        (
+            SWARM_SESSION_STATUS_TERMINATED,
+            _integer(payload, "now_ms", minimum=0),
+            swarm_key,
+            SWARM_SESSION_STATUS_RUNNING,
+        ),
+    )
+    return {"changed": bool(count)}
+
+
+def _swarm_session_quarantine_ownerless(
+    session: Session, payload: Mapping[str, Any]
+) -> Any:
+    """Quarantine one invalid legacy session without deleting child evidence.
+
+    Ownership is re-checked inside this transaction. If a concurrent repair
+    supplied a valid owner after startup discovery, the mutation becomes a
+    clean no-op instead of quarantining repaired work.
+    """
+    swarm_key = _required_text(payload, "swarm_key", 512)
+    now_ms = _integer(payload, "now_ms", minimum=0)
+    session.lock_key("swarm.session", swarm_key)
+    item = session.fetch_one(
+        "SELECT status, config_json FROM swarm_sessions WHERE swarm_key = ?",
+        (swarm_key,),
+    )
+    if item is None:
+        return {"changed": False}
+    config = _load(item["config_json"])
+    if not isinstance(config, dict):
+        raise StorageError(
+            "database_integrity", "Durable swarm session config is invalid"
+        )
+    try:
+        require_user_id(config.get("user_id"), context="durable swarm owner")
+    except ValueError:
+        pass
+    else:
+        return {"changed": False}
+    current_status = str(item["status"] or "running")
+    if current_status == SWARM_SESSION_STATUS_QUARANTINED_OWNERLESS:
+        return {"changed": False}
+    count = session.execute(
+        "UPDATE swarm_sessions SET status = ?, updated_at = ? "
+        "WHERE swarm_key = ? AND status = ? AND config_json = ?",
+        (
+            SWARM_SESSION_STATUS_QUARANTINED_OWNERLESS,
+            now_ms,
+            swarm_key,
+            current_status,
+            item["config_json"],
+        ),
     )
     return {"changed": bool(count)}
 
@@ -588,14 +1068,40 @@ def _swarm_session_get(session: Session, payload: Mapping[str, Any]) -> Any:
 
 
 def _swarm_resumable_list(session: Session, _payload: Mapping[str, Any]) -> Any:
-    sessions = session.fetch_all(
-        "SELECT swarm_key, conv_id, task_id, status, specs_json, config_json "
-        "FROM swarm_sessions ORDER BY updated_at DESC, swarm_key"
+    normal_statuses = tuple(sorted(SWARM_SESSION_WRITABLE_STATUSES))
+    nonterminal_statuses = tuple(sorted(_SWARM_NONTERMINAL))
+    candidate_parameters = (
+        *normal_statuses,
+        *nonterminal_statuses,
+        "completed",
     )
+    sessions = session.fetch_all(
+        "SELECT s.swarm_key AS swarm_key, s.conv_id AS conv_id, "
+        "s.task_id AS task_id, s.status AS status, "
+        "s.specs_json AS specs_json, s.config_json AS config_json "
+        "FROM swarm_sessions AS s WHERE s.status IN (?, ?) AND EXISTS ("
+        "SELECT 1 FROM swarm_agents AS candidate "
+        "WHERE candidate.swarm_key = s.swarm_key AND ("
+        "candidate.status IN (?, ?, ?) OR "
+        "(candidate.status = ? AND candidate.delivered = 0))) "
+        "ORDER BY s.updated_at DESC, s.swarm_key",
+        candidate_parameters,
+    )
+    if not sessions:
+        return []
     agents = session.fetch_all(
-        "SELECT swarm_key, agent_id, role, objective, status, messages_json, "
-        "result_json, rounds_used, delivered FROM swarm_agents "
-        "ORDER BY swarm_key, agent_id"
+        "SELECT a.swarm_key AS swarm_key, a.agent_id AS agent_id, "
+        "a.role AS role, a.objective AS objective, a.status AS status, "
+        "a.messages_json AS messages_json, a.result_json AS result_json, "
+        "a.rounds_used AS rounds_used, a.delivered AS delivered "
+        "FROM swarm_agents AS a JOIN swarm_sessions AS s "
+        "ON s.swarm_key = a.swarm_key WHERE s.status IN (?, ?) AND EXISTS ("
+        "SELECT 1 FROM swarm_agents AS candidate "
+        "WHERE candidate.swarm_key = s.swarm_key AND ("
+        "candidate.status IN (?, ?, ?) OR "
+        "(candidate.status = ? AND candidate.delivered = 0))) "
+        "ORDER BY a.swarm_key, a.agent_id",
+        candidate_parameters,
     )
     by_session: dict[str, list[Mapping[str, Any]]] = {}
     for agent in agents:

@@ -37,6 +37,7 @@ from lib.tasks_pkg.manager._registry import (
 )
 from lib.tasks_pkg.manager._sync import checkpoint_task_partial
 from lib.tasks_pkg.manager._terminal import (
+    finalize_chat_task_aborted,
     finalize_chat_task_error,
     stamp_chat_task_terminal,
 )
@@ -69,6 +70,7 @@ __all__ = [
     'cleanup_old_tasks',
     'create_task',
     'discard_task',
+    'finalize_chat_task_aborted',
     'finalize_chat_task_error',
     'find_message_by_id',
     'has_abort_tombstone',

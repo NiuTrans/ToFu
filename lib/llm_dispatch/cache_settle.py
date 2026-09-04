@@ -17,8 +17,8 @@ read collapses to the static floor, next round rebounds — concentrated in
 FAST tool-loop / autopilot conversations that fire round N+1 within a second or
 two of round N's stream ending, i.e. before the write settled. This is the
 dominant residual after the client-side byte-freeze fixes (which zeroed the
-prefix-mutation miss class) and is NOT addressed by the big-prefix admission
-gate (that bounds cross-conversation working-set pressure, a different axis).
+prefix-mutation miss class); it is not caused by cross-conversation
+working-set pressure.
 
 What this does
 ==============
@@ -32,9 +32,9 @@ Design invariants (each one matters — see the tests):
     cannot read each other's cache, so cross-conv timing is irrelevant here.
   * Cacheable prefixes only. A miss on a trivial few-k prefix costs almost
     nothing, and tiny turns must never eat added latency. Gated on a LOW
-    threshold (default 30k) DECOUPLED from the 150k admission gate — settle is
-    cheap where admission queuing is not, so it fires far lower (the observed
-    ~120-140k floor-miss class sat BELOW the old inherited 150k bar → 0 hits).
+    threshold (default 30k), far below the retired 150k cross-conversation
+    admission threshold. The observed ~120-140k floor-miss class sat below that
+    old inherited bar, so the earlier shared threshold produced zero hits.
   * Tool-loop-internal latency only. The wait sits between the PRIOR round's
     stream end and THIS round's send — inside the agent's own tool loop, where
     the user is already waiting on tool execution. It never delays the FIRST
@@ -61,12 +61,13 @@ Env knobs
                                    or a bogus timestamp can never stall a
                                    request longer than this. Default 4000.
 ``TOFU_CACHE_SETTLE_THRESHOLD_TOKENS`` — prefix size above which settle applies.
-                                   Default 30000 — DECOUPLED from (and far
-                                   below) the 150k admission gate, because a
-                                   settle wait is cheap/tool-loop-internal while
-                                   admission queuing is not. The observed
-                                   floor-miss class (~120-140k) sailed past the
-                                   old 150k-inherited bar.
+                                   Default 30000. The observed floor-miss class
+                                   (~120-140k) sailed past the retired shared
+                                   150k threshold.
+``TOFU_CACHE_SETTLE_WARM_WRITE_TOKENS`` — uncached warm-tail size that arms a
+                                   generic unmetered auto-cache write (default
+                                   4096). Smaller tails reuse the older cached
+                                   prefix instead of paying a 1.5s hold.
 
 Codex subscription overrides (only when ``cache_profile='codex'``):
 ``TOFU_CACHE_SETTLE_CODEX_VISIBILITY_MS`` — inferred unmetered-write visibility
@@ -77,6 +78,11 @@ Codex subscription overrides (only when ``cache_profile='codex'``):
 ``TOFU_CACHE_SETTLE_CODEX_MAX_MS`` — hard cap on one Codex hold (default 6000).
 ``TOFU_CACHE_SETTLE_CODEX_THRESHOLD_TOKENS`` — Codex cacheability threshold
                                    (default 1024, matching automatic caching).
+``TOFU_CACHE_SETTLE_CODEX_WARM_WRITE_TOKENS`` — uncached warm-tail size that
+                                   arms the visibility hold (default 8192).
+                                   Cold cacheable requests always arm it;
+                                   smaller warm tails rely on the send interval
+                                   and remain bounded by this threshold.
 """
 
 from __future__ import annotations
@@ -85,8 +91,12 @@ import os
 import threading
 import time
 
-from lib.cost import normalize_usage
+from lib.cost import normalize_usage, split_input_tokens
 from lib.log import get_logger
+from lib.token_counter.evidence import (
+    ADMITTED_INPUT_TOKENS_KEY,
+    validated_admitted_input_tokens,
+)
 
 logger = get_logger(__name__)
 
@@ -98,10 +108,12 @@ __all__ = [
     'settle_cold_window_ms',
     'settle_cold_max_wait_ms',
     'settle_threshold_tokens',
+    'estimate_prefix_tokens',
     'settle_before_send',
     'async_settle_before_send',
     'record_stream_end',
     'is_cold_write',
+    'generic_cache_write_pending',
     'codex_cache_write_pending',
     'observe_codex_cache',
     '_reset_settle_for_tests',
@@ -196,25 +208,72 @@ def settle_cold_max_wait_ms() -> float:
 _DEFAULT_SETTLE_THRESHOLD_TOKENS = 30_000
 
 
+def estimate_prefix_tokens(body_or_messages) -> int:
+    """Estimate input size for the cache-settle threshold without raising.
+
+    A root round's validated full-prompt admission count is authoritative for
+    same-model retries. Other callers retain the historical chars/4 estimate,
+    including tool schemas and base64 payloads, because this decision only
+    separates cacheable prefixes from small requests.
+    """
+    try:
+        if isinstance(body_or_messages, dict):
+            admitted_input_tokens = validated_admitted_input_tokens(
+                body_or_messages.get(ADMITTED_INPUT_TOKENS_KEY))
+            if admitted_input_tokens is not None:
+                return admitted_input_tokens
+            messages = body_or_messages.get('messages') or []
+            tools = body_or_messages.get('tools') or []
+        elif isinstance(body_or_messages, list):
+            messages = body_or_messages
+            tools = []
+        else:
+            return 0
+        characters = 0
+        for message in messages:
+            content = (
+                message.get('content') if isinstance(message, dict) else None)
+            if isinstance(content, str):
+                characters += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        text = (
+                            block.get('text') or block.get('thinking') or '')
+                        if isinstance(text, str):
+                            characters += len(text)
+                        source = block.get('source')
+                        if isinstance(source, dict):
+                            data = source.get('data')
+                            if isinstance(data, str):
+                                characters += len(data)
+                    elif isinstance(block, str):
+                        characters += len(block)
+        if tools:
+            try:
+                import json
+
+                characters += len(json.dumps(tools, ensure_ascii=False))
+            except (TypeError, ValueError):
+                pass
+        return characters // 4
+    except Exception as error:
+        logger.debug('[CacheSettle] estimate_prefix_tokens failed: %s', error)
+        return 0
+
+
 def settle_threshold_tokens() -> int:
     """Prefix-size (est. tokens) above which settle applies. Default 30000.
 
-    This is DELIBERATELY DECOUPLED from — and far lower than — the big-prefix
-    ADMISSION threshold (150k). Those two gates trade off differently:
-
-      * Admission QUEUES a request behind others on the same key. Queuing is
-        expensive (it can delay a send by the wait budget), so it only pays off
-        for genuinely huge prefixes → high 150k bar.
-      * Settle only waits the REMAINDER of a short window since THIS conv's own
-        prior stream end, INSIDE the tool loop, with zero user-facing first-
-        token delay. It's cheap, and the payoff is avoiding a full-body cache
-        re-write (1.25x) on a byte-identical prefix. So it should fire on any
-        prefix big enough that a re-write actually costs something.
+    Settle waits only the remainder of a short window since this conversation's
+    own prior stream end, inside the tool loop. The payoff is avoiding a
+    full-body cache rewrite on a byte-identical prefix, so it fires on any
+    prefix large enough that a rewrite costs something.
 
     The observed floor-miss class is ~120-140k-token turns — which sailed
-    straight past the old 150k-inherited bar (the reason the gate logged 0
-    hits). 30k gives generous headroom below that while still excluding trivial
-    few-k turns where a miss is nearly free. Tune with
+    straight past the retired 150k shared bar. 30k gives generous headroom
+    below that while still excluding trivial few-k turns where a miss is nearly
+    free. Tune with
     ``TOFU_CACHE_SETTLE_THRESHOLD_TOKENS``."""
     raw = os.environ.get('TOFU_CACHE_SETTLE_THRESHOLD_TOKENS')
     if raw is not None:
@@ -253,10 +312,15 @@ _codex_timing: dict[str, dict[str, float | bool]] = {}
 
 # Per-conversation cache-read history used only for honest GPT-5.6 diagnostics.
 # It proves append-only wire growth before naming an implicit-breakpoint
-# fallback; it never affects request contents or billing decisions.
+# fallback; it never affects request contents or billing decisions. Retain only
+# the prior message count + process-local digest, never the conversation-sized
+# ``_wire_bytes`` list. The next observation hashes its prior-length prefix to
+# prove append-only growth, keeping each entry O(1) in conversation length.
 _codex_health: dict[str, dict] = {}
 
 _CODEX_AUTO_CACHE_MIN_TOKENS = 1024
+_DEFAULT_GENERIC_WARM_WRITE_TOKENS = 4096
+_DEFAULT_CODEX_WARM_WRITE_TOKENS = 8192
 
 
 def _prune_locked(now: float) -> None:
@@ -305,13 +369,67 @@ def is_cold_write(usage) -> bool:
     return cr < cw
 
 
+def _generic_warm_write_tokens() -> int:
+    """Warm unmetered tail that warrants the generic 1.5s hold (4,096)."""
+    try:
+        value = int(os.environ.get(
+            'TOFU_CACHE_SETTLE_WARM_WRITE_TOKENS',
+            str(_DEFAULT_GENERIC_WARM_WRITE_TOKENS)))
+        if value > 0:
+            return value
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] generic warm-write threshold parse failed: %s',
+                     exc)
+    return _DEFAULT_GENERIC_WARM_WRITE_TOKENS
+
+
+def generic_cache_write_pending(usage) -> bool:
+    """Whether a non-Codex round needs the generic visibility hold.
+
+    Metered Anthropic writes are authoritative: a positive cache-creation
+    count arms the hold and an explicit zero proves that no new entry needs to
+    settle. OpenAI-compatible auto-cache providers such as Kimi do not meter
+    writes, so a cold/unreported round remains conservative while a warm round
+    only arms after its uncached suffix reaches 4,096 tokens. A smaller suffix
+    can reuse the already-visible older prefix; skipping the hold can therefore
+    add at most the bounded suffix to one request instead of unconditionally
+    adding up to 1.5 seconds to every fast tool-loop round.
+
+    Missing or malformed usage remains conservative so a provider telemetry
+    regression cannot silently disable the correctness gate.
+    """
+    if not isinstance(usage, dict):
+        return True
+    normalized = normalize_usage(usage)
+    if max(0, int(normalized['cache_write'])) > 0:
+        return True
+    if 'cache_creation_input_tokens' in usage:
+        raw_creation = usage.get('cache_creation_input_tokens')
+        if isinstance(raw_creation, bool) or raw_creation is None:
+            return True
+        try:
+            metered_creation = int(raw_creation)
+        except (TypeError, ValueError):
+            return True
+        if metered_creation < 0:
+            return True
+        return metered_creation > 0
+    uncached_input, total_input = split_input_tokens(usage)
+    if total_input <= 0 or max(0, int(normalized['cache_read'])) <= 0:
+        return True
+    return max(0, int(uncached_input)) >= _generic_warm_write_tokens()
+
+
 def codex_cache_write_pending(usage) -> bool:
-    """Infer an unreported Codex prompt-cache write from Responses usage.
+    """Whether a Codex round should arm the costly write-visibility hold.
 
     The ChatGPT subscription wire reports ``cache_write_tokens=0`` even when a
-    later request proves that a write happened.  A cacheable request therefore
-    arms the visibility hold when it was completely cold, or when at least one
-    new 1,024-token cache chunk remains beyond the reported read prefix.
+    later request proves that a write happened.  A cold cacheable request always
+    arms the hold.  A warm request arms it only after its uncached suffix reaches
+    the configured material-tail threshold.  Smaller warm suffixes can reuse the
+    older prefix and process a bounded tail faster than paying a five-second
+    visibility hold after every tool-loop round; continued growth eventually
+    reaches the threshold and restores the hold.
     """
     if not isinstance(usage, dict):
         return False
@@ -325,8 +443,24 @@ def codex_cache_write_pending(usage) -> bool:
     if input_tokens < _CODEX_AUTO_CACHE_MIN_TOKENS:
         return False
     cache_read = max(0, int(normalized['cache_read']))
-    return (cache_read == 0
-            or input_tokens - cache_read >= _CODEX_AUTO_CACHE_MIN_TOKENS)
+    if cache_read == 0:
+        return True
+    uncached_tail = max(0, input_tokens - cache_read)
+    return uncached_tail >= _codex_warm_write_tokens()
+
+
+def _codex_warm_write_tokens() -> int:
+    """Warm uncached-tail size that warrants a visibility hold (8,192)."""
+    try:
+        value = int(os.environ.get(
+            'TOFU_CACHE_SETTLE_CODEX_WARM_WRITE_TOKENS',
+            str(_DEFAULT_CODEX_WARM_WRITE_TOKENS)))
+        if value >= _CODEX_AUTO_CACHE_MIN_TOKENS:
+            return value
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] Codex warm-write threshold parse failed: %s',
+                     exc)
+    return _DEFAULT_CODEX_WARM_WRITE_TOKENS
 
 
 def _codex_visibility_window_ms() -> float:
@@ -380,7 +514,7 @@ def _codex_threshold_tokens() -> int:
 
 def record_stream_end(conv_id: str, *, now: float | None = None,
                       cold_write: bool = False, cache_profile: str = '',
-                      pending_write: bool = False) -> None:
+                      pending_write: bool | None = None) -> None:
     """Record that ``conv_id``'s current request stream just ENDED.
 
     Called after a successful (or terminal) stream so the NEXT request on the
@@ -391,12 +525,23 @@ def record_stream_end(conv_id: str, *, now: float | None = None,
     cache_write, ~0 read — a freshly-created entry that needs ~15–20s to become
     visible upstream). When True the NEXT same-conv send waits the LONG cold
     window (settle_cold_window_ms); a warm round keeps the short window. Default
-    False keeps existing callers on the short window (back-compat)."""
+    False keeps existing callers on the short window (back-compat).
+
+    ``pending_write`` lets the successful stream's usage decide whether there
+    is actually a new entry to settle. ``False`` clears the generic clock;
+    ``None`` preserves conservative compatibility for older/direct callers.
+    For the Codex subscription profile, the value is already filtered through
+    :func:`codex_cache_write_pending`: every cold cacheable request and only a
+    material warm tail arm the five-second visibility window. The independent
+    per-key send interval remains active either way."""
     if not conv_id or not settle_enabled():
         return
     ts = now if now is not None else time.time()
     with _lock:
-        _last_end[conv_id] = (ts, bool(cold_write))
+        if pending_write is False:
+            _last_end.pop(conv_id, None)
+        else:
+            _last_end[conv_id] = (ts, bool(cold_write))
         if cache_profile == 'codex':
             state = _codex_timing.setdefault(conv_id, {})
             state['last_end'] = ts
@@ -580,12 +725,54 @@ async def async_settle_before_send(conv_id: str, est_tokens: int, *,
     return wait_s
 
 
-def _wire_is_append_only(previous: dict, usage: dict) -> bool:
-    old = previous.get('wire_bytes')
-    new = usage.get('_wire_bytes')
-    if not isinstance(old, list) or not isinstance(new, list) or not old:
+def _wire_hash_values(wire_bytes) -> tuple | None:
+    """Project rich per-message evidence to one immutable hash sequence."""
+    if not isinstance(wire_bytes, list) or not wire_bytes:
+        return None
+    values = []
+    for entry in wire_bytes:
+        if not isinstance(entry, dict) or 'h' not in entry:
+            return None
+        value = entry.get('h')
+        try:
+            hash(value)
+        except TypeError:
+            return None
+        values.append(value)
+    return tuple(values)
+
+
+def _stored_wire_summary(previous: dict) -> tuple[int, int] | None:
+    """Read the compact summary, migrating one legacy rich entry if needed."""
+    count = previous.get('wire_count')
+    digest = previous.get('wire_digest')
+    if (type(count) is int and count > 0
+            and type(digest) is int):
+        return count, digest
+
+    legacy_values = _wire_hash_values(previous.get('wire_bytes'))
+    if legacy_values is None:
+        return None
+    return len(legacy_values), hash(legacy_values)
+
+
+def _wire_is_append_only(
+    previous: dict,
+    usage: dict,
+    *,
+    current_wire_hashes: tuple | None = None,
+) -> bool:
+    old_summary = _stored_wire_summary(previous)
+    new_hashes = (
+        current_wire_hashes
+        if current_wire_hashes is not None
+        else _wire_hash_values(usage.get('_wire_bytes'))
+    )
+    if old_summary is None or new_hashes is None:
         return False
-    if len(new) < len(old) or list(new[:len(old)]) != list(old):
+    old_count, old_digest = old_summary
+    if (len(new_hashes) < old_count
+            or hash(new_hashes[:old_count]) != old_digest):
         return False
     old_region = previous.get('wire_region')
     new_region = usage.get('_wire_region')
@@ -618,10 +805,15 @@ def observe_codex_cache(conv_id: str, usage) -> dict:
         logger.debug('[CacheSettle] invalid observed input-token count: %s', exc)
         input_tokens = 0
     now = time.time()
+    current_wire_hashes = _wire_hash_values(usage.get('_wire_bytes'))
     with _lock:
         previous = dict(_codex_health.get(conv_id) or {})
         call = int(previous.get('call') or 0) + 1
-        append_only = _wire_is_append_only(previous, usage) if previous else False
+        append_only = (
+            _wire_is_append_only(
+                previous, usage, current_wire_hashes=current_wire_hashes)
+            if previous else False
+        )
         previous_read = int(previous.get('cache_read') or 0)
         max_read = max(int(previous.get('max_read') or 0), cache_read)
 
@@ -656,7 +848,12 @@ def observe_codex_cache(conv_id: str, usage) -> dict:
             'call': call,
             'cache_read': cache_read,
             'max_read': max_read,
-            'wire_bytes': usage.get('_wire_bytes'),
+            'wire_count': (
+                len(current_wire_hashes)
+                if current_wire_hashes is not None else 0),
+            'wire_digest': (
+                hash(current_wire_hashes)
+                if current_wire_hashes is not None else None),
             'wire_region': usage.get('_wire_region'),
             'wire_routing': usage.get('_wire_routing'),
             'updated': now,

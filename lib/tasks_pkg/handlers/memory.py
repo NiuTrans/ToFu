@@ -65,7 +65,9 @@ def _memory_merge(fn_args, project_path, extra_paths=None):
         name=fn_args.get('name', 'Merged Memory'),
         description=fn_args.get('description', ''),
         body=fn_args.get('body', ''),
-        tags=fn_args.get('tags', []),
+        # ``None`` means derive the union from source memories; an explicit
+        # empty list intentionally clears tags on the replacement.
+        tags=fn_args.get('tags'),
         scope=(fn_args.get('scope')
                or ('project' if project_path else 'global')),
         project_path=project_path,

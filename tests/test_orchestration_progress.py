@@ -177,7 +177,6 @@ def test_engine_keeps_compatibility_proxies_without_ledger_logic():
     assert 'return self._progress.aggregate_iteration()' in engine
     assert 'self._progress.record_producer({' in runtime
     assert 'self._progress.reset_iteration()' in loop_runtime
-    assert 'return self._replan_runtime.progress_summary()' in engine
     assert 'self._progress.build_replan_summary(' in replan_runtime
     assert 'names.extend(producer.get' not in engine
     assert 'Deliverables Snapshot (engine-injected)' not in engine

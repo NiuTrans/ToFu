@@ -1,158 +1,261 @@
-"""tests/test_frontend_dialog_arrow_nav.py — keyboard-only navigation of the
-themed confirm dialog (``showConfirm`` in ``static/js/core/dialog.js``).
-
-The confirm dialog (used e.g. by the log-noise "Clean & send" / "Keep original"
-prompt) must be usable without a mouse:
-
-  * Left / Right arrow keys move the selection between Cancel (left) and OK
-    (right).
-  * Enter activates the CURRENTLY-FOCUSED button — so a user who arrowed to
-    Cancel and pressed Enter gets the cancel result, not OK.
-
-This drives the REAL shipped ``showConfirm`` under jsdom. A byte-reverting
-NEUTER (Enter always resolves OK regardless of focus) proves the focus-aware
-Enter branch is load-bearing.
-
-Skips cleanly when node + jsdom aren't installed.
-
-Run::
-
-    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/test_frontend_dialog_arrow_nav.py -v
-"""
+"""Behavior contract for the typed application-dialog controller."""
 
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from tests._runtime_sections import runtime_section_path
+from tests._runtime_sections import native_module_path, runtime_section_names
+
 
 pytestmark = pytest.mark.unit
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-DIALOG_JS = runtime_section_path('core/dialog.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+ROOT = Path(__file__).resolve().parents[1]
+DIALOG_SOURCE = ROOT / "frontend/src/dialog-controller.ts"
+DIALOG_BUNDLE = native_module_path("dialog-controller.js", DIALOG_SOURCE)
+LAZY_DIALOG_BUNDLE = native_module_path(
+    "lazy-dialog-controller.js",
+    ROOT / "frontend/src/lazy-dialog-controller.ts",
+)
+HAS_BROWSER_DEPS = bool(
+    shutil.which("node")
+    and (ROOT / "node_modules/jsdom/package.json").is_file()
+)
 
 
 _HARNESS = r"""
 const fs = require('fs');
-const path = require('path');
-const ROOT = process.argv[1];
-const NEUTER = process.argv[2] === 'neuter';
-const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
-const win = dom.window;
-global.window = win;
-global.document = win.document;
-global.requestAnimationFrame = win.requestAnimationFrame = (fn) => setTimeout(fn, 0);
-global.t = win.t = (k) => k;
+const {JSDOM} = require('jsdom');
+(0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
+(0, eval)(fs.readFileSync(process.argv[2], 'utf8'));
 
-let dialogSrc = fs.readFileSync(process.argv[3], 'utf8');
-
-if (NEUTER) {
-  // NEUTER: Enter ignores which button is focused and always confirms OK.
-  // With this, arrowing to Cancel then pressing Enter must WRONGLY yield OK.
-  dialogSrc = dialogSrc.replace(
-    'if (cancelBtn && document.activeElement === cancelBtn) close(cancelResult);\n        else close(okResult);',
-    'close(okResult);');
+function createScheduler() {
+  let nextHandle = 1;
+  const jobs = new Map();
+  const create = (kind, callback, delayMs = 0) => {
+    const handle = nextHandle++;
+    jobs.set(handle, {kind, callback, delayMs, active: true});
+    return handle;
+  };
+  const clear = (handle) => {
+    const job = jobs.get(handle);
+    if (job) job.active = false;
+  };
+  const fire = (kind) => {
+    for (const job of jobs.values()) {
+      if (!job.active || job.kind !== kind) continue;
+      if (kind !== 'interval') job.active = false;
+      job.callback();
+    }
+  };
+  return {
+    port: {
+      setTimeout: (callback, delayMs) => create('timeout', callback, delayMs),
+      clearTimeout: clear,
+      setInterval: (callback, delayMs) => create('interval', callback, delayMs),
+      clearInterval: clear,
+      requestAnimationFrame: (callback) => create('frame', callback),
+      cancelAnimationFrame: clear,
+    },
+    fire,
+    active: (kind) => [...jobs.values()].filter(
+      (job) => job.active && job.kind === kind,
+    ).length,
+  };
 }
-eval(dialogSrc);   // defines showConfirm etc.
 
-function key(k) {
-  const ev = new win.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
-  win.document.dispatchEvent(ev);
+function createEnvironment() {
+  const dom = new JSDOM(
+    '<!doctype html><body><button id="before">before</button></body>',
+    {url: 'http://tofu.test/'},
+  );
+  const document = dom.window.document;
+  const scheduler = createScheduler();
+  const keyListeners = new Set();
+  const addEventListener = document.addEventListener.bind(document);
+  const removeEventListener = document.removeEventListener.bind(document);
+  document.addEventListener = (type, listener, options) => {
+    if (type === 'keydown') keyListeners.add(listener);
+    return addEventListener(type, listener, options);
+  };
+  document.removeEventListener = (type, listener, options) => {
+    if (type === 'keydown') keyListeners.delete(listener);
+    return removeEventListener(type, listener, options);
+  };
+  const ports = {
+    document,
+    schedule: scheduler.port,
+    copy: {
+      confirm: () => 'Confirm',
+      cancel: () => 'Cancel',
+      ok: () => 'OK',
+    },
+    log: {warn: () => undefined},
+  };
+  const controller = createAppDialogController(ports);
+  const key = (value) => document.dispatchEvent(new dom.window.KeyboardEvent(
+    'keydown', {key: value, bubbles: true, cancelable: true},
+  ));
+  return {dom, document, scheduler, keyListeners, ports, controller, key};
 }
 
 (async () => {
-  const out = {};
+  const observed = {};
 
-  // ── Scenario 1: ArrowLeft focuses Cancel, ArrowRight focuses OK ──
   {
-    const p = showConfirm('proceed?', { okText: 'Clean', cancelText: 'Keep' });
-    await new Promise((r) => setTimeout(r, 10));   // let rAF focus OK
-    const ok = win.document.querySelector('.app-dialog-ok');
-    const cancel = win.document.querySelector('.app-dialog-cancel');
-    out.default_focus_ok = win.document.activeElement === ok;
-    key('ArrowLeft');
-    out.left_focuses_cancel = win.document.activeElement === cancel;
-    key('ArrowRight');
-    out.right_focuses_ok = win.document.activeElement === ok;
-    // Now go back to Cancel and confirm with Enter.
-    key('ArrowLeft');
-    key('Enter');
-    out.enter_on_cancel = await p;   // expect false
+    const env = createEnvironment();
+    const previous = env.document.getElementById('before');
+    previous.focus();
+    const promise = env.controller.showConfirm(
+      '<img src=x onerror=bad>\nsecond line',
+      {okText: 'Clean', cancelText: 'Keep'},
+    );
+    env.scheduler.fire('frame');
+    const ok = env.document.querySelector('.app-dialog-ok');
+    const cancel = env.document.querySelector('.app-dialog-cancel');
+    const message = env.document.querySelector('.app-dialog-message');
+    observed.defaultFocus = env.document.activeElement === ok;
+    observed.safeMessage = message.textContent === '<img src=x onerror=bad>second line'
+      && message.querySelectorAll('img').length === 0
+      && message.querySelectorAll('br').length === 1;
+    env.key('ArrowLeft');
+    observed.leftFocus = env.document.activeElement === cancel;
+    env.key('ArrowRight');
+    observed.rightFocus = env.document.activeElement === ok;
+    env.key('ArrowLeft');
+    env.key('Enter');
+    observed.focusedResult = await promise;
+    observed.focusRestored = env.document.activeElement === previous;
+    observed.listenerReleased = env.keyListeners.size === 0;
+    env.scheduler.fire('timeout');
+    observed.overlayRemoved = env.document.querySelector('.app-dialog-overlay') === null;
   }
-  win.document.querySelectorAll('.app-dialog-overlay').forEach((o) => o.remove());
 
-  // ── Scenario 2: default (no arrow) Enter still confirms OK ──
   {
-    const p = showConfirm('proceed?', { okText: 'Clean', cancelText: 'Keep' });
-    await new Promise((r) => setTimeout(r, 10));
-    key('Enter');
-    out.enter_default = await p;   // expect true
+    const env = createEnvironment();
+    const promise = env.controller.showPrompt('Name', {defaultValue: 'before'});
+    env.scheduler.fire('frame');
+    const input = env.document.querySelector('.app-dialog-input');
+    input.value = 'programmatic update';
+    env.key('Enter');
+    observed.promptValue = await promise;
+    env.scheduler.fire('timeout');
+    const cancelled = env.controller.showPrompt('Cancel me');
+    env.scheduler.fire('frame');
+    env.key('Escape');
+    observed.promptCancel = await cancelled;
   }
-  win.document.querySelectorAll('.app-dialog-overlay').forEach((o) => o.remove());
 
-  console.log(JSON.stringify(out));
-  process.exit(0);
-})().catch((e) => { console.log(JSON.stringify({ error: String(e && e.stack || e) })); process.exit(0); });
+  {
+    const env = createEnvironment();
+    const first = env.controller.showConfirm('first');
+    const second = env.controller.showPrompt('second');
+    observed.replacedResult = await first;
+    observed.singleOverlay = env.document.querySelectorAll(
+      '.app-dialog-overlay',
+    ).length === 1;
+    observed.frameBeforeDestroy = env.scheduler.active('frame');
+    env.controller.destroy();
+    observed.destroyedResult = await second;
+    observed.destroyRemovedOverlay = env.document.querySelector(
+      '.app-dialog-overlay',
+    ) === null;
+    observed.destroyReleasedResources = env.keyListeners.size === 0
+      && env.scheduler.active('frame') === 0
+      && env.scheduler.active('interval') === 0
+      && env.scheduler.active('timeout') === 0;
+    observed.afterDestroy = await env.controller.showAlert('ignored');
+    observed.afterDestroyHasOverlay = !!env.document.querySelector(
+      '.app-dialog-overlay',
+    );
+  }
+
+  {
+    const env = createEnvironment();
+    let loadCalls = 0;
+    let createCalls = 0;
+    let releaseModule;
+    const lazyController = createDialogServices(env.ports, () => {
+      loadCalls += 1;
+      return new Promise((resolve) => { releaseModule = resolve; });
+    });
+    const pendingConfirm = lazyController.showConfirm('pending');
+    const pendingPrompt = lazyController.showPrompt('pending');
+    observed.lazyLoadCalls = loadCalls;
+    lazyController.destroy();
+    releaseModule({
+      createAppDialogController: () => {
+        createCalls += 1;
+        return env.controller;
+      },
+    });
+    observed.lazyConfirmAfterDestroy = await pendingConfirm;
+    observed.lazyPromptAfterDestroy = await pendingPrompt;
+    observed.lazyCreateCalls = createCalls;
+  }
+
+  console.log(JSON.stringify(observed));
+})().catch((error) => {
+  console.log(JSON.stringify({error: String(error?.stack || error)}));
+  process.exitCode = 1;
+});
 """
 
 
-def _run(neuter: bool = False) -> dict:
-    arg = 'neuter' if neuter else 'normal'
-    proc = subprocess.run(
-        ['node', '-e', _HARNESS, ROOT, arg, DIALOG_JS],
-        capture_output=True, text=True, timeout=60, cwd=ROOT)
-    assert proc.returncode == 0, f'node harness failed: {proc.stderr[:2000]}'
-    line = [ln for ln in proc.stdout.strip().splitlines() if ln.startswith('{')][-1]
-    return json.loads(line)
+@pytest.fixture(scope="module")
+def dialog_behavior() -> dict:
+    if not HAS_BROWSER_DEPS:
+        pytest.skip("node + jsdom dev dependencies are required")
+    result = subprocess.run(
+        ["node", "-e", _HARNESS, DIALOG_BUNDLE, LAZY_DIALOG_BUNDLE],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "error" not in payload, payload.get("error")
+    return payload
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_arrow_keys_move_selection():
-    r = _run()
-    assert 'error' not in r, r.get('error')
-    assert r['default_focus_ok'] is True, 'OK button should be focused on open'
-    assert r['left_focuses_cancel'] is True, 'ArrowLeft must focus the Cancel button'
-    assert r['right_focuses_ok'] is True, 'ArrowRight must focus the OK button'
+def test_confirm_keyboard_navigation_and_safe_rendering(dialog_behavior: dict):
+    assert dialog_behavior["defaultFocus"] is True
+    assert dialog_behavior["leftFocus"] is True
+    assert dialog_behavior["rightFocus"] is True
+    assert dialog_behavior["focusedResult"] is False
+    assert dialog_behavior["safeMessage"] is True
+    assert dialog_behavior["focusRestored"] is True
+    assert dialog_behavior["listenerReleased"] is True
+    assert dialog_behavior["overlayRemoved"] is True
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_enter_activates_focused_button():
-    r = _run()
-    assert 'error' not in r, r.get('error')
-    assert r['enter_on_cancel'] is False, \
-        'Enter after arrowing to Cancel must resolve the cancel result (false)'
-    assert r['enter_default'] is True, \
-        'Enter with default OK focus must resolve the ok result (true)'
+def test_prompt_reads_the_input_at_settlement(dialog_behavior: dict):
+    assert dialog_behavior["promptValue"] == "programmatic update"
+    assert dialog_behavior["promptCancel"] is None
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NEUTER_enter_ignores_focus():
-    """Byte-reverting NEUTER: make Enter always confirm OK regardless of focus.
-    Arrowing to Cancel then pressing Enter now WRONGLY yields OK, proving the
-    focus-aware Enter branch is load-bearing."""
-    r = _run(neuter=True)
-    assert 'error' not in r, r.get('error')
-    assert r['enter_on_cancel'] is True, (
-        'NEUTER: without focus-aware Enter, confirming on Cancel wrongly '
-        'resolves OK (true)')
+def test_replacement_and_destroy_are_bounded(dialog_behavior: dict):
+    assert dialog_behavior["replacedResult"] is False
+    assert dialog_behavior["singleOverlay"] is True
+    assert dialog_behavior["frameBeforeDestroy"] == 1
+    assert dialog_behavior["destroyedResult"] is None
+    assert dialog_behavior["destroyRemovedOverlay"] is True
+    assert dialog_behavior["destroyReleasedResources"] is True
+    assert dialog_behavior["afterDestroy"] is False
+    assert dialog_behavior["afterDestroyHasOverlay"] is False
 
 
-if __name__ == '__main__':
-    import sys
-    sys.exit(pytest.main([__file__, '-v']))
+def test_lazy_facade_coalesces_and_fails_safe_on_destroy(dialog_behavior: dict):
+    assert dialog_behavior["lazyLoadCalls"] == 1
+    assert dialog_behavior["lazyConfirmAfterDestroy"] is False
+    assert dialog_behavior["lazyPromptAfterDestroy"] is None
+    assert dialog_behavior["lazyCreateCalls"] == 0
+
+
+def test_legacy_dialog_section_is_retired():
+    assert "core/dialog.js" not in runtime_section_names()

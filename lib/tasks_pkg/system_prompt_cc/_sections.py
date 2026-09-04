@@ -17,6 +17,22 @@ from lib.tasks_pkg.compaction._constants import MICRO_HOT_TAIL
 logger = get_logger(__name__)
 
 
+_TOOL_DISCOVERY_GUIDANCE = (
+    "Hidden built-in tools may include image/video, PPTX/slides, reports, "
+    "browser/desktop, and real-browser rendering. If no visible tool fits, use "
+    "Tool Search for the user's outcome; results define availability."
+)
+
+# Full profile only: the lean profile has a hard token budget
+# (tests/test_prompt_profile_adoption.py), so the explicit pointer to the
+# server-side page renderer ships only where context cost is not capped.
+_TOOL_DISCOVERY_GUIDANCE_FULL = (
+    _TOOL_DISCOVERY_GUIDANCE
+    + " To render a page in a real browser on the server, use "
+      "browser_preview_page."
+)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Helper — render heading + bullet list (ports prependBullets)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -74,6 +90,7 @@ def section_intro(is_code_context: bool = True) -> str:
 def section_gpt56_lean(is_code_context: bool = True,
                        tool_names: set[str] | None = None,
                        web_tools: bool = False,
+                       tool_search_available: bool = False,
                        omit_sections: frozenset[str] = frozenset()) -> str:
     """Compact GPT-5.6 operating contract with each instruction stated once."""
     identity = (
@@ -123,6 +140,8 @@ def section_gpt56_lean(is_code_context: bool = True,
             '- Tool results may be cleared as context grows; retain compact '
             'findings and the evidence needed for the final answer.',
         ])
+        if tool_search_available:
+            lines.append(f'- {_TOOL_DISCOVERY_GUIDANCE}')
     if 'output' not in omitted:
         lines.extend([
             '', '# Output', '',
@@ -413,7 +432,8 @@ def section_actions(is_code_context: bool = True) -> str:
 # Claude Code lists specific tools; we substitute Tofu's tool names.  The
 # "CRITICAL" framing is preserved — it's the dominant behavioral lever.
 
-def section_using_tools(tool_names: set[str] | None = None) -> str:
+def section_using_tools(tool_names: set[str] | None = None, *,
+                        tool_search_available: bool = False) -> str:
     """Build the ``# Using your tools`` section.
 
     Args:
@@ -424,6 +444,8 @@ def section_using_tools(tool_names: set[str] | None = None) -> str:
             ``grep_search`` exist when project mode is off, and tries to call
             a tool that isn't in the schema. When ``None`` (back-compat for
             callers that don't pass it), all sub-bullets ship.
+        tool_search_available: Whether this turn has a live discovery path for
+            hidden schemas. False keeps capability examples out of the prompt.
     """
     # (bullet text, tool names that must ALL be present for it to ship).
     # An empty requirement means "always ship". When tool_names is None we
@@ -483,6 +505,9 @@ def section_using_tools(tool_names: set[str] | None = None) -> str:
                 "is CRITICAL to assisting the user:")
         items.append(lead_in)
         items.append(provided_tool_subitems)
+
+    if tool_search_available:
+        items.append(_TOOL_DISCOVERY_GUIDANCE_FULL)
 
     items.extend([
         "You can call multiple tools in a single response. If you intend "

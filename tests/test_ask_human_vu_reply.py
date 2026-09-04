@@ -74,11 +74,15 @@ def test_tool_content_is_clean_vu_text_not_dict_repr(vu_env):
     assert "'text'" not in tool_content
 
 
-def test_resolve_and_sse_event_carry_the_same_clean_text(vu_env):
+def test_synthetic_sse_event_carries_clean_text_without_live_waiter(vu_env):
     captured, _, _ = vu_env
-    assert captured['resolved'] == [VU_CLEAN]
+    # Autopilot never registered a human-gate waiter. The synthetic response
+    # event is the complete UI contract; trying to resolve the registry would
+    # target a missing entry and log a false warning.
+    assert captured['resolved'] == []
     hg_events = [e for e in captured['events']
                  if e.get('type') == 'human_guidance_response']
+    
     assert len(hg_events) == 1
     assert hg_events[0]['response'] == VU_CLEAN
     assert hg_events[0]['isVirtualUser'] is True
@@ -122,3 +126,42 @@ def test_empty_vu_text_falls_back_to_no_further_input(monkeypatch):
         {'question': 'q', 'response_type': 'free_text'}, 1, {},
         {}, '', False, None)
     assert tool_content == 'Human response: (no further input)'
+
+
+def test_abort_leaves_round_awaiting_and_unfinalized(monkeypatch):
+    """Abort must NOT finalize the round into a completed receipt.
+
+    Regression pin for the card-collapse bug: the user pressed Stop while a
+    choice question was open; the handler used to finalize the round with a
+    placeholder result, the settlement then stopped offering
+    answer_guidance, and the interactive card degraded into a dead static
+    receipt. The fix leaves the round awaiting_human so the settlement's
+    missing_tool_result handling offers the late-answer resume.
+    """
+    import lib.tasks_pkg.handlers.misc._human as human_handlers
+    finalized = []
+    monkeypatch.setattr('lib.tasks_pkg.autopilot.is_autopilot_enabled',
+                        lambda t: False)
+    monkeypatch.setattr(
+        'lib.tasks_pkg.human_guidance.request_human_guidance',
+        lambda guidance_id, task=None: None)
+    monkeypatch.setattr(human_handlers, 'append_event', lambda *a, **k: None)
+    monkeypatch.setattr(human_handlers, '_build_simple_meta',
+                        lambda *a, **k: {'k': k})
+    monkeypatch.setattr(human_handlers, '_finalize_tool_round',
+                        lambda *a, **k: finalized.append(k))
+    round_entry = {}
+    _, tool_content, _ = human_handlers._handle_ask_human(
+        {'id': 'task-ask-0004', 'messages': [], '_attended': True,
+         'aborted': True},
+        {}, 'ask_human', 'tc1',
+        {'question': 'q', 'response_type': 'choice',
+         'options': [{'label': 'A'}, {'label': 'B'}]},
+        1, round_entry, {}, '', False, None)
+    assert tool_content == ('[Task was aborted while waiting for human '
+                            'guidance]')
+    assert finalized == []
+    assert round_entry['status'] == 'awaiting_human'
+    assert 'results' not in round_entry
+    assert round_entry['guidanceType'] == 'choice'
+    assert round_entry['guidanceOptions'] == [{'label': 'A'}, {'label': 'B'}]

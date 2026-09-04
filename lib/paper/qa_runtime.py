@@ -31,15 +31,6 @@ _qa_index_lock = threading.Lock()
 _QA_TASK_TTL = 1800
 
 
-def _qa_latest_for(phash: str, *, user_id: int) -> dict | None:
-    """Return the most recent Q&A task for a paper hash, or None."""
-    with _qa_index_lock:
-        tid = _qa_latest_index.get((user_id, phash))
-    if not tid:
-        return None
-    return _qa_runtime.get_owned(tid, user_id=user_id)
-
-
 def _qa_register_latest(phash: str, task_id: str, *, user_id: int) -> None:
     with _qa_index_lock:
         _qa_latest_index[(user_id, phash)] = task_id

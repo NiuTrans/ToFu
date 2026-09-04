@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import subprocess
 import sys
 import threading
@@ -27,14 +28,20 @@ def _run_isolated(source: str) -> subprocess.CompletedProcess:
 def test_server_registration_and_bootstrap_schema_do_not_load_search():
     proc = _run_isolated(
         'import sys; import server; '
-        'from lib.tools.search import build_search_tool; '
+        'from lib.tools.search import ('
+        'build_browser_download_url_to_server_tool, build_search_tool); '
         'tool = build_search_tool(); '
+        'download = build_browser_download_url_to_server_tool(); '
         'props = tool["function"]["parameters"]["properties"]; '
         'print("TOFU", "tofu_search" in sys.modules, '
         '"CORE", "lib.tasks_pkg.handlers.search._core" in sys.modules, '
-        '"ENUM", props["vertical"]["enum"])')
+        '"ENUM", props["vertical"]["enum"], '
+        '"DOWNLOAD", download["function"]["name"])')
     assert proc.returncode == 0, proc.stderr[-800:]
-    assert "TOFU False CORE False ENUM ['auto', 'off']" in proc.stdout
+    assert (
+        "TOFU False CORE False ENUM ['auto', 'off'] "
+        'DOWNLOAD browser_download_url_to_server'
+    ) in proc.stdout
 
 
 @pytest.mark.unit
@@ -71,6 +78,45 @@ def test_direct_optional_import_applies_classic_pdf_policy_without_threads():
         'is None, "THREADS", threading.active_count())')
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert 'LAYOUT-BLOCKED True THREADS 1' in proc.stdout
+
+
+@pytest.mark.unit
+def test_direct_bridge_policy_failure_is_fail_soft_and_observable(
+    monkeypatch,
+    caplog,
+):
+    import runtime_guards
+    import lib.search_bridge as bridge
+
+    def fail_policy():
+        raise RuntimeError('synthetic policy failure')
+
+    monkeypatch.setattr(
+        runtime_guards, 'install_pymupdf_classic_policy', fail_policy)
+    with caplog.at_level(logging.WARNING, logger='lib.search_bridge'):
+        assert bridge._install_search_import_policy() is False
+
+    assert 'classic PyMuPDF policy installation failed: RuntimeError' in caplog.text
+
+
+@pytest.mark.unit
+def test_linkage_forensics_failure_preserves_bounded_diagnostic(
+    monkeypatch,
+    caplog,
+):
+    import lib.search_runtime as runtime
+    import lib.server_linkage_forensics as forensics
+
+    def fail_forensics():
+        raise OSError('synthetic maps failure')
+
+    monkeypatch.setattr(forensics, 'capture_linkage_forensics', fail_forensics)
+    with caplog.at_level(logging.DEBUG, logger='lib.search_runtime'):
+        diagnostic = runtime._linkage_diagnostic(
+            ImportError('GLIBCXX symbol is unavailable'))
+
+    assert diagnostic == ' | LINKAGE: unavailable'
+    assert 'Native linkage forensics unavailable: OSError' in caplog.text
 
 
 @pytest.mark.unit

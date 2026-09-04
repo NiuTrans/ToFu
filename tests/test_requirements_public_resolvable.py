@@ -63,7 +63,10 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.unit
+# Every check here makes a real, unmocked HTTPS request to the PUBLIC PyPI index
+# (the reachability skip guards offline only). Tier it `slow` so it leaves the
+# default unit lane; checking the real index is the behavior under test.
+pytestmark = pytest.mark.slow
 
 _ROOT = Path(__file__).resolve().parent.parent
 _REQUIREMENTS = _ROOT / 'requirements.txt'

@@ -15,14 +15,20 @@ from __future__ import annotations
 from quart import Blueprint
 
 from lib.agent_core.admission import (
-    await_terminal, controller, on_terminal, register_waiter,
+    await_terminal, controller, register_waiter,
     unregister_waiter,
 )
+from lib.agent_core.execution_session import (
+    ExecutionPhase,
+    bind_admission_lease,
+    bind_model_route,
+    execution_session_for_task,
+)
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_not_found,
+    api_bad_request, api_error, api_internal_error,
     sse_response,
 )
-from lib.byo_resolve import dispose_ephemeral_slot, resolve_model_and_provider
+from lib.model_routing import ModelRoutingError
 from lib.compat.anthropic import (
     build_anthropic_response, stream_anthropic_chunks,
     translate_anthropic_request,
@@ -41,6 +47,11 @@ from routes.api_v1.auth import (
     guard_model_relay_or_dispose,
     request_user_id,
     require_scope,
+)
+from routes.model_routing_adapter import (
+    dispose_routed_slot_group,
+    mint_compatible_request_route,
+    routing_error_fields,
 )
 
 logger = get_logger(__name__)
@@ -76,31 +87,25 @@ async def messages():
     if auth is None or auth.owner_user_id is None:
         return api_bad_request('caller has no repository owner identity')
 
-    # ── BYO model resolution ──
-    # Resolve ``model="name@prov_xxx"`` (+ optional inline ``provider``
-    # block) against the caller's registered BYO providers, mirroring
-    # /api/v1/chat so a BYO model advertised by /v1/models is actually
-    # invokable through the Anthropic-compat adapter too.
-    _byo_handle = None
+    # String model IDs remain compatible; Tofu creator/provider preferences
+    # are explicit extensions and ambiguity is never guessed.
+    _route_group = None
     _model_in = cfg.get('model') or ''
-    if _model_in:
-        _model_id, _byo_handle, _byo_prov, _err, _status = (
-            resolve_model_and_provider(
-                _model_in,
-                body.get('provider'),
-                auth.owner_user_id,
-                tenant_id=auth.tenant_id,
-            ))
-        if _err:
-            return (api_not_found(_err) if _status == 404
-                    else api_bad_request(_err, field='model'))
-        cfg['model'] = _model_id  # strip the @suffix
-
-    # BYO-only relay backstop (model_relay_enabled=false): refuse
-    # operator-pool requests; BYO + admin pass. See routes/api_v1/auth.py.
-    _relay_denied = guard_model_relay_or_dispose(_byo_handle)
-    if _relay_denied is not None:
-        return _relay_denied
+    try:
+        _model_id, _selection, _route_group = mint_compatible_request_route(
+            body,
+            model_id=_model_in,
+            owner_user_id=auth.owner_user_id,
+            tenant_id=auth.tenant_id,
+            owner_tag=f'compat-anthropic:{auth.owner_user_id}',
+            protocol='',
+        )
+        cfg['model'] = _model_id
+    except ModelRoutingError as exc:
+        return api_bad_request(str(exc), **routing_error_fields(exc))
+    relay_denial = guard_model_relay_or_dispose(_route_group)
+    if relay_denial is not None:
+        return relay_denial
 
     audit_log('compat_anthropic_messages',
               key_id=(auth.key_id if auth else ''),
@@ -118,42 +123,40 @@ async def messages():
     if auth and auth.key_id:
         task['_api_key_id'] = auth.key_id
     # Hard provider isolation — see lib/llm_dispatch/provider_pin.py.
-    if _byo_handle is not None:
-        task['_pinned_provider_id'] = _byo_handle.slot.provider_id
+    task['_pinned_provider_id'] = _route_group.pin_id
+    task['_requested_model_ref'] = (
+        _selection.model.public_dict()
+        if _selection.model is not None
+        else _selection.provider_offering.public_dict()
+    )
+    execution_session = execution_session_for_task(task)
+    bind_model_route(
+        execution_session,
+        lambda: dispose_routed_slot_group(_route_group),
+    )
 
     # ── Admission control: refuse with 503 when at capacity ───────
-    if not controller.try_acquire():
-        if _byo_handle is not None:
-            dispose_ephemeral_slot(_byo_handle)
+    admission_lease = controller.acquire()
+    if admission_lease is None:
+        execution_session.settle(
+            ExecutionPhase.FAILED, cause='task_admission_refused')
         logger.warning('[compat:anthropic] admission refused '
                        '(in_flight=%d/%d) key=%s model=%s',
                        controller.in_flight, controller.capacity,
                        auth.key_id, cfg.get('model', '?'))
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
-
-    _released = {'done': False}
-
-    def _on_done(_tid, _handle=_byo_handle):
-        if _released['done']:
-            return
-        _released['done'] = True
-        controller.release()
-        if _handle is not None:
-            try:
-                dispose_ephemeral_slot(_handle)
-            except Exception as ex:
-                logger.error('[compat:anthropic] ephemeral dispose failed '
-                             'handle=%s task=%s: %s', _handle.handle_id,
-                             _tid[:8], ex, exc_info=True)
-
-    on_terminal(task['id'], _on_done)
+    bind_admission_lease(
+        execution_session,
+        lambda: controller.release(admission_lease),
+    )
     register_waiter(task['id'])
 
     try:
         spawn_task(task)
     except Exception as e:
-        _on_done(task['id'])
+        execution_session.settle(
+            ExecutionPhase.FAILED, cause='task_spawn_failed')
         unregister_waiter(task['id'])
         logger.exception('[compat:anthropic] spawn_task failed task=%s',
                          task['id'][:8])

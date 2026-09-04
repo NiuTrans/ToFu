@@ -130,7 +130,7 @@ function appendAddRow(box: HTMLElement, scope: LifecycleScope): void {
   input.type = 'text';
   input.id = 'privHostInput';
   input.placeholder = translate(
-    'settings.privHostPlaceholder', 'aigc.sankuai.com');
+    'settings.privHostPlaceholder', 'llm-gateway.example.com');
 
   const add = makeElement(
     'button', 'priv-host-btn primary',

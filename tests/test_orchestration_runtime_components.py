@@ -75,9 +75,10 @@ def test_cancelled_human_input_closes_live_and_durable_gate_lifecycle():
         emit=sink,
         abort_check=lambda: True,
         ports=HumanGateRequestPorts(
-            request_guidance=lambda _request_id, _task: None,
+            request_guidance=lambda _request_id, _task, _owner: None,
         ),
         request_scope='durable-cancel',
+        owner_user_id=1,
     )
 
     result = runtime.execute({

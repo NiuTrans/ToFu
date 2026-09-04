@@ -11,6 +11,7 @@ from lib.storage_sidecar.task_event_codec import (
     TASK_EVENT_COMPRESSION_MIN_BYTES,
     decode_task_event_payload,
     encode_task_event_payload,
+    task_event_decoded_size,
 )
 
 
@@ -21,6 +22,7 @@ def test_small_task_event_keeps_legacy_json_bytes():
     raw = orjson.dumps({"type": "delta", "content": "small"})
 
     assert encode_task_event_payload(raw) is raw
+    assert task_event_decoded_size(raw) == len(raw)
     assert decode_task_event_payload(raw) == raw
 
 
@@ -35,8 +37,24 @@ def test_large_task_event_compresses_and_round_trips_losslessly():
     assert len(raw) >= TASK_EVENT_COMPRESSION_MIN_BYTES
     assert encoded.startswith(COMPRESSED_TASK_EVENT_MAGIC)
     assert len(encoded) < len(raw) // 10
+    assert task_event_decoded_size(encoded) == len(raw)
     assert decode_task_event_payload(encoded) == raw
     assert decode_task_event_payload(memoryview(encoded)) == raw
+
+
+def test_compressed_size_preflight_never_decompresses(monkeypatch):
+    import lib.storage_sidecar.task_event_codec as codec
+
+    raw = orjson.dumps({"content": "compressible " * 10_000})
+    encoded = encode_task_event_payload(raw)
+    assert encoded.startswith(COMPRESSED_TASK_EVENT_MAGIC)
+    monkeypatch.setattr(
+        codec.zlib,
+        "decompressobj",
+        lambda: pytest.fail("size preflight must not decompress the payload"),
+    )
+
+    assert task_event_decoded_size(encoded) == len(raw)
 
 
 def test_unhelpful_compression_keeps_legacy_bytes(monkeypatch):

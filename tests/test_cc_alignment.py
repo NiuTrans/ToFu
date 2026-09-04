@@ -76,6 +76,19 @@ class TestSystemPromptSections:
         assert 'independent' in section.lower()
         assert 'parallel' in section.lower()
 
+    def test_hidden_capability_discovery_guidance_is_explicitly_gated(self):
+        from lib.tasks_pkg.system_prompt_cc import section_using_tools
+
+        ordinary = section_using_tools({'read_files'})
+        discoverable = section_using_tools(
+            {'read_files'}, tool_search_available=True)
+        assert 'Hidden built-in tools may include' not in ordinary
+        assert 'Hidden built-in tools may include' in discoverable
+        assert "user's outcome" in discoverable
+        assert 'results define availability' in discoverable
+        assert 'browser_preview_page' not in ordinary
+        assert 'browser_preview_page' in discoverable
+
     def test_output_efficiency_guidance_exists(self):
         from lib.tasks_pkg.system_prompt_cc import section_output_efficiency
         section = section_output_efficiency()

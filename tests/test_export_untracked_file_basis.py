@@ -32,7 +32,6 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {
 }
 
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -93,7 +92,9 @@ def test_excludes_become_tar_args_and_reach_opensource_mode(fake_repo, monkeypat
     assert '--exclude=./tests/tmpab12cd34.js' in args
     assert '--exclude=./tests/test_wip_uncommitted.py' in args
     # The opensource bundle wires them in (patch ROOT at the call site).
-    monkeypatch.setattr(exp, 'ROOT', repo)
+    import export_pkg._pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, 'ROOT', repo)
     excludes, _preserved = exp._build_tar_excludes_for_mode('opensource', repo / 'dest')
     assert '--exclude=./tests/tmpab12cd34.js' in excludes
 
@@ -101,7 +102,9 @@ def test_excludes_become_tar_args_and_reach_opensource_mode(fake_repo, monkeypat
 def test_personal_mode_keeps_everything(fake_repo, monkeypatch):
     """Personal mode is a full self-use backup — the new rule must not bite it."""
     exp, repo = fake_repo
-    monkeypatch.setattr(exp, 'ROOT', repo)
+    import export_pkg._pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, 'ROOT', repo)
     excludes, _p = exp._build_tar_excludes_for_mode('personal', repo / 'dest')
     assert '--exclude=./tests/tmpab12cd34.js' not in excludes
 
@@ -123,8 +126,10 @@ def test_dry_run_preview_consults_the_same_set():
     says "will copy" while the real copy drops the file is how the WIP test
     got published unnoticed. Source-anchored: the walk's exclusion block must
     reference the helper (delete the wiring and this goes red)."""
-    src = Path(__file__).resolve().parent.parent / 'export.py'
-    text = src.read_text(encoding='utf-8')
+    import inspect
+
+    import export as exp
+    text = inspect.getsource(exp.export_project)
     walk_idx = text.find('os.walk(ROOT)')
     assert walk_idx > 0, 'dry-run walk not found — structure changed, re-anchor'
     window = text[walk_idx - 3000:walk_idx + 3000]
@@ -156,7 +161,9 @@ def test_data_exclusion_is_root_anchored_in_should_exclude():
 def test_tar_excludes_anchor_root_data_without_the_nested_form(
         fake_repo, monkeypatch):
     exp, repo = fake_repo
-    monkeypatch.setattr(exp, 'ROOT', repo)
+    import export_pkg._pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, 'ROOT', repo)
     for mode in ('internal', 'opensource'):
         excludes, _p = exp._build_tar_excludes_for_mode(mode, repo / 'dest')
         assert '--exclude=./data' in excludes, (

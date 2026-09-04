@@ -154,14 +154,15 @@ def correction_enabled() -> bool:
             in ('1', 'true', 'yes', 'on'))
 
 
-# ── Slot selection (reuses the dispatch slot pool — NO chat picker) ─────
+# ── Provider-only slot selection (after an owner route group is pinned) ─
 
 def _transcription_slots() -> list:
     """Return the configured transcription-capable slots (best score first).
 
-    Scans ``dispatcher.slots`` for EITHER transcription capability
+    Scans the hard-pinned request group for EITHER transcription capability
     (``transcription`` = multipart endpoint, or ``audio_chat`` = inline chat
-    audio), exactly as ``model_supports_vision`` scans for ``vision``.
+    audio). Owner-facing entry points mint that group from model-routing v2;
+    owner-less calls are retained only as a focused library compatibility seam.
     OAuth-subscription slots are excluded: the Claude/Codex subscription
     endpoints expose neither audio path. Sorted by the slot's live ``score()``
     (lower = better) so a healthy, fast key is preferred and a cooled-down one
@@ -174,8 +175,11 @@ def _transcription_slots() -> list:
     except Exception as e:
         logger.warning('[STT] dispatcher unavailable: %s', e)
         return []
+    from lib.llm_dispatch.provider_pin import get_pinned_provider
+    pinned_provider = get_pinned_provider()
     slots = [s for s in dispatcher.slots
-             if (s.capabilities & TRANSCRIPTION_CAPS) and not s.oauth]
+             if (s.capabilities & TRANSCRIPTION_CAPS) and not s.oauth
+             and (not pinned_provider or s.provider_id == pinned_provider)]
     slots.sort(key=lambda s: s.score())
     return slots
 
@@ -193,33 +197,84 @@ def _slot_audio_mode(slot) -> str:
     return 'chat'
 
 
-def transcription_available() -> bool:
+def _owner_transcription_models(owner_user_id: int,
+                                tenant_id: str | None = None) -> list[dict]:
+    """Project runnable speech routes inside one owner boundary."""
+    from lib.model_routing import (
+        ModelRoutingRepository,
+        OPENAI_CHAT_COMPATIBLE_PROTOCOLS,
+        OPENAI_COMPATIBLE_PROTOCOLS,
+        OwnerBoundary,
+        list_capability_route_groups,
+    )
+
+    repository = ModelRoutingRepository()
+    boundary = OwnerBoundary.create(owner_user_id, tenant_id)
+    seen: set[tuple[str, str]] = set()
+    models: list[dict] = []
+    route_groups = list_capability_route_groups(
+        repository,
+        boundary,
+        {
+            TRANSCRIPTION_CAP: OPENAI_COMPATIBLE_PROTOCOLS,
+            AUDIO_CHAT_CAP: OPENAI_CHAT_COMPATIBLE_PROTOCOLS,
+        },
+    )
+    for capability, mode in (
+        (TRANSCRIPTION_CAP, 'endpoint'),
+        (AUDIO_CHAT_CAP, 'chat'),
+    ):
+        for route in route_groups[capability]:
+            key = (route.provider_id, route.offering_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            models.append({
+                'model': route.model_id,
+                'provider_id': route.provider_id,
+                'mode': mode,
+            })
+    return models
+
+
+def transcription_available(*, owner_user_id: int | None = None,
+                            tenant_id: str | None = None) -> bool:
     """True when at least one transcription-capable slot is configured.
 
     The route uses this to disable the feature gracefully (mic button hidden)
     instead of assuming any particular vendor exists.
     """
+    if owner_user_id is not None:
+        return bool(_owner_transcription_models(owner_user_id, tenant_id))
+    # Retain a storage-free compatibility path for direct library callers.
+    # Product HTTP/background paths always pass an explicit owner.
     # Resolve through the package so test monkeypatches on
     # ``lib.transcription._transcription_slots`` take effect (facade parity).
     from lib import transcription as _facade
     return bool(_facade._transcription_slots())
 
 
-def list_transcription_models() -> list[dict]:
+def list_transcription_models(*, owner_user_id: int | None = None,
+                              tenant_id: str | None = None) -> list[dict]:
     """Return ``[{model, provider_id}]`` for configured transcription slots.
 
     Deduplicated by ``(model, provider_id)`` in preference order. Used by the
     capabilities surface so the frontend can decide whether to show the mic.
     """
+    if owner_user_id is not None:
+        return _owner_transcription_models(owner_user_id, tenant_id)
     # Resolve through the package facade so test monkeypatches take effect.
     from lib import transcription as _facade
     seen: set[tuple[str, str]] = set()
     out: list[dict] = []
     for s in _facade._transcription_slots():
-        key = (s.model, s.provider_id or 'default')
+        model = getattr(s, 'logical_model', '') or s.model
+        provider_id = (getattr(s, 'routing_provider_id', '')
+                       or s.provider_id or 'default')
+        key = (model, provider_id)
         if key in seen:
             continue
         seen.add(key)
-        out.append({'model': s.model, 'provider_id': s.provider_id or 'default',
+        out.append({'model': model, 'provider_id': provider_id,
                     'mode': _facade._slot_audio_mode(s)})
     return out

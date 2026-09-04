@@ -1,4 +1,9 @@
-"""Configured-provider projection for model profiles."""
+"""Owner-scoped model-routing projection for model profiles.
+
+Runtime callers enumerate enabled v2 Offerings through the repository. The
+``providers=`` argument remains only as a pure compatibility/test fixture; no
+ambient server-config provider list is consulted.
+"""
 
 from __future__ import annotations
 
@@ -8,16 +13,73 @@ from lib.model_profiles._profile import build_model_profile
 logger = get_logger(__name__)
 
 
-def _configured_providers(providers: list | None) -> list:
-    if providers is not None:
-        return providers
+def _routing_model_entries(
+    *, owner_user_id: int, tenant_id: str | None, repository=None,
+) -> list[tuple[str, dict]]:
+    """Project enabled, passed v2 routes into profile-shaped model entries."""
+
     try:
-        from lib import _load_server_config
-        cfg = _load_server_config()
-        return list((cfg or {}).get('providers') or [])
+        from lib.model_routing import ModelRoutingRepository, OwnerBoundary
+
+        active_repository = repository or ModelRoutingRepository()
+        authority = active_repository.get(
+            OwnerBoundary.create(owner_user_id, tenant_id))
     except Exception as exc:
-        logger.warning('[ModelProfile] configured provider load failed: %s', exc)
+        logger.warning('[ModelProfile] owner routing load failed: %s', exc)
         return []
+    if authority.revision <= 0:
+        return []
+
+    document = authority.document
+    providers = {
+        row['provider_id']: row for row in document['providers']}
+    accesses = {
+        row['provider_access_id']: row
+        for row in document['provider_accesses']
+        if row.get('enabled') is True
+    }
+    models = {
+        (row['creator_id'], row['model_id']): row
+        for row in document['models']
+    }
+    live_offerings = {
+        row['offering_id']
+        for row in document['deployments']
+        if row.get('enabled') is True and row.get('probe_status') == 'passed'
+    }
+    projected: list[tuple[str, dict]] = []
+    for offering in document['offerings']:
+        access = accesses.get(offering.get('provider_access_id'))
+        if (
+            access is None
+            or offering.get('enabled') is not True
+            or offering.get('stale') is True
+            or offering.get('offering_id') not in live_offerings
+        ):
+            continue
+        provider_id = str(access['provider_id'])
+        if provider_id not in providers:
+            continue
+        model_ref = offering.get('model') or {}
+        official = models.get((
+            model_ref.get('creator_id'), model_ref.get('model_id')))
+        model_id = str(
+            (official or {}).get('model_id')
+            or offering.get('pending_model_id')
+            or ''
+        ).strip()
+        if not model_id:
+            continue
+        entry = {
+            'model_id': model_id,
+            'capabilities': list(offering.get('capabilities') or []),
+            'context_window': offering.get('context_window'),
+        }
+        pricing = offering.get('actual_pricing')
+        if isinstance(pricing, dict):
+            entry['pricing'] = dict(pricing)
+        projected.append((provider_id, entry))
+    return projected
 
 
 def _price_snapshot(model_id: str, provider_id: str,
@@ -78,35 +140,55 @@ def _price_snapshot(model_id: str, provider_id: str,
     return {'known': False, 'blendedUsdPerMTok': None, 'source': 'unknown'}
 
 
-def configured_model_profiles(*, providers: list | None = None,
-                              provider_id: str = '') -> list[dict]:
-    """Return enabled chat-model profiles without collapsing providers."""
+def configured_model_profiles(
+    *,
+    providers: list | None = None,
+    provider_id: str = '',
+    owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+    repository=None,
+) -> list[dict]:
+    """Return enabled chat-model profiles without crossing owner boundaries."""
+
+    entries: list[tuple[str, dict]] = []
+    if providers is not None:
+        for provider in providers:
+            if not isinstance(provider, dict) or provider.get('enabled', True) is False:
+                continue
+            pid = str(provider.get('id') or provider.get('brand') or '')
+            entries.extend(
+                (pid, entry)
+                for entry in (provider.get('models') or ())
+                if isinstance(entry, dict)
+                and entry.get('enabled', True) is not False
+            )
+    elif owner_user_id is not None:
+        entries = _routing_model_entries(
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+            repository=repository,
+        )
+
     out = []
-    for provider in _configured_providers(providers):
-        if not isinstance(provider, dict) or provider.get('enabled', True) is False:
-            continue
-        pid = str(provider.get('id') or provider.get('brand') or '')
+    for pid, entry in entries:
         if provider_id and pid != provider_id:
             continue
-        for entry in provider.get('models') or ():
-            if not isinstance(entry, dict) or entry.get('enabled', True) is False:
-                continue
-            model_id = str(entry.get('model_id') or '').strip()
-            if not model_id:
-                continue
-            caps = {str(x) for x in (entry.get('capabilities') or ()) if x}
-            if 'text' not in caps:
-                continue
-            if caps & {'embedding', 'image_gen', 'transcription', 'tts'}:
-                continue
-            profile = build_model_profile(
-                model_id, provider_id=pid, model_entry=entry)
-            profile.update({
-                'capabilities': sorted(caps),
-                'price': _price_snapshot(model_id, pid, entry),
-                'enabled': True,
-            })
-            out.append(profile)
+        model_id = str(entry.get('model_id') or '').strip()
+        if not model_id:
+            continue
+        caps = {str(x) for x in (entry.get('capabilities') or ()) if x}
+        if 'text' not in caps:
+            continue
+        if caps & {'embedding', 'image_gen', 'transcription', 'tts'}:
+            continue
+        profile = build_model_profile(
+            model_id, provider_id=pid, model_entry=entry)
+        profile.update({
+            'capabilities': sorted(caps),
+            'price': _price_snapshot(model_id, pid, entry),
+            'enabled': True,
+        })
+        out.append(profile)
     return out
 
 

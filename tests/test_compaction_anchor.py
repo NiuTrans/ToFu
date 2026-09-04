@@ -38,11 +38,17 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
     _apiform_tool_rounds,
     _coerce_spec_list,
     _extract_current_query,
+    _extract_objective_anchor_text,
     _extract_recently_accessed_files,
     _find_turn_boundary,
     _fold_recent_intra_turn,
     _objective_anchor_index,
     _split_cold_rounds,
+)
+from lib.tasks_pkg.compaction._layer2._prompt import (
+    _build_summary_user_content,
+    _ensure_summary_objective,
+    _extract_summary_objective,
 )
 
 pytestmark = pytest.mark.unit
@@ -139,6 +145,97 @@ def test_anchor_none_when_no_real_user_message():
 
 def test_anchor_tolerates_non_dict_rows():
     assert _objective_anchor_index(['garbage', None, _u('goal')]) == 2
+
+
+def test_objective_text_and_immediate_steer_remain_distinct():
+    """Regression for mtbb5cqdk6itfp: a login obstacle is not the project."""
+    msgs = [
+        _u('Download two skills, then use them to improve both MCP tools.'),
+        _a('working'),
+        _u('Unable to log in?', _isInboxInject=True,
+           _containsHumanSteer=True),
+    ]
+
+    assert _extract_objective_anchor_text(msgs) == (
+        'Download two skills, then use them to improve both MCP tools.')
+    assert _extract_current_query(msgs) == 'Unable to log in?'
+
+
+def test_summary_prompt_carries_goal_evidence_without_prejudging_objective():
+    """The prompt supplies verbatim goal EVIDENCE and lets the model author
+    the Objective — no section of the receipt is pre-determined, so the
+    receipt can track goal replacement across a long conversation."""
+    rendered = _build_summary_user_content(
+        anchor_text='Improve two MCP tools from two downloaded skills.',
+        latest_user_message='Unable to log in?',
+        formatted_history='[assistant] Investigating download routes.',
+    )
+
+    assert '## Earliest User Request (verbatim)' in rendered
+    assert 'may already be completed or explicitly replaced' in rendered
+    assert '## Latest User Message' in rendered
+    assert 'Improve two MCP tools' in rendered
+    assert 'Unable to log in?' in rendered
+    assert '## Durable Primary Objective' not in rendered
+    assert '## Immediate User Steering' not in rendered
+
+
+def test_model_authored_objective_is_never_overwritten():
+    """Goal-replacement tracking: the receipt reflects the CURRENT effective
+    goal, even when it differs from the opening ask."""
+    drifted = (
+        '### Objective\nRewrite the report as a press release.\n\n'
+        '### Pending / Next Steps\nDraft the headline.')
+    rendered = _ensure_summary_objective(
+        drifted, anchor_text='Download two skills and improve both MCP tools.')
+
+    assert rendered == drifted
+    assert _extract_summary_objective(rendered) == (
+        'Rewrite the report as a press release.')
+
+
+def test_missing_objective_section_falls_back_to_anchor():
+    rendered = _ensure_summary_objective(
+        '### Pending / Next Steps\nRetry SSO.',
+        anchor_text='Download two skills and improve both MCP tools.')
+
+    assert rendered.startswith(
+        '### Objective\nDownload two skills and improve both MCP tools.')
+    assert '### Pending / Next Steps\nRetry SSO.' in rendered
+
+
+def test_empty_objective_body_falls_back_to_anchor():
+    rendered = _ensure_summary_objective(
+        '### Objective\n\n### Pending / Next Steps\nRetry SSO.',
+        anchor_text='Download two skills and improve both MCP tools.')
+
+    assert rendered.startswith(
+        '### Objective\nDownload two skills and improve both MCP tools.')
+    assert '### Pending / Next Steps\nRetry SSO.' in rendered
+
+
+@pytest.mark.parametrize('anchor', [
+    r'\u003cplan\u003e',
+    r'truncated \u',
+    r'\1',
+    r'\g<name>',
+    r'C:\users\name',
+])
+def test_empty_objective_accepts_verbatim_replacement_syntax(anchor):
+    """User/plan text is data, never a regular-expression replacement."""
+    rendered = _ensure_summary_objective(
+        '### Objective\n\n### Pending / Next Steps\nKeep working.',
+        anchor_text=anchor,
+    )
+
+    assert _extract_summary_objective(rendered) == anchor
+    assert '### Pending / Next Steps\nKeep working.' in rendered
+
+
+def test_ensure_objective_noops_without_anchor_or_section():
+    assert _ensure_summary_objective('', anchor_text='') == ''
+    body = '### Pending / Next Steps\nRetry SSO.'
+    assert _ensure_summary_objective(body, anchor_text='') == body
 
 
 # ───────────────────────── current query ─────────────────────────
@@ -498,7 +595,7 @@ def test_recent_files_recognizes_failed_results_without_repeated_tool_name():
     assert _extract_recently_accessed_files(msgs) == ['src/created.py']
 
 
-def test_recent_files_uses_only_latest_recycled_call_id():
+def test_recent_files_pairs_each_recycled_call_id_occurrence():
     def read_call(path):
         return _a('', tool_calls=[{
             'id': 'recycled',
@@ -516,10 +613,10 @@ def test_recent_files_uses_only_latest_recycled_call_id():
         {'role': 'tool', 'tool_call_id': 'recycled',
          'content': 'Error: File not found'},
     ]
-    assert _extract_recently_accessed_files(msgs) == []
+    assert _extract_recently_accessed_files(msgs) == ['src/old-success.py']
 
 
-def test_recent_files_recycled_latest_call_must_itself_be_settled():
+def test_recent_files_unsettled_recycled_id_does_not_erase_prior_success():
     def read_call(path):
         return _a('', tool_calls=[{
             'id': 'recycled',
@@ -534,5 +631,24 @@ def test_recent_files_recycled_latest_call_must_itself_be_settled():
         {'role': 'tool', 'tool_call_id': 'recycled',
          'content': 'file contents'},
         read_call('src/latest-unsettled.py'),
+    ]
+    assert _extract_recently_accessed_files(msgs) == ['src/old-success.py']
+
+
+def test_recent_files_recycled_id_never_borrows_nonadjacent_result():
+    def read_call(path):
+        return _a('', tool_calls=[{
+            'id': 'recycled',
+            'function': {
+                'name': 'read_file',
+                'arguments': json.dumps({'path': path}),
+            },
+        }])
+
+    msgs = [
+        read_call('src/not-run.py'),
+        {'role': 'user', 'content': 'interrupt the tool protocol'},
+        {'role': 'tool', 'tool_call_id': 'recycled',
+         'content': 'unrelated late contents'},
     ]
     assert _extract_recently_accessed_files(msgs) == []

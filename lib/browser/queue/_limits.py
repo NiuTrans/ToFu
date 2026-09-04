@@ -34,10 +34,20 @@ def client_registry_limits() -> tuple[int, int]:
     return process_limit, owner_limit
 
 
+def login_capture_limits() -> tuple[int, int]:
+    """Return process/owner ceilings for ten-minute login-capture threads."""
+    poll_limit = resolve_resource_budget(
+        'TOFU_BROWSER_POLL_MAX_INFLIGHT', minimum=4, maximum=1024)
+    process_limit = max(2, min(64, poll_limit // 2))
+    owner_limit = max(2, min(8, process_limit // 2))
+    return process_limit, min(process_limit, owner_limit)
+
+
 __all__ = [
     'BrowserPollCapacityExceeded',
     'MAX_COMMANDS_PER_POLL',
     'MAX_RESULTS_PER_POLL',
     'client_registry_limits',
+    'login_capture_limits',
     'waiter_limits',
 ]

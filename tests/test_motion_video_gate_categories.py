@@ -501,8 +501,9 @@ def test_resumed_authored_composition_counts_as_authored():
     from tests._source_scan import python_block
 
     src = inspect.getsource(engine.run_motion_task)
-    # The resume branch must inspect whether the reused composition is the
-    # fallback card before it can count it.
+    # The prepared-resume branch must inspect whether the reused composition
+    # is the fallback card before it can count it. The author batch stores only
+    # the existence verdict, then this single-writer branch rereads the bytes.
     #
     # Indent-matched, not a fixed 600-byte window (charter #24 / pt_b95c6d39).
     # ``run_motion_task`` is ~16.7 KB, so the old window covered under 4% of it
@@ -510,7 +511,7 @@ def test_resumed_authored_composition_counts_as_authored():
     # which is the dangerous polarity for a truncating window: it passes today
     # only because the token happens to sit early in the branch, and would go
     # quietly green if the check moved a few lines down.
-    branch = python_block(src, 'if existing is not None:')
+    branch = python_block(src, "elif prepared['has_existing']:")
     assert 'is_template_composition' in branch, (
         'the resume branch must ask whether the reused composition is the '
         'fallback card before counting it as authored — an authored resume '

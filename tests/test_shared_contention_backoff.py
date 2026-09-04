@@ -6,20 +6,20 @@ family parking (2s → doubling → 60s cap) for contention 429s, on the theory
 that rotating our own keys is futile when the whole upstream project is
 saturated by other tenants. 2026-08-03 that policy was retired in favor of a
 fixed 0.3s retry. Production evidence on 2026-08-26 then found 239 project TPM
-rejections across 87 rounds: 152 repeat probes, including 12 in 14 seconds.
-The replacement coordinates pre-request admission per provider/model: one probe
-per second, with bounded three-second recheck slices and no slot parking.
+rejections across 87 rounds. Fixed one-second coordination shipped next, but on
+2026-08-27 one translation still spent 746 rejected calls in a 600-second
+window before failing. The replacement keeps pre-request admission per
+provider/model while adapting the probe interval to the observed streak.
 
 Pinned here:
 
-  1. The first strike arms the 0.3s baseline; every later task reserves a
-     one-second probe slot before network I/O. Deep queues recheck after three
-     seconds instead of collapsing onto the same capped wake-up time.
+  1. The first strike arms the 0.3s baseline; repeated rejection adapts
+     1→2→4→8→15s. Deep queues recheck in abortable three-second slices.
   2. Coordination NEVER cools a slot or contaminates health. Quiet recovery
      resets state; one lucky success does not, while sustained recovery does.
   3. Provider/model families coordinate independently.
-  4. Log throttle: strikes 1-3 + every 100th at INFO, the rest DEBUG —
-     a sustained storm costs ~1 line/30s, not ~3 lines/s.
+  4. Log throttle: strikes 1-3, interval changes, and every 100th at INFO;
+     wire classification is DEBUG, not one INFO line per rejected request.
   5. Sync chat/stream and native-async stream consume the coordinator delay;
      the wait remains abortable and is included in queue-wait accounting.
   6. The per-cycle 429 loop log is DEBUG after the first 3 cycles.
@@ -60,6 +60,8 @@ def _dispatcher(slots):
     disp.slots = list(slots)
     disp.initialize = lambda: None
     disp._contention_strikes = {}
+    disp._logical_index = {}
+    disp._direct_models = {slot.model for slot in slots}
     return disp
 
 
@@ -102,6 +104,31 @@ class TestProjectProbeCoordination:
         assert s.cooldown_until == 0.0
         assert s.cooldown_reason == ''
 
+    def test_immediate_admission_defers_without_advancing_probe_clock(
+            self, monkeypatch):
+        """Optional work cannot reserve a future probe while yielding."""
+        slot = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([slot])
+        now = [100.0]
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: now[0])
+        disp.note_shared_contention(slot)
+        family = (PROV, 'kimi-k3')
+        before = disp._contention_strikes[family]
+
+        blocked = disp.reserve_shared_contention_probe_now(slot)
+
+        assert blocked.admitted is False
+        assert blocked.delay_s == pytest.approx(0.3)
+        assert disp._contention_strikes[family] == before
+
+        now[0] = 100.3
+        admitted = disp.reserve_shared_contention_probe_now(slot)
+        assert admitted.admitted is True
+        assert admitted.delay_s == 0.0
+        assert disp._contention_strikes[family].next_probe_at == \
+            pytest.approx(101.3)
+
     def test_families_coordinate_independently(self, monkeypatch):
         kimi = _slot('kimi-k3', 'k0')
         qwen = _slot('qwen3.5-plus', 'k1')
@@ -115,7 +142,54 @@ class TestProjectProbeCoordination:
         assert disp.reserve_shared_contention_probe(qwen).delay_s == \
             pytest.approx(0.3)
 
-    def test_strikes_reset_after_quiet_window(self, monkeypatch):
+    def test_repeated_rejections_adapt_to_a_bounded_probe_interval(
+            self, monkeypatch):
+        s = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([s])
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: 100.0)
+
+        delays = [disp.note_shared_contention(s) for _ in range(10)]
+
+        assert [
+            disp._contention_probe_spacing_s(strike)
+            for strike in range(1, 11)
+        ] == [1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 8.0, 8.0, 15.0, 15.0]
+        assert delays == pytest.approx([
+            0.3, 1.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+        ])
+        state = disp._contention_strikes[(PROV, 'kimi-k3')]
+        assert state.strikes == 10
+        assert disp._contention_probe_spacing_s(state.strikes) == 15.0
+        assert state.next_probe_at == pytest.approx(115.0)
+
+    def test_ten_minute_storm_has_a_hard_probe_budget(self, monkeypatch):
+        """Continuous rejection spends at most 50 starts per family/10 min."""
+        s = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([s])
+        now = [100.0]
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: now[0])
+        deadline = now[0] + 600.0
+        probes = 1  # the rejection that first establishes family contention
+        disp.note_shared_contention(s)
+
+        while now[0] < deadline:
+            decision = disp.reserve_shared_contention_probe(s)
+            now[0] += decision.delay_s
+            if not decision.admitted:
+                continue
+            if now[0] >= deadline:
+                break
+            probes += 1
+            disp.note_shared_contention(s)
+
+        assert probes <= 50, (
+            f'adaptive gate spent {probes} rejected starts in ten minutes')
+        assert disp._contention_strikes[(PROV, 'kimi-k3')].strikes == probes
+
+    def test_quiet_window_keeps_one_serialization_seed_then_resets(
+            self, monkeypatch):
         s = _slot('kimi-k3', 'k0')
         disp = _dispatcher([s])
         now = [100.0]
@@ -126,6 +200,16 @@ class TestProjectProbeCoordination:
         key = (PROV, 'kimi-k3')
         assert disp._contention_strikes[key].strikes == 3
         now[0] += 31.0
+
+        decisions = [disp.reserve_shared_contention_probe(s)
+                     for _ in range(5)]
+        assert [decision.delay_s for decision in decisions] == pytest.approx(
+            [0.0, 1.0, 2.0, 3.0, 3.0])
+        assert [decision.admitted for decision in decisions] == [
+            True, True, True, True, False]
+        assert disp._contention_strikes[key].strikes == 1
+
+        now[0] = 221.0
         assert disp.note_shared_contention(s) == pytest.approx(0.3)
         assert disp._contention_strikes[key].strikes == 1
 
@@ -168,7 +252,7 @@ class TestProjectProbeCoordination:
         assert (PROV, 'model-3') in disp._contention_strikes
 
     def test_log_is_throttled(self, monkeypatch):
-        """First 3 strikes + every 100th at INFO; the other 96 DEBUG."""
+        """INFO retains first/escalation/heartbeat records, not every wire."""
         s = _slot('kimi-k3', 'k0')
         disp = _dispatcher([s])
         infos, debugs = [], []
@@ -178,9 +262,10 @@ class TestProjectProbeCoordination:
                             lambda *a, **k: debugs.append(a))
         for _ in range(100):
             disp.note_shared_contention(s)
-        assert len(infos) == 4, (
-            f'strikes 1-3 + strike 100 at INFO, got {len(infos)}')
-        assert len(debugs) == 96
+        assert len(infos) == 7, (
+            f'first 3 + three spacing changes + strike 100, got {len(infos)}')
+        assert len(debugs) == 93
+        assert infos[-1][-2] == pytest.approx(15.0)
 
     def test_cooling_summary_has_no_contention_cause(self):
         """Nothing parks → the wait-label summary never sees 'contention'."""
@@ -189,17 +274,45 @@ class TestProjectProbeCoordination:
         disp.note_shared_contention(s)
         assert 'contention' not in disp.cooling_cause_summary('text')
 
-    def test_picker_not_steered_away_from_family(self):
-        """Admission timing is not hidden slot parking or health steering."""
+    def test_picker_steers_automatic_work_to_a_ready_family(self):
+        """Automatic work avoids a known wait without mutating slot health."""
         s1, other = _slot('kimi-k3', 'k0'), _slot('qwen3.5-plus', 'k1')
         other.latency_ema = 99999.0  # kimi wins on score deterministically
         disp = _dispatcher([s1, other])
         disp.note_shared_contention(s1)
         picked = disp._pick('text', None, None, None)
         assert picked is not None
-        assert picked.model == 'kimi-k3', (
-            'no family parking → the picker must NOT be steered away from '
-            'the contended model')
+        assert picked.model == 'qwen3.5-plus'
+        assert s1.cooldown_until == 0.0
+        assert s1.consecutive_errors == 0
+
+    def test_explicit_model_never_crosses_its_candidate_boundary(self):
+        selected = _slot('kimi-k3', 'k0')
+        other = _slot('qwen3.5-plus', 'k1')
+        disp = _dispatcher([selected, other])
+        disp.note_shared_contention(selected)
+
+        picked = disp._pick(
+            'text', 'kimi-k3', None, None, strict_model=True)
+
+        assert picked is selected
+
+    def test_live_gate_state_is_bounded_and_observable(self, monkeypatch):
+        s = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([s])
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: 100.0)
+        for _ in range(5):
+            disp.note_shared_contention(s)
+
+        assert disp.get_shared_contention_info() == [{
+            'provider_id': PROV,
+            'model': 'kimi-k3',
+            'strikes': 5,
+            'probe_spacing_s': 4.0,
+            'next_probe_in_s': 4.0,
+            'recovery_successes': 0,
+        }]
 
 
 @pytest.mark.unit
@@ -276,6 +389,142 @@ class TestRpmLimitNotDecayed:
 @pytest.mark.unit
 class TestDispatchIntegration:
 
+    @pytest.mark.parametrize('operation', ['chat', 'stream'])
+    def test_optional_dispatch_yields_before_transport_and_releases_slot(
+            self, monkeypatch, operation):
+        from lib.llm_dispatch import api
+
+        slot = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([slot])
+        now = [100.0]
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: now[0])
+        disp.note_shared_contention(slot)
+        family = (PROV, 'kimi-k3')
+        before = disp._contention_strikes[family]
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr('lib.key_stats.is_key_enabled',
+                            lambda *a, **k: True)
+        monkeypatch.setattr(
+            'lib.llm_dispatch.cache_settle.settle_before_send',
+            lambda *a, **k: 0.0,
+        )
+        transports = []
+        monkeypatch.setattr(
+            'lib.llm.chat',
+            lambda *a, **k: transports.append('chat'),
+        )
+        monkeypatch.setattr(
+            'lib.llm.stream_chat',
+            lambda *a, **k: transports.append('stream'),
+        )
+        dispatch = api.dispatch_chat if operation == 'chat' \
+            else api.dispatch_stream
+
+        with pytest.raises(api.DispatchSharedContentionDeferred) as raised:
+            dispatch(
+                [{'role': 'user', 'content': 'optional'}],
+                log_prefix='[optional]',
+                defer_on_shared_contention=True,
+            )
+
+        assert raised.value.request_not_dispatched is True
+        assert raised.value.retry_after_s == pytest.approx(0.3)
+        assert transports == []
+        assert slot.inflight == 0
+        assert slot.total_errors == 0
+        assert disp._contention_strikes[family] == before
+
+    def test_optional_async_dispatch_yields_before_transport(
+            self, monkeypatch):
+        from lib.llm_dispatch import api
+
+        slot = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([slot])
+        now = [100.0]
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: now[0])
+        disp.note_shared_contention(slot)
+        family = (PROV, 'kimi-k3')
+        before = disp._contention_strikes[family]
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        transports = []
+
+        async def _transport(*args, **kwargs):
+            transports.append('async-stream')
+
+        monkeypatch.setattr('lib.llm.astream.async_stream_chat', _transport)
+
+        with pytest.raises(api.DispatchSharedContentionDeferred):
+            asyncio.run(api.async_dispatch_stream(
+                [{'role': 'user', 'content': 'optional'}],
+                log_prefix='[optional-async]',
+                defer_on_shared_contention=True,
+            ))
+
+        assert transports == []
+        assert slot.inflight == 0
+        assert slot.total_errors == 0
+        assert disp._contention_strikes[family] == before
+
+    def test_optional_dispatch_uses_ready_alternate_family(
+            self, monkeypatch):
+        from lib.llm_dispatch import api
+
+        gated = _slot('kimi-k3', 'k0')
+        ready = _slot('qwen3.5-plus', 'k1')
+        ready.latency_ema = 99999.0
+        disp = _dispatcher([gated, ready])
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: 100.0)
+        disp.note_shared_contention(gated)
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr('lib.key_stats.is_key_enabled',
+                            lambda *a, **k: True)
+        monkeypatch.setattr('lib.key_stats.record_outcome',
+                            lambda *a, **k: None)
+        sent_models = []
+
+        def _chat(*args, **kwargs):
+            sent_models.append(kwargs['model'])
+            return 'ok', {}
+
+        monkeypatch.setattr('lib.llm.chat', _chat)
+
+        content, _usage = api.dispatch_chat(
+            [{'role': 'user', 'content': 'optional'}],
+            defer_on_shared_contention=True,
+        )
+
+        assert content == 'ok'
+        assert sent_models == ['qwen3.5-plus']
+        assert gated.inflight == 0
+        assert gated.total_errors == 0
+
+    def test_smart_chat_does_not_resurrect_deferred_optional_work(
+            self, monkeypatch):
+        from lib.llm_dispatch import api
+
+        deferred = api.DispatchSharedContentionDeferred(retry_after_s=2.0)
+        direct_calls = []
+        monkeypatch.setattr(
+            'lib.llm_dispatch._api_multi.dispatch_chat',
+            lambda *a, **k: (_ for _ in ()).throw(deferred),
+        )
+        monkeypatch.setattr(
+            'lib.llm.chat',
+            lambda *a, **k: direct_calls.append((a, k)),
+        )
+
+        with pytest.raises(api.DispatchSharedContentionDeferred) as raised:
+            api.smart_chat(
+                [{'role': 'user', 'content': 'optional'}],
+                defer_on_shared_contention=True,
+            )
+
+        assert raised.value is deferred
+        assert direct_calls == []
+
     def test_first_contention_uses_baseline_without_parking(
             self, monkeypatch):
         """One contention 429 keeps the existing 0.3s retry contract."""
@@ -327,11 +576,37 @@ class TestDispatchIntegration:
         assert msg == 'ok'
         assert sleeps == pytest.approx([0.3], abs=0.02)
         assert recoveries == [other]
-        assert s1.cooldown_reason != 'contention', (
-            'probe coordination must NOT park the family')
-        assert s1.cooldown_until <= time.time() + 0.6, (
-            'the only cooldown left is the 0.5s per-slot steering from '
-            'record_error — never a family window')
+        assert s1.cooldown_reason == ''
+        assert s1.cooldown_until == 0, (
+            'family admission owns shared contention; slot cooling would '
+            'evict the conversation from its warm cache key')
+
+    def test_shared_contention_preserves_conversation_warm_key(self):
+        """A project-wide rejection must not force a cold namespace switch."""
+        from lib.llm_dispatch import conv_affinity
+
+        warm = _slot('kimi-k3', 'warm-key')
+        cold = _slot('kimi-k3', 'cold-key')
+        warm.latency_ema = 100.0
+        cold.latency_ema = 1.0
+        disp = _dispatcher([warm, cold])
+        conversation_id = 'shared-contention-warm-cache'
+        conv_affinity.record_conv_key(
+            conversation_id, warm.key_name, route_key='cap:text')
+
+        warm.record_request()
+        warm.record_error(is_rate_limit=True, is_shared_contention=True)
+
+        with conv_affinity.conv_affinity(conversation_id):
+            chosen = disp._pick(
+                'text', None, None, None,
+                reserve=False, strict_model=False,
+            )
+
+        assert chosen is warm, (
+            'shared contention displaced the prompt-cache-warm key')
+        assert warm.consecutive_errors == 0
+        assert warm.cooldown_until == 0
 
     def test_dispatch_chat_consumes_coordinator_delay(self, monkeypatch):
         from lib.llm_dispatch import api

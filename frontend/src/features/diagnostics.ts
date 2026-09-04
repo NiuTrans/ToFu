@@ -177,14 +177,3 @@ export async function collectDiagnostics(): Promise<string> {
     });
   }
 }
-
-export function snapshotDiagnostics(): FrontendDiagnostics {
-  const memory = (performance as Performance & {
-    memory?: { usedJSHeapSize?: number };
-  }).memory;
-  return {
-    loadedAt: Date.now(),
-    resourceEntries: performance.getEntriesByType('resource').length,
-    ...(memory?.usedJSHeapSize ? { heapBytes: memory.usedJSHeapSize } : {}),
-  };
-}

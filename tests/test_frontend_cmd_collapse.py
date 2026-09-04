@@ -41,10 +41,9 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 sys.path.insert(0, HERE)
-from _runtime_sections import runtime_section_path  # noqa: E402
+from _runtime_sections import runtime_section_path, shipped_source_text  # noqa: E402
 
 TOOL_ROUNDS = runtime_section_path('ui/tool_rounds.js')
-STYLES = os.path.join(ROOT, 'static', 'styles.css')
 
 LONG_CMD = "grep -c 'jsonify(' routes/api_v1/browser.py && python3 - <<'EOF'\nimport pathlib\nprint('baseline tightened')\nEOF"
 
@@ -67,6 +66,7 @@ global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 global.t = (k, d) => (d || k);
+global.Icon = global.window.Icon = (name) => '<svg></svg>';
 global.renderMarkdown = (s) => s;
 global._shortUrl = (u) => u;
 global.formatNumber = (n) => String(n);
@@ -92,8 +92,9 @@ check('done_long_cmd_key', html1.includes('data-cmd-key="call-long-1"'));
 check('done_long_not_open', !html1.includes('ptool-cmd-block ptool-cmd-ok cmd-open'));
 check('done_long_cmd_still_in_dom', html1.includes('baseline tightened')); // output AND/OR cmd
 check('done_long_cmd_pre_kept', html1.includes('$ grep -c'));
-check('done_long_output_toggle_kept', html1.includes('ptool-cmd-toggle')
-  && html1.includes('Show output') && html1.includes('<svg'));
+check('done_long_output_toggle_kept', html1.includes('ptool-cmd-hasoutput')
+  && html1.includes('data-tofu-action="_cmdHeaderToggle(this,event)"')
+  && html1.includes('role="button"'));
 
 // ── 2. Done: short one-liner ⇒ stays visible ──
 const doneShort = {
@@ -147,24 +148,21 @@ check('untoggle_removes_cmd_open', !blockEl.classList.contains('cmd-open'));
 const html1c = _renderUnifiedToolLine(doneLong, false);
 check('rerender_collapses_again', !html1c.includes('ptool-cmd-ok cmd-open'));
 
-// ── 5b. Output pane toggle: NAMED action only. The data-tofu-action
-// interpreter executes a restricted grammar (no `var`, no ternaries) and
-// silently refuses inline JS beyond it — the pre-2026-08-14 inline version
-// threw "Unsupported action expression" on every click, so the output could
-// never be opened. Guard both the wiring AND the behavior. ──
-const outToggle = host.querySelector('.ptool-cmd-toggle');
-check('output_toggle_el_present', !!outToggle);
-check('output_toggle_named_action', html1.includes('data-tofu-action="_cmdOutputToggle(this,event)"'));
+// ── 5b. Output pane toggle: the command HEADER is the ARIA button and its
+// named action is `_cmdHeaderToggle` (no `var`, no ternaries in the restricted
+// data-tofu-action grammar). The output pane visibility rides `output-open` on
+// the block and `aria-expanded` on the header. ──
+const outHeader = host.querySelector('.ptool-cmd-header[role="button"]');
+check('output_toggle_el_present', !!outHeader);
+check('output_toggle_named_action', html1.includes('data-tofu-action="_cmdHeaderToggle(this,event)"'));
 check('output_toggle_no_inline_var', !html1.includes('var w=this.parentElement'));
-_cmdOutputToggle(outToggle, { stopPropagation() {} });
-const outWrap = host.querySelector('.ptool-cmd-output-wrap');
-check('output_toggle_expands', outWrap.classList.contains('expanded'));
-check('output_toggle_label_collapse', outToggle.textContent === 'Collapse'
-  && !!outToggle.querySelector('svg'));
-_cmdOutputToggle(outToggle, { stopPropagation() {} });
-check('output_toggle_collapses', !outWrap.classList.contains('expanded'));
-check('output_toggle_label_show', outToggle.textContent === 'Show output'
-  && !!outToggle.querySelector('svg'));
+_cmdHeaderToggle(outHeader, { stopPropagation() {}, target: {} });
+const outBlock = host.querySelector('.ptool-cmd-block');
+check('output_toggle_expands', outBlock.classList.contains('output-open'));
+check('output_toggle_aria_expanded', outHeader.getAttribute('aria-expanded') === 'true');
+_cmdHeaderToggle(outHeader, { stopPropagation() {}, target: {} });
+check('output_toggle_collapses', !outBlock.classList.contains('output-open'));
+check('output_toggle_aria_collapsed', outHeader.getAttribute('aria-expanded') === 'false');
 
 // Search/timer disclosure rows contain nested source/copy controls, so they
 // use an ARIA button rather than invalid nested <button> markup. The shared
@@ -231,7 +229,7 @@ def test_cmd_collapse_contract():
 def test_cmd_collapse_css_rules_present():
     """Guard the static half: the collapse classes must have real rules in
     styles.css (a render-side class with no rule silently never hides)."""
-    css = open(STYLES, encoding='utf-8').read()
+    css = shipped_source_text('frontend/src/styles/application/09-tool-terminal-details.css')
     assert '.ptool-cmd-collapsible' in css
     assert '.ptool-cmd-block.cmd-open .ptool-cmd-collapsible' in css
     assert '.ptool-cmd-chev' not in css  # chevron glyph removed (owner call 2026-08-02)

@@ -113,6 +113,16 @@ class Slot:
                                     # defaults it to `model` (env/ephemeral slots).
     base_url: str = ''              # provider-specific base URL (empty = use global default)
     provider_id: str = 'default'    # which provider this slot belongs to
+    # Request-scoped v2 route groups use provider_id as an opaque hard-pin
+    # namespace shared by their candidate slots. routing_provider_id remains
+    # the actual Provider identity persisted in RouteSnapshot/usage metadata.
+    routing_provider_id: str = ''
+    routing_owner_user_id: int = 0
+    route_offering_id: str = ''
+    route_deployment_id: str = ''
+    route_connection_id: str = ''
+    route_credential_id: str = ''
+    route_snapshot: dict = field(default_factory=dict)
     extra_headers: dict = field(default_factory=dict)  # provider-specific custom HTTP headers
     thinking_format: str = ''       # per-provider thinking param format:
                                     # '' = auto-detect from model name (default)
@@ -240,6 +250,17 @@ class Slot:
             return 0.95  # assume good until proven otherwise
         return max(0.0, 1.0 - self.total_errors / self.total_requests)
 
+    def key_stats_provider_id(self) -> str:
+        """Stable owner+Provider namespace for durable credential health."""
+        provider_id = self.routing_provider_id or self.provider_id or 'default'
+        if self.routing_owner_user_id > 0:
+            return f'owner:{self.routing_owner_user_id}:{provider_id}'
+        return provider_id
+
+    def key_stats_key_name(self) -> str:
+        """Use v2 credential identity instead of request-random slot names."""
+        return self.route_credential_id or self.key_name
+
     @property
     def requests_5h(self) -> int:
         """Count requests in the last 5 hours (rolling window)."""
@@ -286,6 +307,20 @@ class Slot:
         """
         with self._lock:
             self.inflight = max(0, self.inflight - 1)
+
+    def mark_route_missing(self, error: str = '') -> bool:
+        """Disable this configured wire route until the slot pool rebuilds.
+
+        Returns ``True`` only when the call changed an available slot.  This
+        is routing/catalog evidence, so it intentionally does not increment
+        request-error counters or poison key health.
+        """
+        with self._lock:
+            changed = self.is_available
+            self.is_available = False
+            self.last_error_time = time.time()
+            self.last_error_msg = ('[route_missing] ' + str(error))[:200]
+            return changed
 
     def record_success(self, latency_ms, ttft_ms=None,
                        output_tokens: int = 0):
@@ -344,7 +379,10 @@ class Slot:
         # genuine health signal for this key.
         try:
             from lib.key_stats import record_outcome
-            record_outcome(self.provider_id, self.key_name, success=True)
+            record_outcome(
+                self.key_stats_provider_id(),
+                self.key_stats_key_name(),
+                success=True)
         except Exception as e:
             logger.debug('[Slot] key_stats record_outcome(success) failed: %s', e)
 
@@ -436,13 +474,16 @@ class Slot:
                 (RateLimitError.is_shared_contention). Counted into
                 ``contention_errors`` instead of ``total_errors`` (the
                 success-rate column stays honest) and feeds neither
-                key_stats path. Slot-local cooldown still applies so the
-                picker rotates away briefly.
+                key_stats path nor slot-local cooldown/error scoring. The
+                provider/model admission gate owns pacing, so the warm key
+                stays eligible and its prompt-cache namespace is preserved.
         """
+        shared_contention = bool(is_shared_contention and not is_gateway)
         with self._lock:
             self.inflight = max(0, self.inflight - 1)
-            self.consecutive_errors += 1
-            if is_shared_contention and not is_gateway:
+            if not shared_contention:
+                self.consecutive_errors += 1
+            if shared_contention:
                 # External project-level contention: NOT this key's health.
                 # Count it separately and pull the attempt back out of
                 # total_requests (record_request already added it) so the
@@ -469,14 +510,13 @@ class Slot:
                 # (the daily key-stats tracker also disables it).
                 self.cooldown_until = time.time() + 3600
                 self.cooldown_reason = 'quota'
-            elif is_rate_limit:
+            elif is_rate_limit and not shared_contention:
                 # Reduce effective RPM estimate — but NOT for external
                 # shared-project contention: the pipe is full of OTHER
                 # tenants' tokens, so decaying our own pacing estimate
                 # teaches the scorer a false "this key is slow" lesson it
                 # then has to recover from at 1.1x.
-                if not is_shared_contention:
-                    self.rpm_limit = max(5, self.rpm_limit * 0.8)
+                self.rpm_limit = max(5, self.rpm_limit * 0.8)
                 if cooldown_s and cooldown_s > 0:
                     # Subscription-quota timed hold — the upstream named
                     #   the reset time, so park the slot for exactly that
@@ -517,17 +557,21 @@ class Slot:
                 from lib.key_stats import mark_key_exhausted
                 # HTTP 402 = account credit pool dead → key-wide stop;
                 # 429-quota = vendor-ambiguous → per-model stop.
-                mark_key_exhausted(self.provider_id, self.key_name,
+                mark_key_exhausted(
+                                   self.key_stats_provider_id(),
+                                   self.key_stats_key_name(),
                                    reason=error or 'quota exhausted (HTTP 402/429)',
                                    model='' if is_account_quota else self.model)
             except Exception as e:
                 logger.debug('[Slot] key_stats mark_key_exhausted failed: %s', e)
-        elif is_shared_contention and not is_gateway:
+        elif shared_contention:
             # External contention feeds NEITHER the consecutive-429
             # telemetry streak NOR the daily failure stats (nothing failed —
-            # someone else's traffic filled the pipe). The slot-local
-            # contention_errors counter above keeps the volume visible on
-            # the model card.
+            # someone else's traffic filled the pipe). It also leaves slot
+            # cooldown/error scoring untouched: the provider/model family
+            # admission gate owns pacing, while keeping this conversation's
+            # warm cache key eligible. The slot-local contention_errors
+            # counter above keeps the volume visible on the model card.
             pass
         elif is_gateway:
             # Gateway-class outage — own daily counter ONLY. Feeding the
@@ -537,14 +581,18 @@ class Slot:
             # an upstream outage to per-key contention.
             try:
                 from lib.key_stats import record_gateway_error
-                record_gateway_error(self.provider_id, self.key_name,
+                record_gateway_error(
+                                     self.key_stats_provider_id(),
+                                     self.key_stats_key_name(),
                                      reason=error or 'gateway 5xx')
             except Exception as e:
                 logger.debug('[Slot] key_stats record_gateway_error failed: %s', e)
         elif is_rate_limit and not is_gateway:
             try:
                 from lib.key_stats import record_rate_limit
-                record_rate_limit(self.provider_id, self.key_name,
+                record_rate_limit(
+                                  self.key_stats_provider_id(),
+                                  self.key_stats_key_name(),
                                   reason=error or 'HTTP 429')
             except Exception as e:
                 logger.debug('[Slot] key_stats record_rate_limit failed: %s', e)
@@ -557,7 +605,9 @@ class Slot:
             # contention.
             try:
                 from lib.key_stats import record_outcome
-                record_outcome(self.provider_id, self.key_name,
+                record_outcome(
+                               self.key_stats_provider_id(),
+                               self.key_stats_key_name(),
                                success=False, error=error)
             except Exception as e:
                 logger.debug('[Slot] key_stats record_outcome(failure) failed: %s', e)

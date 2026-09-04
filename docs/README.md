@@ -16,27 +16,30 @@ is [`catalog.json`](catalog.json), enforced by
 
 | Change | Runtime owner | Contract / map |
 |---|---|---|
-| Embed/package/serve the agent without application storage or ChatUI (includes a small Provider setup page) | `tofu_agent/`, transient paths in `lib/tasks_pkg/` | [`DEVELOPER_RUNTIME.md`](DEVELOPER_RUNTIME.md), [`HEADLESS_API.md`](HEADLESS_API.md) |
+| Repository layout, first-party packages, versioning, releases, checkout relocation | root, `packages/`, `plugins/` | [`MONOREPO.md`](MONOREPO.md) |
+| Embed/package/serve the agent without application storage or the full Tofu UI (includes a small model-routing v2 setup page) | `tofu_agent/`, transient paths in `lib/tasks_pkg/` | [`DEVELOPER_RUNTIME.md`](DEVELOPER_RUNTIME.md), [`HEADLESS_API.md`](HEADLESS_API.md) |
 | App assembly, boot, shutdown | `lib/app_assembly.py`, `lib/production_lifecycle.py`, `lib/serving_loop_lifecycle.py` | [`modules/infra_runtime.md`](modules/infra_runtime.md) |
-| HTTP, auth, errors | `routes/`, `lib/api_response.py`, `lib/error_envelope/` | [`API_CONTRACT.md`](API_CONTRACT.md), [`modules/auth_providers_billing.md`](modules/auth_providers_billing.md) |
+| HTTP, auth, errors | `routes/`, `lib/api_response.py`, `lib/error_envelope/` | [`API_CONTRACT.md`](API_CONTRACT.md), [`modules/auth_providers_billing.md`](modules/auth_providers_billing.md), [`CODEX_ACCOUNT_USAGE.md`](CODEX_ACCOUNT_USAGE.md) |
 | Accounts, owners, credentials | `lib/identity.py`, `lib/api_keys/`, Sidecar `identity` domain | [`IDENTITY.md`](IDENTITY.md), [`contracts/identity_v1.yaml`](../contracts/identity_v1.yaml) |
 | Conversation turns and live state | `contracts/conversation_sync_v3.yaml`, `lib/conversation_sync/`, `routes/conversation_sync_v3.py`, `frontend/src/core/conversation-sync.ts` | [`CONVERSATION_SYNC_V3.md`](CONVERSATION_SYNC_V3.md) |
 | Conversation delete, restore, clone | `contracts/conversation_lifecycle_v1.yaml`, `routes/conversations.py`, `lib/storage_sidecar/operations_pkg/_conversations.py` | [`API_CONTRACT.md`](API_CONTRACT.md), [`STORAGE.md`](STORAGE.md) |
 | Durable data | `lib/storage/`, `lib/storage_sidecar/` | [`STORAGE.md`](STORAGE.md), [`modules/data_tier.md`](modules/data_tier.md) |
-| Task / agent execution | `lib/tasks_pkg/`, `lib/agent_core/` | [`modules/task_engine.md`](modules/task_engine.md), [`EVENTS.md`](EVENTS.md) |
-| Models and provider I/O | `lib/llm/`, `lib/llm_dispatch/`, `lib/model_profiles/`, `lib/provider_template_recipes.py` | [`modules/llm_io.md`](modules/llm_io.md), [`MODEL_REGISTRATION.md`](MODEL_REGISTRATION.md), [`PROVIDER_TEMPLATE_RECIPES.md`](PROVIDER_TEMPLATE_RECIPES.md) |
-| Tools and MCP | `lib/tools/`, `lib/mcp/` | [`modules/tools_execution.md`](modules/tools_execution.md), [`TOOL_PLUGINS.md`](TOOL_PLUGINS.md) |
-| Skills | `lib/skills/`, `handlers/skills.py`, `routes/api_v1/skills.py` | [`modules/skills.md`](modules/skills.md) |
+| Task / agent execution | `lib/tasks_pkg/`, `lib/agent_core/` | [`modules/task_engine.md`](modules/task_engine.md), [`TASK_EXECUTION_MODES.md`](TASK_EXECUTION_MODES.md), [`EVENTS.md`](EVENTS.md) |
+| Orchestration definitions and runs | `lib/orchestration/`, `routes/orchestration_*` | [`modules/orchestration_dag.md`](modules/orchestration_dag.md), [`ORCHESTRATION_PRODUCT_SURFACES.md`](ORCHESTRATION_PRODUCT_SURFACES.md) |
+| Models, routing, and provider I/O | `lib/model_routing/`, `lib/llm/`, `lib/llm_dispatch/`, `lib/local_serve/`, `lib/model_profiles/`, `lib/provider_template_recipes.py` | [`contracts/model_routing_v2.schema.json`](../contracts/model_routing_v2.schema.json), [`modules/llm_io.md`](modules/llm_io.md), [`LLM_RUNTIME_PROFILES.md`](LLM_RUNTIME_PROFILES.md), [`MODEL_REGISTRATION.md`](MODEL_REGISTRATION.md), [`PROVIDER_TEMPLATE_RECIPES.md`](PROVIDER_TEMPLATE_RECIPES.md) |
+| Tools and MCP | `lib/tools/`, `lib/mcp/` | [`modules/tools_execution.md`](modules/tools_execution.md), [`TOOL_EXECUTION_POLICY.md`](TOOL_EXECUTION_POLICY.md), [`TOOL_PLUGINS.md`](TOOL_PLUGINS.md) |
+| Skills | `lib/skills/`, `routes/api_v1/skills.py` | [`modules/skills.md`](modules/skills.md) |
 | Browser automation and site adapters | `lib/browser/`, `routes/browser.py`, `browser_extension/` | [`modules/browser_automation.md`](modules/browser_automation.md) |
 | Browser UI | `frontend/src/`; retained runtime under `frontend/src/runtime/sections/`; styles under `frontend/src/styles/` | [`FRONTEND_ARCHITECTURE.md`](FRONTEND_ARCHITECTURE.md), [`RENDER_CONTRACT.md`](RENDER_CONTRACT.md) |
 | VS Code forwarded ports and constrained reverse proxies | `lib/control_rpc.py`, `lib/static_mirror.py`, `frontend/src/api/transport.ts`, retained Project/push/log sections | [`contracts/control_rpc_v1.yaml`](../contracts/control_rpc_v1.yaml), [`PROXY_RUNTIME.md`](PROXY_RUNTIME.md) |
 | Project coordination and Git publication | `lib/conversations/`, `lib/project_mod/`, `lib/integration_control.py` | [`modules/conversations_project_brain.md`](modules/conversations_project_brain.md), [`modules/project_integration.md`](modules/project_integration.md) |
-| Media and knowledge | `lib/paper/`, `lib/motion_video/`, `lib/knowledge/` | [`modules/ingest_media.md`](modules/ingest_media.md) |
+| Project file history, undo, redo | `lib/file_history/`, `lib/project_mod/modifications.py` | [`modules/file_history.md`](modules/file_history.md) |
+| Media, papers, and Research Foundry | `lib/media_attachments.py`, `lib/knowledge/`, `lib/video_analysis/`, `lib/paper/`, `lib/research/`, `lib/motion_video/` | [`contracts/research_program_v1.schema.json`](../contracts/research_program_v1.schema.json), [`modules/ingest_media.md`](modules/ingest_media.md) |
 | Long-running deliverable production | `lib/production/` plus capability recipes | [`modules/production.md`](modules/production.md) |
 | Scheduling and operations | `lib/scheduler/`, `lib/daily_report/` | [`modules/scheduling_ops.md`](modules/scheduling_ops.md), [`RELIABILITY_RUNBOOK.md`](RELIABILITY_RUNBOOK.md) |
 | Desktop devices, remote worktrees, egress | `lib/desktop/`, `lib/desktop_agent/`, `lib/desktop_dist/` | [`modules/remote_execution.md`](modules/remote_execution.md) |
 | Experiments and strategy decisions | `contracts/experiments_v1.schema.json`, `lib/experiments/`, `lib/cost_experiments.py` | [`modules/experiments.md`](modules/experiments.md) |
-| Long-agent context, tool-cost controls, and paired Codex evaluation | `lib/tasks_pkg/context_composer/`, `lib/tools/`, `lib/benchmark_contract.py`, `evaluations/{codex_kimi_proxy,long_agent_release}/` | [`LLM_COST_OPTIMIZATION.md`](LLM_COST_OPTIMIZATION.md), [`modules/context_engineering.md`](modules/context_engineering.md), [`modules/tools_execution.md`](modules/tools_execution.md) |
+| Long-agent context, tool-cost controls, and paired Codex evaluation | `lib/tasks_pkg/context_composer/`, `lib/tools/`, `lib/benchmark_contract.py`, `evaluations/{codex_kimi_proxy,long_agent_release}/` | [`LLM_COST_OPTIMIZATION.md`](LLM_COST_OPTIMIZATION.md), [`modules/context_engineering.md`](modules/context_engineering.md), [`CONTEXT_COMPACTION.md`](CONTEXT_COMPACTION.md), [`modules/tools_execution.md`](modules/tools_execution.md) |
 | Logging and incident diagnosis | `lib/log*.py`, `lib/incident_journal.py` | [`LOGGING.md`](LOGGING.md), [`RELIABILITY_RUNBOOK.md`](RELIABILITY_RUNBOOK.md) |
 
 ## Authority rules

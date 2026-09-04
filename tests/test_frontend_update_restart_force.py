@@ -37,6 +37,11 @@ showConfirm / DOM / timers, and drives ``restartServer()`` directly:
   • an ordinary update-check 500 still renders its error card.
   • a pre-restart update check that returns 500 after progress takes ownership
     cannot replace the restart card, even in the post-health/pre-reload window.
+  • slow restart preflight paints one continuous preparation card immediately;
+    an accepted request advances that same card, while an explicit preflight
+    refusal restores controls/availability without entering health polling.
+  • only a lost response to an approved executable request is ambiguous enough
+    for bootId polling; a pre-approval network failure cannot have restarted.
 
 DOUBLE-NEUTER (on a MUTATED copy; shipped file never touched): strip the
 ``e.status === 409`` branch → the confirm-then-force retry no longer happens,
@@ -88,14 +93,21 @@ const domElements = {};
 function domElement(id) {
   if (!domElements[id]) {
     const classes = new Set();
+    const attributes = new Map();
     domElements[id] = {
       classList: {
         add(c){ classes.add(c); },
-        remove(c){ classes.delete(c); },
+        remove(...names){ names.forEach((name) => classes.delete(name)); },
         toggle(c){ classes.has(c) ? classes.delete(c) : classes.add(c); },
         contains(c){ return classes.has(c); },
       },
       querySelector: () => null,
+      setAttribute: (name, value) => attributes.set(name, String(value)),
+      removeAttribute: (name) => attributes.delete(name),
+      getAttribute: (name) => attributes.get(name) || null,
+      insertAdjacentHTML: (_position, html) => {
+        domElements[id].innerHTML += String(html);
+      },
       disabled: false,
       textContent: '',
       style: {},
@@ -114,7 +126,11 @@ global.cancelAnimationFrame = () => {};
 global.setInterval = () => 0;
 global.clearInterval = () => {};
 // setTimeout: run nothing async (the health-poll arm is fire-and-forget here).
-global.setTimeout = () => 0;
+let timeoutDelays = [];
+global.setTimeout = (_callback, delayMs) => {
+  timeoutDelays.push(delayMs);
+  return timeoutDelays.length;
+};
 global.clearTimeout = () => {};
 global.addEventListener = () => {};
 global._onReady = () => {};   // feature-bridge.js deferred-ready hook (Epic-E sub-9)
@@ -130,6 +146,17 @@ let firstThrows409 = true;
 let pendingFirst = false;   // first restart call answers 202 {pendingApproval}
 let always429 = false;      // every restart call 429s (cooldown)
 let pendingUpdateChecks = [];
+let deferRestart = false;
+let settleRestart = null;
+let rejectRestart = null;
+let monitorCalls = { begin: 0, end: [] };
+
+global.BackendAvailabilityRestartScope = {
+  begin: () => { monitorCalls.begin += 1; },
+  end: (backendReachable) => {
+    monitorCalls.end.push(backendReachable);
+  },
+};
 
 global.showToast = (icon, title, body) => { toastCalls.push([icon, title, body]); };
 global.Api = {
@@ -144,6 +171,12 @@ global.Api = {
         e.status = 429;
         e.body = { ok: false, retryAfterSec: 812 };
         throw e;
+      }
+      if (deferRestart) {
+        return await new Promise((resolve, reject) => {
+          settleRestart = resolve;
+          rejectRestart = reject;
+        });
       }
       // Human-approval gate emulation: without an approvalId the endpoint
       // only REGISTERS a pending approval (202 shape) — nothing executes.
@@ -187,6 +220,12 @@ function reset(opts) {
   firstThrows409 = ('firstThrows409' in opts) ? opts.firstThrows409 : true;
   pendingFirst = ('pendingFirst' in opts) ? opts.pendingFirst : false;
   always429 = ('always429' in opts) ? opts.always429 : false;
+  deferRestart = ('deferRestart' in opts) ? opts.deferRestart : false;
+  settleRestart = null;
+  rejectRestart = null;
+  timeoutDelays = [];
+  monitorCalls = { begin: 0, end: [] };
+  for (const id of Object.keys(domElements)) delete domElements[id];
   // Restart state is module-level; reset it between independent scenarios.
   try { _restartActive = false; _restartDone = false; } catch (_) {}
 }
@@ -329,6 +368,75 @@ const flush = () => new Promise((r) => setImmediate(r));
     check('s9_late_500_hidden', body.innerHTML.indexOf('upd-err-card') < 0);
   }
 
+  // ══ 10. Slow preflight gets immediate feedback, then advances in place ══
+  {
+    reset({ firstThrows409: false, deferRestart: true });
+    const running = restartServer({ approvalId: 'approved-10' });
+    await flush(); await flush();
+    const body = domElement('updateModalBody');
+    const card = domElement('updRestartCard');
+    check('s10_modal_open_immediately', domElement('updateModal').classList.contains('open'));
+    check('s10_preparing_card_immediately', body.innerHTML.indexOf('is-preparing') >= 0 && body.innerHTML.indexOf('update.restartPreparingTitle') >= 0);
+    check('s10_controls_disabled', domElement('updateRestartNowBtn').disabled && domElement('updateShutdownBtn').disabled);
+    check('s10_generic_alarm_suppressed', monitorCalls.begin === 1 && monitorCalls.end.length === 0);
+    check('s10_no_health_poll_before_ack', !timeoutDelays.includes(2500));
+    settleRestart({ ok: true, restarting: true });
+    await running; await flush();
+    check('s10_same_card_advanced', domElement('updRestartCard') === card && domElement('updRestartTitle').textContent === 'update.restartTitle');
+    check('s10_health_poll_deferred', timeoutDelays.includes(2500));
+    check('s10_alarm_still_suppressed', monitorCalls.end.length === 0);
+  }
+
+  // ══ 11. Explicit preflight refusal ends now; it is not a fake restart ══
+  {
+    reset({ firstThrows409: false, deferRestart: true });
+    const running = restartServer({ approvalId: 'approved-11' });
+    await flush(); await flush();
+    const card = domElement('updRestartCard');
+    const error = new Error('Frontend artifact preparation failed.');
+    error.status = 409;
+    error.body = { restartPreflightFailed: true, detail: 'synthetic failure' };
+    rejectRestart(error);
+    await running; await flush();
+    check('s11_not_started_title', domElement('updRestartTitle').textContent === 'update.restartNotStartedTitle');
+    check('s11_concrete_reason', domElement('updRestartSub').textContent.indexOf('Frontend artifact preparation failed.') >= 0);
+    check('s11_online_hint', domElement('updRestartPhase').textContent === 'update.restartNotStartedHint');
+    check('s11_controls_restored', !domElement('updateRestartNowBtn').disabled && !domElement('updateShutdownBtn').disabled);
+    check('s11_alarm_restored_online', monitorCalls.end.length === 1 && monitorCalls.end[0] === true);
+    check('s11_no_health_poll', !timeoutDelays.includes(2500));
+    check('s11_retry_visible', card.innerHTML.indexOf('restartServer()') >= 0);
+  }
+
+  // ══ 12. Lost response to an approved POST verifies the new boot ══
+  {
+    reset({ firstThrows409: false, deferRestart: true });
+    const running = restartServer({ approvalId: 'approved-12' });
+    await flush(); await flush();
+    const error = new Error('Failed to fetch');
+    error.status = 0;
+    error.code = 'network';
+    rejectRestart(error);
+    await running; await flush();
+    check('s12_advances_to_restart_verification', domElement('updRestartTitle').textContent === 'update.restartTitle');
+    check('s12_health_poll_deferred', timeoutDelays.includes(2500));
+    check('s12_alarm_scope_remains', monitorCalls.end.length === 0);
+  }
+
+  // ══ 13. A pre-approval network failure cannot have scheduled restart ══
+  {
+    reset({ firstThrows409: false, deferRestart: true });
+    const running = restartServer();
+    await flush(); await flush();
+    const error = new Error('Failed to fetch');
+    error.status = 0;
+    error.code = 'network';
+    rejectRestart(error);
+    await running; await flush();
+    check('s13_stays_not_started', domElement('updRestartTitle').textContent === 'update.restartNotStartedTitle');
+    check('s13_no_health_poll', !timeoutDelays.includes(2500));
+    check('s13_alarm_rechecks_backend', monitorCalls.end.length === 1 && monitorCalls.end[0] === false);
+  }
+
   console.log(out.join('\n'));
   process.exit(0);
 })();
@@ -354,4 +462,4 @@ def test_update_restart_force_confirm_flow():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'update restart force-flow failures:\n' + output
-    assert output.count('PASS') >= 34, f'expected >=34 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 55, f'expected >=55 PASS lines, got:\n{output}'

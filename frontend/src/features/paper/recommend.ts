@@ -1,5 +1,8 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
+
+import { scheduleAnimationFrame } from '../../conversation/ui/animation-frame-scheduler';
 import {
   paperAttachPush,
   paperDetachPush,
@@ -70,7 +73,6 @@ type RecElement = HTMLElement & { _recSig?: string; _recToolKey?: string };
 type RecommendWindow = Window & {
   Api?: { paper?: RecommendApi };
   t?: (key: string) => string;
-  escapeHtml?: (value: unknown) => string;
   debugLog?: (message: string, level?: string) => void;
   renderToolRoundsHTML?: (rounds: RecommendToolRound[], running: boolean) => string;
   _escWithInlineMath?: (value: unknown) => string;
@@ -115,14 +117,6 @@ function api(): RecommendApi {
   const paper = globals().Api?.paper;
   if (!paper) throw new Error('Paper recommendation API unavailable');
   return paper;
-}
-
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (helper) return helper(value);
-  const node = document.createElement('span');
-  node.textContent = value == null ? '' : String(value);
-  return node.innerHTML;
 }
 
 function translate(key: I18nKey): string {
@@ -293,6 +287,8 @@ export function applyRecommendEvent(
         query: event.query || event.toolName,
         toolCallId: event.toolCallId || '',
         toolArgs: event.toolArgs || '',
+        attentionKind: event.attentionKind,
+        parentToolCallId: event.parentToolCallId,
         status: 'searching',
         results: null,
       });
@@ -413,10 +409,7 @@ export function paintRecommendFromState(): void {
   const shared = state();
   if (shared._recPaintScheduled) return;
   shared._recPaintScheduled = true;
-  const frame = typeof window.requestAnimationFrame === 'function'
-    ? window.requestAnimationFrame.bind(window)
-    : (callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 16);
-  frame(() => {
+  scheduleAnimationFrame(window, () => {
     state()._recPaintScheduled = false;
     try { paintRecommendNow(); } catch (error: unknown) {
       console.warn('[Paper:Recommend] paint failed:', error);

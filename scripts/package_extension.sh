@@ -53,7 +53,6 @@ trap 'rm -rf "$STAGE"' EXIT
 
 # Copy only the files the extension actually needs — never the whole repo.
 cp "$SRC_DIR/background.js" "$STAGE/"
-cp "$SRC_DIR/origin_marker.js" "$STAGE/"
 cp "$SRC_DIR/popup.html"    "$STAGE/"
 cp "$SRC_DIR/popup.js"      "$STAGE/"
 cp "$SRC_DIR/icon16.png"    "$STAGE/"

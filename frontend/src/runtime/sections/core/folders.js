@@ -8,14 +8,15 @@
    core.js shell — symbols share `window` scope so no exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-/* Bounded backoff retry for a failed FIRST folder load. loadFolders() has no
- * caller-side retry (it runs once at boot), so without this a transient fetch
- * failure permanently hides the folder rail until the next full page reload.
+/* Bounded backoff retry for a failed FIRST folder load. Callers observe the
+ * rejection for diagnostics, while this owner keeps the recovery lifecycle so
+ * a transient fetch failure cannot hide the folder rail for the whole session.
  * The chain is self-cancelling: each attempt is a no-op once _foldersLoaded is
  * true (a success — from this retry, a create, or a cross-device push refresh —
  * flips it and the next scheduled tick returns early). */
 let _folderLoadRetryTimer = 0;
 let _folderLoadRetryAttempt = 0;
+let _folderLoadFlight = null;
 const _FOLDER_LOAD_RETRY_DELAYS = [1500, 4000, 10000, 30000];
 function _scheduleFolderLoadRetry() {
   if (_foldersLoaded) return;                       // already recovered
@@ -31,44 +32,48 @@ function _scheduleFolderLoadRetry() {
   }, delay);
 }
 
-async function loadFolders() {
-  /* Api.folders.list() is best-effort ({onError:'null'}): a transient network
-   * failure resolves to [] (empty array), NOT the real folder list. Adopting
-   * that empty result would blank every folder tab on a flaky connection even
-   * though the folders still exist server-side (the "folders missing on
-   * desktop" symptom). Distinguish a genuine empty list (200 → []) from a
-   * fetch failure by re-requesting with onError:'throw' when the first call
-   * came back empty, so a real error is caught instead of masquerading as
-   * "no folders". On error we keep whatever folders were already loaded. */
-  let list = await Api.folders.list();
-  if (Array.isArray(list) && list.length === 0) {
-    try {
-      const verified = await Api.get('/api/v1/folders');
-      if (Array.isArray(verified)) list = verified;
-    } catch (e) {
-      console.warn('[loadFolders] fetch failed — keeping current folders:', e.message);
-      if (_foldersLoaded) return _folders;   // preserve already-loaded tabs
-      list = null;                            // first load ever failed → leave unloaded
-      /* Self-heal: loadFolders() is called ONCE at boot (inside
-       *   initActiveTasks' Promise.all) and the boot-reconnect loop only
-       *   re-runs the CONVERSATION load — nothing re-fetches folders. So a
-       *   failed first load would hide the folder rail for the whole session
-       *   ("sidebar folder gone after refresh, only reappears on create").
-       *   Schedule a bounded backoff retry so folders recover on their own
-       *   once the transient fetch failure clears. Guarded by _foldersLoaded
-       *   so a later success (or a concurrent retry) cancels the chain. */
+function _clearFolderLoadRetry() {
+  if (_folderLoadRetryTimer) clearTimeout(_folderLoadRetryTimer);
+  _folderLoadRetryTimer = 0;
+  _folderLoadRetryAttempt = 0;
+}
+
+async function _loadFoldersOnce() {
+  try {
+    // Api.folders.list preserves the distinction between a valid [] and a
+    // failed response. One request is therefore sufficient even when the user
+    // genuinely has no folders; failure keeps the last good projection.
+    const list = await Api.folders.list();
+    if (!Array.isArray(list)) throw new Error('invalid folder list');
+    _folders = list;
+  } catch (e) {
+    console.warn('[loadFolders] fetch failed — keeping current folders:', e.message);
+    if (!_foldersLoaded) {
+      /* First load failed: the sidebar stays fail-open and this existing
+       * bounded chain heals it after connectivity returns. */
       _scheduleFolderLoadRetry();
     }
+    throw e;
   }
-  if (Array.isArray(list)) _folders = list;
-  else return _folders;   // fetch failed before first success — don't mark loaded
   _foldersLoaded = true;
+  _clearFolderLoadRetry();
   /* Trigger sidebar re-render so folder tabs appear immediately.
    *   On init, loadFolders() runs in parallel with loadConversationCatalog().
    *   If conversations arrived first, the sidebar rendered with foldersReady=false
    *   (hiding foldered convs). Now that folders are ready, re-render to show them. */
   if (typeof renderConversationList === 'function') renderConversationList();
   return _folders;
+}
+
+function loadFolders() {
+  if (_folderLoadFlight) return _folderLoadFlight;
+  const flight = _loadFoldersOnce();
+  _folderLoadFlight = flight;
+  const release = () => {
+    if (_folderLoadFlight === flight) _folderLoadFlight = null;
+  };
+  flight.then(release, release);
+  return flight;
 }
 
 async function createFolder(name, color) {
@@ -153,7 +158,7 @@ function setConversationFolder(convId, folderId) {
   const c = getConvById(convId);
   if (!c) return;
   c.folderId = folderId || null;
-  saveConversations(null);  // null = metadata-only, don't bump updatedAt
+  reconcileConversationCatalogMetadata(null);
   renderConversationList();
   /* Folder assignment is settings-plane data. Persist it through the
    * lightweight PATCH endpoint; transcript state is never involved. */
@@ -259,7 +264,7 @@ async function _migratePinnedToFolder() {
       .catch(e => console.warn('[Folders] Migration PATCH failed:', e.message));
     ConvCache.put(c);
   }
-  saveConversations(null);
+  reconcileConversationCatalogMetadata(null);
   renderConversationList();
   console.info('[Folders] Migrated %d pinned conversations to "⭐ 置顶" folder', pinnedConvs.length);
 }

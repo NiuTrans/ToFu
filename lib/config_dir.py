@@ -4,7 +4,9 @@ All persistent config lives in ``<project>/data/config/`` so that
 multiple copies of Tofu on the same machine stay fully isolated.
 
 Contents:
-  data/config/server_config.json  — providers, models, presets, search
+  data/config/server_config.json  — legacy-compatible miscellaneous settings,
+                                     presets, and search configuration; model
+                                     routing authority lives in its v2 store
   data/config/features.json       — feature flags (trading_enabled etc.)
   data/config/daily_reports/      — daily task reports
   data/config/.first_run_token    — plaintext bootstrap admin token (0600)

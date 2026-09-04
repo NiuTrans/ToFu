@@ -44,8 +44,9 @@ def test_standalone_run_command_plain_ls_uses_bounded_directory_reader(tmp_path)
     (tmp_path / 'pkg').mkdir()
     result = execute_standalone_command(
         'run_command', {'command': 'ls -lh .'}, working_dir=str(tmp_path))
-    assert result.startswith('Directory: .')
+    assert result.startswith('$ ls -lh .\nDirectory: .')
     assert 'sample.py' in result and 'pkg/' in result
+    assert result.rstrip().endswith('[exit code: 0]')
 
     file_result = execute_standalone_command(
         'run_command', {'command': 'ls sample.py'},
@@ -63,6 +64,8 @@ def test_standalone_ls_fast_path_keeps_shell_visible_entries(tmp_path):
 
     normal = execute_standalone_command(
         'run_command', {'command': 'ls .'}, working_dir=str(tmp_path))
+    assert normal.startswith('$ ls .\n')
+    assert normal.rstrip().endswith('[exit code: 0]')
     assert 'node_modules/' in normal
     assert 'link.txt [symlink]' in normal
     assert '.hidden.txt' not in normal
@@ -130,6 +133,8 @@ def test_standalone_find_fast_path_preserves_hidden_ignore_and_case(tmp_path):
         {'command': "find . -type f -name '*.py'"},
         working_dir=str(tmp_path),
     )
+    assert sensitive.startswith("$ find . -type f -name '*.py'\n")
+    assert sensitive.rstrip().endswith('[exit code: 0]')
     assert './lower.py' in sensitive
     assert './.hidden.py' in sensitive
     assert './node_modules/dependency.py' in sensitive
@@ -147,8 +152,67 @@ def test_standalone_find_fast_path_preserves_hidden_ignore_and_case(tmp_path):
         {'command': 'find lower.py -type f'},
         working_dir=str(tmp_path),
     )
-    assert 'lower.py' in file_operand.splitlines()
-    assert '[exit code: 0]' in file_operand
+@pytest.mark.unit
+def test_run_command_fast_path_meta_classifies_as_executed(tmp_path):
+    """ls/find fast-paths must not look like a pre-execution refusal.
+
+    Regression pin for the "not run" misclassification: the bounded-reader
+    result used to go out without the [exit code: N] marker, and both
+    lib/tools/meta.py and the task handler read a missing marker as
+    "refused/blocked before it ran" — a successful listing rendered as an
+    amber not-run card with the full payload pinned open as the reason.
+    """
+    from lib.tools.meta import build_project_tool_meta
+
+    (tmp_path / 'sample.py').write_text('print(1)\n', encoding='utf-8')
+    content = execute_standalone_command(
+        'run_command', {'command': 'ls .'}, working_dir=str(tmp_path))
+    meta = build_project_tool_meta(
+        'run_command', {'command': 'ls .'}, content)
+    assert meta['exitCode'] == '0'
+    assert meta.get('notRun') is not True
+    assert meta['badge'] == 'done'
+    assert 'sample.py' in meta['output']
+
+    find_content = execute_standalone_command(
+        'run_command', {'command': "find . -type f -name '*.py'"},
+        working_dir=str(tmp_path))
+    find_meta = build_project_tool_meta(
+        'run_command', {'command': "find . -type f -name '*.py'"},
+        find_content)
+    assert find_meta['exitCode'] == '0'
+    assert find_meta.get('notRun') is not True
+    assert './sample.py' in find_meta['output']
+
+
+@pytest.mark.unit
+def test_fast_path_command_result_marks_reader_failures_nonzero():
+    from lib.project_mod.tools import _fast_path_command_result
+
+    for failure in ('Unable to list directory: x',
+                    'Not a directory: x',
+                    "find: 'x': No such directory"):
+        assert _fast_path_command_result('ls x', failure).rstrip().endswith(
+            '[exit code: 1]'), failure
+    ok = _fast_path_command_result(
+        'ls .', 'Directory: .\n\nFiles:\n  a.py (1L, 2B)')
+    assert ok == '$ ls .\nDirectory: .\n\nFiles:\n  a.py (1L, 2B)\n\n[exit code: 0]'
+    # find with no matches prints nothing and still exits 0.
+    assert _fast_path_command_result('find .', '') == (
+        '$ find .\n\n[exit code: 0]')
+
+
+@pytest.mark.unit
+def test_fast_path_gate_declines_unreadable_directory(tmp_path, monkeypatch):
+    """A permission-denied target keeps the real shell (truthful exit/stderr)."""
+    import os
+
+    from lib.project_mod import tools as project_tools
+
+    monkeypatch.setattr(os, 'access', lambda _path, _mode: False)
+    assert project_tools._bounded_directory_fast_path_available(
+        str(tmp_path), '.') is False
+
 
 # ═══════════════════════════════════════════════════════════
 #  _clean_command_output — progress bar compression
@@ -714,6 +778,50 @@ class TestLargeFileRangeRead:
         r = _read_project_file(d, 'big.txt', 96)
         assert 'File too large' not in r
         assert 'line-00000095' in r
+
+    def test_small_project_file_explicit_range_is_never_widened(self, tmp_path):
+        """Incident mtc6xp7kka0hls: changed ranges returned one full file."""
+        from lib.project_mod.read_tools import tool_read_files
+
+        path = tmp_path / 'small.txt'
+        path.write_text(''.join(
+            f'LINE_{line:04d} value\n' for line in range(1, 401)),
+            encoding='utf-8')
+        assert path.stat().st_size < 40_000
+
+        relative = tool_read_files(str(tmp_path), [{
+            'path': 'small.txt', 'start_line': 130, 'end_line': 260,
+        }])
+        absolute = tool_read_files(str(tmp_path), [{
+            'path': str(path), 'start_line': 130, 'end_line': 260,
+        }])
+
+        for result in (relative, absolute):
+            assert 'lines 130-260 of 400' in result
+            assert 'LINE_0130' in result and 'LINE_0260' in result
+            assert 'LINE_0129' not in result and 'LINE_0261' not in result
+
+    def test_invalid_explicit_range_never_degrades_to_whole_file(self, tmp_path):
+        from lib.project_mod.read_tools import tool_read_files
+
+        path = tmp_path / 'small.txt'
+        path.write_text('SECRET_FIRST_LINE\nsecond\n', encoding='utf-8')
+        for invalid in (0, -1, False, 'not-a-line'):
+            result = tool_read_files(str(tmp_path), [{
+                'path': 'small.txt', 'start_line': invalid,
+            }])
+            assert 'must be a positive 1-based integer' in result
+            assert 'SECRET_FIRST_LINE' not in result
+
+    def test_read_files_schema_rejects_non_positive_bounds(self):
+        from lib.tools.project import READ_FILES_TOOL
+
+        properties = READ_FILES_TOOL['function']['parameters']['properties']
+        assert properties['start_line']['minimum'] == 1
+        assert properties['end_line']['minimum'] == 1
+        item_properties = properties['reads']['items']['properties']
+        assert item_properties['start_line']['minimum'] == 1
+        assert item_properties['end_line']['minimum'] == 1
 
 
 # ═══════════════════════════════════════════════════════════

@@ -23,6 +23,7 @@ export function createTransientStatusTurn(
   const timestamp = input.timestamp ?? Date.now();
   return {
     turnId: input.turnId,
+    presentationId: input.turnId,
     conversationId: input.conversationId,
     laneId: 'main',
     parentTurnId: null,

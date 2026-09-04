@@ -244,6 +244,7 @@ def test_the_analyser_re_drives_the_loop_and_appends_the_nudge():
     assert messages[-2]['content'] == _STALL_TEXT
     assert messages[-1]['role'] == 'user'
     assert messages[-1]['content'] == NUDGE_TEXT
+    assert messages[-1]['_isMeta'] is True
     assert task['_intent_stall_nudge_count'] == 1
 
 

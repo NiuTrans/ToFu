@@ -212,6 +212,29 @@ def test_enqueue_empty_task_id_is_silent_noop():
     assert agent_inbox.drain('') == []
 
 
+def test_durable_commit_precedes_inbox_visibility_and_tombstone_skips_commit():
+    observed_depths = []
+
+    def commit():
+        observed_depths.append(len(agent_inbox._inboxes.get('t1', [])))
+        return {'revision': 2}
+
+    accepted, result = agent_inbox.enqueue_after_durable_commit(
+        't1', 'steer', commit, priority='next', mode='user-steer')
+    assert accepted is True
+    assert result == {'revision': 2}
+    assert observed_depths == [0]
+    assert agent_inbox.peek('t1') == 1
+
+    agent_inbox.clear('closed')
+    committed = []
+    accepted, result = agent_inbox.enqueue_after_durable_commit(
+        'closed', 'late', lambda: committed.append(True), mode='user-steer')
+    assert accepted is False
+    assert result is None
+    assert committed == []
+
+
 # ── format_swarm_update payload ──────────────────────────────
 
 def test_format_swarm_update_basic_shape():

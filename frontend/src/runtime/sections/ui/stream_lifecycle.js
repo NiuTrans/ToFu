@@ -30,7 +30,7 @@ function _retriggerHgTranslations(convId) {
       && Array.isArray(turn.projection?.toolRounds),
   );
   for (const r of assistantTurn?.projection?.toolRounds || []) {
-    const presentation = runtimeScope.HumanGuidancePresentation?.read?.(
+    const presentation = humanGuidancePresentation.read(
       convId, r.guidanceId || '',
     );
     if (r.status === 'awaiting_human' && r.guidanceQuestion
@@ -69,7 +69,7 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
   if (!guidanceId) return;
 
   // Mark as translating (shows spinner in the card)
-  runtimeScope.HumanGuidancePresentation?.patch?.(
+  humanGuidancePresentation.patch(
     convId, guidanceId, { translating: true },
   );
 
@@ -121,7 +121,7 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
         });
       }
     }
-    runtimeScope.HumanGuidancePresentation?.patch?.(convId, guidanceId, {
+    humanGuidancePresentation.patch(convId, guidanceId, {
       translating: false,
       translatedQuestion,
       translatedOptions,
@@ -131,7 +131,7 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
       `question: ${question.length}→${translatedQuestion.length} chars`);
   } catch (e) {
     console.warn(`[HG-Translate] Translation failed: ${e.message} — showing original`);
-    runtimeScope.HumanGuidancePresentation?.patch?.(
+    humanGuidancePresentation.patch(
       convId, guidanceId, { translating: false },
     );
   }

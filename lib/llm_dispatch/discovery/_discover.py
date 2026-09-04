@@ -124,7 +124,7 @@ def discover_models(base_url: str, api_key: str,
             service. All other failures stay WARNING.
 
     Returns:
-        List of model dicts suitable for server_config providers.models:
+        List of model discovery facts suitable for the v2 Offering importer:
         ``[{'model_id': str, 'aliases': [], 'capabilities': [...],
             'rpm': int, 'cost': float, 'thinking_default': bool}, ...]``
         Empty list on any failure. With ``return_effective=True`` a

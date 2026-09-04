@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 # floor. Covers CJK full-width terminators + Latin sentence enders + closing
 # brackets/quotes/fences a complete segment can legitimately end on.
 _SENTENCE_END_CHARS = frozenset(
-    '。．.！!？?…～~：:；;、,，)）]】》」』”"\'`’*_>')
+    '。．.！!？?…～~：:；;、,，)）]】》」』”"\'`’*_>⟧')
 
 
 def _ends_midsentence(text: str) -> bool:

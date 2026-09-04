@@ -37,7 +37,7 @@ class SupervisorUrlTest {
     @Test
     fun status_endpoint_encodes_project_path_query() {
         val su = SupervisorUrl("https://h.example/proxy/15001", "https://h.example")
-        val url = SupervisorUrl.endpoint(su, SupervisorUrl.STATUS, "/home/dev/chatui")
+        val url = SupervisorUrl.endpoint(su, SupervisorUrl.STATUS, "/home/dev/tofu")
         assertEquals(
             "https://h.example/proxy/15001/status?projectPath=%2Fhome%2Fdev%2Fchatui", url,
         )

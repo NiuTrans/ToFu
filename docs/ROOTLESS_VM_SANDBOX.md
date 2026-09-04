@@ -219,7 +219,7 @@ python -m rootless_vm run \
   --state-root /private/rootless-vm-state \
   --cache-root /private/rootless-vm-cache \
   --jobs-dir /private/rootless-vm-jobs \
-  --model deepseek-v4-flash-meituan
+  --model deepseek-v4-flash
 ```
 
 The launcher creates state/cache/jobs roots at mode 0700, fixes concurrency at
@@ -372,7 +372,7 @@ python scripts/rootless_terminal_bench_21.py write-config \
   --egress-global-concurrency 16 \
   --max-retries 0 \
   --harness deepseek-minimal \
-  --model deepseek-v4-flash-meituan \
+  --model deepseek-v4-flash \
   --reasoning-effort max \
   --temperature 1 \
   --top-p 0.95 \
@@ -579,7 +579,7 @@ are known; cheap representative smoke checks are used during iteration, with a
 single full-scale validation reserved for the final artifact.
 
 Two unrelated Terminal-Bench 2.1 tasks were exercised offline end to end with Harbor,
-Tofu's Friday/Meituan provider, and `deepseek-v4-flash-meituan`:
+Tofu's internal corp-gateway provider, and `deepseek-v4-flash`:
 
 - `regex-log`, image registry digest
   `sha256:90101b2e815323a8da20528a1439bebc407eb9761c9c68a3d557730856c878e9`;
@@ -629,8 +629,8 @@ installation, uv 0.9.5 download, pytest 8.4.1 download, and official assertion:
 | Host-confined runc + Oracle | 26.46 s | 1.30 s | 192.56 s | 1.0 |
 | Host-confined runc + DeepSeek | 26.26 s | 165.52 s | 187.95 s | 1.0 |
 
-The final host-confined model trial used the project's Friday/Meituan provider
-and `deepseek-v4-flash-meituan`: 6 rounds, 22,326 input tokens, 11,454 output
+The final host-confined model trial used the project's internal corp-gateway provider
+and `deepseek-v4-flash`: 6 rounds, 22,326 input tokens, 11,454 output
 tokens, no recovery reset, and 159.98 seconds of provider latency. The key
 remained host-only. The entire run used local QEMU TCG; the only remote
 services were the explicitly allowed model API and public package endpoints,

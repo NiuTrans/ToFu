@@ -36,10 +36,10 @@ PRICING_TIERS: list[tuple[str, float, float]] = [
 # Never put operational capability tags (text / vision / thinking / …) here.
 MANAGED_TIER_TAGS: frozenset[str] = frozenset(tag for tag, *_ in PRICING_TIERS)
 
-# Caps that indicate a non-chat model — pricing tier tags never apply.
-# Must list EVERY non-chat cap: a stray managed tag (e.g. 'cheap') on a non-chat
-# slot makes {transcription, cheap} no longer a subset of the dispatcher's
-# _NON_CHAT_CAPS, so the slot leaks into the chat picker (and 404s). Single
+# Caps that indicate a non-chat model — pricing tier tags never apply. Any
+# stale managed tags are actively removed from these models so persisted
+# catalogue data cannot misrepresent cost metadata as chat protocol support.
+# Single
 # source of truth is lib.model_info.capability_taxonomy — this alias imports
 # the dispatcher-shaped set (includes 'audio_chat', which matters for the
 # subset check above). Keep debug/reeval_pricing_tags.py skip-sets in sync.
@@ -159,8 +159,8 @@ def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict
     matches the desired set.  Non-tier capabilities (text / vision /
     thinking / image_gen / embedding / …) are left untouched.
 
-    Skips non-chat models (image_gen / embedding in caps) entirely —
-    their caps lists stay as-is.
+    Non-chat models (image_gen / embedding / audio-only caps) keep their
+    operational capabilities but lose any stale managed pricing tags.
 
     Args:
         models: List of model dicts with at least ``model_id`` and
@@ -185,8 +185,17 @@ def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict
         caps_raw = m.get('capabilities') or []
         caps = set(caps_raw) if isinstance(caps_raw, (list, set, tuple)) else {'text'}
 
-        # Skip non-chat models — tier tags don't apply.
+        # Non-chat models never carry pricing tiers. Merely skipping them
+        # preserves stale tags from older catalogues; strip those tags so a
+        # persisted {embedding, cheap} record cannot leak into chat routing.
         if caps & _NON_CHAT_CAPS:
+            stale_tier_tags = caps & MANAGED_TIER_TAGS
+            if stale_tier_tags:
+                for tag in stale_tier_tags:
+                    caps.discard(tag)
+                    removed[tag] += 1
+                m['capabilities'] = sorted(caps)
+                changed += 1
             continue
 
         desired = get_pricing_tiers(

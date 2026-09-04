@@ -14,12 +14,38 @@ pageType: cover          # cover | table_of_contents | chapter | content | final
 background:              # solid | gradient | image
   type: solid
   color: "$bg"
-elements:
+elements:                 # may be empty when semantic components are present
   - elementId: <unique-id>
-    elementType: text|shape|line|image|icon|table
+    elementType: text|shape|line|image|icon|table|chart
     bounds: [x, y, w, h]
     ...
 ```
+
+## semantic components (preferred for recurring information structures)
+
+Components expand to ordinary editable text/shape/line elements before render
+and export. Use a component instead of manually rebuilding one of these groups;
+`elements` and `components` may coexist.
+
+```yaml
+components:
+  - componentId: north-star
+    componentType: metric       # metric | quote | comparison | timeline | process | code
+    bounds: [72, 160, 520, 360]
+    value: "37%"
+    label: "转化率提升"
+    support: "来自同口径 A/B 样本，而非装饰性大数字"
+    source: "Source: example.com"
+
+  - componentId: decision
+    componentType: comparison
+    bounds: [620, 160, 588, 360]
+    left: {heading: "方案 A", points: ["低迁移成本", "上限较低"]}
+    right: {heading: "方案 B", points: ["能力完整", "需一次迁移"]}
+```
+
+`quote` uses `quote` + `attribution`; `timeline`/`process` use 2..6
+`items: [{label, detail}]`; `code` uses `title`/`language` + `code`.
 
 ## text
 
@@ -119,13 +145,13 @@ elements:
       - {text: "96.3", rowSpan: 1, colSpan: 1, fill: {type: solid, color: "$accent"}}
 ```
 
-## chart (bar/column/line/pie — native chart in the PPTX)
+## chart (native, editable chart in the PPTX)
 
 ```yaml
 - elementId: sales
   elementType: chart
   bounds: [80, 140, 600, 380]
-  chartType: column             # column | bar(horizontal) | line | pie
+  chartType: column             # column | bar | line | pie | area | doughnut | radar
   data:
     categories: [Q1, Q2, Q3, Q4]
     series:
@@ -147,7 +173,7 @@ elements:
    Text boxes default to `fit: shrink`; do not use `resize` when later content
    depends on the box boundary.
 5. `columnWidths`/`rowHeights` sum to 1 (±0.02), one rowHeights entry per row.
-6. Charts use the `chart` element (bar/column/line/pie); complex
+6. Charts use the `chart` element (bar/column/line/pie/area/doughnut/radar); complex
    structural diagrams are still built from shapes/lines.
 7. Every callout line/arrow/dot must terminate on a clearly visible image
    feature that proves its label. If the exact target is uncertain, omit the

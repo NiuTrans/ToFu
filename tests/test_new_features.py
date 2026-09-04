@@ -257,6 +257,10 @@ class TestAttachments:
         assert '- [x] Inspect the failure' in result[0]
         assert '- [ ] Implement the fix ⏳' in result[0]
         assert 'do not recreate or restart the plan' in result[0]
+        assert 'reuse each id exactly in later sync calls' in result[0]
+        assert 'id="inspect"' in result[0]
+        assert 'id="fix"' in result[0]
+        assert 'id="verify"' in result[0]
 
     def test_todo_restore_deduplicates_and_refreshes_stale_state(self):
         from lib.tasks_pkg.attachments import (compute_turn_attachments,

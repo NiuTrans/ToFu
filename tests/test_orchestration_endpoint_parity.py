@@ -13,13 +13,18 @@ import subprocess
 
 import pytest
 
-from tests._runtime_sections import orchestration_legacy_test_root
+from tests._runtime_sections import native_module_path
 
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
-LEGACY_ROOT = Path(orchestration_legacy_test_root())
 ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
+API_CLIENT_SOURCE = (
+    ROOT / 'frontend/src/features/orchestration/api-client.ts'
+)
+API_CLIENT_JS = Path(native_module_path(
+    '.native/orchestration-api-client-parity.js', API_CLIENT_SOURCE,
+))
 
 
 def _backend_contracts() -> set[tuple[str, str]]:
@@ -36,12 +41,8 @@ def _frontend_contracts() -> dict[str, tuple[str, str]]:
     script = r"""
 const fs=require('fs');
 global.window=global;
-eval(fs.readFileSync('static/js/api/orchestration-http-contract.generated.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-response-contracts.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-client-methods.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-endpoint-transport.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-endpoints.js','utf8'));
-const contracts=ApiOrchestrationEndpoints.contracts();
+eval(fs.readFileSync(process.argv[1],'utf8'));
+const contracts=orchestrationEndpointContracts();
 process.stdout.write(JSON.stringify(Object.fromEntries(
   Object.entries(contracts).map(([name,value])=>[
     name,[value.method,value.route],
@@ -49,8 +50,8 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
 )));
 """
     result = subprocess.run(
-        ['node', '-e', script],
-        cwd=LEGACY_ROOT,
+        ['node', '-e', script, str(API_CLIENT_JS)],
+        cwd=ROOT,
         capture_output=True,
         text=True,
         timeout=30,
@@ -230,39 +231,27 @@ def test_response_required_fields_derive_from_owned_openapi_schemas():
     }
 
 
-def test_generated_classic_and_native_endpoint_policies_are_current():
+def test_generated_typed_endpoint_policy_is_current():
     from scripts.gen_orchestration_http_contract import (
-        METHOD_OUTPUT,
-        OUTPUT,
-        RESPONSE_OUTPUT,
         TYPESCRIPT_OUTPUT,
-        render,
-        render_client_methods,
-        render_response_contracts,
         render_typescript,
     )
 
-    expected = {
-        OUTPUT: render(),
-        RESPONSE_OUTPUT: render_response_contracts(),
-        METHOD_OUTPUT: render_client_methods(),
-        TYPESCRIPT_OUTPUT: render_typescript(),
-    }
-    for path, content in expected.items():
-        assert Path(path).read_text(encoding='utf-8') == content
+    assert Path(TYPESCRIPT_OUTPUT).read_text(encoding='utf-8') == \
+        render_typescript()
 
 
 @pytest.mark.skipif(
     not shutil.which('node') or not ESBUILD.is_file(),
     reason='node + vite test bundler unavailable',
 )
-def test_native_request_registry_is_self_contained_and_matches_classic(
+def test_typed_request_registry_is_self_contained_and_matches_canonical(
     tmp_path,
 ):
     built = tmp_path / 'request-contract.js'
     compiled = subprocess.run(
         [str(ESBUILD),
-         'frontend/src/features/orchestration/request-contract.ts',
+         'frontend/src/features/orchestration/api-client.ts',
          '--bundle', '--format=cjs', '--platform=node',
          f'--outfile={built}'],
         cwd=ROOT, capture_output=True, text=True, timeout=30,
@@ -272,47 +261,35 @@ def test_native_request_registry_is_self_contained_and_matches_classic(
     script = r"""
 const fs=require('fs');global.window=global;
 const requestContracts=require(process.argv[1]);
-const native=requestContracts.ORCHESTRATION_REQUEST_CONTRACTS;
+const native=requestContracts.orchestrationEndpointContracts();
 const nativeSnapshot=JSON.parse(JSON.stringify(native));
 const nativeFrozen=Object.isFrozen(native)
   &&Object.values(native).every(value=>Object.isFrozen(value)
-    &&Object.isFrozen(value.responseRequiredFields));
-const nativeUnknown=requestContracts.orchestrationRequestContract('missing');
-eval(fs.readFileSync(
-  'static/js/api/orchestration-http-contract.generated.js','utf8'));
-eval(fs.readFileSync(
-  'static/js/api/orchestration-response-contracts.js','utf8'));
-eval(fs.readFileSync(
-  'static/js/api/orchestration-client-methods.js','utf8'));
-eval(fs.readFileSync(
-  'static/js/api/orchestration-endpoint-transport.js','utf8'));
-eval(fs.readFileSync(
-  'static/js/api/orchestration-endpoints.js','utf8'));
-const classic=Object.fromEntries(Object.entries(
-  ApiOrchestrationEndpoints.contracts()).map(([name,value])=>[name,{
-    resultMethod:value.resultMethod,
-    directMethod:value.directMethod,
-    optionName:value.optionName,
-    responseContract:value.responseContract,
-    responseRequiredFields:value.responseRequiredFields,
-  }]));
+    &&Object.isFrozen(value.responseRequiredFields)
+    &&['pathArgs','queryArgs','bodyArgs'].every(
+      field=>!value[field]||Object.isFrozen(value[field])));
+const nativeUnknown=requestContracts.orchestrationEndpointContract('missing');
 process.stdout.write(JSON.stringify({
-  native:nativeSnapshot,classic,nativeFrozen,nativeUnknown,
+  native:nativeSnapshot,nativeFrozen,nativeUnknown,
 }));
 """
     run = subprocess.run(
-        ['node', '-e', script, str(built)], cwd=LEGACY_ROOT,
+        ['node', '-e', script, str(built)], cwd=ROOT,
         capture_output=True, text=True, timeout=30,
     )
     assert run.returncode == 0, run.stderr
     result = json.loads(run.stdout)
-    assert result['native'] == result['classic']
+    from lib.orchestration.browser_endpoint_contract import (
+        orchestration_browser_request_contract_dicts,
+    )
+    assert result['native'] == \
+        orchestration_browser_request_contract_dicts()
     assert result['native']
     assert result['nativeFrozen'] is True
     assert result['nativeUnknown'] is None
 
     native_source = (
-        ROOT / 'frontend/src/features/orchestration/request-contract.ts'
+        ROOT / 'frontend/src/features/orchestration/api-client.ts'
     ).read_text()
     assert 'ApiOrchestrationEndpoints' not in native_source
     assert '_ORCHESTRATION_ENDPOINT_REGISTRY' not in native_source

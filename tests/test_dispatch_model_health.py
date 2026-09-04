@@ -221,6 +221,36 @@ def test_non_chat_models_never_get_tier_tags():
     assert models[0]['capabilities'] == ['embedding']
 
 
+def test_non_chat_pricing_refresh_strips_stale_tier_tags():
+    models = [{
+        'model_id': 'embedding-stale',
+        'capabilities': ['embedding', 'cheap'],
+        'pricing': {'input': 0.1, 'output': 0.1},
+    }]
+
+    result = reevaluate_pricing_tags(models)
+
+    assert models[0]['capabilities'] == ['embedding']
+    assert result['removed']['cheap'] == 1
+    assert result['changed'] == 1
+
+
+def test_stale_non_chat_tier_tag_cannot_enter_chat_dispatch():
+    slot = Slot(
+        key_name='key_0',
+        api_key='k',
+        model='text-embedding-stale',
+        capabilities={'embedding', 'cheap'},
+        provider_id='prov1',
+    )
+    dispatcher = _dispatcher_with([slot])
+
+    assert dispatcher._is_chat_compatible(slot) is False
+    assert dispatcher._pick(
+        'cheap', None, set(), set(), reserve=False,
+    ) is None
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Route shape — /api/v1/dispatch/model-health over the real app
 # ══════════════════════════════════════════════════════════════════════

@@ -7,17 +7,23 @@ This module is the only application-facing boundary for ``paper_reports``,
 explicit owner once and exchange typed values; SQL, JSON columns, operation
 names, and backend choices remain inside the storage Sidecar.
 
-Entry points: :class:`PaperArtifactRepository` and the immutable projection
-types below. Dependencies: ``lib.identity`` and ``lib.storage``.
+Entry points: :class:`PaperArtifactRepository`, :class:`PaperReportReopen`, and
+the immutable projection types below. Dependencies: ``lib.identity`` and
+``lib.storage``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from lib.identity import require_user_id
+from lib.paper.contracts import (
+    PAPER_FANIN_MAX_PAPERS,
+    PAPER_FANIN_MAX_TEXT_CHARS,
+    PAPER_REPORT_REOPEN_MAX_SIBLINGS,
+)
 
 
 StorageClientFactory = Callable[..., Any]
@@ -52,6 +58,33 @@ class PaperReport:
             meta=_document(value.get('meta')),
             created_at=int(value.get('created_at') or 0),
         )
+
+
+@dataclass(frozen=True)
+class PaperReportReopen:
+    """One resolved base report plus explicitly requested sibling artifacts."""
+
+    report: PaperReport | None
+    siblings: dict[str, PaperReport] = field(default_factory=dict)
+
+    @classmethod
+    def from_projection(cls, value: Mapping[str, Any]) -> 'PaperReportReopen':
+        report_value = value.get('report')
+        report = (
+            PaperReport.from_projection(report_value)
+            if isinstance(report_value, Mapping)
+            else None
+        )
+        siblings = {}
+        offered_siblings = value.get('siblings')
+        if isinstance(offered_siblings, list):
+            for offered in offered_siblings:
+                if not isinstance(offered, Mapping):
+                    continue
+                sibling = PaperReport.from_projection(offered)
+                if sibling.lang:
+                    siblings[sibling.lang] = sibling
+        return cls(report=report, siblings=siblings)
 
 
 @dataclass(frozen=True)
@@ -192,10 +225,143 @@ class PaperArtifactRepository:
         )
         return _document(result)
 
-    def get_report(self, paper_hash: str, lang: str) -> PaperReport | None:
-        row = self._query(
-            'paper.report.get', {'paper_hash': paper_hash, 'lang': lang})
+    def get_report(
+        self,
+        paper_hash: str,
+        lang: str,
+        *,
+        max_chars: int | None = None,
+    ) -> PaperReport | None:
+        """Read a report, optionally as a text-only server-side excerpt."""
+        payload: dict[str, Any] = {
+            'paper_hash': paper_hash,
+            'lang': lang,
+        }
+        if max_chars is not None:
+            if (
+                not isinstance(max_chars, int)
+                or isinstance(max_chars, bool)
+                or not 1 <= max_chars <= PAPER_FANIN_MAX_TEXT_CHARS
+            ):
+                raise ValueError(
+                    'paper report max_chars must be '
+                    f'1..{PAPER_FANIN_MAX_TEXT_CHARS}')
+            payload['max_report_chars'] = max_chars
+        row = self._query('paper.report.get', payload)
         return PaperReport.from_projection(row) if isinstance(row, Mapping) else None
+
+    def resolve_report(
+        self,
+        paper_hash: str,
+        preferred_lang: str,
+        fallback_lang: str | None = None,
+    ) -> PaperReport | None:
+        """Read the preferred report or one explicit fallback in one query."""
+        payload = {
+            'paper_hash': paper_hash,
+            'preferred_lang': preferred_lang,
+        }
+        if fallback_lang and fallback_lang != preferred_lang:
+            payload['fallback_lang'] = fallback_lang
+        row = self._query('paper.report.resolve', payload)
+        return PaperReport.from_projection(row) if isinstance(row, Mapping) else None
+
+    def reopen_report(
+        self,
+        paper_hash: str,
+        preferred_lang: str,
+        fallback_lang: str | None = None,
+        *,
+        sibling_langs_by_base: Mapping[str, Sequence[str]] | None = None,
+    ) -> PaperReportReopen:
+        """Resolve base + bounded sibling artifacts through one Sidecar query."""
+        if sibling_langs_by_base is not None and not isinstance(
+            sibling_langs_by_base, Mapping
+        ):
+            raise ValueError('paper report sibling groups must be a mapping')
+        allowed_base_langs = {preferred_lang}
+        if fallback_lang:
+            allowed_base_langs.add(fallback_lang)
+        normalized_groups = {}
+        sibling_count = 0
+        for base_lang, offered_siblings in (sibling_langs_by_base or {}).items():
+            if base_lang not in allowed_base_langs:
+                raise ValueError('paper report sibling group has an unknown base')
+            if isinstance(offered_siblings, str) or not isinstance(
+                offered_siblings, Sequence
+            ):
+                raise ValueError(
+                    'paper report sibling groups must contain sequences')
+            normalized_siblings = []
+            for offered in offered_siblings:
+                if not isinstance(offered, str) or not offered.strip():
+                    raise ValueError(
+                        'paper report sibling languages must be non-empty')
+                normalized = offered.strip()
+                if normalized not in normalized_siblings:
+                    normalized_siblings.append(normalized)
+            sibling_count += len(normalized_siblings)
+            if sibling_count > PAPER_REPORT_REOPEN_MAX_SIBLINGS:
+                raise ValueError(
+                    'paper report reopen requires at most '
+                    f'{PAPER_REPORT_REOPEN_MAX_SIBLINGS} sibling languages')
+            normalized_groups[base_lang] = normalized_siblings
+        payload = {
+            'paper_hash': paper_hash,
+            'preferred_lang': preferred_lang,
+            'sibling_langs_by_base': normalized_groups,
+        }
+        if fallback_lang and fallback_lang != preferred_lang:
+            payload['fallback_lang'] = fallback_lang
+        row = self._query('paper.report.reopen', payload)
+        return PaperReportReopen.from_projection(
+            row if isinstance(row, Mapping) else {})
+
+    def report_excerpts(
+        self,
+        paper_hashes,
+        lang: str,
+        *,
+        max_chars: int,
+    ) -> dict[str, PaperReport]:
+        """Read bounded text-only reports with one owner-scoped query."""
+        if (
+            not isinstance(max_chars, int)
+            or isinstance(max_chars, bool)
+            or not 1 <= max_chars <= PAPER_FANIN_MAX_TEXT_CHARS
+        ):
+            raise ValueError(
+                'paper report max_chars must be '
+                f'1..{PAPER_FANIN_MAX_TEXT_CHARS}')
+        normalized = []
+        seen = set()
+        for index, value in enumerate(paper_hashes or ()):
+            if index >= PAPER_FANIN_MAX_PAPERS:
+                raise ValueError(
+                    'paper report excerpts accept at most '
+                    f'{PAPER_FANIN_MAX_PAPERS} paper hashes')
+            if not isinstance(value, str):
+                raise ValueError('paper report hashes must be strings')
+            candidate = value.strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            normalized.append(candidate)
+        if not normalized:
+            return {}
+        rows = self._query('paper.report.excerpts', {
+            'paper_hashes': normalized,
+            'lang': lang,
+            'max_report_chars': max_chars,
+        }) or []
+        excerpts = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            report = PaperReport.from_projection(row)
+            if report.paper_hash:
+                excerpts.setdefault(report.paper_hash, report)
+        return excerpts
 
     def latest_report(self, paper_hash: str) -> PaperReport | None:
         row = self._query('paper.report.latest', {'paper_hash': paper_hash})

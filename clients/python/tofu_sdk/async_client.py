@@ -9,13 +9,19 @@ available without an SDK release.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import json
 import uuid
 from typing import Any, AsyncIterator, Optional
 
 import httpx
 
-from . import TofuError, __version__
+from . import (
+    TofuError,
+    __version__,
+    _native_agent_payload,
+    _native_model_payload,
+)
 
 
 def _error_body(response: httpx.Response) -> Any:
@@ -131,11 +137,16 @@ class AsyncTofu:
         return await self._json(
             'GET', '/api/v1/capabilities', retryable=True)
 
-    async def chat(self, *, messages: list, model: str = '',
+    async def chat(self, *, messages: list, model: Mapping[str, str],
+                   routing: Optional[dict] = None,
                    config: Optional[dict] = None, **extra) -> dict:
-        body = {'messages': messages, **extra}
-        if model:
-            body['model'] = model
+        body = {
+            'messages': messages,
+            'model': _native_model_payload(model),
+            **extra,
+        }
+        if routing:
+            body['routing'] = routing
         if config:
             body['config'] = config
         return await self._json(
@@ -232,23 +243,7 @@ class _AsyncAgentsAPI:
     def __init__(self, client: AsyncTofu) -> None:
         self._c = client
 
-    @staticmethod
-    def _body(*, messages: list, model: str = '',
-              provider: Optional[dict] = None,
-              config: Optional[dict] = None,
-              capabilities: Optional[dict] = None,
-              tools: Optional[list] = None,
-              trajectory: str = '', timeout_s: float = 600.0,
-              request_id: str = '', **extra) -> dict:
-        body: dict = {'messages': messages, 'timeout_s': timeout_s, **extra}
-        for key, value in (
-            ('model', model), ('provider', provider), ('config', config),
-            ('capabilities', capabilities), ('tools', tools),
-            ('trajectory', trajectory), ('id', request_id),
-        ):
-            if value:
-                body[key] = value
-        return body
+    _body = staticmethod(_native_agent_payload)
 
     async def run(self, *, idempotency_key: str = '', **params) -> dict:
         body = self._body(stream=False, **params)

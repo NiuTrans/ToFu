@@ -26,8 +26,8 @@ Review tabs:
 DB-free by construction: every endpoint is stubbed via the JS ``Api`` object;
 no ``server.app``, no Postgres/SQLite bootstrap (respects the bare-CI rule).
 
-Negative-control (automated, source-level): a second test patches a COPY of
-paper-reader.js reverting step 4 to the old ``_generatePaperReport(false, view)``
+Negative-control (automated, source-level): a second test patches a COPY of the
+typed owner, reverting the terminal prompt to ``_generatePaperReport(false, view)``
 auto-start, and asserts the harness then FAILS the no-autostart / button-present
 checks. The shipped file is never modified.
 
@@ -43,15 +43,15 @@ import subprocess
 import pytest
 
 from tests._paper_vite import compiled_typescript
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root, shipped_source_text
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-# _loadOrGenerateReport / _renderReportStartPrompt moved to paper/report.js
-# (Epic E split, 2026-07-11); paper-reader.js keeps _reportView + shared helpers.
+# The typed report owner owns reopen/manual-start policy; retained sections keep
+# the _reportView adapter and report renderers.
 REPORT_JS = os.path.join(JS_DIR, 'paper', 'report.js')
 CORE_JS = os.path.join(JS_DIR, 'paper-reader.js')
 PAPER_JS = REPORT_JS  # the file under test (holds the step-4 marker)
@@ -90,10 +90,11 @@ win.t = global.t = (k) => k;
 
 // ── Spy-able Api surface. reportStart IS the /api/paper/report/start POST. ──
 // Clean MISS: no running task (lookup ok:false), no DB cache (cache ok:false).
-const calls = { start: [], cache: 0, lookup: 0 };
+const calls = { start: [], cache: 0, lookup: 0, resolve: 0 };
 global.Api = win.Api = { paper: {
   libraryList: async () => ({ ok: true, papers: [{ id: 'paper-1', title: 'Test Paper', paperHash: 'phash-1' }] }),
   reportLookup: async () => { calls.lookup++; return { ok: false }; },
+  reportResolve: async () => { calls.resolve++; return { ok: false }; },
   reportCache:  async () => { calls.cache++;  return { ok: false }; },
   reportStart:  async (body) => { calls.start.push(body); return { ok: true, task_id: 'gen_1', paper_hash: 'phash-1' }; },
   reportPoll:   async () => ({ ok: true, status: 'done', report: 'GENERATED', next_cursor: 0, events: [] }),
@@ -102,6 +103,7 @@ global.Api = win.Api = { paper: {
 
 localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
+localStorage.setItem('tofu_ui_lang', 'en');
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (report/review fns)
 if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
@@ -116,8 +118,8 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 // Stub the few helpers that touch unrelated subsystems (skeleton/toolbar/model
 // dropdown/persist). We deliberately do NOT stub _renderReportStartPrompt —
 // that is the function under test.
-_saveActivePaperState = () => {};
-_getActivePaperEntry = () => null;
+_saveActivePaperState = win._saveActivePaperState = () => {};
+_getActivePaperEntry = win._getActivePaperEntry = () => null;
 _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
 _syncReportToolbar = () => {};
 _populatePaperReportModelDropdown = () => {};
@@ -143,10 +145,11 @@ function reportBtn(id) {
   _paperReviewModel = 'some-model';
   _paperReviewVenue = 'neurips';
   _activePaperId = 'paper-1';
+  win._activePaperId = _activePaperId;
   _i18nLang = 'en';
 
   // ══════════════════ REPORT tab ══════════════════
-  calls.start.length = 0; calls.cache = 0; calls.lookup = 0;
+  calls.start.length = 0; calls.cache = 0; calls.lookup = 0; calls.resolve = 0;
   await _loadOrGenerateReport();                       // == _reportView('report')
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 0)); }
 
@@ -155,13 +158,11 @@ function reportBtn(id) {
   // The manual-start affordance is present + correctly wired.
   const rbtn = reportBtn('paperReportContent');
   check('report_button_present', !!rbtn);
-  check('report_button_wired', !!rbtn && rbtn.getAttribute('onclick') === '_generatePaperReport()');
-  // Steps 1-3 still ran (we exercised the real loader, not a short-circuit).
-  // cache is consulted TWICE on a clean miss: once for the active language,
-  // then step 3.5 probes the OTHER report language before falling through to
-  // the Generate prompt (so a report generated in the other language is shown
-  // instead of the manual trigger). Both miss here → Generate prompt renders.
-  check('report_lookup_and_cache_consulted', calls.lookup === 1 && calls.cache === 2);
+  check('report_button_wired', !!rbtn
+        && rbtn.getAttribute('data-tofu-action') === '_generatePaperReport()');
+  // Live-task + preferred/fallback cache resolution is one fused request.
+  check('report_open_uses_one_fused_resolve',
+        calls.resolve === 1 && calls.lookup === 0 && calls.cache === 0);
 
   // Clicking Generate (invoking the wired fn) DOES start — proving the manual
   // path works AND that the no-start assertion above can distinguish states.
@@ -171,7 +172,7 @@ function reportBtn(id) {
         calls.start.length === 1 && calls.start[0].lang === 'en');
 
   // ══════════════════ REVIEW tab ══════════════════
-  calls.start.length = 0; calls.cache = 0; calls.lookup = 0;
+  calls.start.length = 0; calls.cache = 0; calls.lookup = 0; calls.resolve = 0;
   _paperReviewStream = null; _paperReviewCache = '';
   await _loadOrGenerateReport(_reportView('review'));
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 0)); }
@@ -179,7 +180,10 @@ function reportBtn(id) {
   check('review_open_no_start', calls.start.length === 0);
   const vbtn = reportBtn('paperReviewContent');
   check('review_button_present', !!vbtn);
-  check('review_button_wired', !!vbtn && vbtn.getAttribute('onclick') === '_generatePaperReview()');
+  check('review_button_wired', !!vbtn
+        && vbtn.getAttribute('data-tofu-action') === '_generatePaperReview()');
+  check('review_open_uses_one_fused_resolve',
+        calls.resolve === 1 && calls.lookup === 0 && calls.cache === 0);
 
   await _generatePaperReview();
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 0)); }
@@ -193,12 +197,20 @@ function reportBtn(id) {
 """
 
 
-def _run_harness(report_js: str, core_js: str = CORE_JS) -> subprocess.CompletedProcess:
+def _run_harness(
+    report_js: str,
+    core_js: str = CORE_JS,
+    runtime_contents: str | None = None,
+) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_paper_no_autostart_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:
-        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+        with compiled_typescript(
+            REPORT_RUNTIME_TS,
+            contents=runtime_contents,
+            expose_feature_registry_to_window=True,
+        ) as runtime_js:
             return subprocess.run(
                 ['node', harness, report_js, ROOT, core_js, runtime_js],
                 capture_output=True, text=True, timeout=60,
@@ -218,7 +230,7 @@ def test_report_and_review_tab_open_does_not_autostart():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'paper no-autostart failures:\n' + out
-    assert out.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{out}'
+    assert out.count('PASS') >= 10, f'expected >=10 PASS lines, got:\n{out}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),
@@ -226,48 +238,34 @@ def test_report_and_review_tab_open_does_not_autostart():
 def test_source_level_negative_control_step4_autostart_reintroduces_bug():
     """Revert step 4 to the old auto-start and prove the guard FAILS.
 
-    We patch a COPY of paper-reader.js so ``_loadOrGenerateReport`` step 4
+    We patch a COPY of the typed report owner so ``loadOrGenerateReport``
     calls ``_generatePaperReport(false, view)`` again (the pre-fix auto-start)
-    instead of ``_renderReportStartPrompt(view)``. The harness must then FAIL
+    instead of ``renderReportStartPrompt(view)``. The harness must then FAIL
     the no-autostart + button-present checks. The shipped file is untouched.
     """
-    src = open(PAPER_JS, encoding='utf-8').read()
+    src = shipped_source_text('frontend/src/features/paper/report-runtime.ts')
 
-    marker = (
-        "  if (_activePaperId !== startPaperId) return;\n"
-        "  _renderReportStartPrompt(view);\n"
-    )
+    marker = "  renderReportStartPrompt(view);\n}"
     assert marker in src, 'fix marker not found — test is stale, update the marker'
     broken = src.replace(
         marker,
-        "  if (_activePaperId !== startPaperId) return;\n"
-        "  _generatePaperReport(false, view);\n",
+        "  void globals()._generatePaperReport?.(false, view);\n}",
         1,
     )
     assert broken != src, 'negative-control patch was a no-op'
+    proc = _run_harness(PAPER_JS, runtime_contents=broken)
+    out = proc.stdout.strip()
+    assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
+    # Reverting to auto-start: the tab open fires /report/start and never
+    # renders the Generate button → these two checks MUST flip to FAIL.
+    assert 'FAIL report_open_no_start' in out, \
+        'reverting step 4 did NOT reintroduce auto-start — guard is non-load-bearing:\n' + out
+    assert 'FAIL report_button_present' in out, \
+        'reverting step 4 still rendered the Generate button — guard is non-load-bearing:\n' + out
 
-    tmp = os.path.join(HERE, '_paper_reader_autostart_revert.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        proc = _run_harness(tmp)
-        out = proc.stdout.strip()
-        assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
-        # Reverting to auto-start: the tab open fires /report/start and never
-        # renders the Generate button → these two checks MUST flip to FAIL.
-        assert 'FAIL report_open_no_start' in out, \
-            'reverting step 4 did NOT reintroduce auto-start — guard is non-load-bearing:\n' + out
-        assert 'FAIL report_button_present' in out, \
-            'reverting step 4 still rendered the Generate button — guard is non-load-bearing:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-    assert open(PAPER_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
+    assert shipped_source_text('frontend/src/features/paper/report-runtime.ts') == src, (
+        'typed report runtime was modified!'
+    )
 
 
 if __name__ == '__main__':

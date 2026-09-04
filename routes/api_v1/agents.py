@@ -49,7 +49,7 @@ from lib.request_parser import (
 )
 from lib.agent_core.task_runtime import TaskRuntime
 
-from .auth import request_user_id, require_scope
+from .auth import current_auth, request_user_id, require_scope
 
 logger = get_logger(__name__)
 
@@ -527,11 +527,15 @@ def image_gen():
                   '1024x1536': '9:16',
                   '1536x1024': '16:9'}.get(aspect, '1:1')
     try:
+        auth = current_auth()
         out = generate_image(
             prompt=prompt,
             model=body.get('model') or '',
             aspect_ratio=aspect,
             resolution=body.get('resolution') or '1K',
+            owner_user_id=int(request_user_id()),
+            tenant_id=auth.tenant_id if auth else None,
+            preferred_provider_id=str(body.get('provider_id') or ''),
         )
     except Exception as e:
         logger.exception('[api_v1.image-gen] failed')

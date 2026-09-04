@@ -61,6 +61,7 @@ __all__ = [
     'pool_probe_entries', 'pool_note_outcome', 'test_proxy_entry',
     'first_global_proxy_url', 'first_reachable_global_proxy_url',
     'global_proxy_failover_urls',
+    'global_egress_route_specs',
     'subscription_route_specs', 'subscription_route_candidates',
     'subscription_route_verdict', 'report_subscription_route',
 ]
@@ -276,7 +277,9 @@ _pool_lock = threading.Lock()
 _proxy_pool: list = []          # sanitized entries (persisted shape)
 _pool_health: dict = {}         # id → {fails, ewma_ms, samples, cooldown_until}
 _pool_choice: dict = {}         # host → entry id (report_outcome attribution)
-_cred_cache: dict = {}          # vault name → (value|None, fetched_at epoch)
+_cred_cache: dict = {}          # vault name → (value|None, fetched_at epoch); bounded by construction (keyed by pool-config vault names, cleared on pool update)
+_topology_lock = threading.Lock()
+_proxy_topology_epoch = 0       # non-secret cache-busting route identity
 
 
 def is_subscription_host(host: str) -> bool:
@@ -290,6 +293,9 @@ def _on_proxy_topology_changed() -> None:
     ``geo_blocked`` verdict kept misrouting subscription traffic to desktop
     agents for up to 300s after the proxy changed) and netpath's per-host
     proxy stats."""
+    global _proxy_topology_epoch
+    with _topology_lock:
+        _proxy_topology_epoch += 1
     try:
         from lib.desktop import egress as _eg
         _eg.invalidate_probe_cache()
@@ -613,6 +619,101 @@ def pool_probe_entries() -> list:
     return out
 
 
+def global_egress_route_specs(
+        url: str, *, include_bypassed: bool = False,
+        include_credentialed: bool = False, limit: int = 4) -> list:
+    """Return explicit direct/global-proxy routes eligible for ``url``.
+
+    This is the credential-preserving candidate boundary for consumers that
+    must compare routes before launching work.  It does not perform network
+    I/O. Credentialed pool rows are excluded by default because an arbitrary
+    shell is not an acceptable vault-consumer boundary. Trusted non-shell
+    callers may opt in explicitly; credentials then stay inside
+    :class:`Route` objects whose repr deliberately omits ``proxy_url``.
+
+    Normal HTTP callers should continue using :func:`proxies_for`.  The
+    ``include_bypassed`` escape is intentionally explicit: command egress can
+    treat ``NO_PROXY`` as the deployment's preferred path while testing a
+    configured global proxy, but local/loopback targets always remain direct.
+    """
+    from lib.subscription_routes import Route
+
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or '').lower()
+    except (TypeError, ValueError) as error:
+        logger.debug('[Proxy] route-spec URL parse failed: %s', error)
+        return []
+    if not host:
+        return []
+
+    direct = Route('direct', 'direct', 'direct', priority=0)
+    if host in _ALWAYS_BYPASS:
+        return [direct]
+    try:
+        address = ipaddress.ip_address(host)
+        if address.is_loopback or address.is_link_local:
+            return [direct]
+    except ValueError:
+        pass
+
+    bypassed = (
+        host in _registered_hosts
+        or _host_matches_bypass(host, _bypass_domains)
+    )
+    if bypassed and not include_bypassed:
+        return [direct]
+
+    try:
+        bounded_limit = max(1, min(8, int(limit)))
+    except (TypeError, ValueError):
+        bounded_limit = 4
+
+    with _pool_lock:
+        pool = [dict(entry) for entry in _proxy_pool
+                if entry.get('enabled')
+                and entry.get('scope') == _SCOPE_GLOBAL]
+    with _topology_lock:
+        topology_epoch = _proxy_topology_epoch
+
+    routes = [direct]
+    seen_proxy_urls = set()
+    for idx, entry in enumerate(_healthy_candidates(pool)):
+        if entry.get('credential_vault') and not include_credentialed:
+            continue
+        resolved = _resolve_entry(entry)
+        if not resolved or resolved in seen_proxy_urls:
+            continue
+        seen_proxy_urls.add(resolved)
+        pool_id = str(entry.get('id') or '')
+        routes.append(Route(
+            f'pool:{pool_id}:g{topology_epoch}',
+            'proxy ' + (str(entry.get('name') or pool_id) or '?'),
+            'proxy', priority=10 + idx, proxy_url=resolved,
+            pool_id=pool_id))
+        if len(routes) - 1 >= bounded_limit:
+            break
+
+    config = get_proxy_config()
+    scheme = (parsed.scheme or '').lower()
+    if scheme == 'http':
+        env_proxy = (config.get('http_proxy')
+                     or config.get('https_proxy') or '')
+    else:
+        # HTTPS and SSH both need an HTTP CONNECT-capable proxy.  Prefer the
+        # configured HTTPS route, with HTTP as the conventional fallback.
+        env_proxy = (config.get('https_proxy')
+                     or config.get('http_proxy') or '')
+    env_proxy = str(env_proxy or '').strip()
+    if env_proxy and env_proxy not in seen_proxy_urls \
+            and len(routes) - 1 < bounded_limit:
+        routes.append(Route(
+            f'proxy:environment:g{topology_epoch}',
+            'environment proxy', 'proxy',
+            priority=100, proxy_url=env_proxy))
+    return routes
+
+
 def subscription_route_specs(url: str) -> list:
     """Build every distinct server-side route eligible for ``url``.
 
@@ -813,7 +914,7 @@ _DEFAULT_REACH_PROBE_URL = 'https://pypi.org/simple/'
 #: re-probe the same endpoint. Negatives are NOT cached (they fail fast
 #: anyway, and an entry that recovers must be picked up immediately).
 _REACH_PROBE_TTL_S = 60.0
-_reach_probe_cache: dict = {}  # resolved url -> monotonic ts of last pass
+_reach_probe_cache: dict = {}  # resolved url -> monotonic ts of last pass; bounded by construction (keyed by pool entry URLs)
 
 
 def first_reachable_global_proxy_url(probe_url: str = '',

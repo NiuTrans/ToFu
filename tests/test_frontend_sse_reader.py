@@ -1,65 +1,51 @@
-"""Contract tests for the shared SSE read/decode/buffer primitive
-``static/js/core/sse_reader.js`` (``window.readSSEStream``).
-
-WHY
----
-The mechanical core of consuming an SSE fetch response — ``getReader()`` +
-``TextDecoder`` + ``buffer.split("\\n")`` + ``lines.pop()`` tail-buffering —
-was copy-pasted verbatim across THREE call sites:
-  * ``static/js/branch.js`` (branch stream)
-  * ``static/js/paper-reader.js`` (arXiv fetch stream)
-  * ``static/js/ui/sse_pipeline.js`` (main chat stream)
-
-``core/sse_reader.js`` extracts that loop as ``readSSEStream(response, opts)``
-with callback seams (``onLine`` for per-line semantics, ``onChunk`` /
-``afterChunk`` for the main-chat timer-touch + periodic-save hooks) so each
-site keeps its own fragile per-line logic while sharing the transport loop.
-
-These assertions lock the primitive's contract:
-  1. Complete ``\\n``-delimited lines are delivered to ``onLine`` in order.
-  2. A line split ACROSS two chunk boundaries is reassembled before delivery.
-  3. The trailing partial (no final ``\\n``) is flushed at stream end when
-     ``flushTail`` is true (branch + main-chat behavior), and NOT flushed when
-     ``flushTail`` is false (paper's exact pre-extraction behavior).
-  4. ``onLine`` returning a truthy value stops the loop early (the done signal).
-  5. ``onChunk`` fires once per chunk BEFORE decode; ``afterChunk`` fires once
-     per chunk AFTER the line loop (the two main-chat hooks).
-  6. The call resolves to the done boolean.
-
-Runs the REAL shipped JS under jsdom so it tracks the file. Skips cleanly when
-node + jsdom aren't installed.
-"""
+"""Typed SSE transport reader behavior and production ownership contracts."""
 
 from __future__ import annotations
 
-import os
+import json
+from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._runtime_sections import native_module_path
+
 
 pytestmark = pytest.mark.unit
+ROOT = Path(__file__).resolve().parents[1]
+OWNER = ROOT / 'frontend/src/core/sse-reader.ts'
+OWNER_BUNDLE = native_module_path('.native/sse-reader-contract.js', OWNER)
 
 
-_BODY = r"""
-const { setup } = require(process.env.JSDOM_HARNESS);
-const { check, report } = setup({
-  root: process.argv[3],
-  targets: [process.argv[2]],
-});
+def _run_node(script: str) -> str:
+    process = subprocess.run(
+        ['node', '-e', script], cwd=ROOT, capture_output=True, text=True,
+        timeout=60,
+    )
+    output = (process.stdout or '') + (process.stderr or '')
+    assert process.returncode == 0, output
+    return output
 
-// A fake fetch Response whose body.getReader() yields the given byte chunks
-// (strings, UTF-8 encoded) then {done:true}.
-const enc = new TextEncoder();
-function fakeResponse(chunks) {
-  let i = 0;
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node unavailable')
+def test_sse_reader_public_behavior():
+    script = r'''
+const fs = require('fs');
+eval(fs.readFileSync(OWNER_PATH, 'utf8'));
+const checks = [];
+const check = (name, value) => checks.push((value ? 'PASS ' : 'FAIL ') + name);
+const encoder = new TextEncoder();
+
+function responseFromBytes(chunks) {
+  let index = 0;
   return {
     body: {
       getReader() {
         return {
           read() {
-            if (i < chunks.length) {
-              return Promise.resolve({ done: false, value: enc.encode(chunks[i++]) });
+            if (index < chunks.length) {
+              return Promise.resolve({ done: false, value: chunks[index++] });
             }
             return Promise.resolve({ done: true, value: undefined });
           },
@@ -69,72 +55,88 @@ function fakeResponse(chunks) {
   };
 }
 
+function responseFromText(chunks) {
+  return responseFromBytes(chunks.map(chunk => encoder.encode(chunk)));
+}
+
 (async () => {
-  check('readSSEStream is defined', typeof readSSEStream === 'function');
-  if (typeof readSSEStream !== 'function') { report(); return; }
+  check('reader_is_public', typeof readSSEStream === 'function');
 
-  // 1 + 2: split-across-chunks reassembly + in-order complete-line delivery.
   {
-    const got = [];
-    // "data: a" and "data: b" — the first line is split across two chunks.
+    const lines = [];
     const done = await readSSEStream(
-      fakeResponse(['data: a\ndata: ', 'b\ndata: c\n']),
-      { onLine: (l) => { got.push(l); return false; } });
-    check('delivers complete lines in order',
-          got.join('|') === 'data: a|data: b|data: c');
-    check('non-done stream resolves false', done === false);
+      responseFromText(['data: a\ndata: ', 'b\ndata: c\n']),
+      { onLine: line => { lines.push(line); return false; } },
+    );
+    check('split_lines_are_reassembled_in_order',
+      lines.join('|') === 'data: a|data: b|data: c');
+    check('eof_without_signal_returns_false', done === false);
   }
 
-  // 3a: flushTail default true → trailing partial (no final \n) is delivered.
   {
-    const got = [];
-    await readSSEStream(fakeResponse(['data: a\ndata: tail']),
-      { onLine: (l) => { got.push(l); return false; } });
-    check('flushTail default delivers trailing partial',
-          got.length === 2 && got[1] === 'data: tail');
+    const lines = [];
+    await readSSEStream(responseFromText(['data: a\ndata: tail']), {
+      onLine: line => { lines.push(line); return false; },
+    });
+    check('tail_is_flushed_by_default',
+      lines.length === 2 && lines[1] === 'data: tail');
   }
 
-  // 3b: flushTail:false → trailing partial is NOT delivered (paper's behavior).
   {
-    const got = [];
-    await readSSEStream(fakeResponse(['data: a\ndata: tail']),
-      { flushTail: false, onLine: (l) => { got.push(l); return false; } });
-    check('flushTail:false drops trailing partial',
-          got.length === 1 && got[0] === 'data: a');
+    const lines = [];
+    await readSSEStream(responseFromText(['data: a\ndata: tail']), {
+      flushTail: false,
+      onLine: line => { lines.push(line); return false; },
+    });
+    check('disabled_tail_flush_drops_partial_line',
+      lines.length === 1 && lines[0] === 'data: a');
   }
 
-  // 4: onLine truthy return stops early — later lines are not delivered.
   {
-    const got = [];
+    const lines = [];
     const done = await readSSEStream(
-      fakeResponse(['data: a\ndata: STOP\ndata: c\n']),
-      { onLine: (l) => { got.push(l); return l === 'data: STOP'; } });
-    check('truthy onLine stops the loop early',
-          got.join('|') === 'data: a|data: STOP');
-    check('early-stop resolves true', done === true);
+      responseFromText(['data: a\ndata: STOP\ndata: c\n']),
+      { onLine: line => { lines.push(line); return line === 'data: STOP'; } },
+    );
+    check('truthy_line_handler_stops_before_later_lines',
+      lines.join('|') === 'data: a|data: STOP');
+    check('early_stop_returns_true', done === true);
   }
 
-  // 5: onChunk fires per chunk BEFORE decode; afterChunk AFTER the line loop.
   {
     const order = [];
-    await readSSEStream(fakeResponse(['data: a\n', 'data: b\n']), {
+    await readSSEStream(responseFromText(['data: a\n', 'data: b\n']), {
       onChunk: () => order.push('chunk'),
-      onLine: (l) => { order.push('line'); return false; },
+      onLine: () => { order.push('line'); return false; },
       afterChunk: () => order.push('after'),
     });
-    // 2 chunks → chunk,line,after,chunk,line,after
-    check('onChunk before line, afterChunk after line, per chunk',
-          order.join(',') === 'chunk,line,after,chunk,line,after');
+    check('chunk_hooks_keep_their_order',
+      order.join(',') === 'chunk,line,after,chunk,line,after');
   }
 
-  report();
-})();
-"""
+  {
+    const bytes = encoder.encode('data: 雪\n');
+    const lines = [];
+    await readSSEStream(
+      responseFromBytes([bytes.slice(0, 7), bytes.slice(7, 8), bytes.slice(8)]),
+      { onLine: line => { lines.push(line); return false; } },
+    );
+    check('utf8_code_points_survive_byte_boundaries', lines[0] === 'data: 雪');
+  }
 
+  {
+    const order = [];
+    await readSSEStream(responseFromText(['data: STOP\n']), {
+      onChunk: () => order.push('chunk'),
+      onLine: () => { order.push('line'); return true; },
+      afterChunk: () => order.push('after'),
+    });
+    check('early_stop_skips_after_chunk', order.join(',') === 'chunk,line');
+  }
 
-def test_sse_reader_contract():
-    run_harness(
-        target_js=os.path.join(JS_DIR, 'core', 'sse_reader.js'),
-        body_js=_BODY,
-        min_pass=8,
-    )
+  console.log(checks.join('\n'));
+  if (checks.some(line => line.startsWith('FAIL'))) process.exitCode = 1;
+})().catch(error => { console.error(error); process.exit(1); });
+'''.replace('OWNER_PATH', json.dumps(OWNER_BUNDLE))
+    output = _run_node(script)
+    assert output.count('PASS') == 10, output

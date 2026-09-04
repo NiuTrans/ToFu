@@ -125,6 +125,28 @@ are retained when replay-safe. Unknown event/item types are logged instead of
 being silently discarded. Multi-agent mode omits explicit server compaction,
 which the beta API does not support.
 
+## Server compaction and local fallback
+
+For a public GPT-5.6 `responses_profile=openai` route, the economic working-set
+threshold is emitted as Responses `context_management` and server compaction is
+the primary L2 mechanism. This is the only layer that can trigger from the
+provider's complete rendered token count, including opaque persisted reasoning.
+Returned compaction items are stored and replayed; history before the newest
+item is omitted while current developer instructions remain.
+
+Local L1 continues every round. Local L2, manual `/compact`, pre-compaction
+archives and the reactive prompt-too-long path are not removed: automatic local
+L2 simply waits for the hard model-window threshold while a verified native
+route owns the 128K economic trigger. A mixed/unknown provider pool stays local.
+Native Multi-agent rounds also stay local because that beta rejects explicit
+server compaction.
+
+The Codex subscription profile never receives public `context_management`.
+Its local L2 remains primary. For both public and subscription Responses,
+provider `reasoning_tokens` are carried once into the next local count only when
+the returned encrypted reasoning item is actually replayed; the small displayed
+reasoning summary is not treated as the complete hidden reasoning state.
+
 ## Operational prerequisite
 
 Native Programmatic Tool Calling, native Tool Search, Pro mode, WebSocket and

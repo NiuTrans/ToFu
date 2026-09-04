@@ -8,7 +8,12 @@ from quart import Blueprint, request
 
 from lib.quart_sync import request_files, send_file
 
-from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.api_response import (
+    api_bad_request,
+    api_not_found,
+    api_ok,
+    api_service_unavailable,
+)
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
@@ -226,6 +231,7 @@ def knowledge_upload_v1():
 
     from lib.knowledge import add_document
     from lib.knowledge.ingest import KnowledgeIngestError
+    from lib.pdf_parser.admission import PdfParseCapacityExceeded
 
     indexed = []
     errors = []
@@ -243,6 +249,12 @@ def knowledge_upload_v1():
         try:
             indexed.append(add_document(
                 raw, name, user_id=owner_user_id))
+        except PdfParseCapacityExceeded as exc:
+            errors.append({
+                'name': name,
+                'error': str(exc),
+                'retryable': True,
+            })
         except KnowledgeIngestError as exc:
             errors.append({'name': name, 'error': str(exc)})
         except Exception as exc:
@@ -289,8 +301,16 @@ def knowledge_reindex_v1(document_id: str):
     owner_user_id = int(request_user_id())
     from lib.knowledge import reindex_document
     from lib.knowledge.ingest import KnowledgeIngestError
+    from lib.pdf_parser.admission import PdfParseCapacityExceeded
     try:
         document = reindex_document(document_id, user_id=owner_user_id)
+    except PdfParseCapacityExceeded as exc:
+        return api_service_unavailable(
+            str(exc),
+            retry_after=1,
+            kind='server_busy',
+            retryable=True,
+        )
     except KnowledgeIngestError as exc:
         return api_bad_request(str(exc))
     if document is None:
@@ -306,9 +326,9 @@ def knowledge_reindex_v1(document_id: str):
 @require_auth
 @api_meta(summary='Delete one local knowledge document', tags=['knowledge'])
 def knowledge_delete_v1(document_id: str):
-    from lib.knowledge import delete_document
+    from lib.knowledge import remove_library_document
     owner_user_id = int(request_user_id())
-    if not delete_document(document_id, user_id=owner_user_id):
+    if not remove_library_document(document_id, user_id=owner_user_id):
         return api_not_found('Knowledge document not found')
     return api_ok(_status_payload(user_id=owner_user_id))
 

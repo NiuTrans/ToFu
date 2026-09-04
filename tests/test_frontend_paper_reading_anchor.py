@@ -3,7 +3,8 @@
 Requirement: toggling the report language (EN/中) fully rebuilds the report DOM
 via ``_renderFinalReport`` (``container.innerHTML=''``). Before this fix that
 snapped the reader back to the TOP — a reading-flow break mid-paper. The fix
-adds two pure helpers in ``static/js/paper/report.js``:
+adds two pure helpers in the typed
+``frontend/src/features/paper/report-runtime.ts`` owner:
 
   • ``_captureReadingAnchor(scroller)`` → {index, offset} : the index of the
     heading nearest the top of the viewport + that heading's pixel offset below
@@ -13,7 +14,7 @@ adds two pure helpers in ``static/js/paper/report.js``:
   • ``_restoreReadingAnchor(scroller, article, anchor)`` : re-applies that anchor
     onto the rebuilt article so the reader lands where their eye was.
 
-The harness loads the REAL shipped ``paper/report.js`` under jsdom, builds a
+The harness compiles the REAL typed report runtime under jsdom, builds a
 scroller with several headings, STUBS getBoundingClientRect + scroll geometry
 (jsdom does no layout), captures an anchor at a mid-report heading, rebuilds the
 article, and asserts the restored scrollTop lands on that heading (not 0).
@@ -34,13 +35,15 @@ import shutil
 import subprocess
 
 import pytest
+from tests._paper_vite import compiled_typescript
 from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
-PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'report.js')
+REPORT_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
 
 
 def _node_deps_available() -> bool:
@@ -70,7 +73,9 @@ global.requestAnimationFrame = win.requestAnimationFrame = (fn) => { fn(); retur
 global.setTimeout = win.setTimeout = (fn) => { if (typeof fn === 'function') fn(); return 0; };
 win.matchMedia = global.matchMedia = (q) => ({ matches:false, media:q, addEventListener(){}, removeEventListener(){} });
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // real paper/report.js
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // compiled typed report owner
+const _captureReadingAnchor = win._captureReadingAnchor;
+const _restoreReadingAnchor = win._restoreReadingAnchor;
 
 const CONTENT_H = 2000, VIEW_H = 600, H0 = 100, GAP = 400;
 
@@ -143,13 +148,20 @@ process.exit(0);
 """
 
 
-def _run(paper_js: str) -> subprocess.CompletedProcess:
+def _run(runtime_contents: str | None = None) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_paper_reading_anchor_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:
-        return subprocess.run(['node', harness, paper_js, ROOT],
-                              capture_output=True, text=True, timeout=60)
+        with compiled_typescript(
+            REPORT_RUNTIME_TS,
+            contents=runtime_contents,
+            expose_feature_registry_to_window=True,
+        ) as runtime_js:
+            return subprocess.run(
+                ['node', harness, runtime_js, ROOT],
+                capture_output=True, text=True, timeout=60,
+            )
     finally:
         try:
             os.remove(harness)
@@ -160,7 +172,7 @@ def _run(paper_js: str) -> subprocess.CompletedProcess:
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_reading_anchor_preserves_position_across_rerender():
-    proc = _run(PAPER_JS)
+    proc = _run()
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -169,46 +181,51 @@ def test_reading_anchor_preserves_position_across_rerender():
 
 
 def _run_neuter(patched_src: str, tag: str) -> str:
-    tmp = os.path.join(HERE, f'_paper_reading_anchor_neuter_{tag}.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(patched_src)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid ({tag}): {chk.stderr}'
-        proc = _run(tmp)
-        assert proc.returncode == 0, f'node crashed ({tag}): {proc.stderr}\n{proc.stdout}'
-        return proc.stdout.strip()
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    proc = _run(runtime_contents=patched_src)
+    assert proc.returncode == 0, (
+        f'node crashed (typed runtime {tag}): {proc.stderr}\n{proc.stdout}'
+    )
+    return proc.stdout.strip()
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_double_neuter_reading_anchor_is_load_bearing():
-    src = open(PAPER_JS, encoding='utf-8').read()
+    src = open(REPORT_RUNTIME_TS, encoding='utf-8').read()
 
     # ── NC-1: capture always returns null → restore no-ops → stays at top. ──
-    m1 = 'function _captureReadingAnchor(scroller) {\n  try {'
+    m1 = (
+        'export function captureReadingAnchor('
+        'scroller: HTMLElement | null): ReadingAnchor | null {\n'
+        '  try {'
+    )
     assert m1 in src, 'NC-1 marker not found — test is stale'
     out1 = _run_neuter(
-        src.replace(m1, 'function _captureReadingAnchor(scroller) {\n  return null;\n  try {', 1),
+        src.replace(m1, m1.replace('  try {', '  return null;\n  try {'), 1),
         'nc1')
     assert 'FAIL restore_returns_to_heading2' in out1 or 'FAIL anchor_captured_index2' in out1, \
         'NC-1: nulling capture did NOT break preservation — non-load-bearing:\n' + out1
 
     # ── NC-2: restore is a no-op → captured anchor never applied → stays at top. ──
-    m2 = 'function _restoreReadingAnchor(scroller, article, anchor) {\n  if (!scroller || !anchor) return;'
+    m2 = (
+        'export function restoreReadingAnchor(\n'
+        '  scroller: HTMLElement | null,\n'
+        '  article: HTMLElement | null,\n'
+        '  anchorValue: unknown,\n'
+        '): void {\n'
+        '  const anchor = normalizeReadingAnchor(anchorValue);'
+    )
     assert m2 in src, 'NC-2 marker not found — test is stale'
     out2 = _run_neuter(
-        src.replace(m2, 'function _restoreReadingAnchor(scroller, article, anchor) {\n  return;\n  if (!scroller || !anchor) return;', 1),
+        src.replace(m2, m2.replace(
+            '): void {\n', '): void {\n  return;\n', 1), 1),
         'nc2')
     assert 'FAIL restore_returns_to_heading2' in out2 and 'FAIL restore_not_top' in out2, \
         'NC-2: no-op restore did NOT break preservation — non-load-bearing:\n' + out2
 
-    assert open(PAPER_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
+    assert open(REPORT_RUNTIME_TS, encoding='utf-8').read() == src, (
+        'typed report runtime was modified!'
+    )
 
 
 if __name__ == '__main__':

@@ -157,7 +157,7 @@ class TestExternalBaseUrl:
     def test_frontend_download_link_carries_live_base(self):
         # Wiring pin: the panel's download entry must hand its live
         # origin+BASE_PATH to the backend (see _external_base_url).
-        src = _src('frontend/src/runtime/app-runtime.js')
+        src = _src('frontend/src/runtime/sections/local-control.js')
         assert 'download?base=' in src
         assert 'window.location.origin + BASE_PATH' in src
 

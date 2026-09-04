@@ -4,21 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section_path
-
-
 pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 SOURCE = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'video-runtime.ts')
-RETAINED_RENDERER = Path(runtime_section_path(
-    'paper/video.js', scope_prelude=False))
 ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
@@ -163,11 +157,3 @@ def test_compiled_video_runtime_owns_tasks_and_fences_scene_races(tmp_path):
     assert result['staleFenced']
     assert result['aborts'] == ['abort-me']
     assert result['destroyed'] and not result['leakedGlobal']
-
-
-def test_retained_video_file_contains_renderers_not_task_owner():
-    renderer = RETAINED_RENDERER.read_text(encoding='utf-8')
-    assert '__tofuInstallVideoRuntime' not in renderer
-    assert 'function _videoGenerate' not in renderer
-    assert 'function _pvPollOnce' not in renderer
-    assert 'function _pvRender(' in renderer

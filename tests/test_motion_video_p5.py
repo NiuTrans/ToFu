@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -67,6 +68,168 @@ def _fake_llm(monkeypatch, script):
 
     monkeypatch.setattr('lib.llm_dispatch.api.dispatch_chat', fake_dispatch_chat)
     return calls
+
+
+def test_scene_prompts_put_the_shared_contract_before_dynamic_fields(
+        monkeypatch):
+    """Sibling scenes expose one exact, large provider-cache prefix."""
+    guides = {
+        'COMPOSITION_CONTRACT.md': 'CONTRACT_SENTINEL',
+        'MOTION_CRAFT.md': 'CRAFT_SENTINEL',
+        'skeleton.html': 'SKELETON_SENTINEL',
+    }
+    monkeypatch.setattr(
+        sa, '_read_guide', lambda name, limit=12000: guides[name])
+    monkeypatch.setattr('lib.motion_video._craft.craft_index', lambda: '')
+
+    prompts = [
+        sa._build_prompt(
+            _scene(sid, narration), width=1080, height=1440,
+            duration=duration, scene_index=index, total_scenes=2)
+        for sid, narration, duration, index in (
+            ('alpha-scene', 'ALPHA_NARRATION', 4.0, 1),
+            ('omega-scene', 'OMEGA_NARRATION', 7.0, 2),
+        )
+    ]
+    prefixes = [prompt.split('## This scene\n', 1)[0]
+                for prompt in prompts]
+
+    assert prefixes[0] == prefixes[1]
+    assert 'The shared film frame is 1080x1440 px.' in prefixes[0]
+    for marker in guides.values():
+        assert marker in prefixes[0]
+    for dynamic in ('alpha-scene', 'omega-scene', 'ALPHA_NARRATION',
+                    'OMEGA_NARRATION', '4.0 seconds', '7.0 seconds'):
+        assert dynamic not in prefixes[0]
+    assert prompts[0].index('SKELETON_SENTINEL') < prompts[0].index(
+        'alpha-scene')
+
+
+def test_prepared_scene_prompt_context_preserves_exact_prompt_and_reads_once(
+        monkeypatch):
+    reads = []
+    guides = {
+        'COMPOSITION_CONTRACT.md': 'contract',
+        'MOTION_CRAFT.md': 'craft',
+        'skeleton.html': 'skeleton',
+    }
+
+    def _guide(name, limit=12000):
+        reads.append((name, limit))
+        return guides[name]
+
+    monkeypatch.setattr(sa, '_read_guide', _guide)
+    monkeypatch.setattr('lib.motion_video._craft.craft_index', lambda: '')
+    context = sa.prepare_author_prompt_context(
+        width=1080, height=1440, total_scenes=2)
+    first = sa._build_prompt(
+        _scene('scene-a', 'same narration'), width=1080, height=1440,
+        duration=4.0, scene_index=1, total_scenes=2,
+        prompt_context=context)
+    second = sa._build_prompt(
+        _scene('scene-a', 'same narration'), width=1080, height=1440,
+        duration=4.0, scene_index=1, total_scenes=2)
+
+    assert first == second
+    assert reads == [
+        ('COMPOSITION_CONTRACT.md', 12000),
+        ('MOTION_CRAFT.md', 12000),
+        ('skeleton.html', 6000),
+    ] * 2
+
+
+def test_scene_prompt_context_rejects_cross_film_geometry(monkeypatch):
+    monkeypatch.setattr(sa, '_read_guide', lambda *a, **k: 'guide')
+    context = sa.prepare_author_prompt_context(
+        width=1080, height=1440, total_scenes=2)
+
+    with pytest.raises(ValueError, match='mismatch'):
+        sa._build_prompt(
+            _scene(), width=1920, height=1080, duration=4.0,
+            scene_index=1, total_scenes=2, prompt_context=context)
+
+
+def test_parallel_author_dependency_prewarm_deduplicates_theme_fonts(
+        monkeypatch):
+    craft_calls = []
+    font_calls = []
+    face = SimpleNamespace(
+        id='shared-face',
+        sources=(SimpleNamespace(weight=400), SimpleNamespace(weight=700)),
+    )
+    theme = SimpleNamespace(fonts={
+        'display': 'shared-face', 'body': 'shared-face',
+        'latin': 'shared-face',
+    })
+    monkeypatch.setattr(
+        'lib.motion_video._craft.ensure_craft_corpus',
+        lambda: craft_calls.append('craft') or True)
+    monkeypatch.setattr('lib.design_sys.fonts.get_font', lambda _font_id: face)
+    monkeypatch.setattr(
+        'lib.design_sys.fonts.ensure_font',
+        lambda font_id, weight: font_calls.append((font_id, weight))
+        or f'/fonts/{font_id}-{weight}.woff2')
+
+    assert sa.prepare_parallel_author_dependencies(
+        theme=theme, needs_craft=True) is True
+    assert craft_calls == ['craft']
+    assert font_calls == [('shared-face', 400), ('shared-face', 700)]
+
+
+def test_default_prompt_does_not_scan_the_unused_craft_catalog(monkeypatch):
+    monkeypatch.setattr(
+        'lib.motion_video._craft.craft_index',
+        lambda: (_ for _ in ()).throw(
+            AssertionError('default scene scanned the craft catalog')))
+
+    prompt = sa._build_prompt(
+        _scene(), width=1080, height=1440, duration=4.0,
+        scene_index=1, total_scenes=2)
+
+    assert 'Craft corpus (deep reference' not in prompt
+
+
+def test_explicit_craft_browse_reads_and_exposes_the_catalog(monkeypatch):
+    monkeypatch.setattr('lib.motion_video._craft.craft_index',
+                        lambda: 'CRAFT_INDEX_SENTINEL')
+    scene = _scene()
+    scene['allow_craft_browse'] = True
+
+    prompt = sa._build_prompt(
+        scene, width=1080, height=1440, duration=4.0,
+        scene_index=1, total_scenes=2)
+
+    assert 'Craft corpus (deep reference' in prompt
+    assert 'CRAFT_INDEX_SENTINEL' in prompt
+
+
+@pytest.mark.parametrize(('allow_browse', 'expected_installs'), [
+    (False, 0),
+    (True, 1),
+])
+def test_author_installs_craft_only_for_explicit_browse(
+        monkeypatch, tmp_path, allow_browse, expected_installs):
+    installs = []
+    monkeypatch.setattr(
+        'lib.motion_video._craft.ensure_craft_corpus',
+        lambda: installs.append('install') or True)
+    monkeypatch.setattr('lib.motion_video._craft.craft_index',
+                        lambda: 'CRAFT_INDEX_SENTINEL')
+    html = _good_html()
+    _fake_llm(monkeypatch, [
+        ('', [('write_composition', {'html': html})]),
+        ('done', []),
+    ])
+    scene = _scene()
+    if allow_browse:
+        scene['allow_craft_browse'] = True
+
+    result = sa.author_scene(
+        scene, str(tmp_path), width=1080, height=1440,
+        duration=4.0, scene_index=1, total_scenes=3)
+
+    assert result['mode'] == 'authored'
+    assert len(installs) == expected_installs
 
 
 # ══════════════════════════════════════════════════════════
@@ -145,6 +308,50 @@ def test_degrades_when_already_aborted(monkeypatch, tmp_path):
                           abort_event=ev)
     assert res['mode'] == 'template'
     assert called['n'] == 0  # never even dispatched
+
+
+def test_author_dispatch_uses_abort_and_production_retry_budgets(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', '7')
+    seen = {}
+
+    def complete(messages, **kwargs):
+        seen.update(kwargs)
+        return 'done', {'total_tokens': 10, '_tool_calls': []}
+
+    monkeypatch.setattr('lib.llm_dispatch.api.dispatch_chat', complete)
+    res = sa.author_scene(
+        _scene(), str(tmp_path), width=1080, height=1440,
+        duration=4.0, scene_index=1, total_scenes=3)
+
+    assert res['mode'] == 'template'
+    assert seen['max_retries'] == 2
+    assert seen['max_429_attempts'] == 7
+    assert callable(seen['abort_check'])
+    assert seen['abort_check']() is False
+
+
+def test_abort_during_author_dispatch_is_not_retried(monkeypatch, tmp_path):
+    from lib.llm_errors import AbortedError
+
+    abort_event = threading.Event()
+    calls = []
+
+    def interrupted(messages, **kwargs):
+        calls.append('dispatch')
+        assert kwargs['abort_check']() is False
+        abort_event.set()
+        raise AbortedError('stopped')
+
+    monkeypatch.setattr('lib.llm_dispatch.api.dispatch_chat', interrupted)
+    res = sa.author_scene(
+        _scene(), str(tmp_path), width=1080, height=1440,
+        duration=4.0, scene_index=1, total_scenes=3,
+        abort_event=abort_event, transient_attempts=3)
+
+    assert res['mode'] == 'template'
+    assert 'aborted' in res['detail']
+    assert calls == ['dispatch']
 
 
 def test_neuter_gate_check_proves_degradation_is_loadbearing(monkeypatch, tmp_path):

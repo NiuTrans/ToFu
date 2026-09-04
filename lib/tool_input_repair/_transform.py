@@ -250,6 +250,42 @@ def _transform_legacy_edit_to_edit_file(
     return out, changed
 
 
+def _transform_todo_write_nested_envelope(
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Unwrap a todo_write envelope nested inside its own ``todos`` array.
+
+    Observed live (conv ``mtdqz4bkuyitzj``, kimi-k3): the model emitted
+    ``{"todos": [{"todos": [<real items>], "operation": "sync",
+    "reason": "...", "id": ""}]}`` — the whole envelope pushed one level
+    down into the array's only element, padded with a junk empty ``id``
+    that half-satisfies the item schema. The intent is unambiguous, so
+    lift it back up: ``todos`` becomes the inner list and envelope keys
+    (``operation`` / ``reason`` / ``parent_todo_id``) are hoisted when the
+    top level lacks them; junk item-level keys die with the wrapper.
+
+    Fires only when ``todos`` is a single-element list whose element is a
+    dict carrying its own ``todos`` list AND is not itself a genuine item
+    (a real item always has ``content``) — a correct call is never
+    touched. Anything still invalid after the unwrap fails closed at
+    contract validation exactly as before.
+    """
+    todos = args.get('todos')
+    if not isinstance(todos, list) or len(todos) != 1:
+        return args, False
+    element = todos[0]
+    if not isinstance(element, dict) or 'content' in element:
+        return args, False
+    inner = element.get('todos')
+    if not isinstance(inner, list):
+        return args, False
+    out = {k: v for k, v in args.items() if k != 'todos'}
+    out['todos'] = inner
+    for key in ('operation', 'reason', 'parent_todo_id'):
+        if key not in out and isinstance(element.get(key), str):
+            out[key] = element[key]
+    return out, True
+
 def _transform_askuserquestion_to_ask_human(
     args: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
@@ -299,6 +335,7 @@ _STRUCTURAL_TRANSFORMS: dict[str, Any] = {
     'edit_file': _transform_legacy_edit_to_edit_file,
     'apply_diffs': _transform_multiedit_to_apply_diffs,
     'ask_human': _transform_askuserquestion_to_ask_human,
+    'todo_write': _transform_todo_write_nested_envelope,
 }
 
 

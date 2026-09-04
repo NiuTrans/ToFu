@@ -25,6 +25,8 @@ Removed in the async migration (no longer exist):
   • ``swarm_done``          — async swarm has no internal mini-master to "stop"
 """
 
+from lib.swarm.resource_policy import swarm_max_agents_per_wave
+
 
 # ═══════════════════════════════════════════════════════════
 #  Shared constants — MUST be defined before SPAWN_AGENTS_TOOL
@@ -131,76 +133,28 @@ def _build_spawn_agents_description() -> str:
     """
     from lib.swarm.registry import format_role_catalogue
     return (
-        "Launch one or more sub-agents in parallel to work on independent parts "
-        "of the task. The call returns IMMEDIATELY with a handle "
-        "(`{status:'async_launched', swarm_id, agents:[...]}`); each sub-agent "
-        "runs in the background with its own LLM session and tool access, and "
-        "completions arrive automatically on subsequent turns as `<swarm-update>` "
-        "user messages.\n\n"
-        "Available roles, when to choose each, and the tools each one "
-        "actually receives:\n"
+        "Launch independent subtasks concurrently. Returns immediately with an "
+        "async handle; each agent has its own session/tools, and results arrive "
+        "later as `<swarm-update>` messages.\n\n"
+        "Roles and exact tool scopes:\n"
         f"{format_role_catalogue()}\n\n"
-        "Each role sees ONLY the tools listed for it, plus the shared "
-        "artifact tools. If the task needs a tool not listed for any "
-        "specialist role (for example reading this app's past conversations "
-        "via get_conversation), use 'general'. Sub-agents never receive the "
-        "denylisted tools and cannot ask the user anything, so objectives "
-        "must be fully self-contained.\n\n"
-        "## If a sub-agent reports a missing tool\n"
-        "- You picked the wrong role. Re-spawn the same task with "
-        "role='general' (or a role whose tool list covers the need) — do "
-        "NOT tell the sub-agent to work around a missing tool, and do not "
+        "Choose this only for 2+ independent branches (parallel sources or "
+        "subsystems, independent review, or context isolation); keep trivial or "
+        "sequential work local. A role must list every tool it needs. If the task "
+        "needs a tool not listed by any specialist, use 'general'. Sub-agents "
+        "cannot spawn or ask the user, so objectives must be self-contained. If a "
+        "sub-agent reports a missing tool, Re-spawn the same task with "
+        "role='general' or a covering role; never ask it to work around the gap or "
         "abandon the task.\n\n"
-        "## When you SHOULD spawn agents\n"
-        "- The user asks a question whose answer needs **2+ independent pieces** "
-        "of work (e.g. \"is this branch ready to ship?\" → git audit + test audit + "
-        "flag audit, three independent investigations).\n"
-        "- A research task spans **multiple sources** (web pages, repos, libraries) "
-        "that don't depend on each other.\n"
-        "- A code task touches **multiple unrelated files / subsystems** that can "
-        "be investigated or changed in parallel.\n"
-        "- You want a **second-opinion review** of code or a design — spawn a "
-        "`reviewer` so it forms its own conclusion without seeing your analysis.\n"
-        "- You'd otherwise dump a lot of low-value tool output (long greps, big "
-        "file reads) into your own context — fork that work to a sub-agent so "
-        "only the conclusion comes back.\n\n"
-        "## When NOT to spawn\n"
-        "- Trivial single-step questions (one tool call would do it).\n"
-        "- Tasks that are inherently sequential — each step needs the previous "
-        "answer.\n"
-        "- Reading one specific file you already know the path of (just use "
-        "`read_files`).\n"
-        "- A grep you can do yourself in a single call.\n\n"
-        "## Mechanics\n"
-        "- This tool is **fire-and-forget**. After calling, your turn ends. "
-        "Sub-agent results land on later turns as `<swarm-update>` blocks; you "
-        "do NOT poll, sleep, or check on them.\n"
-        "- **Never fabricate or predict** sub-agent results before their "
-        "`<swarm-update>` arrives. If the user asks mid-wait, give status, not a "
-        "guess.\n"
-        "- **Never read the `output_file`** unless the user explicitly asks for "
-        "a progress check — that just imports the sub-agent's tool noise into "
-        "your own context.\n"
-        "- If you have nothing useful to do while waiting, call "
-        "`await_agents(mode='any')` to block on the next completion. If a "
-        "preview is too short, call `get_agent_result(id)` for the full body.\n"
-        "- To launch agents in parallel **send a SINGLE message with one "
-        "`spawn_agents` call containing multiple `agents` entries** — do NOT "
-        "issue several spawn_agents calls in sequence; that defeats the parallelism.\n"
-        "- Use `depends_on: [\"<id-of-prereq>\"]` ONLY when one agent's output "
-        "is genuinely a prerequisite for another. Prefer maximum parallelism.\n"
-        "- Sub-agents cannot themselves spawn further agents and cannot ask the "
-        "user. Don't write objectives that assume they can.\n\n"
-        "## Writing a good objective\n"
-        "- Treat the sub-agent like a smart colleague who just walked in. It "
-        "has none of your conversation context.\n"
-        "- Say what to accomplish AND why, plus any context (file paths, URLs, "
-        "constraints) it needs to do its job.\n"
-        "- Specify the output you expect (\"report a punch list, under 200 "
-        "words\"). Vague prompts produce shallow results.\n"
-        "- Don't write \"based on your findings, fix the bug\" — that pushes "
-        "synthesis onto the sub-agent. Synthesise in your own turn after the "
-        "`<swarm-update>` lands."
+        "Put all parallel agents in one `agents[]` call. Use `depends_on` only "
+        "for a true prerequisite; otherwise maximize parallelism. This is "
+        "fire-and-forget and ends the turn: do not poll/sleep, predict results, or "
+        "read `output_file` unless the user asks for progress. Continue useful "
+        "local work on later turns; if none remains, use "
+        "`await_agents(mode='any')`. Use `get_agent_result(id)` when a preview is "
+        "insufficient.\n\n"
+        "Each objective states the goal and why, needed context, paths, "
+        "constraints, and expected bounded output. The root synthesizes results."
     )
 
 
@@ -214,11 +168,10 @@ SPAWN_AGENTS_TOOL = {
             "properties": {
                 "agents": {
                     "type": "array",
+                    "maxItems": swarm_max_agents_per_wave(),
                     "description": (
-                        "List of sub-tasks to execute IN PARALLEL within this "
-                        "single tool call. To run N agents in parallel, put N "
-                        "items here — do NOT issue N separate spawn_agents "
-                        "tool calls."
+                        "All parallel subtasks in one call; do not issue serial "
+                        "spawn calls."
                     ),
                     "items": {
                         "type": "object",
@@ -226,46 +179,38 @@ SPAWN_AGENTS_TOOL = {
                             "id": {
                                 "type": "string",
                                 "description": (
-                                    "Optional stable id for THIS agent (e.g. 'audit', 'a1'). "
-                                    "Set it when another agent in the same call must reference "
-                                    "this one via `depends_on` — the referenced id must match "
-                                    "exactly. When omitted a random id is assigned, which "
-                                    "cannot be targeted by `depends_on` within the same call."
+                                    "Optional sibling-reference id. Set it when "
+                                    "another item names it in `depends_on`; "
+                                    "omission mints an id unavailable to same-call "
+                                    "dependencies."
                                 ),
                             },
                             "objective": {
                                 "type": "string",
                                 "description": (
-                                    "What this sub-agent should accomplish. Brief it like a "
-                                    "smart colleague who just walked in — explain the goal, "
-                                    "give it the context it needs (file paths, URLs, prior "
-                                    "findings), and say what output you expect."
+                                    "Self-contained goal, rationale, necessary "
+                                    "context, and expected output."
                                 ),
                             },
                             "context": {
                                 "type": "string",
                                 "description": (
-                                    "Optional extra context: file paths, data, "
-                                    "constraints, links to relevant docs."
+                                    "Optional paths, data, constraints, or links."
                                 ),
                             },
                             "role": {
                                 "type": "string",
                                 "description": (
-                                    "One of: researcher / coder / analyst / "
-                                    "browser / reviewer / writer / general. "
-                                    "See the tool description for what each "
-                                    "role is for. Defaults to 'general' when "
-                                    "omitted."
+                                    "Specialist role; defaults to `general`. "
+                                    "Exact scopes are listed above."
                                 ),
                             },
                             "depends_on": {
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": (
-                                    "Optional: ids of sibling agents in this "
-                                    "spawn that must complete first. Use "
-                                    "sparingly — prefer maximum parallelism."
+                                    "Sibling ids that must finish first. Use only "
+                                    "for true prerequisites."
                                 ),
                             },
                         },
@@ -292,9 +237,12 @@ AWAIT_AGENTS_TOOL = {
             "genuinely have no other work to do — otherwise let the swarm "
             "run in the background and continue with other tools.\n\n"
             "Returns the same `<swarm-update>` summaries that would have "
-            "auto-injected on a later turn, batched together. Hard cap is "
-            "120 seconds; if more agents are still running when the timeout "
-            "elapses, the call returns what's done plus a list of stragglers."
+            "auto-injected on a later turn, batched together. Without ids, "
+            "each completion is returned only once; use get_agent_result with "
+            "explicit ids to reread a full result. Hard cap is "
+            "60 seconds; if more agents are still running when the timeout "
+            "elapses, the call returns what's done plus a list of stragglers. "
+            "An identical retry with no new completion returns immediately."
         ),
         "parameters": {
             "type": "object",
@@ -318,7 +266,7 @@ AWAIT_AGENTS_TOOL = {
                 "timeout_seconds": {
                     "type": "integer",
                     "description": (
-                        "Max wait in seconds (default 60, hard cap 120). "
+                        "Max wait in seconds (default and hard cap 60). "
                         "On timeout, returns partial results + still-running list."
                     ),
                 },

@@ -98,11 +98,12 @@ class TestSnapshotTimelineKeepsPreview(unittest.TestCase):
     """The rebuilt timeline must forward preview/error, not drop them."""
 
     def test_timeline_forwards_preview_and_error(self):
-        tools, calls = sw_master._snapshot_tool_timeline([
+        tools, calls, omitted = sw_master._snapshot_tool_timeline([
             {'round': 1, 'tool': 'fetch_url', 'args_brief': '3 URLs',
              'preview': 'P' * 2000, 'error': ''},
         ])
         self.assertEqual(tools, ['fetch_url'])
+        self.assertEqual(omitted, 0)
         self.assertEqual(len(calls), 1)
         self.assertEqual(
             len(calls[0].get('preview') or ''), 2000,
@@ -111,11 +112,21 @@ class TestSnapshotTimelineKeepsPreview(unittest.TestCase):
 
     def test_timeline_tolerates_rows_without_preview(self):
         """Legacy tool_log rows predate the preview field."""
-        tools, calls = sw_master._snapshot_tool_timeline([
+        tools, calls, omitted = sw_master._snapshot_tool_timeline([
             {'round': 1, 'tool': 'grep_search', 'args_brief': 'x'},
         ])
         self.assertEqual(tools, ['grep_search'])
+        self.assertEqual(omitted, 0)
         self.assertEqual(calls[0]['preview'], '')
+
+    def test_long_preview_is_bounded_and_marked_instead_of_silently_cut(self):
+        _, calls, _ = sw_master._snapshot_tool_timeline([
+            {'round': 1, 'tool': 'fetch_url', 'args_brief': 'one URL',
+             'preview': 'P' * 5000},
+        ])
+        self.assertEqual(len(calls[0]['preview']), 2000)
+        self.assertTrue(calls[0]['previewTruncated'])
+        self.assertEqual(calls[0]['previewFullChars'], 5000)
 
 
 class TestFrontendSlicesRemoved(unittest.TestCase):
@@ -137,6 +148,13 @@ class TestFrontendSlicesRemoved(unittest.TestCase):
             'preview.slice(0, 200)', self._panel_src(),
             'a failed agent\'s error text is exactly what needs reading in '
             'full — 200 chars truncates the stack/cause')
+
+    def test_budget_elision_is_visible_after_reload(self):
+        panel = self._panel_src()
+        self.assertIn('toolCallsOmitted', panel)
+        self.assertIn('previewTruncated', panel)
+        self.assertIn('swarm.toolCallsOmitted', panel)
+        self.assertIn('swarm.toolPreviewTruncated', panel)
 
 
 if __name__ == '__main__':

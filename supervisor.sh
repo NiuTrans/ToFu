@@ -36,6 +36,7 @@
 #    TOFU_SUPERVISOR_PORT      default 15001
 #    TOFU_SUPERVISOR_HOST      default 127.0.0.1
 #    TOFU_SUPERVISOR_PYTHON    interpreter used to launch server.py
+#    TOFU_SUPERVISOR_OWNER_PID optional ephemeral owner; unset for durable use
 
 set -euo pipefail
 umask 077  # manager/worker logs are owner-only by logging contract
@@ -74,12 +75,36 @@ _daemon_alive() {
     [[ "$cmdline" == *"$BASE_DIR/supervisor.sh __watchdog__"* ]]
 }
 
+# Durable daemons intentionally have no process owner. Ephemeral test/dev
+# launchers may opt in so an interrupted caller cannot leave this self-healing
+# watchdog resident under PID 1 forever.
+_owner_alive() {
+    local owner_pid="${TOFU_SUPERVISOR_OWNER_PID:-}"
+    [[ -z "$owner_pid" ]] && return 0
+    [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$owner_pid" 2>/dev/null
+}
+
 # The self-healing loop. Runs as the setsid session leader ($$ == session id
 # == process-group id), so a group-directed signal reaches BOTH this loop and
 # the current supervisor.py child. Restarts supervisor.py on crash; exits
 # without restart when asked to stop.
 cmd_watchdog() {
     set +e   # the loop manages exit codes itself; do not let `wait` trip errexit
+    # ``setsid`` detaches the session but does not close arbitrary inherited
+    # descriptors. Test runners, IDEs, and calling terminals may have marked
+    # control sockets inheritable; retaining them makes an otherwise-dead
+    # caller and its deleted temporary tree look live forever. Keep only the
+    # standard streams and Bash's script descriptor (255).
+    if [[ -d "/proc/$$/fd" ]]; then
+        local _fd_path _fd
+        for _fd_path in /proc/$$/fd/*; do
+            _fd="${_fd_path##*/}"
+            [[ "$_fd" =~ ^[0-9]+$ ]] || continue
+            [[ "$_fd" -le 2 || "$_fd" -eq 255 ]] && continue
+            eval "exec ${_fd}>&-" 2>/dev/null || true
+        done
+    fi
     mkdir -p "$BASE_DIR/data" "$BASE_DIR/logs"
     echo "$$" > "$PID_FILE"
 
@@ -100,6 +125,18 @@ cmd_watchdog() {
     local _backoff="$WATCHDOG_RESTART_SECS"
     echo "[watchdog] started (pid=$$) — supervising supervisor.py, escalating backoff ${WATCHDOG_RESTART_SECS}..${WATCHDOG_MAX_BACKOFF_SECS}s"
     while [[ "$_stopping" -eq 0 ]]; do
+        if ! _owner_alive; then
+            echo "[watchdog] configured owner disappeared — retiring."
+            break
+        fi
+        # The checkout path is this daemon's explicit ownership boundary. If
+        # it is removed or atomically replaced, supervisor.py's service hook
+        # exits and the watchdog must not manufacture an immortal deleted-tree
+        # process by trying to restart a source file that no longer exists.
+        if [[ ! -f "$BASE_DIR/supervisor.py" || ! -f "$BASE_DIR/supervisor.sh" ]]; then
+            echo "[watchdog] source checkout disappeared — retiring."
+            break
+        fi
         local _t0
         _t0=$(date +%s)
         "$PY" "$BASE_DIR/supervisor.py" &
@@ -107,6 +144,10 @@ cmd_watchdog() {
         wait "$_child"
         local code=$?
         if [[ "$_stopping" -ne 0 ]]; then
+            break
+        fi
+        if ! _owner_alive; then
+            echo "[watchdog] configured owner disappeared — retiring."
             break
         fi
         local _ran=$(( $(date +%s) - _t0 ))

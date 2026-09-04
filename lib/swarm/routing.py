@@ -24,6 +24,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from lib.swarm.resource_policy import swarm_max_agents_per_wave
+
 
 ACTIVE_MULTI_AGENT_MODES = frozenset({'read_only'})
 MULTI_AGENT_BACKENDS = frozenset({'off', 'native_openai', 'local_swarm'})
@@ -129,7 +131,11 @@ def project_multi_agent_wire_tools(
         return visible
 
     try:
-        maximum = max(1, min(int(max_concurrent_agents), 8))
+        maximum = max(1, min(
+            int(max_concurrent_agents),
+            8,
+            swarm_max_agents_per_wave(),
+        ))
     except (TypeError, ValueError):
         maximum = 3
     spawn = deepcopy(source)

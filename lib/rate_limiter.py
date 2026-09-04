@@ -58,7 +58,8 @@ def rate_limit(limit=10, per=60):
             if _limits_disabled():
                 return None
             ip = request.remote_addr or 'unknown'
-            endpoint = request.path
+            route_rule = getattr(request, 'url_rule', None)
+            endpoint = str(getattr(route_rule, 'rule', '') or request.path)
             store = get_store()
             allowed, count = store.record_and_check(endpoint, ip, limit, per)
             if not allowed:

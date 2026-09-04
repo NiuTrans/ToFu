@@ -1,8 +1,9 @@
-"""Regression test: the frontend ``convAutoTranslate(conv)`` helper is the
-single source of truth for the per-conversation auto-translate trigger
-decision, and its canonical default is OPT-IN / OFF — matching the backend
-``lib.conv_config.AUTO_TRANSLATE_DEFAULT`` so the toolbar toggle display and
-every frontend trigger path agree.
+"""Regression test for the typed per-conversation auto-translate query.
+
+The composition-level ``convAutoTranslate(conv)`` wrapper supplies the current
+toolbar default to this pure owner. Its canonical missing-everywhere result is
+OPT-IN / OFF, matching ``lib.conv_config.AUTO_TRANSLATE_DEFAULT`` so toolbar
+presentation and every frontend trigger path agree.
 
 WHY
 ---
@@ -20,32 +21,37 @@ Runs the REAL shipped JS under node; skips cleanly when node isn't installed.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import shutil
 import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section_path
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CONV_REDUCERS = runtime_section_path('core/conv_reducers.js')
+QUERY_OWNER = (
+    Path(ROOT)
+    / 'frontend/src/conversation/application/conversation-catalog-queries.ts'
+)
+QUERY_BUNDLE = native_module_path(
+    '.native/auto-translate-default-contract.js', QUERY_OWNER,
+)
 
 
 def _node_available() -> bool:
     return bool(shutil.which('node'))
 
 
-# core/conv_reducers.js (extracted from conversations.js 2026-07-25) is all
-# top-level declarations; eval'ing it bare defines convAutoTranslate with no
-# side effects (the Api / ConvCache globals it names are only touched inside
-# OTHER function bodies).
 _HARNESS = r"""
 const fs = require('fs');
 global.window = global;
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conv_reducers.js
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const convAutoTranslate = (conversation) =>
+  resolveConversationAutoTranslate(conversation, global.autoTranslate);
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -101,7 +107,7 @@ def test_conv_auto_translate_default():
     try:
         proc = subprocess.run(
             ['node', harness,
-             CONV_REDUCERS,                                     # argv[2]
+             QUERY_BUNDLE,                                      # argv[2]
              ],
             capture_output=True, text=True, timeout=60,
         )

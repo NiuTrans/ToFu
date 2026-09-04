@@ -13,7 +13,7 @@ import time
 import uuid
 
 import lib as _lib
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
@@ -28,6 +28,8 @@ from lib.paper.images.titles import (
     lookup_paper_title,
 )
 from lib.paper.artifact_repository import PaperArtifactRepository, PaperReport
+from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
+from lib.paper.agent_usage import PaperAgentUsageMeter
 from lib.paper.report_engine._body import resolve_canonical_report_body
 from lib.paper.review._lang import (
     is_rebuttal_lang,
@@ -73,7 +75,7 @@ def run_report_task(task, messages, images):
       - {type: 'thinking',   delta}
       - {type: 'delta',      delta}
       - {type: 'enriched',   text}             — post-stream image injection
-      - {type: 'done',       report, paperHash}
+      - {type: 'done',       report, paperHash, meta.agentUsageV1}
       - {type: 'error',      error}
 
     thinking / delta / delta_reset / tool_start / tool_done all carry
@@ -108,6 +110,9 @@ def run_report_task(task, messages, images):
         return abort_event.is_set()
 
     model_name = model or _lib.LLM_MODEL
+    _agent_usage = PaperAgentUsageMeter.for_stage(
+        'report', fallback_model=model_name)
+    task['agentUsageV1'] = _agent_usage.snapshot()
     t0 = time.time()
     full_content = ''
     # ── Finish-tag accumulators ──
@@ -230,6 +235,7 @@ def run_report_task(task, messages, images):
                 _resolved_model = _disp['model']
             if _disp.get('provider_id'):
                 _provider_id = _disp['provider_id']
+        task['agentUsageV1'] = _agent_usage.snapshot()
 
     def _begin_tool_round(rnd, msg):
         # This round ended with tool calls, so any prose it emitted was a
@@ -344,7 +350,10 @@ def run_report_task(task, messages, images):
             tool_arguments=fn_args)
 
     try:
-        _outcome = run_agent_loop(
+        _outcome = run_guarded_paper_agent_loop(
+            context='Paper report agent',
+            allow_aborted_outcome=True,
+            usage_meter=_agent_usage,
             abort=abort_signal,
             round_tools=paper_tools,
             dispatch=_dispatch,
@@ -369,6 +378,7 @@ def run_report_task(task, messages, images):
                 task_id,
                 terminal_event_fields={
                     'type': 'aborted', 'partial': full_content,
+                    'agentUsageV1': _agent_usage.snapshot(),
                 },
             )
             return
@@ -391,6 +401,8 @@ def run_report_task(task, messages, images):
             full_content,
             _terminal['content'],
         )
+        if not (canonical_body or '').strip():
+            raise ValueError('Paper report completed without a non-empty body')
         if projection_needs_reset:
             logger.info('[Paper:Report] Task %s — replacing %d-char streamed body with '
                         '%d-char terminal returned content (deltas were display-only; '
@@ -496,6 +508,9 @@ def run_report_task(task, messages, images):
                                               appendix=inj_appendix,
                                               allow_images=inj_allow_images)
         task['enriched_text'] = enriched
+        final_report = enriched or full_content
+        if not final_report.strip():
+            raise ValueError('Paper report enrichment produced an empty artifact')
 
         # ── Build the "finish tag" meta (model + token usage + cost) ──
         # Persisted alongside the report so re-opening a cached report still
@@ -505,6 +520,7 @@ def run_report_task(task, messages, images):
         report_meta = _build_report_meta(
             report_model, _provider_id, _usage_total, _round_count,
             time.time() - t0)
+        report_meta['agentUsageV1'] = _agent_usage.snapshot()
         request_policy = dict(task.get('requestPolicyV1') or {})
         cache_isolated = request_policy.get('cacheMode') == 'request_local'
         if request_policy:
@@ -550,27 +566,29 @@ def run_report_task(task, messages, images):
 
         task['report_meta'] = report_meta
         # Persist through storage.v1. The worker never owns a database driver,
-        # connection, cursor, or transaction.
-        if enriched and not cache_isolated:
-            try:
-                PaperArtifactRepository(int(task['_userId'])).put_report(
-                    PaperReport(
-                        paper_hash=phash,
-                        lang=lang,
-                        report=enriched,
-                        model=report_model,
-                        meta=report_meta,
-                        created_at=int(time.time()),
-                    ),
-                    command_id=f'paper.report.upsert:{uuid.uuid4().hex}',
-                )
-                logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs) '
-                            'model=%s cost=%s',
-                            phash, lang, len(enriched), len(images),
-                            report_model, report_meta.get('costCny'))
-            except Exception as e:
-                logger.warning('[Paper:Report] Failed to persist: %s', e)
-        elif enriched:
+        # connection, cursor, or transaction. A canonical product request is
+        # successful only after the repository confirms the artifact; otherwise
+        # publishing ``done`` would make an expensive report disappear on reload.
+        if not cache_isolated:
+            saved = PaperArtifactRepository(int(task['_userId'])).put_report(
+                PaperReport(
+                    paper_hash=phash,
+                    lang=lang,
+                    report=final_report,
+                    model=report_model,
+                    meta=report_meta,
+                    created_at=int(time.time()),
+                ),
+                command_id=f'paper.report.upsert:{uuid.uuid4().hex}',
+            )
+            if not saved:
+                raise RuntimeError(
+                    'Paper report repository did not confirm persistence')
+            logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs) '
+                        'model=%s cost=%s',
+                        phash, lang, len(final_report), len(images),
+                        report_model, report_meta.get('costCny'))
+        else:
             logger.info(
                 '[Paper:Report] Request-local policy — canonical cache write '
                 'suppressed hash=%s policy=%s',
@@ -601,7 +619,6 @@ def run_report_task(task, messages, images):
         if enriched and enriched != full_content:
             _append_report_event(task, {'type': 'enriched', 'text': enriched, 'paperHash': phash})
 
-        final_report = enriched or full_content
         _report_runtime.finish(
             task_id,
             result=final_report,
@@ -674,6 +691,7 @@ def run_report_task(task, messages, images):
             task_id,
             terminal_event_fields={
                 'type': 'aborted', 'partial': full_content,
+                'agentUsageV1': _agent_usage.snapshot(),
             },
         )
 
@@ -689,8 +707,12 @@ def run_report_task(task, messages, images):
             task_id,
             error=envelope,
             error_context='paper-report',
+            terminal_event_fields={
+                'agentUsageV1': _agent_usage.snapshot(),
+            },
         )
     finally:
+        task['agentUsageV1'] = _agent_usage.snapshot()
         _cleanup_stale_report_tasks()
 
 

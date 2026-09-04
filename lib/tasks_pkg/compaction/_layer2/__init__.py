@@ -39,6 +39,7 @@ from lib.tasks_pkg.compaction._constants import _COMPACT_TOOL_NAME  # noqa: F401
 
 from lib.tasks_pkg.compaction._layer2._prompt import (  # noqa: F401
     _SUMMARY_SYSTEM_PROMPT,
+    _extract_summary_objective,
     _format_messages_for_summary,
     _summary_input_char_budget,
 )
@@ -47,6 +48,7 @@ from lib.tasks_pkg.compaction._layer2._anchor import (  # noqa: F401
     _coerce_spec_list,
     _collect_user_verbatim,
     _extract_current_query,
+    _extract_objective_anchor_text,
     _extract_recently_accessed_files,
     _find_turn_boundary,
     _fold_recent_intra_turn,
@@ -65,10 +67,12 @@ logger = get_logger(__name__)
 
 __all__ = [
     '_SUMMARY_SYSTEM_PROMPT',
+    '_extract_summary_objective',
     '_format_messages_for_summary',
     '_summary_input_char_budget',
     '_coerce_spec_list',
     '_extract_current_query',
+    '_extract_objective_anchor_text',
     '_collect_user_verbatim',
     '_extract_recently_accessed_files',
     '_find_turn_boundary',

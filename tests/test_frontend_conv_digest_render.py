@@ -2,13 +2,11 @@
 
 WHY
 ---
-``_renderConvDigest`` in ``static/js/ui/tool_rounds_rich.js`` is the HUMAN view of
-the View-Conversation tool — the primary deliverable a user sees when the agent
-opens a past conversation. It was previously a thin card (bare tool NAMES, a
-short preview, no timestamps, first-40-messages only). This harness loads the
-REAL shipped ``tool_rounds.js`` under jsdom and drives ``_renderConvDigest`` on
-the exact structured digest ``build_conversation_digest`` now emits, asserting
-the card renders:
+``_renderConvDigest`` in ``frontend/src/runtime/sections/ui/tool_rounds_rich.js``
+is the retained legacy HUMAN projection of a conversation digest. It is no
+longer allowed to replace the same-round ``get_conversation`` backend result.
+This harness drives that pure projection on a representative structured digest,
+asserting the body renders:
   1. rich tool chips (name + primary arg), not bare names;
   2. a per-message EXPAND (<details>) when a longer ``full`` text is present;
   3. the conversation last-updated time + per-message timestamps;
@@ -64,8 +62,8 @@ _DIGEST_JSON = r"""{
 
 
 # RAW-mode digest: carries `raw:true` + `rev` + per-message low-level metadata
-# (model / usage / finishReason / msgId). The card must render the RAW badge and
-# at least one metadata chip — the visible difference from a normal read.
+# (model / usage / finishReason / turnId). The retained digest body renders the
+# message metadata, but must not invent the former wrapper-only RAW/revision badge.
 _DIGEST_RAW_JSON = r"""{
   "convId": "convRAW9999",
   "title": "Debug read",
@@ -77,9 +75,9 @@ _DIGEST_RAW_JSON = r"""{
   "rev": 7,
   "messages": [
     { "index": 1, "role": "user", "text": "hello", "ts": 1700000000000,
-      "msgId": "u-abc" },
+      "turnId": "turn-user-abc" },
     { "index": 2, "role": "assistant", "text": "hi there", "ts": 1700000100000,
-      "model": "aws.claude-opus-4.8", "finishReason": "stop", "msgId": "a-xyz",
+      "model": "aws.claude-opus-4.8", "finishReason": "stop", "turnId": "turn-assistant-xyz",
       "usage": { "in": 1234, "out": 56 } }
   ],
   "truncated": false,
@@ -159,26 +157,27 @@ check('fallback_not_notext', (function () {
 check('nonraw_no_rawbadge', !d.querySelector('.ptool-convdigest-rawbadge'));
 check('nonraw_no_metachip', !d.querySelector('.ptool-convdigest-metachip'));
 
-// (8) RAW card renders the RAW badge + per-message metadata chips.
+// (8) The legacy body does not claim wrapper-only RAW/revision UI, while its
+// per-message metadata projection remains usable in secondary contexts.
 const cdRaw = JSON.parse(DIGEST_RAW_JSON_PH);
 const dRaw = frag(_renderConvDigest(cdRaw));
-check('raw_badge_present', !!dRaw.querySelector('.ptool-convdigest-rawbadge'));
-check('raw_rev_shown', dRaw.querySelector('.ptool-convdigest-rawbadge').textContent.indexOf('7') !== -1);
+check('raw_body_has_no_wrapper_badge', !dRaw.querySelector('.ptool-convdigest-rawbadge'));
+check('raw_body_does_not_invent_revision', dRaw.textContent.indexOf('rev 7') === -1);
 check('raw_model_chip', !!dRaw.querySelector('.ptool-convdigest-meta-model') &&
   dRaw.textContent.indexOf('aws.claude-opus-4.8') !== -1);
 check('raw_token_chip', !!dRaw.querySelector('.ptool-convdigest-meta-tok') &&
   dRaw.textContent.indexOf('1234') !== -1 && dRaw.textContent.indexOf('56') !== -1);
 check('raw_finish_chip', !!dRaw.querySelector('.ptool-convdigest-meta-fr') &&
   dRaw.textContent.indexOf('stop') !== -1);
-check('raw_msgid_chip', !!dRaw.querySelector('.ptool-convdigest-meta-id') &&
-  dRaw.textContent.indexOf('a-xyz') !== -1);
+check('raw_turnid_chip', !!dRaw.querySelector('.ptool-convdigest-meta-id') &&
+  dRaw.textContent.indexOf('turn-assistant-xyz') !== -1);
 
 report();
 """.replace("DIGEST_JSON_PH", __import__("json").dumps(_DIGEST_JSON)).replace("DIGEST_RAW_JSON_PH", __import__("json").dumps(_DIGEST_RAW_JSON))
 
 
 def test_conv_digest_render():
-    # _renderConvDigest moved to the DEFERRED tool_rounds_rich.js (Epic-E
+    # _renderConvDigest moved to the adjacent tool_rounds_rich.js (Epic-E
     # split 2026-08-01) — drive it there.
     run_harness(
         target_js=TOOL_ROUNDS_RICH,

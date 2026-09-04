@@ -189,6 +189,10 @@ def _append_partial_stream_retry_context(messages, partial_content, model):
     messages.append({
         'role': 'user',
         'content': _PARTIAL_STREAM_CONTINUATION_NUDGE,
+        # Engine-authored control, not a new human objective. Provider
+        # sanitization keeps the same role/text while turn/query policy treats
+        # the carrier as transparent.
+        '_isMeta': True,
     })
     return 'continuation_nudge'
 
@@ -635,72 +639,13 @@ def analyse_stream_result(
     assistant_msg, last_finish_reason, task, tid, model,
     round_num, _premature_retry_count, messages, usage=None,
 ):
-    """Analyse the result of one LLM streaming round and decide next action.
+    """Return the break/continue/proceed decision for one streamed round.
 
-    Inspects the ``assistant_msg`` returned by ``_llm_call_with_fallback``
-    and determines whether the main loop should **break**, **continue**
-    (retry after premature close), or **proceed** to tool execution.
-
-    Per-phase counter scope
-    -----------------------
-    The premature-retry counter survives across rounds within the same
-    Worker / Planner phase: each ``analyse_stream_result`` call reads
-    ``task['_premature_retry_count_phase']`` as the source of truth (when
-    present) and writes the updated value back.  The legacy
-    ``_premature_retry_count`` argument is kept for back-compat (paper
-    reports / swarm agents pass a local counter); when the task dict
-    has the phase counter set, that overrides the argument.
-
-    Per-retry slot rotation
-    -----------------------
-    On each zero-byte retry decision, the analyser also signals to the
-    next dispatch call to AVOID the pair ``(slot.key_name, slot.model)``
-    that just zero-byte'd.  The signal is written to
-    ``task['_force_rotate_pair']`` and consumed (cleared) by
-    ``stream_llm_response`` on the next call.  Mirrors the
-    ``gateway-5xx-treated-as-429`` pattern.
-
-    Parameters
-    ----------
-    assistant_msg : dict
-        The assistant message returned from the LLM stream.
-    last_finish_reason : str | None
-        The finish reason reported by the LLM for this round.
-    task : dict
-        Live task dict (read for ``aborted``, ``error``, ``content``; mutated
-        on premature-close to update retry state and, on exhaustion, set the
-        terminal error while preserving partial content).
-    tid : str
-        Short task ID for logging.
-    model : str
-        Current model identifier.
-    round_num : int
-        Zero-based loop iteration index.
-    _premature_retry_count : int
-        How many premature-close retries have already been attempted.
-        Treated as a fallback when ``task['_premature_retry_count_phase']``
-        is not yet initialised — caller code in the orchestrator that
-        sets the phase counter on the task dict overrides this argument.
-    messages : list[dict]
-        Conversation message list. Transport retries leave it untouched;
-        partial-stream continuations append or extend an assistant prefill.
-        Providers that reject prefill instead receive the partial assistant
-        row followed by a system-authored user nudge.
-    usage : dict | None
-        Raw usage dict from the LLM response.  Contains ``trace_id``,
-        ``resp_trace_id``, and ``stream_elapsed_ms`` for gateway
-        coordination diagnostics.
-
-    Returns
-    -------
-    dict
-        A decision dict with the following keys:
-
-        - ``action`` : ``'break'`` | ``'continue'`` | ``'proceed'``
-        - ``loop_exit_reason`` : str | None — set when action is ``'break'``
-        - ``abort_detected_phase`` : str | None — set when abort is the cause
-        - ``premature_retry_count`` : int — updated retry counter
-        - ``last_finish_reason`` : str | None — possibly updated finish reason
+    A task-owned phase counter overrides the legacy caller counter so retries
+    remain bounded across Worker/Planner rounds. Zero-byte recovery also writes
+    ``_force_rotate_pair`` for the next dispatch, while partial continuation
+    preserves provider-compatible assistant history. The returned mapping owns
+    the updated retry count, finish reason, loop-exit cause, and abort phase.
     """
     # ── Per-phase counter override ──
     # If the orchestrator has set ``task['_premature_retry_count_phase']``,
@@ -1096,6 +1041,9 @@ def analyse_stream_result(
                     messages, assistant_msg, task=task)
                 messages.append({
                     'role': 'user',
+                    # Provider-wire user role, but engine-authored continuation
+                    # control rather than a new human query/objective.
+                    '_isMeta': True,
                     'content': (
                         '[SYSTEM: TODO CONTINUATION REQUIRED]\n'
                         f'You have {len(_incomplete)} incomplete checklist '
@@ -1176,7 +1124,13 @@ def analyse_stream_result(
                 )
                 append_assistant_prose_message(
                     messages, assistant_msg, task=task)
-                messages.append({'role': 'user', 'content': _stall_text})
+                messages.append({
+                    'role': 'user',
+                    'content': _stall_text,
+                    # The correction must not replace the task's real user
+                    # intent or split a productive read sequence next round.
+                    '_isMeta': True,
+                })
                 # DISPLAY-ONLY sidecar accumulation — the in-timeline chip.
                 # Unlike the peer / steer lanes this is emitted AT INJECTION
                 # rather than deferred until the next LLM call confirms

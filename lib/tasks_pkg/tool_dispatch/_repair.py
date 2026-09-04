@@ -28,6 +28,7 @@ _REPAIR_PATTERN_LABELS = {
     'leaked_tool_call_syntax': 'stripped leaked tool-call markup',
     'param_alias': 'renamed wrong-harness arg key',
     'schema_default': 'applied schema default',
+    'zero_cursor_omission': 'treated zero cursor as the latest window',
 }
 
 

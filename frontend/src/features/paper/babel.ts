@@ -1,5 +1,7 @@
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
+import type { PaperSaveScope } from './library';
 import {
   paperAttachPush,
   paperDetachPush,
@@ -29,10 +31,9 @@ type Translator = (key: string, vars?: JsonObject) => string;
 type LegacyPaperWindow = Window & {
   Api?: { paper?: BabelPaperApi };
   t?: Translator;
-  escapeHtml?: (value: unknown) => string;
   renderMarkdown?: (text: string) => string;
   errorEnvelopeMessage?: (error: unknown) => string;
-  _saveActivePaperState?: () => void;
+  _saveActivePaperState?: (scope?: PaperSaveScope) => void;
   _paperParsedText?: string;
   _paperHash?: string;
   _babelTargetLang?: string;
@@ -52,14 +53,6 @@ function globals(): LegacyPaperWindow {
 function translate(key: I18nKey, vars?: JsonObject): string {
   const fn = globals().t;
   return typeof fn === 'function' ? fn(key, vars) : key;
-}
-
-function escape(value: unknown): string {
-  const fn = globals().escapeHtml;
-  if (typeof fn === 'function') return fn(value);
-  const span = document.createElement('span');
-  span.textContent = value == null ? '' : String(value);
-  return span.innerHTML;
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -201,7 +194,7 @@ export async function babelTranslateAllPages(lang: string): Promise<void> {
           if (state._babelTargetLang === lang) {
             translatedPages()[lang] = text;
             renderBabelResult(text);
-            state._saveActivePaperState?.();
+            state._saveActivePaperState?.('babel');
             if (status) status.textContent = translate('paper.babelCompleteCached');
           }
           return;
@@ -222,7 +215,7 @@ export async function babelTranslateAllPages(lang: string): Promise<void> {
       if (state._babelTargetLang === lang) {
         translatedPages()[lang] = cachedText;
         renderBabelResult(cachedText);
-        state._saveActivePaperState?.();
+        state._saveActivePaperState?.('babel');
         if (status) status.textContent = translate('paper.babelCompleteCached');
       }
       return;
@@ -242,7 +235,7 @@ export async function babelTranslateAllPages(lang: string): Promise<void> {
       const complete = text || aggregated.join('\n\n');
       translatedPages()[lang] = complete;
       renderBabelResult(complete);
-      state._saveActivePaperState?.();
+      state._saveActivePaperState?.('babel');
       if (status) status.textContent = translate('paper.babelComplete');
     };
     const applyEvent = (_stream: BabelStreamState, event: PaperPushEvent): boolean => {
@@ -250,9 +243,9 @@ export async function babelTranslateAllPages(lang: string): Promise<void> {
       if (type === 'chunk') {
         aggregated.push(stringValue(event.text));
         setProgress(numberValue(event.index) + 1, numberValue(event.total));
-        if (state._babelTargetLang === lang) {
-          renderBabelResult(aggregated.join('\n\n'));
-        }
+        // Progress remains live, but render the validated artifact only once.
+        // Rejoining and reparsing every prefix made long translations O(n^2)
+        // in both copied text and Markdown/DOM work.
         return true;
       }
       if (type === 'done') {

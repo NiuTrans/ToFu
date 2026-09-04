@@ -9,6 +9,7 @@ events.  This module owns the wire shape independently of Flask and storage.
 from __future__ import annotations
 
 import copy
+import json
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -26,6 +27,9 @@ TASK_REPLAY_EVENT_REQUIRED_FIELDS = (
 )
 TASK_REPLAY_UNKNOWN_EVENT_TYPES = 'allow'
 TASK_REPLAY_TERMINAL_EVENT_TYPES = ('done', 'error', 'aborted')
+TASK_REPLAY_TERMINAL_STATUSES = (
+    'done', 'error', 'aborted', 'interrupted',
+)
 TASK_REPLAY_STATUS_FIELD = 'status'
 TASK_REPLAY_NEXT_CURSOR_FIELD = 'next_cursor'
 TASK_REPLAY_TERMINAL_FIELD = 'done'
@@ -37,6 +41,12 @@ TASK_REPLAY_CURSOR_RESET_FIELD = 'reset'
 TASK_REPLAY_QUERY_FIELD = 'cursor'
 TASK_REPLAY_QUERY_MINIMUM = 0
 TASK_REPLAY_QUERY_DEFAULT = 0
+# HTTP long-poll consumers should make incremental progress instead of
+# serializing the complete retained window on every stale-cursor request.
+# The byte budget covers the event array only; one oversized event is still
+# delivered intact so replay remains lossless.
+TASK_REPLAY_HTTP_PAGE_MAX_EVENTS = 128
+TASK_REPLAY_HTTP_PAGE_MAX_EVENT_BYTES = 1024 * 1024
 TASK_REPLAY_PAGE_FIELDS = (
     'format',
     'ok',
@@ -95,10 +105,17 @@ class TaskReplayPage:
     @property
     def frames(self) -> list[tuple[int, dict]]:
         """Events paired with their absolute producer sequence."""
-        return [
-            (self.first_cursor + offset, event)
-            for offset, event in enumerate(self.events)
-        ]
+        frames = []
+        for offset, event in enumerate(self.events):
+            fallback = self.first_cursor + offset
+            try:
+                sequence = int(event.get(TASK_REPLAY_EVENT_SEQUENCE_FIELD))
+                if sequence < 0:
+                    sequence = fallback
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                sequence = fallback
+            frames.append((sequence, event))
+        return frames
 
     def payload(self, extras: dict | None = None) -> dict:
         payload = {
@@ -120,6 +137,96 @@ class TaskReplayPage:
         if extras:
             payload.update(extras)
         return payload
+
+
+def project_bounded_replay_payload(
+    payload: dict,
+    *,
+    max_events: int = TASK_REPLAY_HTTP_PAGE_MAX_EVENTS,
+    max_event_bytes: int = TASK_REPLAY_HTTP_PAGE_MAX_EVENT_BYTES,
+) -> dict:
+    """Project a runtime replay response onto one bounded HTTP page.
+
+    ``TaskRuntime.poll`` deliberately returns the complete retained suffix for
+    in-process compatibility. HTTP callers can repeat a stale cursor, though,
+    so exposing that suffix directly turns one long task into repeated
+    multi-megabyte responses. This projection advances ``next_cursor`` only
+    past events actually delivered and withholds the terminal snapshot until
+    the consumer catches up. A legacy ``while not done`` client therefore
+    drains every page instead of stopping at the first page of an already
+    terminal task.
+
+    The input mapping is never mutated. One event is always delivered even
+    when it alone exceeds the byte target; replay fidelity takes precedence
+    over the transport target.
+    """
+    if not isinstance(payload, dict):
+        raise TypeError('replay payload must be a dict')
+    event_limit = max(1, int(max_events))
+    byte_limit = max(1, int(max_event_bytes))
+    source_events = payload.get(TASK_REPLAY_EVENTS_FIELD)
+    events = list(source_events) if isinstance(source_events, (list, tuple)) \
+        else []
+
+    delivered: list[dict] = []
+    encoded_bytes = 2  # JSON array brackets.
+    for event in events[:event_limit]:
+        event_bytes = len(json.dumps(
+            event, ensure_ascii=False, separators=(',', ':'),
+        ).encode('utf-8'))
+        separator_bytes = 1 if delivered else 0
+        if delivered and encoded_bytes + separator_bytes + event_bytes \
+                > byte_limit:
+            break
+        delivered.append(event)
+        encoded_bytes += separator_bytes + event_bytes
+
+    full_next_cursor = safe_replay_cursor(
+        payload.get(TASK_REPLAY_NEXT_CURSOR_FIELD))
+    page_start_cursor = max(0, full_next_cursor - len(events))
+    caught_up = len(delivered) == len(events)
+    page_next_cursor = full_next_cursor
+    if not caught_up:
+        # Durable logs may be sparse: provider-ingress deltas are intentionally
+        # memory-local, while the next structural event keeps its absolute
+        # producer sequence. Advancing by list length would then either repeat
+        # or skip rows. Prefer the last delivered event's canonical ``seq``;
+        # legacy unsequenced producers retain the contiguous fallback.
+        delivered_sequence = None
+        if delivered and isinstance(delivered[-1], dict):
+            try:
+                candidate = int(delivered[-1].get(
+                    TASK_REPLAY_EVENT_SEQUENCE_FIELD))
+                if candidate >= 0:
+                    delivered_sequence = candidate
+            except (TypeError, ValueError, OverflowError):
+                pass
+        page_next_cursor = (
+            delivered_sequence + 1
+            if delivered_sequence is not None else
+            page_start_cursor + len(delivered)
+        )
+
+    projected = dict(payload)
+    projected[TASK_REPLAY_EVENTS_FIELD] = delivered
+    projected[TASK_REPLAY_NEXT_CURSOR_FIELD] = page_next_cursor
+    projected[TASK_REPLAY_CAUGHT_UP_FIELD] = caught_up
+    cursor_state = projected.get(TASK_REPLAY_CURSOR_FIELD)
+    if isinstance(cursor_state, dict):
+        cursor_state = dict(cursor_state)
+        cursor_state[TASK_REPLAY_CURSOR_NEXT_FIELD] = page_next_cursor
+        projected[TASK_REPLAY_CURSOR_FIELD] = cursor_state
+
+    if not caught_up and projected.get('ok') is True:
+        # ``status`` remains the authoritative lifecycle status. ``done`` is
+        # false until replay is drained so legacy clients keep paging.
+        projected[TASK_REPLAY_TERMINAL_FIELD] = False
+        for field in (
+            'finishedAt', 'artifact_quality', 'error', 'result',
+            'content', 'thinking',
+        ):
+            projected.pop(field, None)
+    return projected
 
 
 def memory_replay_page(
@@ -196,7 +303,7 @@ def task_memory_replay_page(task: dict, cursor: Any) -> TaskReplayPage:
         events = task.get('events') or []
         base = task_event_base_cursor(task, events)
         status = str(task.get('status') or '')
-        terminal = status in TASK_REPLAY_TERMINAL_EVENT_TYPES
+        terminal = status in TASK_REPLAY_TERMINAL_STATUSES
         return memory_replay_page(
             events, cursor, status=status, done=terminal, base_cursor=base)
 
@@ -458,7 +565,8 @@ __all__ = [
     'TASK_REPLAY_EVENT_TYPE_FIELD', 'TASK_REPLAY_EVENT_SEQUENCE_FIELD',
     'TASK_REPLAY_EVENTS_FIELD',
     'TASK_REPLAY_EVENT_REQUIRED_FIELDS', 'TASK_REPLAY_UNKNOWN_EVENT_TYPES',
-    'TASK_REPLAY_TERMINAL_EVENT_TYPES', 'TaskReplayPage',
+    'TASK_REPLAY_TERMINAL_EVENT_TYPES', 'TASK_REPLAY_TERMINAL_STATUSES',
+    'TaskReplayPage',
     'TASK_REPLAY_STATUS_FIELD', 'TASK_REPLAY_NEXT_CURSOR_FIELD',
     'TASK_REPLAY_TERMINAL_FIELD', 'TASK_REPLAY_CURSOR_FIELD',
     'TASK_REPLAY_CAUGHT_UP_FIELD',

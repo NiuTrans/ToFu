@@ -220,12 +220,6 @@ class ArtifactStore:
             return [k for k, v in self._backend.items()
                     if tag in v.get('tags', [])]
 
-    def get_all(self) -> dict[str, str]:
-        """Get all non-expired artifacts as ``{key: content}``."""
-        with self._lock:
-            self._evict_expired_locked()
-            return {k: v.get('content', '') for k, v in self._backend.items()}
-
     def summary(self, max_preview: int = 120) -> str:
         """Human-readable summary of all artifacts."""
         with self._lock:

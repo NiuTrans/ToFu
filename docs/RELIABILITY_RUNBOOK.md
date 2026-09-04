@@ -38,6 +38,34 @@ python serverctl.py doctor
 对 live worker 执行 `stop` / `restart` 会中断在途任务：交互终端必须确认，非交互
 调用必须消费用户在 Tofu UI 中批准的一次性 `shutdown` / `restart` 记录。服务本来
 就未运行时，`stop` 保持幂等且不要求批准；`status`、`doctor`、`logs` 均为只读。
+应用内 restart 会在停止监听前按 manifest 中的全量构建输入 SHA-256 持锁修复并重新
+验证完整 frontend artifact；内容不匹配、损坏或缺少本地 builder 时旧 worker 继续
+在线，且不消费一次性批准或 cooldown。浏览器必须在这个同步预检开始前先绘制“准备
+重启”，并在同一张进度卡中连续过渡到停机、启动和恢复；仅在该计划内中断作用域内
+抑制通用离线告警。明确的 HTTP 拒绝立即恢复正常健康监控且不得进入新 boot 等待，
+响应丢失才使用新 `bootId` 作为完成权威，超时则重新探测并恢复通用告警。合法预构建
+发布包无需 Node。生产 shutdown 只有在 Sidecar
+auto-restart 线程已退出后才签发 storage-boundary release certificate；若有界 join
+失败，进程退出并由 manager 等待 OS lease 真正释放后换 PID 恢复，不允许同 PID
+re-exec 携带一个可能重新取得 SQLite lease 的后台线程。
+manager 的自动 crash recovery 也会在每次 worker spawn 前调用同一个隔离的
+`prepare-frontend` 门禁；因此 manager 长期存活期间发生的源码变更不能绕过校验。
+源码 manager 还把启动它的 checkout 中 `supervisor.py` 作为生命周期所有权哨兵：
+checkout 被删除或原子移走后，HTTP manager 与 watchdog 会在有界轮询内自行退出，
+释放监听端口、继承描述符和内存；watchdog 不会对已失去所有权的路径无限自愈。
+
+重启后的恢复边界必须被值班者准确理解，避免把正常墓碑当事故、把真事故当墓碑：
+worker 重启时 `recover_stale_tasks_on_startup` 将中断回合置为 interrupted，
+同一对话点击继续会从断点恢复；swarm 会话与子代理状态持久化于
+`swarm_sessions` / `swarm_agents` 表，启动时 `rehydrate_swarms_on_startup`
+恢复——已完成未投递的结果重新投递，运行中的子代理从回合检查点续跑（被中断
+回合内已执行的副作用工具可能重跑一次，写类工具经审批门拦截）。等待人工回答
+的提问卡片只存在于进程内存：中断或重启后旧卡片成为只读墓碑，不是数据丢失；
+继续对话会基于完整历史发出新的可交互卡片。取证第一命令是
+`python3 debug/inspect_conversation.py <conversation_id>`：只读、自动解析当前
+SQLite authority，按运行中 Sidecar 相同的投影渲染完整回合轨迹、压缩回执与
+匹配日志行；逐阶段耗时与用户感知绘制证据由 turn trace 拥有
+（`GET /api/v1/tasks/<task_id>/trace`，见 docs/TURN_TRACE_CONTRACT.md）。
 
 Docker 部署：
 
@@ -76,7 +104,9 @@ backup API 分页复制，完成 `integrity_check`、fsync 后原子发布。夜
 
 | 防线 | 默认行为 | 目的 |
 |---|---|---|
-| 任务背压 | 个人探针 1..8；8 CPU/8 GiB 常见结果为 4 | 防止并发线性放大工作集 |
+| 任务背压 | 个人探针按 CPU、内存容量、启动时可用内存和任务 RSS 包络推导 1..48 个根 Agent 槽；8 CPU/8 GiB 常见结果为 4，64 CPU/64 GiB 且可用 48 GiB 的参考结果为 18，超大服务器在默认 64 GiB worker 硬预算内最多 48 | 尽量利用服务器资源，同时给 OS、浏览器和进程非任务基线留出明确空间 |
+| Agent 等待队列 | 有限 FIFO，默认每个执行槽 8 个等待项（总量 8..512）；绑定后仍为 `pending`，工作线程入口才是 `running` | 用户能区分“已受理、等本机 Agent 槽”和“已经执行”，队列饱和显式失败而非无限堆积 |
+| 卡死槽恢复 | reaper 判定卡死后隔离旧线程，按独立预算补位；默认每 4 个逻辑槽最多 1 个、总计 1..4 | Python 无法安全杀线程；恢复吞吐但不让僵尸线程无限增加 |
 | allocator | 个人随数值预算 1..4；容器早期回退 2；分布式 8 | 避免大载荷释放后留下几十个 64 MiB arena |
 | Sidecar RPC | 个人探针 2..12；分布式 64 | 与有效存储并发对齐，不把 256 个线程当吞吐 |
 | serving-loop 空闲线程 | 个人探针 300..1800 秒；分布式 3600 秒 | 超过热线底线的 sync/agent burst 线程仅在 active=queued=0 时整代退役；容量不变、后续按需重建 |
@@ -87,7 +117,7 @@ backup API 分页复制，完成 `integrity_check`、fsync 后原子发布。夜
 | Codex 模型目录 | 登录/真实变化后 3 分钟；稳定时 6→12→24→48→60 分钟；未登录/分布式为 0 worker | ETag 与归一化行比较识别真实变化；失败保留 last-good 并同样退避，缓存新鲜度上限 60 分钟 |
 | 远程 provider 模型目录 | 变化/待删除确认 6 小时；无变化 12 小时；失败 6→12→24→48 小时 | 每 provider 持久化 next-attempt，重启不绕过；Settings Save 强制立即同步；空/失败响应保留 last-good |
 | 本地端点监控 | health + autodiscovery 共享 1 个 worker；空模型 HTTP 2→4→8→15 分钟 | TCP 拓扑仍每 2 分钟检查，新端口/Settings 变化立即全探测；`TOFU_LOCAL_AUTODISCOVER_MAX_INTERVAL` 最大硬限 3600 秒 |
-| Project presence TTL | 空注册表 0 个线程；首个 peer 1 个共享 sweeper；最后 peer 回收后回到 0 | 启动不创建空闲 worker；25 秒 active/180 秒 idle TTL 与 owner 隔离不变，精确线程身份阻止旧批次释放新 owner |
+| Project presence TTL | 空注册表 0 个线程；首个 peer 1 个共享 sweeper；最后 peer 回收后回到 0；有项目任务运行期间另有 1 个 presence-keepalive | 启动不创建空闲 worker；25 秒 active/180 秒 idle TTL 与 owner 隔离不变，精确线程身份阻止旧批次释放新 owner；keepalive 由任务注册表驱动每 10 秒刷新，无项目任务即退休 |
 | Swarm 会话清理 | 活跃 session 共享 1 个 300 秒 timer；0 session 时为 0 | import 不启动线程；精确 timer 代次在最后 session 移除时取消，后续 session 按需重建 |
 | Billing reserve 回收 | 非 multi-user/计费关闭时 0；启用时每 5 分钟 1 个 durable claim | 单一 Sidecar sweep，跳过仍运行任务，幂等 release；无第二个 request-worker janitor |
 | 日报缺失补偿 | 0 个专用常驻线程；主 scheduler 每 6 小时 1 个 owner-scoped durable claim | 启动仅在昨日缺失时排入有界 hint；maintenance 子线程不阻塞主 tick，Sidecar claim 防重复 |
@@ -97,21 +127,38 @@ backup API 分页复制，完成 `integrity_check`、fsync 后原子发布。夜
 | 会话目录到达合并 | 与 Sidecar RPC 容量相同，硬上限 256；8 ms 到达窗 | 仅合并同 owner/同投影且尚未开始的读取；开始即摘除，完成结果不缓存，饱和时直读 |
 | Project refresh 队列 | 个人探针 16..128；分布式 512（status/watch/summary 各一条） | 唯一 scope 有界，重复 scope 合并；过载只延迟可重建的 warm refresh |
 | 增量翻译 | 活跃 accumulator 个人 2..16、分布式 32；每任务 preview 队列个人 8..32、分布式 64 | 限制线程和文本积压；终态 handoff 永不丢弃 |
+| 共享翻译通道 | worker 个人 1..2、分布式 16；等待队列个人 4..32、分布式 128；空闲 60/600 秒退线程 | 发送前、显式文本、整轮、PPTX、论文共享按 owner 轮转的硬界队列；完整 Turn 译文先提交并终结任务，15 秒上限的可重建分段富化再排到同一 owner 队尾，饱和可丢弃且不新建线程；前台发送仅在自身 owner 内插队；同一 worker 值还限制实际 MT/LLM 并发；其他饱和后台返回可重试 `server_busy`/HTTP 503，发送路径降级为带 `server_busy` 原因的原文 |
+| 翻译限流调用预算 | 每次翻译个人 4..8、分布式 16，显式硬上限 64 个真实上游限流响应 | 等待槽位不计数；预算耗尽终止整项可选翻译且禁止 direct fallback；交互式编码/研究调度默认仍可等待恢复 |
 | 存储启动余量 | `data/` 所在卷容量的 1%，限制在 256 MiB..2 GiB | 不让 SQLite/WAL 吃掉文件系统最后空间 |
 | cgroup admission | 源码 96%；Compose 90% | 高压时拒绝新任务 |
-| 大请求闸门 | 源码 95%；Compose 90% 触发检查；还需绝对余量低于 `max(64 MiB, body×8)` 才拒绝 | 共享 cgroup 不因百分比假阳性中断小请求 |
+| process RSS admission | 新任务必须还能在 worker 硬上限内容纳一个 `TOFU_TASK_RSS_RESERVE_MB` 包络 | 即使共享 cgroup 尚有数百 GiB，也不再把已经接近自身上限的 worker 推过回收线 |
+| 大请求闸门 | process RSS 每轮检查；共享 cgroup 在源码 95% / Compose 90% 时检查，且绝对余量低于 `max(64 MiB, body×8)` 才拒绝 | 先在软 RSS 线触发派生上下文裁剪，同时避免共享 cgroup 百分比假阳性 |
 | aggregate relief | 源码 92%；Compose 85% | 清缓存、丢日志页缓存、`malloc_trim` |
-| aggregate relief 冷却 | 连续 5 次无有效回收后默认 600 秒 | 共享 cgroup/FUSE slab 压力下停止无效缓存抖动，日志与 RSS 防线继续 |
+| aggregate relief 冷却 | 连续 5 次无有效回收后默认 600→1200→2400→3600 秒封顶；压力跌回触发线下或有效回收后复位 | 共享 cgroup/FUSE slab 持续压力下减少无效热缓存清空，日志、OOM 检查与进程 RSS 防线继续 |
 | 进程软 RSS | 个人按有效容量/当前余量推导；8 GiB 常见结果 2 GiB | 在 worker 变胖时主动回收 |
 | 进程硬 RSS | 个人按有效容量/当前余量推导；8 GiB 常见结果 3 GiB | 应用与 manager 独立采样，超限优雅轮换 worker |
 | 外部恢复 | manager / container runtime | OOM、崩溃、卡死后重新拉起 |
 | worker 风暴熔断 | 120 秒内 5 次失败 | 指数退避，第 5 次暂停并要求显式恢复 |
 | 任务恢复熔断 | 2 分钟 5 次 boot | 避免恢复任务形成重启风暴 |
 
-大请求闸门的百分比只是开始评估的信号，不是单独的拒绝条件。这点对
+`tofu_cgroup_relief_reclaimed_bytes_{latest,total}` 的 `process_rss` 来源可直接
+归属于 Tofu；`shared_cgroup`、`cgroup_cache`、`heap_window` 与 `log_window` 是
+动作边界前后的共享计数器观测，会混入兄弟进程并发变化，不能相加或解释为因果回收。
+结合 `tofu_cgroup_relief_duration_seconds` 判断一次 relief 的收益/时延，再调整策略。
+
+取消是资源释放边界，不只是 UI 状态。已在 Agent FIFO 中等待的任务应直接撤销队列项；
+已经取得 worker、但在启动准备期间收到取消的任务，会在项目状态、工具装配、上下文
+拼装等每个重阶段边界重新检查信号。入口已取消时不得启动项目扫描、外部编辑探针、
+MCP 装配、内存选择或上下文预取；阶段中取消时，预取池在终态路径上取消尚未开始的
+future 并释放任务引用。排障时若看到 `aborted_during_prep_<stage>`，该任务不应再有
+后续 LLM 请求；若仍有，则是取消门禁回归。
+
+共享 cgroup 的百分比只是开始评估的信号，不是单独的拒绝条件。这点对
 Tofu 与其他进程共享的大 cgroup 尤其重要：`99%` 可能仍有 1 GiB 以上绝对余量，
 不应拒绝几 MiB 的请求。只有当百分比越线且请求特定峰值包络仍无法容纳时，
-闸门才拒绝。编排器随后先不调用摘要模型地裁剪派生上下文，在同一模型上有界重试；
+该分支才拒绝。worker 自身的软 RSS 包络是另一条独立边界，不要求共享 cgroup 先高压；
+否则单进程会先撞到按本机容量推导的 worker RSS 回收线。编排器随后先不调用摘要模型
+地裁剪派生上下文，在同一模型上有界重试；
 本地内存压力不是模型故障证据，不会触发模型切换或池救援。
 
 可用 `.env` 显式调整：
@@ -120,6 +167,7 @@ Tofu 与其他进程共享的大 cgroup 尤其重要：`99%` 可能仍有 1 GiB 
 TOFU_PROCESS_RSS_RELIEF_MB=2048
 TOFU_PROCESS_RSS_RECYCLE_MB=2867
 TOFU_PROCESS_RSS_COOLDOWN_SEC=300
+TOFU_TASK_RSS_RESERVE_MB=512
 TOFU_CGROUP_RELIEF_COOLDOWN_SEC=600
 TOFU_MAX_INFLIGHT_TASKS=4
 TOFU_EXECUTOR_IDLE_SECONDS=300
@@ -128,6 +176,17 @@ TOFU_PROJECT_REFRESH_QUEUE_CAPACITY=64
 TOFU_PROJECT_UNDO_CACHE_CAPACITY=128
 TOFU_INCREMENTAL_TRANSLATE_ACTIVE=8
 TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY=16
+TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS=32
+TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS=30
+TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS=256
+TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS=1
+FETCH_FILTER_MIN_CHARS=6000
+FETCH_FILTER_GATE_MAX_CHARS=6000
+TOFU_TRANSLATE_CACHE_MAX_MIB=256
+TOFU_TRANSLATE_MAX_429_ATTEMPTS=8
+TOFU_TRANSLATE_WORKERS=2
+TOFU_TRANSLATE_QUEUE_CAPACITY=16
+TOFU_TRANSLATE_WORKER_IDLE_SECONDS=60
 TOFU_NETPATH_INTERVAL=180
 TOFU_NETPATH_MAX_INTERVAL=3600
 TOFU_MODEL_CATALOG_STABLE_INTERVAL=43200
@@ -143,6 +202,9 @@ TOFU_SQLITE_SNAPSHOT_MAX_AGE_HOURS=26
 路径、日志/存储余量和当前零配置预算。启动器把同一次快照物化进 child 环境，避免
 主进程与 Sidecar 因瞬时
 余量变化选择不同并发。显式 `.env` 值优先于探针，并单独显示在 `Override` 行。
+个人模式的 `TOFU_MAX_INFLIGHT_TASKS` 仍受 worker RSS 硬边界约束；要提高并发，必须
+同时用测量结果提高 `TOFU_PROCESS_RSS_RECYCLE_MB` 或降低已证实的单任务包络，不能只把
+任务数从 4 改成 8。
 
 阈值必须来自观测，不要为追求更高吞吐直接关闭保护。若合法单任务就超过软阈值，
 先把 PDF/视频/浏览器等重任务迁到受限 worker，再提高阈值。
@@ -210,14 +272,24 @@ python3 -m lib.log_diagnostics --max-bytes 32768 --pretty
 先用有界诊断报告按 fingerprint/关联 ID 缩小到一段证据。
 若已有侧边栏复制出的 conversation ID，执行
 `python serverctl.py inspect-conversation <conversation-id>` 一次性读取权威存储投影和
-匹配日志；该命令只读，但输出包含对话正文，分享前必须检查，必要时加 `--no-logs`。
+压缩归档回执及匹配日志。命令会自动识别当前 Sidecar/fastpath 写前端，不会把遗留的
+`data/tofu.db` 当成当前状态；无法唯一证明权威路径时会拒绝并给出下一步。该命令只读，
+但输出包含对话正文，分享前必须检查，必要时加 `--no-logs`。
 
 支持包会自动包含有界且常见凭据尽力脱敏的 worker、资源压力与 faulthandler 等
 诊断尾部，不读取对话存储或数据库；日志可能引用用户文本或未知格式的密钥，分享前
 应检查，严格场景使用 `--no-logs`。`doctor` 会显示 cgroup 使用量/上限、swap 上限、内核 OOM 次数、当前 worker RSS、
-manager 实际执行的 worker RSS 硬上限、
-最近快照年龄和路径。manager 状态还会保留滚动故障数、上次退出的时间相关原因和
-实际恢复 RTO。`status --json` 中 `ready` 表示 manager 状态与健康探测一致，
+manager 实际执行的 worker RSS 硬上限、Supervisor 已加载/磁盘期望的源码指纹，以及
+worker 当前/下一次启动的任务并发与 RSS 预算。`supervisor_source_stale` 只需执行
+`serverctl.py ensure`，不会停止 worker；`worker_resource_budget_stale` 必须等任务空闲后
+执行一次获批的 managed restart，禁止为消除 warning 强杀仍在运行的对话。
+最近快照年龄和路径。manager 状态将 worker exit 分成 `workerFailureCount` 与
+`plannedExitCount`；只有前者进入滚动故障窗口。`restartCount` 是升级前后兼容的历史
+混合计数，不能再当 crash 数。clean marker 必须同时匹配 PID、host、worker generation
+时间戳且只能消费一次；手动关机把 durable desired state 改成 stopped，显式 restart
+证书或 manager 在发信号前持久化的 PID 意图会立即恢复。没有该意图的普通 SIGTERM
+以及 memory recycle 都进入故障预算，防止外部信号或泄漏形成无限拉起。状态还会保留实际恢复 RTO。
+`status --json` 中 `ready` 表示 manager 状态与健康探测一致，
 `applicationReachable` 表示通过 PID 身份校验的实际应用端点可达；两者不一致时
 `portDrift` 与 `applicationUrl` 直接指出可用端口和生命周期漂移。`status` 在
 manager 离线、启动卡住、端口漂移或运行态 conflict/crashloop/degraded 时返回非零；
@@ -233,6 +305,7 @@ manager 离线、启动卡住、端口漂移或运行态 conflict/crashloop/degr
 
 ```bash
 python -m pytest -q tests/test_cgroup_guard.py tests/test_server_manager.py \
+  tests/test_storage_runtime_shutdown.py tests/test_update_restart_guard.py \
   tests/test_shutdown_quiesce.py tests/test_shutdown_hard_deadline.py
 python healthcheck.py
 python serverctl.py doctor

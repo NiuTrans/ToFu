@@ -36,7 +36,6 @@ ROUTES_DIR = PROJECT_ROOT / 'routes'
 # Files that are allowed to use raw `import logging` for valid reasons:
 # - lib/log.py: IS the logging module
 # - lib/__init__.py: loaded before lib.log may be ready
-# - lib/_pkg_utils.py: needs `import logging` for type hints (Logger param)
 # - lib/version.py: loaded at import-time before lib.log may exist
 #
 # An entry whose file no longer exists is DEAD WEIGHT that exempts nothing and
@@ -49,7 +48,6 @@ ROUTES_DIR = PROJECT_ROOT / 'routes'
 RAW_LOGGING_ALLOWLIST = {
     'lib/log.py',
     'lib/__init__.py',
-    'lib/_pkg_utils.py',
     'lib/version.py',
 }
 

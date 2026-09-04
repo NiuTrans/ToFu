@@ -16,7 +16,7 @@ and ultimately backpressures commands instead of dropping recovery records.
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -173,6 +173,42 @@ class LogicalMutationRecordingSession:
             'rowcount': int(rowcount),
             'sql': sql,
         })
+        return rowcount
+
+    def execute_many_exact(
+        self, sql: str, params: Sequence[tuple[Any, ...]],
+    ) -> int:
+        """Record a backend-batched set as equivalent replay statements."""
+        rows = tuple(params)
+        if not rows:
+            return 0
+        if not isinstance(sql, str) or not sql.strip() or (
+                len(sql.encode('utf-8')) > _MAX_MUTATION_SQL_BYTES):
+            raise StorageError(
+                'database_protocol_error',
+                'Logical mutation statement exceeds its contract',
+            )
+        if not sql.lstrip().lower().startswith(_MUTATION_PREFIXES):
+            raise StorageError(
+                'database_protocol_error',
+                'Logical command attempted a non-replayable mutation statement',
+            )
+        if len(self.mutations) + len(rows) > _MAX_MUTATIONS_PER_COMMAND:
+            raise StorageError(
+                'storage_payload_too_large',
+                'Logical mutation count exceeds its contract',
+            )
+        if any(len(row) > _MAX_MUTATION_PARAMETERS for row in rows):
+            raise StorageError(
+                'storage_payload_too_large',
+                'Logical mutation parameter count exceeds its contract',
+            )
+        rowcount = self._session.execute_many_exact(sql, rows)
+        self.mutations.extend({
+            'params': _wire_value(list(row)),
+            'rowcount': 1,
+            'sql': sql,
+        } for row in rows)
         return rowcount
 
     def fetch_one(

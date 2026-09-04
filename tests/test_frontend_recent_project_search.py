@@ -10,7 +10,8 @@ quickly find a project among many recents. The render path (project.js) is:
                             ``#recentCount`` badge, and shows an empty-state
                             when nothing matches.
 
-This drives the REAL shipped static/js/project.js under jsdom, seeds a set of
+This drives the authored Project section through the logical runtime test view
+under jsdom, seeds a set of
 recent projects via an in-scope bridge (the state lives in a top-level ``let``,
 unreachable from the outer eval scope — same trick as the _streamTimers tests),
 and asserts filter / highlight / count / empty-state / XSS-escape behaviour.
@@ -31,6 +32,7 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
+REPOSITORY_ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _PROJECT_SRC = os.path.join(JS_DIR, 'project.js')
 
@@ -223,10 +225,12 @@ def test_NC_highlight_escape_is_load_bearing():
     )
 
 
-_I18N_SRC = os.path.join(JS_DIR, 'i18n.js')
+_I18N_SRC = os.path.join(
+    REPOSITORY_ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
 
-# Loads the REAL i18n.js (zh default) + project.js under jsdom, applies the
-# static data-i18n* attrs via _applyI18n(), and drives _renderRecentList() to
+# Loads the authoritative zh catalogue + project.js under jsdom, applies the
+# same data-i18n* projection needed by this fixture, and drives
+# _renderRecentList() to
 # assert the JS-rendered empty-state uses t() (zh), not a hardcoded English
 # literal. The DOM mirrors the real index.html markup for the Recent card.
 _I18N_HARNESS = r"""
@@ -251,7 +255,7 @@ const dom = new JSDOM(`<!DOCTYPE html><body>
   </div>
 </body>`, { url: 'http://localhost/' });
 global.window = dom.window; global.document = dom.window.document;
-global.localStorage = dom.window.localStorage;   // i18n.js reads tofu_ui_lang here → null → 'zh'
+global.localStorage = dom.window.localStorage;
 global.navigator = dom.window.navigator;
 global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -259,7 +263,20 @@ global.escapeHtml = (s) => String(s == null ? '' : s)
 global.getConvById = () => null;
 global.getActiveConv = () => null;
 
-eval(fs.readFileSync(I18N, 'utf8'));            // defines t(), _applyI18n(), _i18n (zh default)
+const catalog = JSON.parse(fs.readFileSync(I18N, 'utf8'));
+global.t = (key) => Object.prototype.hasOwnProperty.call(catalog, key)
+  ? catalog[key] : key;
+global._applyI18n = (root = document) => {
+  root.querySelectorAll('[data-i18n]').forEach((element) => {
+    element.textContent = t(element.dataset.i18n);
+  });
+  root.querySelectorAll('[data-i18n-placeholder]').forEach((element) => {
+    element.placeholder = t(element.dataset.i18nPlaceholder);
+  });
+  root.querySelectorAll('[data-i18n-title]').forEach((element) => {
+    element.title = t(element.dataset.i18nTitle);
+  });
+};
 let src = fs.readFileSync(SRC, 'utf8');
 src += '\n;globalThis.__seedRecent = (arr) => { _recentProjects = arr; };';
 eval(src);
@@ -324,7 +341,7 @@ def _run_i18n(project_src, i18n_src=None):
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_recent_search_i18n_zh():
-    """Real i18n.js (zh default) → the label / placeholder / tooltips / empty
+    """Authoritative zh catalogue → label / placeholder / tooltips / empty
     states all render Chinese, no raw key leaks."""
     output = _run_i18n(_PROJECT_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -384,8 +401,8 @@ def test_NC_i18n_keys_defined():
     FAILs (renders empty), while the empty-state (separate key) still passes."""
     _nc_i18n(
         _I18N_SRC,
-        anchor="'pm.recentSearchPlaceholder': { zh: '搜索最近…', en: 'Search recent…' },",
-        replacement="'pm.recentSearchPlaceholder': { zh: '', en: 'Search recent…' },",
+        anchor='"pm.recentSearchPlaceholder": "搜索最近…",',
+        replacement='"pm.recentSearchPlaceholder": "",',
         must_fail=['placeholder_zh'],
         must_still_pass=['nomatch_zh', 'empty_zh'],
     )

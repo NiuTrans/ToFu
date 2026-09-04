@@ -423,10 +423,12 @@ except OSError:
 _PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PROJ_DIR)
 
-# ── Dev fallback: locate a local tofu-search checkout when it isn't
-# pip-installed (production installs it via requirements.txt). Set
-# TOFU_SEARCH_PATH to the repo root of a sibling tofu-search clone.
-_TOFU_SEARCH_PATH = os.environ.get('TOFU_SEARCH_PATH', '')
+# ── Dev fallback: prefer the monorepo's canonical tofu-search source when it
+# is not pip-installed (production installs it via requirements.txt). An
+# explicit TOFU_SEARCH_PATH remains available for packaged/source-export tests.
+_TOFU_SEARCH_PATH = os.environ.get('TOFU_SEARCH_PATH', '').strip()
+if not _TOFU_SEARCH_PATH:
+    _TOFU_SEARCH_PATH = os.path.join(_PROJ_DIR, 'packages', 'tofu-search')
 if _TOFU_SEARCH_PATH and os.path.isdir(_TOFU_SEARCH_PATH):
     sys.path.insert(0, _TOFU_SEARCH_PATH)
 
@@ -1184,6 +1186,22 @@ from lib.server_shutdown import (
 )
 
 
+def _cleanup_abandoned_tool_output_spools():
+    """Reclaim reconstructible run-command spools left by crashed workers."""
+    from lib.tool_result_artifact_writer import cleanup_abandoned_spools
+
+    removed = cleanup_abandoned_spools()
+    if removed:
+        _server_log.info(
+            '[ToolResultWriter] reclaimed %d abandoned spool file(s)', removed)
+
+
+
+def _prepare_startup_artifacts():
+    """Reclaim transient spools before validating the frontend artifact."""
+    _cleanup_abandoned_tool_output_spools()
+    _prepare_frontend_runtime_assets()
+
 def _prepare_frontend_runtime_assets():
     """Validate/build the frontend, then stage its Vite tree on local disk."""
     _check_frontend_artifact()
@@ -1201,6 +1219,7 @@ def _prepare_frontend_runtime_assets():
 def register_server_production_lifecycle(
         target_app, *, shutdown_requested=None, announce_ready=None):
     """Attach the shared production bootstrap/cleanup recipe to ``target_app``."""
+    from lib.model_routing import bootstrap_personal_model_routing
     from lib.production_lifecycle import (
         ProductionStartupSteps,
         register_production_lifecycle,
@@ -1209,10 +1228,11 @@ def register_server_production_lifecycle(
     return register_production_lifecycle(
         target_app,
         steps=ProductionStartupSteps(
-            build_assets=_prepare_frontend_runtime_assets,
+            build_assets=_prepare_startup_artifacts,
             validate_storage_boundary=_validate_storage_cutover_boundary,
             init_database=_init_database,
             start_storage=_start_storage_sidecar,
+            bootstrap_model_routing=bootstrap_personal_model_routing,
             validate_imports=_validate_imports,
             start_workers=_start_background_workers,
         ),
@@ -1242,6 +1262,7 @@ def register_server_runtime_lifecycle(
         fault_shm_log=_fault_shm_log,
         fault_log=_fault_log,
         logger=_server_log,
+        process_role=DEPLOYMENT_CONFIGURATION.process_role,
     )
 
 

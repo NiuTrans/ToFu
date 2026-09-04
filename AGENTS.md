@@ -40,21 +40,24 @@ reports, in one pass: which stores reference the ID (sidecar
 `conversations` / `conversation_messages`), full metadata, the transcript
 (rendered through the same `conversation.get` operation the running sidecar
 serves, so turn-native conversations are projected exactly like the server
-renders them), and matching lines from `logs/app.log` + `logs/access.log`.
+renders them), compaction summaries/receipts, and matching lines from
+`logs/app.log` + `logs/access.log`.
 Flags: `--full` (untruncated, all messages), `--raw` (messages as JSON),
 `--logs N` / `--no-logs`, `--db PATH`, `--user-id N`.
 
 Key storage facts that save exploration turns:
 
 - The storage authority is the **sidecar** (`server.py` defaults
-  `TOFU_STORAGE_MODE=sidecar`); the database file is `data/tofu.db` (sqlite,
-  WAL — concurrent read-only access is safe).
+  `TOFU_STORAGE_MODE=sidecar`). The inspector auto-resolves the active SQLite
+  authority from the live lease/open file or fastpath lineage. Never assume
+  `data/tofu.db` while a fastpath shadow exists; use `--db` only for an
+  explicitly verified override.
 - Turn-native conversations store their transcript in
   `storage_conversation_turns`; their `messages_json` / `msg_count` in
   `storage_conversations` are intentionally empty placeholders, NOT data loss.
-- The sidecar token/port exist only inside the running server process, so
-  offline inspection must read `data/tofu.db` directly — never try to connect
-  to the live sidecar socket.
+- The sidecar token/port exist only inside the running server process. Offline
+  inspection reads the auto-resolved WAL-backed authority in query-only mode;
+  never try to recover or expose the live sidecar credential.
 
 # Design principles (standing constraints)
 

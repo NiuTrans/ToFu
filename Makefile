@@ -24,7 +24,7 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
-.PHONY: lint docs-check architecture-check contracts-check test-unit test-api test-api-core test-slow test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp audit-tests suite-health
+.PHONY: lint docs-check architecture-check contracts-check monorepo-check test-unit test-api test-api-core test-slow test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp audit-tests suite-health
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -44,6 +44,9 @@ architecture-check: ## Reject retired surfaces and incident-only source notation
 contracts-check: ## Reject generated API client and server drift
 	python3 scripts/gen_conversation_sync_contract.py --check
 	python3 scripts/gen_api_v4_contract.py --check
+
+monorepo-check: ## Validate first-party package, version and dependency boundaries
+	python3 scripts/check_monorepo.py
 
 .PHONY: lint-format
 lint-format: ## Check formatting (non-blocking, for gradual adoption)
@@ -142,10 +145,12 @@ FRONTEND_UNIT_IGNORES = \
 	--ignore=tests/test_bundle_nonblocking_serve.py \
 	--ignore=tests/test_bundle_source_syntax_ratchet.py \
 	--ignore=tests/test_i18n_pack_emission.py \
+	--ignore=tests/test_i18n_packs.py \
 	--ignore=tests/test_stale_bundle_self_heal.py \
 	--ignore=tests/test_stale_i18n_pack_self_heal.py \
 	--ignore=tests/test_static_route_offload.py \
 	--ignore=tests/test_static_serving_registration.py \
+	--ignore=tests/test_snapshot_document_refs_frontend.py \
 	--ignore=tests/test_task_mode_states.py \
 	--ignore=tests/test_orchestration_endpoint_parity.py \
 	--ignore=tests/test_orchestration_wire_contracts.py \
@@ -164,22 +169,21 @@ FRONTEND_ESM_TESTS = \
 	tests/test_frontend_attempt_stream_vite.py \
 	tests/test_frontend_authoritative_composer.py \
 	tests/test_frontend_auto_translate_default.py \
-	tests/test_frontend_balance_vite.py \
 	tests/test_frontend_browser_storage_vite.py \
 	tests/test_frontend_budget.py \
 	tests/test_frontend_conversation_surface_vite.py \
 	tests/test_frontend_memory_vite.py \
-	tests/test_frontend_model_catalog_vite.py \
 	tests/test_frontend_paper_arxiv_fetch_vite.py \
 	tests/test_frontend_paper_arxiv_search_vite.py \
 	tests/test_frontend_paper_lifecycle_vite.py \
+	tests/test_frontend_paper_media_ux.py \
 	tests/test_frontend_paper_podcast_runtime_vite.py \
 	tests/test_frontend_paper_push_transport_vite.py \
 	tests/test_frontend_paper_qa_task_vite.py \
 	tests/test_frontend_paper_recommend_vite.py \
 	tests/test_frontend_paper_report_runtime_vite.py \
-	tests/test_frontend_paper_video.py \
 	tests/test_frontend_paper_video_runtime_vite.py \
+	tests/test_frontend_project_brain_content_translation_vite.py \
 	tests/test_frontend_project_mode_decoupling.py \
 	tests/test_frontend_timeline_narration_translation.py \
 	tests/test_frontend_translate_guard.py \
@@ -188,6 +192,7 @@ FRONTEND_ESM_TESTS = \
 	tests/test_agent_mode_selector.py \
 	tests/test_vite_migration_residuals.py \
 	tests/test_i18n_pack_emission.py \
+	tests/test_i18n_packs.py \
 	tests/test_install_npm_bounded.py \
 	tests/test_orchestration_endpoint_parity.py \
 	tests/test_orchestration_wire_contracts.py \
@@ -195,6 +200,7 @@ FRONTEND_ESM_TESTS = \
 	tests/test_stale_i18n_pack_self_heal.py \
 	tests/test_static_route_offload.py \
 	tests/test_static_serving_registration.py \
+	tests/test_snapshot_document_refs_frontend.py \
 	tests/test_task_mode_states.py
 
 ifeq ($(JOBS),0)
@@ -246,7 +252,7 @@ healthcheck: ## Run project health diagnostics
 
 # ── CI Pipeline ────────────────────────────────────────────────
 
-ci: lint docs-check architecture-check contracts-check test-unit test-api suite-health healthcheck ## Full CI pipeline
+ci: lint docs-check architecture-check contracts-check monorepo-check test-unit test-api suite-health healthcheck ## Full CI pipeline
 	@echo ""
 	@echo "  ✅ CI pipeline passed"
 	@echo ""

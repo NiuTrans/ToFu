@@ -247,6 +247,8 @@ html[data-rail] .folder-quickadd{display:none}
 .conv-date-text{font-size:11px;color:var(--text-tertiary)}
 .conv-date-sep{font-size:9px;color:var(--text-tertiary);opacity:0.35}
 .conv-date-time{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-tertiary);opacity:0.65;letter-spacing:-0.02em}
+/* Clone provenance chip — sits in the date line, same scale as status tags. */
+.conv-copy-badge{font-size:9px;font-weight:600;padding:1px 5px;border-radius:6px;line-height:14px;white-space:nowrap;flex-shrink:0;color:var(--text-tertiary);border:1px solid var(--border,rgba(255,255,255,.15))}
 /* ── Status tags in sidebar date line ── */
 .conv-status-tag{font-size:9px;font-weight:600;padding:1px 5px;border-radius:6px;line-height:14px;margin-left:4px;white-space:nowrap;animation:statusTagFadeIn .3s ease}
 .conv-status-translating{color:#14b8a6;background:rgba(20,184,166,0.12)}
@@ -257,6 +259,7 @@ html[data-rail] .folder-quickadd{display:none}
 .conv-status-streaming{color:var(--accent);background:var(--accent-subtle)}
 .conv-status-error{color:#ef4444;background:rgba(239,68,68,0.12)}
 .conv-status-incomplete{color:#f59e0b;background:rgba(245,158,11,0.12)}
+.conv-status-waiting{color:#f59e0b;background:rgba(245,158,11,0.12)}
 @keyframes statusTagFadeIn{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:translateX(0)}}
 /* ── Overlay action buttons (gradient fade) ── */
 .conv-actions{position:absolute;right:0;top:0;bottom:0;display:flex;align-items:center;gap:1px;padding:0 6px 0 24px;opacity:0;pointer-events:none;transition:opacity 0.15s ease;background:linear-gradient(90deg,transparent 0%,var(--bg-secondary) 40%)}
@@ -290,6 +293,7 @@ html[data-rail] .folder-quickadd{display:none}
 @keyframes errDotFadeIn{from{opacity:0;transform:scale(0.6)}to{opacity:1;transform:scale(1)}}
 /* ── Incomplete dot — settled interrupted/unfinished turn, static amber with a soft glow (no pulse: the turn is over, just needs attention) ── */
 .conv-incomplete-dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;box-shadow:0 0 5px rgba(245,158,11,0.5);animation:errDotFadeIn .3s ease}
+.conv-waiting-dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;box-shadow:0 0 6px rgba(245,158,11,0.6);animation:hgDotBlink 1s ease-in-out infinite}
 /* ── Freshness degrade (pt_cadaa70ffa6b468d) ──
    The authoritative channel is not delivering, so a busy indicator may be
    showing a state that has since changed. Deliberately a SOFTENING (hollow +
@@ -535,7 +539,14 @@ html[data-rail] .folder-quickadd{display:none}
   border-radius:.52em;
   margin-left:.52em;
   vertical-align:middle;opacity:1;
-  transform:translateY(-.62em) rotate(-3.2deg);
+  /* 上抬用独立 translate 属性、倾角走 --brand-tilt:悬停 wobble 的 keyframes 整体占用
+     transform,静置偏移若也写在 transform 里,动画起止帧会把它冲掉(印章先掉 .62em
+     再回正跳一下)。独立属性与 keyframes 复合,上抬全程保持;--brand-tilt 让摆动围绕
+     静置的 -3.2° 进行(与吉祥物 img 的 translate/transform 拆分同一机制)。 */
+  --brand-tilt:-3.2deg;
+  translate:0 -.62em;
+  transform:rotate(var(--brand-tilt));
+  transform-origin:50% 100%;
   box-shadow:0 .06em .16em rgba(92,72,44,.30),
              inset 0 .06em 0 rgba(255,247,232,.30)
 }

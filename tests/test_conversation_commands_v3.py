@@ -56,6 +56,142 @@ def _append_settled(flask_client, command_id: str, actor: str, content: str):
     return response.get_json()["turn"]
 
 
+def test_busy_lane_queue_returns_real_pair_and_cancel_deletes_it(
+    flask_client, conversation_command_db, monkeypatch,
+):
+    import lib.conversation_sync.task_start as task_start_runtime
+
+    monkeypatch.setattr(
+        task_start_runtime,
+        "start_conversation_attempt_executor",
+        _registered_start("active-queue-fence"),
+    )
+    active = flask_client.post(_create_path(), json={
+        "commandId": "queue-fence-active",
+        "inputTurn": {"content": "hold the lane"},
+        "config": {"model": "gpt-4o"},
+    })
+    assert active.status_code == 200
+
+    queued_response = flask_client.post(_create_path(), json={
+        "commandId": "queue-real-pair",
+        "inputTurn": {"content": "restore me on cancel"},
+        "message": {"text": "restore me on cancel"},
+        "config": {"model": "gpt-4o"},
+        "injectMode": "queue",
+    })
+    assert queued_response.status_code == 200
+    queued = queued_response.get_json()
+    assert queued["queued"] is True
+    assert queued["submittedTurn"]["presentationId"] == "queue-real-pair:input"
+    assert queued["turn"]["presentationId"] == "queue-real-pair:output"
+    assert queued["attempt"]["queueBinding"] == {
+        "queueId": queued["queueId"], "state": "pending",
+    }
+    assert queued["queueItem"]["inputTurnId"] == queued["submittedTurn"]["turnId"]
+    assert queued["queueItem"]["outputTurnId"] == queued["turn"]["turnId"]
+
+    snapshot_response = flask_client.get(
+        f"/api/v3/conversations/{CONVERSATION_ID}/sync"
+    )
+    assert snapshot_response.status_code == 200
+    snapshot = snapshot_response.get_json()
+    assert snapshot["scope"] == {
+        "kind": "conversation",
+        "ownerId": 1,
+        "threadId": CONVERSATION_ID,
+    }
+    snapshot_queue_item = next(
+        item for item in snapshot["queueItems"]
+        if item["queueId"] == queued["queueId"]
+    )
+    assert snapshot_queue_item["inputTurnId"] == queued["submittedTurn"]["turnId"]
+    assert snapshot_queue_item["outputTurnId"] == queued["turn"]["turnId"]
+    assert snapshot_queue_item["attemptId"] == queued["attempt"]["attemptId"]
+
+    cancelled_response = flask_client.delete(
+        f"/api/v3/conversations/{CONVERSATION_ID}/queue/{queued['queueId']}"
+    )
+    assert cancelled_response.status_code == 200
+    cancelled = cancelled_response.get_json()
+    assert cancelled["cancelled"] is True
+    assert cancelled["inputTurn"]["projection"]["content"] == (
+        "restore me on cancel"
+    )
+    assert set(cancelled["deletedTurnIds"]) == {
+        queued["submittedTurn"]["turnId"], queued["turn"]["turnId"],
+    }
+    replay = flask_client.delete(
+        f"/api/v3/conversations/{CONVERSATION_ID}/queue/{queued['queueId']}"
+    )
+    assert replay.status_code == 200
+    assert replay.get_json()["deletedTurnIds"] == cancelled["deletedTurnIds"]
+
+
+def test_regenerate_rebinds_plan_turn_identity_to_normalized_target_mode(
+    flask_client, conversation_command_db, monkeypatch,
+):
+    from lib.turn_lifecycle import get_turn, read_events, record_task_event
+    import lib.conversation_sync.task_start as task_start_runtime
+
+    task_ids = iter(("plan-task", "standard-task"))
+    monkeypatch.setattr(
+        task_start_runtime,
+        "start_conversation_attempt_executor",
+        lambda _conv_id, _config, **kwargs: (
+            (task_id := next(task_ids)),
+            kwargs["on_task_registered"](task_id),
+        )[0:2],
+    )
+    created_response = flask_client.post(_create_path(), json={
+        "commandId": "plan-create",
+        "inputTurn": {"content": "design this"},
+        "config": {"model": "gpt-4o", "planMode": True},
+    })
+    assert created_response.status_code == 200
+    created = created_response.get_json()
+    assert (created["turn"]["actor"], created["turn"]["kind"]) == (
+        "planner", "plan"
+    )
+    first_attempt_id = created["attempt"]["attemptId"]
+    assert record_task_event({
+        "_attemptId": first_attempt_id,
+        "_userId": 1,
+        "id": "plan-task",
+        "status": "done",
+        "finishReason": "stop",
+        "content": "the plan",
+        "thinking": "",
+        "toolRounds": [],
+        "config": {"model": "gpt-4o", "planMode": True},
+    }, {"type": "done", "finishReason": "stop"})
+
+    turn_id = created["turn"]["turnId"]
+    settled = get_turn(CONVERSATION_ID, turn_id, user_id=1)
+    regenerated_response = flask_client.post(
+        f"{_create_path()}/{turn_id}/attempts",
+        json={
+            "commandId": "plan-to-standard",
+            "operation": "regenerate",
+            "expectedProjectionRevision": settled["projectionRevision"],
+            "config": {"model": "gpt-4o", "planMode": False},
+        },
+    )
+    assert regenerated_response.status_code == 200
+    regenerated = regenerated_response.get_json()
+    assert (regenerated["turn"]["actor"], regenerated["turn"]["kind"]) == (
+        "assistant", "reply"
+    )
+    persisted = get_turn(CONVERSATION_ID, turn_id, user_id=1)
+    assert (persisted["actor"], persisted["kind"]) == ("assistant", "reply")
+    attempt_events = read_events(
+        regenerated["attempt"]["attemptId"], user_id=1
+    )
+    first_payload = attempt_events[0]["payload"]
+    assert first_payload["turnState"]["actor"] == "assistant"
+    assert first_payload["turnState"]["kind"] == "reply"
+
+
 def test_create_retry_settle_and_same_turn_regenerate(
     flask_client, conversation_command_db, monkeypatch,
 ):
@@ -85,8 +221,10 @@ def test_create_retry_settle_and_same_turn_regenerate(
     first_response = flask_client.post(_create_path(), json=body)
     assert first_response.status_code == 200
     first = first_response.get_json()
-    assert first["turn"]["status"] == "running"
+    assert first["turn"]["status"] == "pending"
     assert first["submittedTurn"]["actor"] == "human"
+
+    submitted_turn = first["submittedTurn"]
     assert first["attempt"]["operation"] == "generate"
     assert "_needsStart" not in first
     attempt_id = first["attempt"]["attemptId"]
@@ -123,18 +261,54 @@ def test_create_retry_settle_and_same_turn_regenerate(
         turn for turn in list_turns(CONVERSATION_ID, user_id=1)["turns"]
         if turn["turnId"] == turn_id
     )
+    live_input_projection = {
+        "content": "hello",
+        "contextSnapshot": {
+            "blockId": "turn-context",
+            "snapshot": {
+                "roots": [
+                    {"path": "/workspace/original", "short": "original", "ro": False},
+                    {"path": "/workspace/added", "short": "added", "ro": False},
+                ],
+                "model": "gpt-4o",
+            },
+        },
+    }
+    stale_input = flask_client.post(
+        f"{_create_path()}/{turn_id}/attempts",
+        json={
+            "commandId": "regenerate-stale-input-command",
+            "operation": "regenerate",
+            "expectedProjectionRevision": latest["projectionRevision"],
+            "inputUpdate": live_input_projection,
+            "expectedInputProjectionRevision": (
+                submitted_turn["projectionRevision"] - 1
+            ),
+            "config": {"model": "gpt-4o"},
+        },
+    )
+    assert stale_input.status_code == 409
+
     regenerated = flask_client.post(
         f"{_create_path()}/{turn_id}/attempts",
         json={
             "commandId": "regenerate-command",
             "operation": "regenerate",
             "expectedProjectionRevision": latest["projectionRevision"],
+            "inputUpdate": live_input_projection,
+            "expectedInputProjectionRevision": submitted_turn["projectionRevision"],
             "config": {"model": "gpt-4o"},
         },
     ).get_json()
     assert regenerated["turn"]["turnId"] == turn_id
     assert regenerated["attempt"]["attemptId"] != attempt_id
-    assert regenerated["turn"]["status"] == "running"
+    assert regenerated["turn"]["status"] == "pending"
+    regenerated_input = regenerated["submittedTurn"]["projection"]
+    assert regenerated_input["content"] == live_input_projection["content"]
+    assert regenerated_input["contextSnapshot"] == live_input_projection["contextSnapshot"]
+    assert regenerated["submittedTurn"]["projectionRevision"] == (
+        submitted_turn["projectionRevision"] + 1
+    )
     assert len(starts) == 2
 
     task.update(status="running", content="stale overwrite")
@@ -442,21 +616,32 @@ def test_regenerate_truncates_lane_tail_atomically(
         turn for turn in list_turns(CONVERSATION_ID, user_id=1)["turns"]
         if turn["turnId"] == first["turn"]["turnId"]
     )
+    client = get_storage_client(write=True)
+    cursor_before_regenerate = client.query(
+        "turn.sync.changes",
+        {"conversation_id": CONVERSATION_ID, "user_id": 1, "after": 0},
+    )["head"]
     regenerated = _regenerate(flask_client, target, "tail-regenerate")
     assert regenerated.status_code == 200
     body = regenerated.get_json()
     assert body["turn"]["turnId"] == target["turnId"]
-    assert body["turn"]["status"] == "running"
+    assert body["turn"]["status"] == "pending"
     assert set(body["deletedTurnIds"]) == tail_ids
     remaining = list_turns(CONVERSATION_ID, user_id=1)["turns"]
     assert {turn["turnId"] for turn in remaining} == {
         first["submittedTurn"]["turnId"], first["turn"]["turnId"],
     }
 
-    client = get_storage_client(write=True)
+    # Deleting tail attempts expires their old replay prefix by design. A
+    # zero cursor must reset to a snapshot once that creates a gap; the live
+    # client contract is the cursor it held immediately before regenerate.
     changes = client.query(
         "turn.sync.changes",
-        {"conversation_id": CONVERSATION_ID, "user_id": 1, "after": 0},
+        {
+            "conversation_id": CONVERSATION_ID,
+            "user_id": 1,
+            "after": cursor_before_regenerate,
+        },
     )
     deleted_events = [
         event for event in changes["events"] if event["type"] == "turn.deleted"

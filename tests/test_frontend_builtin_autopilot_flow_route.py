@@ -60,7 +60,7 @@ _SETACTIVEFLOW_HEAD = (
 _NC_ALIAS_BRANCH = (
     "  if ((flowVal || '') === 'builtin:autopilot') {\n"
     "    _applyFlowUI('');\n"
-    "    if (!autopilotEnabled) { toggleAutopilot(); } else { captureActiveConversationSettings(); }\n"
+    "    if (!autopilotEnabled) { setAgentMode('autopilot'); } else { captureActiveConversationSettings(); }\n"
     "    if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();\n"
     "    return;\n"
     "  }\n"
@@ -137,15 +137,16 @@ function _buildToolbarOverrides() {
 }
 
 // Load ONLY the (possibly byte-reverted) toolbar source. It defines
-// _applyFlowUI / _applyAutopilotUI / toggleAutopilot /
-// setActiveFlow / _buildToolbarOverrides as top-level functions in this scope.
+// _applyFlowUI / _applyAutopilotUI / setAgentMode /
+// setActiveFlow as top-level functions in this scope; the harness stubs
+// _buildToolbarOverrides (its owner moved to main_conv_lifecycle.js).
 eval(fs.readFileSync(TOOLBAR_SRC, 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 check('fns_exposed',
-  typeof setActiveFlow === 'function' && typeof toggleAutopilot === 'function'
+  typeof setActiveFlow === 'function' && typeof setAgentMode === 'function'
   && typeof _buildToolbarOverrides === 'function');
 
 function _snapshot() {
@@ -168,7 +169,7 @@ function _reset() {
 
 // ── Path A: the standalone toggle (live autopilot loop — DISTINCT) ──
 _reset();
-toggleAutopilot();
+setAgentMode('autopilot');
 const A = _snapshot();
 check('toggle_sets_autopilot', A.autopilotEnabled === true);
 check('toggle_no_flow', A.activeFlow === '');

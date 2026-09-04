@@ -2,7 +2,7 @@
 
 The reusable agent base emits project-brain "Activity Feed" lifecycle pulses
 (a turn ``started`` / ``completed`` / ``aborted``) through this seam rather
-than importing ``lib.conversations.project_feed`` directly.  This module is
+than importing Project Brain storage or projection owners directly.  This module is
 part of the agent base (``lib.agent_core`` is in ``CORE_MODULES``), so it MUST
 NOT import ``lib.conversations`` — it only names the *default adapter module*
 (:mod:`lib.tasks_pkg.activity_sink`), which is itself non-core and free to bind

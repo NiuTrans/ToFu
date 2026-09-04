@@ -15,9 +15,13 @@ grant execution authority, install dependencies, or bypass tool policy.
 | Bounded ClawHub search and exact-version resolution | `lib/skills/online_catalog.py` |
 | Package validation and atomic activation | `lib/skills/installer.py` |
 | Verified catalog download service | `lib/skills/catalog_install.py` |
-| Model tool schemas and execution | `lib/skills/tools.py`, `handlers/skills.py` |
+| Model tool schemas and execution | `lib/skills/tools.py` |
 | Authenticated HTTP/settings surface | `routes/api_v1/skills.py` |
-| Settings UI | `frontend/src/features/skills.ts` |
+| Lazy domain entry | `frontend/src/features/skills.ts` |
+| Settings UI state, view, commands, rollback, lifecycle | `frontend/src/features/skills/panel.ts` |
+| Shared bounded browser package-upload transport | `frontend/src/features/skills/package-installer.ts` |
+| Skills package-upload presentation | `frontend/src/features/skills/package-install-panel.ts` |
+| Memory package-upload presentation | `frontend/src/features/memory/skill-package-install.ts` |
 
 ## Context lifecycle
 
@@ -101,6 +105,13 @@ package bytes, never an arbitrary server path. Catalog entries that exceed the
 product resource budget remain visible with an unavailable reason rather than
 silently weakening validation.
 
+Memory and Skills load the same typed package-upload transport only with their
+lazy feature chunks. Picker and OS-drop inputs share ZIP validation, FormData
+construction, response parsing, and a one-active-upload guard. Each surface
+installs one fixed page-lifetime set of four drag listeners; feature adapters
+retain scope selection, localized toast placement, diagnostics, and
+post-install refresh policy.
+
 ## Ownership and activation
 
 Every durable operation receives an explicit owner id. Global packages live in
@@ -124,6 +135,8 @@ the frozen index mid-task.
   ClawHub approval includes the exact version returned by search.
 - Package scripts are retained for inspection and never run automatically.
 - Installed content activation is atomic and rollback-safe.
+- Browser package upload permits one active request and one fixed listener set
+  per lazy surface.
 - Model-visible results never reveal an absolute package path.
 - Owner, project, and enabled-state boundaries are explicit at every entry.
 
@@ -136,6 +149,7 @@ the frozen index mid-task.
 | Online discovery | `online_catalog.py`, search API, feature module | no preload, query/result/cache caps, fail-soft outage, untrusted metadata label |
 | Package policy | `installer.py`, `catalog.py` | digest, archive limits, collision, rollback tests |
 | Approval/dispatch | ToolSpec, dispatch pipeline, handler | auto-mode gate, unattended rejection, one-use receipt |
+| Browser package upload | `features/skills/package-installer.ts`, feature adapters | ZIP rejection, scope, one active upload, fixed drag listeners, visible failure |
 | Owner/API/UI | paths, registry, API route, feature module | owner isolation, multipart-only route, unavailable card |
 
 ```bash
@@ -144,4 +158,6 @@ pytest -q tests/test_skill_channel.py \
   tests/test_skills_api_split.py
 pytest -q tests/test_skill_env_vault.py tests/test_tool_registry.py \
   tests/test_write_approval_gate.py
+pytest -q tests/test_skill_package_installer.py \
+  tests/test_frontend_memory_vite.py tests/test_frontend_skills_vite.py
 ```

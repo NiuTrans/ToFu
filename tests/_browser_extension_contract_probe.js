@@ -625,8 +625,57 @@ function paginationProbe() {
   return {wizard, semantic, clicked, crossOrigin, sameOrigin};
 }
 
+async function navigateGuardProbe() {
+  vm.runInContext(`
+    SERVER_URL = 'https://tofu.test';
+    CLIENT_ID = 'probe-client';
+    BRIDGE_SECRET = 'probe-secret';
+  `, context);
+
+  // cmdListTabs flags the Tofu client tab so the server never seeds it as
+  // the working tab.
+  chrome.tabs.query = async () => ([
+    {id: 1, url: 'https://tofu.test/app', title: 'Tofu', active: true,
+     windowId: 1, index: 0, status: 'complete', pinned: false},
+    {id: 2, url: 'https://other.example/', title: 'Other', active: false,
+     windowId: 1, index: 1, status: 'complete', pinned: false},
+  ]);
+  const listTabs = await vm.runInContext('cmdListTabs({})', context);
+
+  // Case 1: the target tab IS the Tofu client — must open a new tab, never
+  // tabs.update the client tab.
+  currentUrl = 'https://tofu.test/app';
+  operations.length = 0;
+  const clientResult = await vm.runInContext(
+    "cmdNavigate({tabId: 7, url: 'https://dev.example.test/', waitForLoad: false})",
+    context);
+  const clientOps = operations.slice();
+
+  // Case 2: a normal tab navigates in place.
+  currentUrl = 'https://elsewhere.example/page';
+  operations.length = 0;
+  const normalResult = await vm.runInContext(
+    "cmdNavigate({tabId: 7, url: 'https://dev.example.test/', waitForLoad: false})",
+    context);
+  const normalOps = operations.slice();
+
+  // Case 3: pre-pairing (no SERVER_URL) there is nothing to protect — even a
+  // tofu.test-looking tab navigates in place.
+  vm.runInContext("SERVER_URL = '';", context);
+  currentUrl = 'https://tofu.test/app';
+  operations.length = 0;
+  const unpairedResult = await vm.runInContext(
+    "cmdNavigate({tabId: 7, url: 'https://dev.example.test/', waitForLoad: false})",
+    context);
+  const unpairedOps = operations.slice();
+
+  return {listTabs, clientResult, clientOps, normalResult, normalOps,
+          unpairedResult, unpairedOps};
+}
+
 const probes = {
   diagnosticUrl: diagnosticUrlProbe,
+  navigateGuard: navigateGuardProbe,
   fetch: fetchProbe,
   fileTransferCleanup: fileTransferCleanupProbe,
   fileTransferDeadline: fileTransferDeadlineProbe,

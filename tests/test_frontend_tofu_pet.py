@@ -30,7 +30,7 @@ from tests._runtime_sections import runtime_section_path
 # The classic js tree is gone; sections materialize from the retained
 # runtime (lazy chunks are concatenated back into the virtual view).
 PET_JS = Path(runtime_section_path('tofu-pet.js'))
-APP_RUNTIME = REPO / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
+APP_RUNTIME = REPO / 'frontend' / 'src' / 'main.ts'
 VITE_MANIFEST = REPO / 'static' / 'vite' / 'manifest.json'
 INDEX = REPO / "index.html"
 
@@ -1433,7 +1433,7 @@ def test_NEUTER_pet_ignores_light_is_caught():
 
 def test_registered_in_bundler_manifest():
     shell = APP_RUNTIME.read_text(encoding='utf-8')
-    assert "import('./scene/tofu-pet.js')" in shell, \
+    assert "import('./runtime/scene/tofu-pet.js')" in shell, \
         'tofu-pet.js lazy chunk not scheduled — it would load as a silent no-op'
     import json as _json
     manifest = _json.loads(VITE_MANIFEST.read_text(encoding='utf-8'))

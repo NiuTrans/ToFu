@@ -11,9 +11,13 @@ pure model-capability lookup, lazy-imported to avoid a package-load cycle.)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
+from lib.tool_history_projection import build_tool_history_round
+from lib.tool_round_identity import tool_round_batches
+from lib.tool_round_replay import scan_replayable_tool_round_prefix
 
 from lib.tasks_pkg.segments._types import SEG_TEXT, RESUMABLE_FINISH_REASONS
 from lib.tasks_pkg.segments._derive import _rounds_view_from_segments
@@ -47,37 +51,16 @@ def tool_history_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
     to the frontend-supplied toolHistory (the step-4 parity gate).
     """
     from lib.tools.todo import compact_todo_rounds_for_replay
-    rounds = compact_todo_rounds_for_replay(_rounds_view_from_segments(segments))
-    history: list[dict[str, Any]] = []
-    by_batch: dict[Any, dict[str, Any]] = {}
-    order: list[Any] = []
-    for r in rounds:
-        lr = r.get('llmRound')
-        if lr not in by_batch:
-            entry: dict[str, Any] = {'toolCalls': [], 'toolResults': []}
-            if r.get('assistantContent'):
-                entry['assistantContent'] = r['assistantContent']
-            if r.get('thinking'):
-                entry['thinking'] = r['thinking']
-            if r.get('thinkingSignature'):
-                entry['thinkingSignature'] = r['thinkingSignature']
-            by_batch[lr] = entry
-            order.append(lr)
-        tc: dict[str, Any] = {'id': r['toolCallId'], 'name': r['toolName'],
-                              'arguments': r.get('toolArgs') or '{}'}
-        if r.get('extraContent'):
-            tc['extraContent'] = r['extraContent']
-        if isinstance(r.get('caller'), dict):
-            tc['caller'] = dict(r['caller'])
-        by_batch[lr]['toolCalls'].append(tc)
-        result = {'tool_call_id': r['toolCallId'],
-                  'content': r.get('toolContent') or ''}
-        if isinstance(r.get('caller'), dict):
-            result['caller'] = dict(r['caller'])
-        by_batch[lr]['toolResults'].append(result)
-    for lr in order:
-        history.append(by_batch[lr])
-    return history
+    replay_prefix = scan_replayable_tool_round_prefix(
+        _rounds_view_from_segments(segments))
+    rounds = compact_todo_rounds_for_replay(list(replay_prefix.rounds))
+    # ``llmRound`` is local to one execution attempt.  Delegating both batch
+    # identity and shape to their shared owners prevents this compatibility
+    # path from recreating the old global-dict merge after Continue.
+    return [
+        build_tool_history_round(batch)
+        for batch in tool_round_batches(rounds)
+    ]
 
 
 def resume_prefill_from_segments(segments: list[dict[str, Any]] | None,
@@ -126,8 +109,11 @@ def resume_prefill_from_segments(segments: list[dict[str, Any]] | None,
         return None  # Claude — fail closed (Messages API rejects the prefill)
     fr_resumable = (finish_reason or '') in RESUMABLE_FINISH_REASONS
     for s in (segments or []):
+        if not isinstance(s, Mapping):
+            continue
         if s.get('type') == SEG_TEXT and s.get('terminal') and s.get('deliverable'):
-            text = s.get('text') or ''
+            raw_text = s.get('text')
+            text = raw_text if isinstance(raw_text, str) else ''
             if not text:
                 return None
             if s.get('resumable') or fr_resumable:
@@ -148,6 +134,7 @@ def resume_prefill_from_segments(segments: list[dict[str, Any]] | None,
     # fallback only ever fires on a no-tools turn. Gated on the SAME
     # resumability + capability checks, so a clean-stop / Claude message
     # still declines (returns None).
-    if fr_resumable and content and content.strip():
+    if (fr_resumable and isinstance(content, str) and content
+            and content.strip()):
         return content
     return None

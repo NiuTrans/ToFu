@@ -27,10 +27,11 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_JS = os.path.join(_ROOT, 'static', 'js', 'project-brain-status.js')
+_JS = runtime_section_path('project-brain-status.js')
 
 _HARNESS = r"""
 // ── Minimal DOM good enough for the builders under test ──────────────
@@ -74,7 +75,7 @@ global.document = {
   createDocumentFragment: () => mkEl('fragment'),
   getElementById: (id) => _byId[id] || null,
 };
-global.window = { ProjectBrain: { _state: { path: '/proj/x' } } };
+global.window = { ProjectBrain: { _state: { path: '/proj/x' } }, activeConvId: 'convH' };
 global.escapeHtml = (s) => String(s == null ? '' : s);
 global.t = (k) => k;                       // labels come back as their key
 global.Icon = () => '';

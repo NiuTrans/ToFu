@@ -16,9 +16,37 @@ import unittest
 
 import pytest
 
+from tests.support.model_routing import (
+    allow_native_test_endpoint,
+    native_test_model,
+)
+
+
+# Importing ``test_sdk_e2e`` below reuses its Python helper, but pytest does not
+# inherit plugins from imported modules.  Declare the storage authority here as
+# well so setUpClass cannot mint credentials against an unstarted/fenced global
+# runtime when this module is collected on its own or assigned to another
+# xdist worker.
+pytest_plugins = ('tests._credential_sidecar',)
+pytestmark = pytest.mark.api
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _native_test_endpoint_policy():
+    with allow_native_test_endpoint():
+        yield
+
 
 # Reuse the fixture machinery from test_sdk_e2e.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _ecosystem_server_lifecycle(credential_storage):
+    """Order the shared server after storage and never leak its daemon thread."""
+    yield
+    from test_sdk_e2e import _shutdown_real_server
+    _shutdown_real_server()
 
 
 @unittest.skipIf(
@@ -51,11 +79,11 @@ class OpenAISDKCompatTest(unittest.TestCase):
         """The canonical drop-in test: unmodified openai SDK → Tofu."""
         client = self._client()
         resp = client.chat.completions.create(
-            model='test-model',
+            model=native_test_model()['model_id'],
             messages=[{'role': 'user', 'content': 'OPENAI_SDK_PING'}],
         )
         self.assertEqual(resp.object, 'chat.completion')
-        self.assertEqual(resp.model, 'test-model')
+        self.assertEqual(resp.model, native_test_model()['model_id'])
         # Stub echoes the prompt → confirms the SDK delivered it
         self.assertIn('OPENAI_SDK_PING',
                        resp.choices[0].message.content or '')
@@ -68,7 +96,7 @@ class OpenAISDKCompatTest(unittest.TestCase):
         client = self._client()
         accumulated = []
         for chunk in client.chat.completions.create(
-            model='m',
+            model=native_test_model()['model_id'],
             messages=[{'role': 'user', 'content': 'OAS_STREAM'}],
             stream=True,
         ):
@@ -94,7 +122,8 @@ class OpenAISDKCompatTest(unittest.TestCase):
         bad = OpenAI(api_key='tofu_live_' + 'z' * 32, base_url=self.base)
         with self.assertRaises(AuthenticationError):
             bad.chat.completions.create(
-                model='m', messages=[{'role': 'user', 'content': 'x'}])
+                model=native_test_model()['model_id'],
+                messages=[{'role': 'user', 'content': 'x'}])
 
 
 @unittest.skipIf(
@@ -121,7 +150,7 @@ class AnthropicSDKCompatTest(unittest.TestCase):
     def test_messages_via_anthropic_sdk(self):
         client = self._client()
         msg = client.messages.create(
-            model='claude-test',
+            model=native_test_model()['model_id'],
             max_tokens=100,
             messages=[{'role': 'user', 'content': 'ANTHRO_SDK_PING'}],
         )
@@ -141,7 +170,7 @@ class AnthropicSDKCompatTest(unittest.TestCase):
         client = self._client()
         accumulated = []
         with client.messages.stream(
-            model='claude-test',
+            model=native_test_model()['model_id'],
             max_tokens=100,
             messages=[{'role': 'user', 'content': 'ANTHRO_SDK_STREAM'}],
         ) as stream:

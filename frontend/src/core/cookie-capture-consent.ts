@@ -1,4 +1,8 @@
-/** One owner for the cookie-capture completion subscription and toast. */
+/**
+ * Responsibility: own the cookie-capture completion subscription and toast
+ * projection. Entry points: handleCookieCaptureFrame and
+ * createCookieCaptureConsentController. Dependencies: injected ports only.
+ */
 
 export interface CookieCaptureFrame {
   type?: string;

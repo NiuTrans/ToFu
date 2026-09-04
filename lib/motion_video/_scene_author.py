@@ -35,6 +35,7 @@ one agent loop per scene).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import os
 
@@ -42,9 +43,11 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['author_scene', 'scene_author_enabled', 'SCENE_AUTHOR_TOOLS',
-           'is_transient_fault', 'load_draft', 'save_draft',
-           'DRAFT_FILENAME']
+__all__ = ['AuthorPromptContext', 'author_scene',
+           'prepare_author_prompt_context', 'scene_author_enabled',
+           'prepare_parallel_author_dependencies',
+           'SCENE_AUTHOR_TOOLS', 'is_transient_fault', 'load_draft',
+           'save_draft', 'DRAFT_FILENAME']
 
 #: Cumulative token ceiling per scene — the cost cap (拍板 #3).
 #:
@@ -539,13 +542,156 @@ def _full_gate(html: str, scene_dir: str, *, abort_event=None,
     return out + fill
 
 
-def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
-                  scene_index: int, total_scenes: int,
-                  font_rel: str = '', theme=None,
-                  font_rels: dict | None = None) -> str:
+def _shared_scene_prompt_prefix(*, width: int, height: int,
+                                total_scenes: int, contract: str,
+                                craft: str, skeleton: str) -> str:
+    """Return the immutable film contract before any scene-specific bytes.
+
+    Scene authors run sequentially today, so keeping this large prefix exact
+    lets the provider observe it before the id, duration, narration, assets,
+    and frame packet diverge.  The caller still owns per-scene context and no
+    full prompts are retained between author loops.
+    """
+    return (
+        f'You are authoring ONE scene of a {total_scenes}-scene motion-graphics '
+        f'video. Write a single self-contained HTML composition for it.\n'
+        f'The shared film frame is {width}x{height} px.\n\n'
+        '## Hard requirements\n'
+        '1. Call write_composition with the COMPLETE document, then '
+        'composition_check. Iterate until the check returns no errors.\n'
+        '2. The composition must satisfy the contract below exactly '
+        '(data-composition-id / data-start / data-duration / data-width / '
+        'data-height, ONE paused GSAP timeline registered on '
+        'window.__timelines under the SAME key as data-composition-id).\n'
+        '   The animation runtime is already staged at '
+        '"assets/gsap-3.14.2.min.js". Load that exact local file with a '
+        '<script src="assets/gsap-3.14.2.min.js"></script> tag. Never use a '
+        'CDN or network fallback: the render browser has no external network.\n'
+        '3. DETERMINISM: no Date.now(), Math.random(), performance.now(), '
+        'requestAnimationFrame, setInterval, or infinite repeats.\n'
+        '4. Visual quality is the point. Pick ONE archetype from the craft '
+        'guide below that fits this beat, then build it with a real type '
+        'hierarchy (eyebrow / headline / caption at clearly different sizes), '
+        'STAGGERED entrances, and at least one supporting graphic (rule, bar, '
+        'number, icon or divider). A single centred line on a gradient is the '
+        'fallback we are replacing and is not acceptable output.\n'
+        '5. REAL IMAGERY IS AVAILABLE — use it when the beat calls for it. '
+        'Call generate_asset to create a background texture, an illustration '
+        'or a diagram; it returns a scene-relative path like '
+        '"assets/ab12cd.png" that you reference with <img src="..."> or CSS '
+        'background-image. You may also paste a fetched brand SVG inline. '
+        'What you may NOT do is reference a local file you did not create: '
+        'every src/url() must resolve inside this scene directory, no "../", '
+        'no absolute paths — the gate rejects those before rendering.\n'
+        '6. Text must be HTML-escaped and fit inside the frame at the chosen '
+        'font size.\n\n'
+        f'## Composition contract\n{contract}\n\n'
+        f'## Motion craft — how to make this LOOK designed\n{craft}\n\n'
+        f'## Reference skeleton (a STARTING POINT, not the target quality)\n'
+        f'```html\n{skeleton}\n```\n\n'
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorPromptContext:
+    """Immutable scene-author text shared by every scene in one film."""
+
+    width: int
+    height: int
+    total_scenes: int
+    shared_prefix: str
+
+
+def prepare_author_prompt_context(*, width: int, height: int,
+                                  total_scenes: int) -> AuthorPromptContext:
+    """Read and format the film-wide author contract exactly once."""
     contract = _read_guide('COMPOSITION_CONTRACT.md')
     craft = _read_guide('MOTION_CRAFT.md')
     skeleton = _read_guide('skeleton.html', limit=6000)
+    return AuthorPromptContext(
+        width=width, height=height, total_scenes=total_scenes,
+        shared_prefix=_shared_scene_prompt_prefix(
+            width=width, height=height, total_scenes=total_scenes,
+            contract=contract, craft=craft, skeleton=skeleton))
+
+
+def prepare_parallel_author_dependencies(*, theme=None,
+                                         needs_craft: bool = False) -> bool:
+    """Prewarm shared mutable stores before scene-author threads start.
+
+    Craft extraction and stable font aliases are process-shared writes.  A
+    first-install race would make bounded author concurrency unsafe, so the
+    caller uses more than one worker only when this single-threaded preflight
+    proves every dependency that author threads may stage is already durable.
+    Failure is degradable: callers fall back to one worker and retain the
+    existing per-scene retry behavior.
+    """
+    ready = True
+    if needs_craft:
+        try:
+            from lib.motion_video._craft import ensure_craft_corpus
+            ready = bool(ensure_craft_corpus()) and ready
+        except Exception as e:
+            logger.warning('[SceneAuthor] craft prewarm failed: %s', e,
+                           exc_info=True)
+            ready = False
+
+    if theme is not None:
+        try:
+            from lib.design_sys.fonts import ensure_font, get_font
+            requested: set[tuple[str, int]] = set()
+            for role in ('display', 'body', 'latin'):
+                face = get_font(theme.fonts.get(role, ''))
+                if face is None:
+                    continue
+                requested.update((face.id, source.weight)
+                                 for source in face.sources)
+            for font_id, weight in sorted(requested):
+                if not ensure_font(font_id, weight):
+                    ready = False
+        except Exception as e:
+            logger.warning('[SceneAuthor] theme font prewarm failed: %s', e,
+                           exc_info=True)
+            ready = False
+    else:
+        try:
+            from lib.motion_video._fonts import ensure_cjk_sans
+            ready = bool(ensure_cjk_sans()) and ready
+        except Exception as e:
+            logger.warning('[SceneAuthor] CJK font prewarm failed: %s', e,
+                           exc_info=True)
+            ready = False
+    return ready
+
+
+def _validated_author_prompt_context(
+        prompt_context: AuthorPromptContext, *, width: int, height: int,
+        total_scenes: int) -> AuthorPromptContext:
+    if not isinstance(prompt_context, AuthorPromptContext):
+        raise TypeError('prompt_context must be AuthorPromptContext')
+    actual = (prompt_context.width, prompt_context.height,
+              prompt_context.total_scenes)
+    expected = (width, height, total_scenes)
+    if actual != expected:
+        raise ValueError(
+            'prompt_context geometry/scene count mismatch: '
+            f'expected {expected}, got {actual}')
+    return prompt_context
+
+
+def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
+                  scene_index: int, total_scenes: int,
+                  font_rel: str = '', theme=None,
+                  font_rels: dict | None = None,
+                  prompt_context: AuthorPromptContext | None = None) -> str:
+    if prompt_context is None:
+        prompt_context = prepare_author_prompt_context(
+            width=width, height=height, total_scenes=total_scenes)
+    else:
+        prompt_context = _validated_author_prompt_context(
+            prompt_context, width=width, height=height,
+            total_scenes=total_scenes)
+    shared_prefix = prompt_context.shared_prefix
     from lib.motion_video._creative_plan import (frame_packet,
                                                   normalise_scene_plan)
     normalise_scene_plan(scene, scene_index, total_scenes)
@@ -581,14 +727,18 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
                 if isinstance(a, dict) and a.get('path')]
     if prepared:
         brief_block += (
-            '\n## Prepared assets (verified on disk — use these exact paths)\n'
+            '\n## Prepared generated/stock assets (verified on disk — use '
+            'these exact paths)\n'
             + '\n'.join(
                 f'  - role={a.get("role")}: {a.get("path")}\n'
-                f'    brief: {a.get("prompt", "")} '
+                f'    brief: {a.get("prompt", "")}\n'
+                f'    must show: {a.get("semantic_target", "")} '
                 for a in prepared)
             + '\nDo not regenerate these assets. Reference every required '
-              'path in the composition; an unused prepared asset is a '
-              'failed storyboard obligation.\n')
+              'path in the composition; stock-video paths belong in a local '
+              '<video muted playsinline> element, image/GIF paths in <img> '
+              'or CSS. An unused prepared asset is a failed storyboard '
+              'obligation.\n')
     font_block = ''
     if theme is not None and font_rels:
         # Themed path: the film's font pairing is already staged. Name ONLY
@@ -636,68 +786,35 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
     # only dilutes the beat and burns context. Keep catalogue browsing as an
     # explicit expert/debug escape hatch, not the production default.
     craft_block = ''
-    try:
-        from lib.motion_video._craft import craft_index
-        index = craft_index()
-    except Exception as e:  # never let the deep channel break authoring
-        logger.warning('[SceneAuthor] craft index unavailable: %s', e)
-        index = ''
-    if index and scene.get('allow_craft_browse'):
-        craft_block = (
-            '## Craft corpus (deep reference — READ ONE BEFORE YOU AUTHOR)\n'
-            'These are complete, working techniques with real GSAP code — the '
-            'craft guide above is only a summary of the same discipline. '
-            'Choose the ONE entry whose tags best match this beat and call '
-            'craft_reference with its name to read it in full, THEN author. '
-            'Composing a proven technique beats inventing one.\n'
-            f'{index}\n\n')
+    if scene.get('allow_craft_browse'):
+        try:
+            from lib.motion_video._craft import craft_index
+            index = craft_index()
+        except Exception as e:  # never let the deep channel break authoring
+            logger.warning('[SceneAuthor] craft index unavailable: %s', e)
+            index = ''
+        if index:
+            craft_block = (
+                '## Craft corpus (deep reference — READ ONE BEFORE YOU AUTHOR)\n'
+                'These are complete, working techniques with real GSAP code — '
+                'the craft guide above is only a summary of the same '
+                'discipline. Choose the ONE entry whose tags best match this '
+                'beat and call craft_reference with its name to read it in '
+                'full, THEN author. Composing a proven technique beats '
+                'inventing one.\n'
+                f'{index}\n\n')
     return (
-        f'You are authoring ONE scene of a {total_scenes}-scene motion-graphics '
-        f'video. Write a single self-contained HTML composition for it.\n\n'
-        f'## This scene\n'
+        shared_prefix
+        + f'## This scene\n'
         f'- id: {scene.get("id")}\n'
         f'- index: {scene_index} of {total_scenes}\n'
         f'- EXACT duration: {duration} seconds (data-duration MUST be this)\n'
-        f'- frame: {width}x{height} px\n'
         f'- narration (spoken over this scene): {text or "(none)"}\n'
         + (f'- visual direction: {visual}\n' if visual else '')
         + brief_block
         + packet
         + font_block
-        + '\n## Hard requirements\n'
-        '1. Call write_composition with the COMPLETE document, then '
-        'composition_check. Iterate until the check returns no errors.\n'
-        '2. The composition must satisfy the contract below exactly '
-        '(data-composition-id / data-start / data-duration / data-width / '
-        'data-height, ONE paused GSAP timeline registered on '
-        'window.__timelines under the SAME key as data-composition-id).\n'
-        '   The animation runtime is already staged at '
-        '"assets/gsap-3.14.2.min.js". Load that exact local file with a '
-        '<script src="assets/gsap-3.14.2.min.js"></script> tag. Never use a '
-        'CDN or network fallback: the render browser has no external network.\n'
-        '3. DETERMINISM: no Date.now(), Math.random(), performance.now(), '
-        'requestAnimationFrame, setInterval, or infinite repeats.\n'
-        '4. Visual quality is the point. Pick ONE archetype from the craft '
-        'guide below that fits this beat, then build it with a real type '
-        'hierarchy (eyebrow / headline / caption at clearly different sizes), '
-        'STAGGERED entrances, and at least one supporting graphic (rule, bar, '
-        'number, icon or divider). A single centred line on a gradient is the '
-        'fallback we are replacing and is not acceptable output.\n'
-        '5. REAL IMAGERY IS AVAILABLE — use it when the beat calls for it. '
-        'Call generate_asset to create a background texture, an illustration '
-        'or a diagram; it returns a scene-relative path like '
-        '"assets/ab12cd.png" that you reference with <img src="..."> or CSS '
-        'background-image. You may also paste a fetched brand SVG inline. '
-        'What you may NOT do is reference a local file you did not create: '
-        'every src/url() must resolve inside this scene directory, no "../", '
-        'no absolute paths — the gate rejects those before rendering.\n'
-        '6. Text must be HTML-escaped and fit inside the frame at the chosen '
-        'font size.\n\n'
         + craft_block
-        + f'## Composition contract\n{contract}\n\n'
-        f'## Motion craft — how to make this LOOK designed\n{craft}\n\n'
-        f'## Reference skeleton (a STARTING POINT, not the target quality)\n'
-        f'```html\n{skeleton}\n```\n'
     )
 
 
@@ -709,6 +826,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                  model: str | None = None,
                  abort_event=None,
                  theme=None,
+                 prompt_context: AuthorPromptContext | None = None,
                  extra_findings: list | None = None,
                  transient_attempts: int = _TRANSIENT_ATTEMPTS) -> dict:
     """Author one scene's composition with a naturally completing agent loop.
@@ -822,6 +940,21 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                     '%.120s) — entering the repair loop with it as the seed',
                     scene.get('id'), len(pending), pending[0])
 
+    # Prepare only after the zero-spend draft-adoption boundary: a fully
+    # resumed scene must not read or format author guidance it will never send.
+    try:
+        if prompt_context is None:
+            prompt_context = prepare_author_prompt_context(
+                width=width, height=height, total_scenes=total_scenes)
+        else:
+            prompt_context = _validated_author_prompt_context(
+                prompt_context, width=width, height=height,
+                total_scenes=total_scenes)
+    except Exception as e:
+        logger.warning('[SceneAuthor] %s prompt context failed: %s',
+                       scene.get('id'), e, exc_info=True)
+        return _fallback(f'prompt context failed: {e}')
+
     attempts = max(1, int(transient_attempts))
     total_tokens = 0
     last_transient = ''
@@ -831,7 +964,8 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
             scene_index=scene_index, total_scenes=total_scenes,
             token_budget=token_budget, model=model,
             abort=abort, abort_event=abort_event, seed_html=resumed,
-            theme=theme, extra_findings=extra_findings)
+            theme=theme, prompt_context=prompt_context,
+            extra_findings=extra_findings)
         total_tokens += res['tokens']
 
         if res['outcome'] == 'authored':
@@ -861,7 +995,13 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                 'retrying in %.1fs; %d chars of work kept as a draft',
                 scene.get('id'), attempt, attempts, res['detail'][:120],
                 delay, len(res['html'] or ''))
-            _time.sleep(delay)
+            if abort_event is not None:
+                abort_event.wait(delay)
+            else:
+                _time.sleep(delay)
+            if abort.aborted:
+                return _fallback('aborted during transient backoff',
+                                 rounds=res['rounds'], tokens=total_tokens)
             continue
 
         if res['outcome'] == 'transient':
@@ -885,6 +1025,7 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
                  duration: float, scene_index: int, total_scenes: int,
                  token_budget: int, model: str | None,
                  abort, abort_event, seed_html: str = '', theme=None,
+                 prompt_context: AuthorPromptContext | None = None,
                  extra_findings: list | None = None) -> dict:
     """ONE attempt of the author loop.
 
@@ -951,19 +1092,21 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
                     name='cjk-sans' + os.path.splitext(font_path)[1])
         except Exception as e:
             logger.warning('[SceneAuthor] could not stage the CJK sans face: %s', e)
-    # Materialise the deep craft corpus BEFORE the prompt is built — the index
-    # travels inside the prompt, so a corpus fetched later would be invisible
-    # to this scene. Same managed-dependency contract as the font above:
-    # one-time fetch, cached under the motion root, never fatal.
-    try:
-        from lib.motion_video._craft import ensure_craft_corpus
-        ensure_craft_corpus()
-    except Exception as e:
-        logger.warning('[SceneAuthor] craft corpus unavailable: %s', e)
+    # The planner already injects one selected blueprint. The optional deep
+    # catalogue is installed only for the explicit browse escape hatch; doing
+    # this on ordinary scenes downloaded and scanned knowledge that never
+    # entered their prompt.
+    if scene.get('allow_craft_browse'):
+        try:
+            from lib.motion_video._craft import ensure_craft_corpus
+            ensure_craft_corpus()
+        except Exception as e:
+            logger.warning('[SceneAuthor] craft corpus unavailable: %s', e)
     prompt = _build_prompt(scene, width=width, height=height,
                            duration=duration, scene_index=scene_index,
                            total_scenes=total_scenes, font_rel=font_rel,
-                           theme=theme, font_rels=font_rels)
+                           theme=theme, font_rels=font_rels,
+                           prompt_context=prompt_context)
     if seed_html:
         # Hand the model its own unfinished work plus the gate's current
         # verdict, so the attempt continues the repair rather than restarting.
@@ -994,6 +1137,11 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
                         [str(f) for f in extra_findings if str(f).strip()][:8])
             + '\n')
     messages = [{'role': 'user', 'content': prompt}]
+    from lib.production.llm_policy import (
+        production_llm_dispatch_kwargs,
+        production_llm_max_429_attempts,
+    )
+    max_429_attempts = production_llm_max_429_attempts()
 
     def _dispatch(rnd, tools):
         from lib.llm_dispatch.api import dispatch_chat
@@ -1001,6 +1149,9 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
             messages, max_tokens=_MAX_TOKENS_PER_ROUND, temperature=0.3,
             tools=tools, prefer_model=model,
             strict_model=bool(model),
+            **production_llm_dispatch_kwargs(
+                abort_check=combined.is_set,
+                max_429_attempts=max_429_attempts),
             log_prefix=f'[SceneAuthor:{scene.get("id")}:R{rnd}]')
         tool_calls = []
         if isinstance(usage, dict):
@@ -1143,6 +1294,12 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
             on_tool_round=_on_tool_round)
         rounds = outcome.rounds
     except Exception as e:
+        from lib.llm_errors import AbortedError
+        if abort.aborted or isinstance(e, AbortedError):
+            return {'outcome': 'aborted', 'html': state['html'],
+                    'rounds': rounds, 'tokens': state['tokens'],
+                    'craft_reads': list(state.get('craft_reads') or []),
+                    'detail': 'aborted during author dispatch'}
         kind = 'transient' if is_transient_fault(e) else 'quality'
         logger.log(
             logging.WARNING if kind == 'transient' else logging.ERROR,

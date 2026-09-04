@@ -2,6 +2,7 @@ import type {
   AttemptEvent as ContractAttemptEvent,
   AttemptRecord as ContractAttemptRecord,
   ConversationQueueItem as ContractConversationQueueItem,
+  ConversationTurnWindow,
   TurnProjectionChange,
   TurnStatus,
 } from '../api/conversation-sync.generated';
@@ -26,11 +27,24 @@ export interface TurnSnapshotInput extends UnknownRecord {
   turns?: ReadonlyArray<ProjectionTurn>;
   attempts?: ReadonlyArray<AttemptRecord>;
   queueItems?: ReadonlyArray<ConversationQueueItem>;
+  queueItemUpserts?: ReadonlyArray<ConversationQueueItem>;
+  removedQueueIds?: ReadonlyArray<string>;
   deletedTurnIds?: ReadonlyArray<string>;
   turnPatches?: ReadonlyArray<TurnProjectionChange>;
+  turnWindow?: ConversationTurnWindow;
+  laneId?: string;
+  nextBeforeOrdinal?: number | null;
+  hasMore?: boolean;
+  totalTurns?: number;
   /* Server-stamped delivery-wedge signal (sync snapshot authority). Delta
    * snapshots never carry it; the fold below only applies a present key. */
   pushWithheld?: boolean;
+}
+
+export interface TurnHistoryLaneState {
+  nextBeforeOrdinal: number | null;
+  hasMore: boolean;
+  totalTurns: number;
 }
 
 export interface TurnCommandResult extends UnknownRecord {
@@ -49,6 +63,7 @@ export interface TurnState {
   conversationRevision: number;
   turnsById: Record<string, ProjectionTurn | undefined>;
   laneOrder: Record<string, string[] | undefined>;
+  historyByLane: Record<string, TurnHistoryLaneState | undefined>;
   attemptsById: Record<string, AttemptRecord | undefined>;
   queueItems: ConversationQueueItem[];
   pendingEventsByTurn: Record<string, TurnEvent[] | undefined>;
@@ -106,6 +121,7 @@ export function createTurnState(conversationId: string): TurnState {
     conversationRevision: 0,
     turnsById: Object.create(null) as Record<string, ProjectionTurn>,
     laneOrder: Object.create(null) as Record<string, string[]>,
+    historyByLane: Object.create(null) as Record<string, TurnHistoryLaneState>,
     attemptsById: Object.create(null) as Record<string, AttemptRecord>,
     queueItems: [],
     pendingEventsByTurn: Object.create(null) as Record<string, TurnEvent[]>,
@@ -122,6 +138,8 @@ function copyState(state: TurnState): TurnState {
     turnsById: { ...state.turnsById },
     laneOrder: Object.fromEntries(Object.entries(state.laneOrder)
       .map(([lane, ids]) => [lane, (ids ?? []).slice()])),
+    historyByLane: Object.fromEntries(Object.entries(state.historyByLane ?? {})
+      .map(([lane, history]) => [lane, history ? { ...history } : undefined])),
     attemptsById: { ...state.attemptsById },
     queueItems: state.queueItems.map((item) => ({ ...item })),
     pendingEventsByTurn: Object.fromEntries(
@@ -153,6 +171,10 @@ function putTurn(next: TurnState, turn: ProjectionTurn | null | undefined): void
     Number(next.turnsById[leftId]?.ordinal || 0)
       - Number(next.turnsById[rightId]?.ordinal || 0)
   ));
+  const history = next.historyByLane[lane];
+  if (!previous && history) {
+    history.totalTurns = Math.max(ids.length, history.totalTurns + 1);
+  }
 }
 
 const attemptStatusRank: Record<string, number> = {
@@ -258,6 +280,8 @@ function reduceEvent(
   }
   if (turnState?.turnId === event.turnId) {
     updated.status = turnStatus(turnState.status, turn.status);
+    if (typeof turnState.actor === 'string') updated.actor = turnState.actor;
+    if (typeof turnState.kind === 'string') updated.kind = turnState.kind;
     updated.currentAttemptId = turnState.currentAttemptId;
     updated.settlement = turnState.settlement;
     updated.updatedAt = turnState.updatedAt;
@@ -296,6 +320,7 @@ function removeTurns(
   turnIds: ReadonlyArray<string> | undefined,
 ): void {
   for (const turnId of turnIds ?? []) {
+    const removed = next.turnsById[turnId];
     delete next.turnsById[turnId];
     delete next.pendingEventsByTurn[turnId];
     delete next.commandPending[turnId];
@@ -308,6 +333,10 @@ function removeTurns(
       if (!ids) continue;
       const index = ids.indexOf(turnId);
       if (index >= 0) ids.splice(index, 1);
+      if (index >= 0 && removed && next.historyByLane[lane]) {
+        const history = next.historyByLane[lane];
+        history.totalTurns = Math.max(ids.length, history.totalTurns - 1);
+      }
       if (!ids.length) delete next.laneOrder[lane];
     }
   }
@@ -377,6 +406,9 @@ export function reduceTurnState(
     if (snapshot.authoritativeFull) {
       next.turnsById = Object.create(null) as Record<string, ProjectionTurn>;
       next.laneOrder = Object.create(null) as Record<string, string[]>;
+      next.historyByLane = Object.create(null) as Record<
+        string, TurnHistoryLaneState
+      >;
       next.attemptsById = Object.create(null) as Record<string, AttemptRecord>;
       next.pendingEventsByTurn = Object.create(null) as Record<string, TurnEvent[]>;
     }
@@ -392,10 +424,49 @@ export function reduceTurnState(
     );
     for (const turn of snapshot.turns ?? []) putTurn(next, turn);
     for (const attempt of snapshot.attempts ?? []) putAttempt(next, attempt);
+    const pageWindow = snapshot.turnWindow;
+    if (pageWindow) {
+      next.historyByLane[pageWindow.laneId] = {
+        nextBeforeOrdinal: pageWindow.nextBeforeOrdinal,
+        hasMore: pageWindow.hasMore,
+        totalTurns: pageWindow.totalTurns,
+      };
+    } else if (snapshot.laneId && 'hasMore' in snapshot
+        && 'totalTurns' in snapshot) {
+      next.historyByLane[snapshot.laneId] = {
+        nextBeforeOrdinal: snapshot.nextBeforeOrdinal ?? null,
+        hasMore: Boolean(snapshot.hasMore),
+        totalTurns: Math.max(
+          Number(snapshot.totalTurns || 0),
+          next.laneOrder[snapshot.laneId]?.length ?? 0,
+        ),
+      };
+    } else if (snapshot.authoritativeFull) {
+      for (const [laneId, ids] of Object.entries(next.laneOrder)) {
+        next.historyByLane[laneId] = {
+          nextBeforeOrdinal: null,
+          hasMore: false,
+          totalTurns: ids?.length ?? 0,
+        };
+      }
+    }
     if (snapshot.queueItems) {
       next.queueItems = snapshot.queueItems
         .filter((item) => Boolean(item.queueId))
         .map((item) => ({ ...item }));
+    }
+    for (const item of snapshot.queueItemUpserts ?? []) {
+      if (!item.queueId) continue;
+      next.queueItems = [
+        ...next.queueItems.filter((current) => current.queueId !== item.queueId),
+        { ...item },
+      ];
+    }
+    if (snapshot.removedQueueIds?.length) {
+      const removedQueueIds = new Set(snapshot.removedQueueIds);
+      next.queueItems = next.queueItems.filter(
+        (item) => !removedQueueIds.has(item.queueId),
+      );
     }
     /* Authoritative snapshots ship the key explicitly (true AND false —
      * false is what clears a recovered wedge); delta snapshots omit it. */
@@ -425,6 +496,11 @@ export function reduceTurnState(
         ...next.queueItems.filter((item) => item.queueId !== queueItem.queueId),
         { ...queueItem },
       ].sort((left, right) => Number(left.position || 0) - Number(right.position || 0));
+    }
+    if (response.cancelled && typeof response.queueId === 'string') {
+      next.queueItems = next.queueItems.filter(
+        (item) => item.queueId !== response.queueId,
+      );
     }
     removeTurns(next, response.deletedTurnIds);
     next.conversationRevision = Math.max(

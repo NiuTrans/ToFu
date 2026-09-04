@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import fcntl
 import json
+import math
 import os
 import re
 import shlex
@@ -22,9 +24,16 @@ from pathlib import Path
 
 from runtime_guards import resource_budget_manifest
 from server_manager import (
+    SERVER_ENV_KEYS,
     listener_pids,
     probe_application_readiness,
     read_lock_status,
+)
+from supervisor_protocol import (
+    SupervisorRefreshError,
+    refresh_supervisor,
+    supervisor_generation_matches,
+    supervisor_source_fingerprint,
 )
 from tofu_dotenv import parse_env_boolean, read_dotenv_values
 
@@ -261,8 +270,8 @@ def _validate_frontend_artifact() -> None:
     local_project = Path(__file__).resolve().parent
     selected_project = Path(PROJECT).resolve()
     if selected_project == local_project:
-        from lib.vite_assets import validate_vite_artifact
-        validate_vite_artifact()
+        from lib.vite_assets import validate_source_vite_artifact
+        validate_source_vite_artifact()
         return
     # ``TOFU_PROJECT_PATH`` may ask this CLI to own another checkout. Importing
     # our own ``lib.vite_assets`` would validate the wrong static graph, so use
@@ -271,7 +280,7 @@ def _validate_frontend_artifact() -> None:
     if not verifier.is_file():
         raise RuntimeError(f'frontend validator is missing: {verifier}')
     completed = subprocess.run(
-        [sys.executable, str(verifier)],
+        [sys.executable, str(verifier), '--authoring-freshness'],
         cwd=selected_project,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -300,12 +309,13 @@ def _source_frontend_build_command() -> list[str] | None:
     return [node, str(build_script)]
 
 
-def _repair_source_frontend_artifact(operation: str) -> str:
+def prepare_source_frontend_artifact(operation: str) -> str:
     """Rebuild one stale source-checkout graph before a lifecycle action.
 
-    Release installs intentionally omit Node and continue to rely exclusively
-    on their verified prebuilt graph.  Returning an empty string in that case
-    preserves the production lifespan's actionable fail-closed validation.
+    Release installs intentionally omit Node and rely on the content digest in
+    their verified prebuilt graph. A valid release never enters the repair
+    path; an invalid graph without a local builder fails before lifecycle state
+    changes, while the old worker can still serve its last published graph.
     """
     if not _lifecycle_owns_frontend():
         return ''
@@ -317,7 +327,9 @@ def _repair_source_frontend_artifact(operation: str) -> str:
         initial_error_message = str(initial_error)
         command = _source_frontend_build_command()
         if command is None:
-            return ''
+            return (
+                'frontend artifact validation failed and no local Vite '
+                f'builder is available: {initial_error_message}')
     lock_path = Path(PROJECT) / 'data' / '.frontend-build.lock'
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -364,10 +376,41 @@ def _repair_source_frontend_artifact(operation: str) -> str:
     return ''
 
 
+def _repair_source_frontend_artifact(operation: str) -> str:
+    """Compatibility wrapper for older callers and focused lifecycle tests."""
+    return prepare_source_frontend_artifact(operation)
+
+
+def cmd_prepare_frontend(args: argparse.Namespace) -> int:
+    """Validate or atomically repair frontend without changing lifecycle."""
+    error = prepare_source_frontend_artifact(args.operation)
+    if error:
+        print(f'Frontend preflight failed: {error}', file=sys.stderr)
+        return 1
+    print('Frontend artifact is ready.')
+    return 0
+
+
 def ensure_manager(timeout: float = 8.0) -> dict:
     health = _manager_health()
     if health:
-        return health
+        if supervisor_generation_matches(health, PROJECT):
+            return health
+        try:
+            refresh_supervisor(
+                PROJECT,
+                environment=os.environ,
+                timeout=max(8.0, timeout),
+            )
+        except SupervisorRefreshError as exc:
+            raise ManagerUnavailable(
+                f'cannot refresh stale lifecycle manager: {exc}') from exc
+        refreshed = _manager_health()
+        if refreshed and supervisor_generation_matches(refreshed, PROJECT):
+            return refreshed
+        raise ManagerUnavailable(
+            'lifecycle manager restarted but did not report the current '
+            'source generation')
     repair_error = _repair_source_frontend_artifact('manager startup')
     if repair_error:
         raise ManagerUnavailable(repair_error)
@@ -386,7 +429,7 @@ def ensure_manager(timeout: float = 8.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         health = _manager_health()
-        if health:
+        if health and supervisor_generation_matches(health, PROJECT):
             return health
         time.sleep(0.2)
     detail = ((result.stdout or '') + (result.stderr or '')).strip()
@@ -556,8 +599,11 @@ def _post(action: str, **extra) -> dict:
 
 
 def _forwarded_server_env() -> dict[str, str]:
-    keys = ('PORT', 'BIND_HOST', 'TOFU_TLS', 'TLS_CERTFILE', 'TLS_KEYFILE',
-            'TOFU_PROCESS_RSS_RECYCLE_MB')
+    # This is the same explicit, non-secret allowlist the lifecycle manager
+    # accepts.  Forwarding only the historical network/RSS subset silently
+    # discarded one-shot shell overrides such as TOFU_AGENT_WORKERS while the
+    # equivalent .env setting happened to work in the manager process.
+    keys = SERVER_ENV_KEYS
     try:
         project_values = read_dotenv_values(Path(PROJECT) / '.env')
     except OSError as exc:
@@ -998,13 +1044,19 @@ def _print_status(status: dict, *, manager_online: bool = True) -> None:
     print(f"Port    : {status.get('port', os.environ.get('PORT', '15000'))}")
     if status.get('launchSource'):
         print(f"Source  : {status['launchSource']}")
-    if status.get('restartCount') is not None:
+    if status.get('workerFailureCount') is not None:
         recent = status.get('recentFailureCount')
         window = status.get('failureWindowSeconds')
         detail = (f'; recent={recent}/{status.get("maxFailures")} in '
                   f'{float(window):.0f}s'
                   if recent is not None and window is not None else '')
-        print(f"Restarts: total={status.get('restartCount', 0)}{detail}")
+        print(
+            'Worker exits: '
+            f"failures={status.get('workerFailureCount', 0)}; "
+            f"planned={status.get('plannedExitCount', 0)}{detail}")
+    elif status.get('restartCount') is not None:
+        # Older manager payloads expose one historically mixed counter.
+        print(f"Restarts: legacy-total={status.get('restartCount', 0)}")
     if status.get('lastRecoverySeconds') is not None:
         print(f"Last RTO: {float(status['lastRecoverySeconds']):.3f}s")
     if status.get('workerRssGuardEnabled'):
@@ -1013,7 +1065,14 @@ def _print_status(status: dict, *, manager_online: bool = True) -> None:
         print('RSS guard: '
               f"{float(rss or 0) / (1024 ** 3):.2f} GiB / "
               f"{float(limit or 0) / (1024 ** 3):.2f} GiB hard ceiling")
-    if status.get('lastExitCause'):
+    if status.get('lastWorkerExitReason'):
+        print(
+            f"Last exit: {status.get('lastWorkerExitKind') or 'unknown'} / "
+            f"{status['lastWorkerExitReason']}"
+            + (f" ({status.get('lastFailureReason')})"
+               if (status.get('lastWorkerExitKind') == 'failure'
+                   and status.get('lastFailureReason')) else ''))
+    elif status.get('lastExitCause'):
         print(f"Last exit: {status['lastExitCause']}"
               + (f" ({status.get('lastFailureReason')})"
                  if status.get('lastFailureReason') else ''))
@@ -1469,10 +1528,32 @@ def _configured_port_snapshot(project_path: str) -> dict:
     }
 
 
+def _backup_recovery_timestamp(
+    manifest: dict,
+    artifact_mtime: float,
+) -> tuple[float, str] | None:
+    """Resolve the data boundary; old manifests fall back to artifact mtime."""
+    raw = manifest.get('recovery_point_at')
+    if raw in (None, ''):
+        return artifact_mtime, 'artifact-mtime-fallback'
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            return None
+        timestamp = parsed.timestamp()
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        return None
+    return timestamp, 'manifest'
+
+
 def _verified_sidecar_snapshots(snapshot_dir: Path) -> tuple[
-        list[tuple[float, int, Path]], bool]:
+        list[tuple[float, float, int, Path, str]], bool]:
     """Return bounded manifest-published Sidecar backups, newest chosen later."""
-    candidates: list[tuple[float, int, Path]] = []
+    candidates: list[tuple[float, float, int, Path, str]] = []
     scanned = 0
     truncated = False
     try:
@@ -1508,7 +1589,11 @@ def _verified_sidecar_snapshots(snapshot_dir: Path) -> tuple[
                     or manifest_bytes != stat.st_size
                     or len(str(payload.get('sha256') or '')) != 64):
                 continue
-            candidates.append((stat.st_mtime, stat.st_size, path))
+            recovery = _backup_recovery_timestamp(payload, stat.st_mtime)
+            if recovery is None:
+                continue
+            candidates.append((
+                recovery[0], stat.st_mtime, stat.st_size, path, recovery[1]))
     return candidates, truncated
 
 
@@ -1519,6 +1604,9 @@ def _legacy_snapshot_inventory(data_dir: Path) -> dict[str, int | bool]:
     temporary_count = 0
     published_bytes = 0
     temporary_bytes = 0
+    published_allocated_bytes = 0
+    temporary_allocated_bytes = 0
+    allocated_bytes_available = True
     matched = 0
     truncated = False
     try:
@@ -1527,9 +1615,13 @@ def _legacy_snapshot_inventory(data_dir: Path) -> dict[str, int | bool]:
         return {
             'publishedCount': 0,
             'publishedBytes': 0,
+            'publishedAllocatedBytes': 0,
             'temporaryCount': 0,
             'temporaryBytes': 0,
+            'temporaryAllocatedBytes': 0,
             'totalBytes': 0,
+            'totalAllocatedBytes': 0,
+            'allocatedBytesAvailable': True,
             'scanTruncated': False,
         }
     with entries:
@@ -1547,21 +1639,35 @@ def _legacy_snapshot_inventory(data_dir: Path) -> dict[str, int | bool]:
                 truncated = True
                 break
             try:
-                size = max(0, int(entry.stat(follow_symlinks=False).st_size))
+                status = entry.stat(follow_symlinks=False)
+                size = max(0, int(status.st_size))
             except OSError:
                 continue
+            blocks = getattr(status, 'st_blocks', None)
+            if blocks is None:
+                allocated = size
+                allocated_bytes_available = False
+            else:
+                allocated = max(0, int(blocks)) * 512
             if is_published:
                 published_count += 1
                 published_bytes += size
+                published_allocated_bytes += allocated
             else:
                 temporary_count += 1
                 temporary_bytes += size
+                temporary_allocated_bytes += allocated
     return {
         'publishedCount': published_count,
         'publishedBytes': published_bytes,
+        'publishedAllocatedBytes': published_allocated_bytes,
         'temporaryCount': temporary_count,
         'temporaryBytes': temporary_bytes,
+        'temporaryAllocatedBytes': temporary_allocated_bytes,
         'totalBytes': published_bytes + temporary_bytes,
+        'totalAllocatedBytes': (
+            published_allocated_bytes + temporary_allocated_bytes),
+        'allocatedBytesAvailable': allocated_bytes_available,
         'scanTruncated': truncated,
     }
 
@@ -1585,7 +1691,11 @@ def sqlite_snapshot_status(project_path: str, now: float | None = None) -> dict:
     max_age_hours = max(1.0, min(24.0 * 30, max_age_hours))
     stamp = time.time() if now is None else float(now)
     candidates, scan_truncated = _verified_sidecar_snapshots(snapshot_dir)
-    latest = max(candidates, default=None, key=lambda item: (item[0], str(item[2])))
+    latest = max(
+        candidates,
+        default=None,
+        key=lambda item: (item[0], item[1], str(item[3])),
+    )
     age_hours = (max(0.0, stamp - latest[0]) / 3600.0) if latest else None
     # Invalid modes fail during runtime configuration. Keep diagnostics
     # conservative by requiring a snapshot for every non-distributed value.
@@ -1597,9 +1707,11 @@ def sqlite_snapshot_status(project_path: str, now: float | None = None) -> dict:
         'snapshotDir': str(snapshot_dir),
         'snapshotCount': len(candidates),
         'snapshotScanTruncated': scan_truncated,
-        'latestPath': str(latest[2]) if latest else None,
-        'latestSizeBytes': latest[1] if latest else None,
-        'latestMtime': latest[0] if latest else None,
+        'latestPath': str(latest[3]) if latest else None,
+        'latestSizeBytes': latest[2] if latest else None,
+        'latestMtime': latest[1] if latest else None,
+        'latestRecoveryPoint': latest[0] if latest else None,
+        'latestRecoveryPointSource': latest[4] if latest else None,
         'latestAgeHours': round(age_hours, 2) if age_hours is not None else None,
         'maxAgeHours': max_age_hours,
         'fresh': (age_hours <= max_age_hours) if age_hours is not None else False,
@@ -1626,6 +1738,8 @@ def _doctor_findings(
         port_config: dict | None = None,
         port_drift: dict | None = None,
         startup_config: dict | None = None,
+        manager_generation: dict | None = None,
+        worker_budget_drift: dict | None = None,
         now: float | None = None) -> list[dict[str, str]]:
     """Classify diagnostics once, with severity and an executable next step.
 
@@ -1783,6 +1897,28 @@ def _doctor_findings(
             'rss_guard_disabled', 'warning',
             'manager-side worker RSS recycle guard is disabled',
             'set TOFU_PROCESS_RSS_RECYCLE_MB to a safe non-zero ceiling')
+    if status and manager_generation and not manager_generation.get('current'):
+        loaded = str(manager_generation.get('loadedFingerprint') or 'unreported')
+        add(
+            'supervisor_source_stale', 'warning',
+            'lifecycle manager has not loaded the current source generation '
+            f'(loaded {loaded[:12]})',
+            _control_command('ensure'))
+    if status and worker_budget_drift and worker_budget_drift.get('stale'):
+        mismatches = worker_budget_drift.get('mismatches') or {}
+        detail = '; '.join(
+            f'{name}={values.get("observed") or "?"} '
+            f'(next {values.get("expected")})'
+            for name, values in sorted(mismatches.items())
+        )
+        message = (
+            'running worker uses an older or unattributed launch-time resource '
+            'budget; a managed restart is required to apply current capacity')
+        if detail:
+            message += f' ({detail})'
+        add(
+            'worker_resource_budget_stale', 'warning', message,
+            _control_command('restart'))
     if memory.get('usagePct') is not None and memory['usagePct'] >= 90.0:
         add(
             'memory_pressure_critical', 'error',
@@ -1805,10 +1941,18 @@ def _doctor_findings(
             'set TOFU_SQLITE_SNAPSHOT_DIR to a separately mounted backup target')
     legacy = snapshot.get('legacy') or {}
     if int(legacy.get('totalBytes') or 0) > 0:
+        logical_bytes = int(legacy.get('totalBytes') or 0)
+        allocated_bytes = int(legacy.get('totalAllocatedBytes') or 0)
+        footprint = (
+            f'{_gib_text(allocated_bytes)} allocated / '
+            f'{_gib_text(logical_bytes)} logical'
+            if legacy.get('allocatedBytesAvailable') is not False
+            else f'{_gib_text(logical_bytes)} logical (allocation unavailable)'
+        )
         add(
             'legacy_sqlite_snapshot_artifacts', 'warning',
             'retired db_snapshots owner still holds '
-            f"{_gib_text(int(legacy.get('totalBytes') or 0))} "
+            f'{footprint} '
             f"({int(legacy.get('publishedCount') or 0)} published, "
             f"{int(legacy.get('temporaryCount') or 0)} interrupted)",
             'review data/db_snapshots after an independent canonical backup; '
@@ -1859,6 +2003,45 @@ def build_doctor_report() -> dict:
     resource_environment['TOFU_DEPLOYMENT_MODE'] = _project_setting(
         PROJECT, 'TOFU_DEPLOYMENT_MODE', 'personal')
     resource_budget = resource_budget_manifest(resource_environment)
+    expected_supervisor_fingerprint = supervisor_source_fingerprint(PROJECT)
+    loaded_supervisor_fingerprint = str(
+        (status or {}).get('supervisorSourceFingerprint') or '')
+    manager_generation = {
+        'current': bool(
+            status
+            and loaded_supervisor_fingerprint == expected_supervisor_fingerprint),
+        'loadedFingerprint': loaded_supervisor_fingerprint or None,
+        'expectedFingerprint': expected_supervisor_fingerprint,
+        'version': (status or {}).get('supervisorVersion'),
+        'startedAt': (status or {}).get('supervisorStartedAt'),
+    }
+    live_budget = (status or {}).get('workerResourceBudget') or {}
+    live_values = live_budget.get('values') or {}
+    expected_budget_values = {
+        name: str(resource_budget.get('overrides', {}).get(
+            name, resource_budget.get('defaults', {}).get(name, '')))
+        for name in (
+            'TOFU_MAX_INFLIGHT_TASKS',
+            'TOFU_AGENT_WORKERS',
+            'TOFU_TASK_RSS_RESERVE_MB',
+            'TOFU_PROCESS_RSS_RELIEF_MB',
+            'TOFU_PROCESS_RSS_RECYCLE_MB',
+        )
+    }
+    budget_mismatches = {
+        name: {'observed': live_values.get(name), 'expected': expected}
+        for name, expected in expected_budget_values.items()
+        if name in live_values and str(live_values.get(name)) != expected
+    }
+    worker_budget_drift = {
+        'stale': bool(live_budget) and (
+            live_budget.get('policyCurrent') is not True
+            or bool(budget_mismatches)),
+        'policyVersion': live_budget.get('policyVersion'),
+        'expectedPolicyVersion': resource_budget.get('policy_version'),
+        'mismatches': budget_mismatches,
+        'values': live_values,
+    }
     snapshot = sqlite_snapshot_status(PROJECT)
     cron_lines: list[str] = []
     manager_cron_lines: list[str] = []
@@ -1886,13 +2069,18 @@ def build_doctor_report() -> dict:
         'supervisorProcesses': supervisors,
         'memory': memory,
         'resourceBudget': resource_budget,
+        'managerGeneration': manager_generation,
+        'workerResourceBudget': live_budget or None,
+        'workerResourceBudgetDrift': worker_budget_drift,
         'snapshot': snapshot,
     }
     findings = _doctor_findings(
         status, guard_loops=guard_loops, legacy_cron=cron_lines,
         manager_cron=manager_cron_lines, memory=memory, snapshot=snapshot,
         port_config=port_config, port_drift=port_drift,
-        startup_config=startup_config)
+        startup_config=startup_config,
+        manager_generation=manager_generation,
+        worker_budget_drift=worker_budget_drift)
     errors = [item['message'] for item in findings if item['severity'] == 'error']
     warnings = [item['message'] for item in findings if item['severity'] == 'warning']
     fixes = [item['command'] for item in findings if item.get('command')]
@@ -1932,12 +2120,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     manager_cron_lines = report['managerRecoveryCron']
     memory = report['memory']
     resource_budget = report['resourceBudget']
+    manager_generation = report['managerGeneration']
+    worker_resource_budget = report['workerResourceBudget'] or {}
     snapshot = report['snapshot']
     findings = report['findings']
     errors = report['errors']
     warnings = report['warnings']
     print(f'Project : {PROJECT}')
     print(f"Manager : {'OK' if status is not None else 'MISSING'}")
+    if status is not None:
+        print(
+            'Manager generation: '
+            + ('current' if manager_generation['current'] else 'STALE')
+            + f" ({str(manager_generation.get('loadedFingerprint') or 'unreported')[:12]}"
+            f" -> {str(manager_generation['expectedFingerprint'])[:12]})")
     print(f"Lock    : {'live pid ' + str(low.get('pid')) if low.get('running') else 'no live worker'}")
     print(f"Port    : {port} -> {pids or 'free/no PID visibility'}")
     if port_drift:
@@ -1971,10 +2167,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"at {probe['data_path']}")
     print(
         f"Budget  : tasks={defaults['TOFU_MAX_INFLIGHT_TASKS']}; "
-        f"API rounds={defaults['TOFU_TASK_MAX_API_ROUNDS']}; "
         f"sync/agent={defaults['TOFU_SYNC_WORKERS']}/"
         f"{defaults['TOFU_AGENT_WORKERS']}; storage RPC="
-        f"{defaults['TOFU_STORAGE_RPC_CAPACITY']}; RSS soft/hard="
+        f"{defaults['TOFU_STORAGE_RPC_CAPACITY']} / "
+        f"{defaults['TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB']} MiB frames; "
+        f"RSS soft/hard="
         f"{defaults['TOFU_PROCESS_RSS_RELIEF_MB']}/"
         f"{defaults['TOFU_PROCESS_RSS_RECYCLE_MB']} MiB; logs="
         f"{defaults['TOFU_LOG_TOTAL_BUDGET_MB']} MiB; storage reserve="
@@ -1983,6 +2180,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if overrides:
         print('Override: ' + '; '.join(
             f'{name}={value}' for name, value in sorted(overrides.items())))
+    if worker_resource_budget:
+        live_values = worker_resource_budget.get('values') or {}
+        print(
+            'Live budget: policy='
+            f"{worker_resource_budget.get('policyVersion') or 'legacy/unattributed'}; "
+            + '; '.join(
+                f'{name}={value}' for name, value in sorted(live_values.items())))
     if status and status.get('workerRssGuardEnabled'):
         print(f"RSS cap : {_gib_text(status.get('workerRssRecycleBytes'))} "
               '(manager-enforced)')
@@ -2206,6 +2410,18 @@ def build_parser() -> argparse.ArgumentParser:
         help='emit findings with stable code, severity, message, and command fields')
     doctor.set_defaults(func=cmd_doctor)
 
+    prepare_frontend = sub.add_parser(
+        'prepare-frontend',
+        help='validate or repair frontend artifacts without starting Tofu',
+        description=(
+            'Validate the content-addressed frontend graph and its authoring '
+            'digest. A source checkout with local Vite may rebuild once under '
+            'the project build lock; lifecycle state is never changed.'))
+    prepare_frontend.add_argument(
+        '--operation', default='frontend preflight', metavar='LABEL',
+        help='bounded diagnostic label for the lifecycle action')
+    prepare_frontend.set_defaults(func=cmd_prepare_frontend)
+
     support = sub.add_parser(
         'support-bundle',
         help='emit bounded diagnostics with common credentials redacted')
@@ -2242,7 +2458,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument('conversation_id', metavar='CONVERSATION_ID')
     inspect.add_argument(
         '--db', type=Path, metavar='PATH',
-        help='SQLite authority (default: data/tofu.db in this checkout)')
+        help=('explicit SQLite authority (default: auto-discover the active '
+              'Sidecar/fastpath write front)'))
     inspect.add_argument(
         '--user-id', type=int, default=None, metavar='N',
         help='owning user (default: auto-detect from the conversation row)')

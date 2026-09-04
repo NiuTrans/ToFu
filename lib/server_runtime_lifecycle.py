@@ -54,6 +54,7 @@ def register_runtime_lifecycle(
     fault_log: Any = None,
     logger: logging.Logger | None = None,
     environ: Mapping[str, str] | None = None,
+    process_role: str = 'all',
     serving_registrar: LifecycleRegistrar = register_serving_loop_lifecycle,
 ) -> bool:
     """Attach loop resources before production bootstrap using one stop event."""
@@ -72,6 +73,7 @@ def register_runtime_lifecycle(
         fault_log=fault_log,
         logger=logger,
         environ=environ,
+        process_role=process_role,
     )
     production_registered = production_registrar(
         app,

@@ -1,9 +1,9 @@
 """Chat turn-building helpers.
 
 Pulls the send-path auto-translate engine, the user-message builder, and the
-continue-checkpoint scanner out of ``routes/chat.py``. These are pure data
-transforms over plain dicts (plus a per-conv status side-table consumed by a
-status-poll endpoint) — no Flask request state — so they live in lib.
+continue-checkpoint scanner out of ``routes/chat.py``. They have no Flask
+request state, so they live in lib; the send translator delegates bounded
+work to the process-wide attended-translation lane.
 
 ``_TRANSLATE_SEND_TIMEOUT`` is the synchronous translate budget; it must stay
 comfortably below the frontend's safety abort timer (``_sendTimeout`` in
@@ -13,14 +13,19 @@ than a generic AbortError.
 
 import threading
 import time
+import uuid
 
 from lib.chat.messages import resolve_conv_refs
 from lib.log import get_logger
+from lib.tool_history_projection import build_tool_history_round
+from lib.tool_round_identity import tool_round_batches
+from lib.tool_round_replay import scan_replayable_tool_round_prefix
 
 logger = get_logger(__name__)
 
 # Max time (seconds) for the synchronous auto-translate during /api/chat/send.
 _TRANSLATE_SEND_TIMEOUT = 45
+_TRANSLATE_SEND_INNER_MARGIN_SECONDS = 5.0
 
 
 def _should_translate_input(text, config):
@@ -63,57 +68,7 @@ def _should_translate_input(text, config):
     return res.code != 'en'
 
 
-# ══════════════════════════════════════════════════════════
-#  Send-path translate status (per-conv)
-#
-#  The atomic /api/chat/send handler translates synchronously, blocking the
-#  HTTP response until the translate either succeeds or hits
-#  _TRANSLATE_SEND_TIMEOUT. If the backend is retrying (429, empty output),
-#  the user sees only the frontend "Translating…" bubble with no progress
-#  clue. The status side-table lets a tiny poll endpoint surface the current
-#  retry reason underneath the bubble while the send call is in flight.
-# ══════════════════════════════════════════════════════════
-_send_translate_status = {}           # conv_id -> {statusMessage, statusKind, updatedAt}
-_send_translate_status_lock = threading.Lock()
-
-
-def set_send_translate_status(conv_id, event):
-    """Record a status event for an in-flight send-path translate.
-
-    Called from the _translate_one_chunk status callback. ``event`` is a
-    dict carrying ``kind``, ``attempt``, ``elapsed``, ``detail`` — see
-    ``lib.translate._format_status_message``.
-    """
-    if not conv_id:
-        return
-    try:
-        from lib.translate import _format_status_message
-        msg = _format_status_message(event)
-    except Exception as e:
-        logger.debug('[Send] _format_status_message failed: %s', e)
-        msg = event.get('kind', '')
-    with _send_translate_status_lock:
-        _send_translate_status[conv_id] = {
-            'statusMessage': msg,
-            'statusKind': event.get('kind', ''),
-            'updatedAt': time.time(),
-        }
-
-
-def clear_send_translate_status(conv_id):
-    if not conv_id:
-        return
-    with _send_translate_status_lock:
-        _send_translate_status.pop(conv_id, None)
-
-
-def get_send_translate_status(conv_id):
-    """Return the current send-path translate status for a conv (or None)."""
-    with _send_translate_status_lock:
-        return _send_translate_status.get(conv_id)
-
-
-def auto_translate_user(text, config, conv_id=None):
+def auto_translate_user(text, config, *, user_id, conv_id=None):
     """Translate non-English user text to English if autoTranslate is on.
 
     English is the language large models perform best in, so when
@@ -130,17 +85,16 @@ def auto_translate_user(text, config, conv_id=None):
     Capped at ``_TRANSLATE_SEND_TIMEOUT`` seconds to prevent the synchronous
     HTTP handler from blocking long enough to trigger the frontend's abort.
 
-    When ``conv_id`` is provided, transient retry statuses are published
-    to ``_send_translate_status[conv_id]`` so the frontend can poll for
-    them and surface them below the "Translating…" bubble.
+    ``user_id`` is the authenticated owner used for fair admission.
+    ``conv_id`` is optional correlation data for the lane job id and logs.
 
     Returns:
         (translated_text, original_text_or_None, model_or_None, fail_reason)
         where ``fail_reason`` is ``None`` when translation succeeded or was
         not attempted (autoTranslate off / already English), or one of
-        ``'timed_out'`` / ``'failed'`` when a translation WAS attempted but
-        did not produce usable output — the caller surfaces this to the user
-        so the silent original-text fallback is no longer invisible.
+        ``'timed_out'`` / ``'server_busy'`` / ``'failed'`` when a translation
+        WAS attempted but did not produce usable output — the caller surfaces
+        this to the user so the original-text fallback is never silent.
     """
     from lib.conv_config import resolve_auto_translate
     auto_translate = resolve_auto_translate(config)
@@ -156,11 +110,16 @@ def auto_translate_user(text, config, conv_id=None):
     if not _should_translate_input(text, config):
         return text, None, None, None
 
-    import concurrent.futures
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+    from lib.agent_core.fair_work_lane import FairWorkLaneQueueFull
+    from lib.translate.execution import (
+        cancel_attended_translation,
+        submit_attended_translation,
+    )
 
-    def _status_cb(event):
-        """Forward chunk-level status events into the per-conv dict."""
-        set_send_translate_status(conv_id, event)
+    started_at = time.monotonic()
+    deadline_at = started_at + _TRANSLATE_SEND_TIMEOUT
+    translate_abort = threading.Event()
 
     def _do_translate():
         from lib.translate import (
@@ -180,73 +139,68 @@ def auto_translate_user(text, config, conv_id=None):
             return _strip_notranslate_tags(text), {'model': 'skipped',
                                                    '_dispatch': {'model': 'skipped'}}
         translate_target = inner_text if nt_blocks else text
-        # Tighter inner deadline than the outer wait — leaves a small
-        # margin for status publication and pool teardown so the HTTP
-        # response arrives well before the frontend safety abort.
+        # The inner budget includes time already spent in the shared lane.
+        # A margin leaves turn construction safely inside the frontend abort
+        # window.
+        inner_budget = max(
+            0.0,
+            deadline_at - time.monotonic()
+            - _TRANSLATE_SEND_INNER_MARGIN_SECONDS,
+        )
         translated, _u = _translate_freetext(
             translate_target, system_prompt, chunk_label=':send',
             source=source_lang, target='English',
-            status_cb=_status_cb if conv_id else None,
-            overall_deadline=max(5.0, _TRANSLATE_SEND_TIMEOUT - 5),
+            overall_deadline=inner_budget,
+            abort_check=translate_abort.is_set,
         )
         if nt_blocks and translated:
             translated = _reattach_notranslate_blocks(translated, nt_blocks)
         return translated, _u
 
-    # Build the executor manually — a `with` block calls shutdown(wait=True)
-    # on exit, which would block the HTTP request until the worker actually
-    # finishes (up to _translate_one_chunk's internal 10-min retry deadline)
-    # and defeat the whole point of the timeout. We tear it down with
-    # wait=False / cancel_futures=True so the request returns as soon as the
-    # timeout hits, even if the worker thread is mid-LLM-call.
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    # The process-wide lane owns finite worker and queue budgets. The request
+    # thread awaits its deadline directly, avoiding the old per-request
+    # executor and heartbeat thread.
+    job_id = f'send:{conv_id or "detached"}:{uuid.uuid4().hex}'
     future = None
     timed_out = False
-    started_at = time.time()
-    # Heartbeat: if the inner translate hasn't surfaced its own status yet,
-    # publish a "still translating" event every few seconds so the polling
-    # frontend doesn't show a static "Translating…" with no clue.
-    _heartbeat_stop = threading.Event()
-
-    def _heartbeat():
-        while not _heartbeat_stop.wait(4.0):
-            try:
-                set_send_translate_status(conv_id, {
-                    'kind': 'in_progress',
-                    'attempt': 0,
-                    'elapsed': time.time() - started_at,
-                    'detail': '',
-                })
-            except Exception as e:
-                logger.debug('[Send] heartbeat status publish failed conv=%s: %s',
-                             (conv_id or '?')[:8], e)
-
-    _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
-    if conv_id:
-        _hb_thread.start()
 
     try:
-        future = pool.submit(_do_translate)
         try:
-            result, _usage = future.result(timeout=_TRANSLATE_SEND_TIMEOUT)
-        except concurrent.futures.TimeoutError:
-            timed_out = True
-            elapsed = time.time() - started_at
+            future = submit_attended_translation(
+                job_id,
+                owner_user_id=user_id,
+                function=_do_translate,
+            )
+        except FairWorkLaneQueueFull:
+            logger.warning(
+                '[Send] Auto-translate queue is full; sending original text '
+                '(conv=%s, %d chars)',
+                (conv_id or '?')[:8], len(text),
+            )
+            return text, None, None, 'server_busy'
+
+        while True:
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                result, _usage = future.result(timeout=remaining)
+                break
+            except FutureTimeoutError:
+                # A completed worker may itself raise TimeoutError; preserve it
+                # as a translation failure rather than mistaking it for a wait.
+                if future.done():
+                    raise
+                timed_out = True
+                break
+
+        if timed_out:
+            translate_abort.set()
+            elapsed = time.monotonic() - started_at
             logger.warning('[Send] Auto-translate timed out after %.1fs, '
                            'sending original text (conv=%s, %d chars)',
                            elapsed, (conv_id or '?')[:8], len(text))
-            # Surface the timeout to the frontend BEFORE we clear the
-            # status dict in `finally` — the poll loop will pick it up
-            # on the very next tick and the user sees a concrete reason.
-            set_send_translate_status(conv_id, {
-                'kind': 'timed_out',
-                'attempt': 1,
-                'elapsed': elapsed,
-                'detail': f'no result after {_TRANSLATE_SEND_TIMEOUT}s',
-            })
-            # Do NOT block on shutdown — the worker may still be mid-LLM
-            # call. cancel_futures requires Python 3.9+; we already require it.
-            pool.shutdown(wait=False, cancel_futures=True)
             return text, None, None, 'timed_out'
         if result and result.strip():
             _model = None
@@ -264,19 +218,9 @@ def auto_translate_user(text, config, conv_id=None):
     except Exception as e:
         logger.warning('[Send] Auto-translate failed: %s', e, exc_info=True)
     finally:
-        _heartbeat_stop.set()
-        # Tear down the pool. When we timed out we already shut it down
-        # non-blocking above. On the success / generic-error paths the
-        # future is finished, so a regular shutdown(wait=False) returns
-        # immediately and the worker thread is collected by the GC.
-        if not timed_out:
-            try:
-                pool.shutdown(wait=False)
-            except Exception as e:
-                logger.debug('[Send] translate pool shutdown failed: %s', e)
-        # Always clear the per-conv status on exit — no stale retry hint
-        # should leak into a subsequent poll after the send returns.
-        clear_send_translate_status(conv_id)
+        translate_abort.set()
+        if future is not None and not future.done():
+            cancel_attended_translation(job_id)
 
     # Reached only when a translation was attempted (autoTranslate on + Chinese
     # present) but produced no usable output — either the LLM call raised or
@@ -288,9 +232,9 @@ def translate_user_text_to_english(text, config):
     """Translate ``text`` to English for the headless API path, returning usage.
 
     Unlike :func:`auto_translate_user` (tuned for the synchronous UI send path
-    with its heartbeat/status side-table and tight abort budget), this is the
-    variant the ``/api/v1/chat/completions`` handler uses: no per-conv status
-    side effects, a generous deadline, and it RETURNS THE TRANSLATION TOKEN
+    with its tight abort budget), this is the variant the
+    ``/api/v1/chat/completions`` handler uses: a generous deadline, and it
+    RETURNS THE TRANSLATION TOKEN
     USAGE so the caller can fold the translate cost into the request's billing
     and cost reporting (English is the model's strongest language, but the
     translate round is a real expense that must be accounted for).
@@ -340,13 +284,11 @@ def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
     """Build a user message dict from frontend payload + optional auto-translate.
 
     Args:
-        payload: dict with text, images, pdfTexts, replyQuotes, convRefs, convRefTexts, timestamp
+        payload: dict with text, images, attachments, legacy pdfTexts/videos,
+            replyQuotes, convRefs, convRefTexts, timestamp
         config: task config dict (reads autoTranslate)
         user_id: authenticated owner used for referenced-conversation reads.
-        conv_id: optional — when provided, transient translate retry
-            statuses are exposed via /api/chat/translate-status/<conv_id>
-            so the frontend can display retry reasons under the "Translating…"
-            bubble.
+        conv_id: optional correlation id for translation lane jobs and logs.
 
     Returns:
         user_msg dict ready to append to conv.messages
@@ -355,7 +297,7 @@ def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
     timestamp = payload.get('timestamp') or int(time.time() * 1000)
 
     translated_text, original_text, translate_model, translate_fail = auto_translate_user(
-        text, config, conv_id=conv_id)
+        text, config, user_id=user_id, conv_id=conv_id)
 
     user_msg = {
         'role': 'user',
@@ -386,6 +328,12 @@ def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
         user_msg['_translateFailed'] = translate_fail
     if payload.get('images'):
         user_msg['images'] = payload['images']
+    if payload.get('attachments'):
+        from lib.media_attachments import resolve_client_refs
+        attachments = resolve_client_refs(
+            payload['attachments'], user_id=user_id)
+        if attachments:
+            user_msg['attachments'] = attachments
     if payload.get('pdfTexts'):
         user_msg['pdfTexts'] = payload['pdfTexts']
     if payload.get('videos'):
@@ -450,45 +398,6 @@ def _sanitize_video_attachments(videos):
     return out
 
 
-def build_tool_history_round(batch):
-    """Server-side port of ``_buildToolHistoryRound()`` (static/js/main.js).
-
-    Takes a batch of raw ``toolRounds`` entries (all from the same LLM round)
-    and converts them into the ``toolHistory[i]`` shape consumed by
-    ``lib/tasks_pkg/message_builder.inject_tool_history``.
-    """
-    round_out: dict = {
-        'assistantContent': '',
-        'toolCalls': [],
-        'toolResults': [],
-    }
-    for r in batch:
-        if not round_out['assistantContent'] and r.get('assistantContent'):
-            round_out['assistantContent'] = r.get('assistantContent')
-        if not round_out.get('thinking') and r.get('thinking'):
-            round_out['thinking'] = r.get('thinking')
-        if not round_out.get('thinkingSignature') and r.get('thinkingSignature'):
-            round_out['thinkingSignature'] = r.get('thinkingSignature')
-        tc = {
-            'id': r.get('toolCallId'),
-            'name': r.get('toolName'),
-            'arguments': r.get('toolArgs') or '{}',
-        }
-        if r.get('extraContent'):
-            tc['extraContent'] = r.get('extraContent')
-        if isinstance(r.get('caller'), dict):
-            tc['caller'] = dict(r['caller'])
-        round_out['toolCalls'].append(tc)
-        result = {
-            'tool_call_id': r.get('toolCallId'),
-            'content': r.get('toolContent') or '',
-        }
-        if isinstance(r.get('caller'), dict):
-            result['caller'] = dict(r['caller'])
-        round_out['toolResults'].append(result)
-    return round_out
-
-
 def scan_continue_checkpoint(assistant_msg):
     """Scan the last assistant message's ``toolRounds`` for the latest recoverable
     checkpoint.  Mirrors ``continueAssistant()`` (static/js/main.js:2214-2410).
@@ -503,76 +412,38 @@ def scan_continue_checkpoint(assistant_msg):
         OR ``None`` if no recoverable checkpoint (caller falls back to
         full regeneration / pop-and-resend).
     """
-    all_rounds = assistant_msg.get('toolRounds') or []
+    if not isinstance(assistant_msg, dict):
+        return None
+    raw_rounds = assistant_msg.get('toolRounds')
+    all_rounds = raw_rounds if isinstance(raw_rounds, (list, tuple)) else []
     if not all_rounds:
         return None
-    has_tool_call_ids = any(r.get('toolCallId') for r in all_rounds)
-    if not has_tool_call_ids:
+    replay_prefix = scan_replayable_tool_round_prefix(all_rounds)
+    kept_rounds = list(replay_prefix.rounds)
+
+    if not kept_rounds:
         return None
-
-    has_llm_round = any(r.get('llmRound') is not None for r in all_rounds)
-    batches: dict = {}
-    batch_key = 0
-    last_complete_idx = -1
-
-    for i, r in enumerate(all_rounds):
-        if not r.get('toolCallId'):
-            continue
-        if r.get('status') != 'done':
-            break
-        # Attempt to reconstruct toolContent from results metadata if missing
-        # (parity with the JS scan — happens after DB round-trip when backend
-        # checkpoint was written before toolContent was available).
-        if r.get('toolContent') is None:
-            results = r.get('results') or []
-            reconstructed = ''
-            if results:
-                parts = []
-                for res in results:
-                    if not isinstance(res, dict):
-                        continue
-                    parts.append(res.get('snippet') or res.get('title') or res.get('content') or '')
-                reconstructed = '\n'.join(p for p in parts if p)
-            if not reconstructed:
-                break
-            r['toolContent'] = reconstructed or '[tool result not available]'
-        if has_llm_round:
-            batch_key = r.get('llmRound')
-        else:
-            prev = all_rounds[i - 1] if i > 0 else None
-            if prev and prev.get('toolCallId') and r.get('roundNum', 0) > prev.get('roundNum', -999) + 1:
-                batch_key += 1
-        batches.setdefault(batch_key, []).append(r)
-        last_complete_idx = i
-
-    if last_complete_idx < 0:
-        return None
-
-    kept_rounds = all_rounds[:last_complete_idx + 1]
     discarded_rounds = len(all_rounds) - len(kept_rounds)
 
     # Keep the full checkpoint/audit list on the message, but replay only the
     # newest effective checklist revision to the model.
     from lib.tools.todo import compact_todo_rounds_for_replay
     replay_rounds = compact_todo_rounds_for_replay(kept_rounds)
-    replay_batches: dict = {}
-    replay_key = 0
-    replay_prev = None
-    replay_has_llm = any(r.get('llmRound') is not None for r in replay_rounds)
-    for r in replay_rounds:
-        if replay_has_llm:
-            replay_key = r.get('llmRound')
-        elif (replay_prev and r.get('roundNum', 0)
-              > replay_prev.get('roundNum', -999) + 1):
-            replay_key += 1
-        replay_batches.setdefault(replay_key, []).append(r)
-        replay_prev = r
+    # ``llmRound`` restarts at zero for every Continue attempt.  Preserve
+    # provider-response chronology; a global dict keyed by that local counter
+    # used to merge old/new R17 calls into one synthetic assistant message.
+    replay_batches = tool_round_batches(replay_rounds)
     tool_history = [build_tool_history_round(batch)
-                    for batch in replay_batches.values()]
+                    for batch in replay_batches]
 
-    preserved_content_parts = [r.get('assistantContent') or '' for r in kept_rounds]
+    preserved_content_parts = [
+        r.get('assistantContent')
+        for r in kept_rounds
+        if isinstance(r.get('assistantContent'), str)
+    ]
     preserved_content = '\n\n'.join(p for p in preserved_content_parts if p)
-    original_content = assistant_msg.get('content') or ''
+    raw_content = assistant_msg.get('content')
+    original_content = raw_content if isinstance(raw_content, str) else ''
     # Fallback: if assistantContent was never populated on rounds (legacy DB rows),
     # reuse the full prior content so the visible text is preserved.
     if not preserved_content and kept_rounds and original_content:
@@ -591,8 +462,12 @@ def scan_continue_checkpoint(assistant_msg):
     else:
         discarded_content_text = ''
 
-    preserved_thinking_chars = sum(len(r.get('thinking') or '') for r in kept_rounds)
-    original_thinking = assistant_msg.get('thinking') or ''
+    preserved_thinking_chars = sum(
+        len(r.get('thinking'))
+        for r in kept_rounds if isinstance(r.get('thinking'), str)
+    )
+    raw_thinking = assistant_msg.get('thinking')
+    original_thinking = raw_thinking if isinstance(raw_thinking, str) else ''
     discarded_thinking = max(0, len(original_thinking) - preserved_thinking_chars)
     # Capture the message-level thinking text whenever it is not fully covered
     # by per-round thinking — this is the trailing reasoning the model emitted
@@ -624,7 +499,4 @@ __all__ = [
     'build_user_msg_from_payload',
     'build_tool_history_round',
     'scan_continue_checkpoint',
-    'set_send_translate_status',
-    'clear_send_translate_status',
-    'get_send_translate_status',
 ]

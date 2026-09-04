@@ -1,25 +1,21 @@
-"""Wire-parity regression gate for _renderUnifiedToolLine (tool_rounds.js).
+"""Wire-parity gate for the retained dispatcher plus typed presenters.
 
-Renders the 51-round battery (tests/_tool_rounds_wire_parity_rounds.json)
-through the CURRENT static/js/ui/tool_rounds.js and asserts the emitted HTML
-is byte-identical to the frozen baseline
+Renders the 56-round battery (tests/_tool_rounds_wire_parity_rounds.json)
+through the current materialized runtime graph and asserts the emitted HTML is
+byte-identical to the frozen baseline
 (tests/_tool_rounds_wire_parity_baseline.json).
 
-Why this gate exists: _renderUnifiedToolLine is the single highest-churn
-renderer in the frontend (16 branch helpers + dispatcher after the
-2d7adb99 split). Template-literal *indentation inside* the HTML strings is
-load-bearing — a refactor that re-indents a template changes the served
-markup byte-for-byte. This gate catches any such drift, intended or not.
+Why this gate exists: `_renderUnifiedToolLine` is a retained ordered dispatcher
+across typed and lazy presentation owners. Template-literal *indentation
+inside* the HTML strings is load-bearing — a refactor that re-indents a
+template changes the served markup byte-for-byte. This gate catches any such
+drift, intended or not.
 
-The baseline encodes CURRENT accepted behaviour. When a change to the
-renderer is INTENTIONAL, regenerate the baseline and review its diff like
-any snapshot test:
-
-    node tests/_tool_rounds_wire_parity_harness.js \
-        static/js/ui/tool_rounds.js \
-        tests/_tool_rounds_wire_parity_rounds.json \
-        static/js/ui/tool_rounds_rich.js \
-        > tests/_tool_rounds_wire_parity_baseline.json
+The baseline encodes CURRENT accepted behaviour. When a renderer change is
+intentional, use this module's `_run_harness()` against the materialized owner
+graph, serialize that result to `_tool_rounds_wire_parity_baseline.json`, and
+review the snapshot diff. Raw retained sections are not standalone inputs
+after typed-owner extraction.
 
 Skips cleanly when node is unavailable.
 """
@@ -86,29 +82,32 @@ def test_render_unified_tool_line_matches_baseline():
     )
 
 
-def test_battery_covers_every_branch_helper():
-    """Guard the guard: the battery must exercise every _render* helper the
-    dispatcher can route to, so a future helper can't ship unrendered."""
-    src = TOOL_ROUNDS.read_text(encoding='utf-8')
+def test_battery_covers_every_dispatch_family():
+    """Guard the guard: every dispatcher family needs a representative round."""
     battery = ROUNDS.read_text(encoding='utf-8')
-    # every branch the dispatcher probes must appear in the battery by name
+    # Every branch the dispatcher probes must appear in the battery by name.
     required_markers = [
+        '_inboxInject',         # typed synthetic-injection presenter: swarm
+        '_peerInject',          # typed synthetic-injection presenter: peer
+        '_userSteerInject',     # typed synthetic-injection presenter: operator
+        '_stallNudge',          # typed synthetic-injection presenter: system
         'ask_human',            # _renderHumanGuidanceRows
         'awaiting_human',       # _renderHumanGuidanceCard (live interactive card)
-        'pending_approval',     # _renderPendingApprovalBlock
+        'pending_approval',     # typed tool-approval presenter
         'timer_create',         # _renderTimerWaitingRow
         'awaiting_stdin',       # _renderStdinBlock
         'aborted',              # _renderAbortedRow
         'error-failed-tool',    # _renderErrorRow
-        'run_command',          # _renderSearchingRow + _renderCmdDoneBlock
-        'browser_execute_js',   # _renderBrowserExecJsBlock
+        'run_command',          # typed command presenter + retained lifecycle
+        'browser_execute_js',   # typed browser-execution presenter
+        'search_tools',         # typed tool-catalog search presenter
         'web_search',           # _renderSearchRows (+ searching orbit)
-        'inspect_image',        # _renderReadImagesBlock
-        'generate_image',       # _renderImageGenBlock
-        'write_file',           # _renderWriteFileBlock
-        'apply_diff',           # _renderSingleDiffBlock
-        'apply_diffs',          # _renderBatchEditsBlock
-        'compactionLayer',      # _renderCompactionLabel
+        'inspect_image',        # typed tool-image presenter: read/inspect
+        'generate_image',       # typed tool-image presenter: generate/edit
+        'write_file',           # typed write-result presenter
+        'apply_diff',           # typed single-diff presenter
+        'apply_diffs',          # typed batch-edit presenter
+        'compactionLayer',      # typed compaction presenter
         'toolTokens',           # _computeToolBadgeHtml token branch
         'project_board_read',   # _renderConvMetaBlock (rich, tool_rounds_rich.js)
         '_timerPolls',          # _renderTimerWatcherBlock (rich, tool_rounds_rich.js)

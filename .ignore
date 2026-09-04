@@ -1,6 +1,20 @@
 # Model-facing search defaults. Generated delivery artifacts remain addressable
 # by explicit path, but ordinary `rg` discovery must land on authoring sources.
 frontend/src/runtime/app-runtime.js
+frontend/src/runtime/project-brain-runtime.generated.js
+frontend/src/runtime/paper-reader-presenters.generated.js
+frontend/src/runtime/paper-media-presenters.generated.js
+frontend/src/runtime/image-generation-runtime.generated.js
+frontend/src/runtime/myday-presenters.generated.js
+frontend/src/runtime/knowledge-presenters.generated.js
+frontend/src/runtime/project-presenters.generated.js
+frontend/src/runtime/local-control-presenters.generated.js
+frontend/src/runtime/diagnostics-presenters.generated.js
+frontend/src/runtime/compaction-viewer-presenters.generated.js
+frontend/src/runtime/utility-panels-runtime.generated.js
+frontend/src/runtime/settings-presenters.generated.js
+frontend/src/runtime/orchestration-presenters.generated.js
+frontend/src/i18n/generated/
 static/styles.css
 static/settings.css
 static/vite/

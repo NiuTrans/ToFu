@@ -21,6 +21,7 @@ native library and arXiv-fetch owners under jsdom to verify the fix:
 Skips cleanly when node/jsdom dev-deps are absent.
 """
 
+from contextlib import ExitStack
 import json
 import os
 import shutil
@@ -28,6 +29,7 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._paper_vite import compiled_typescript
 
 
 pytestmark = pytest.mark.unit
@@ -47,23 +49,18 @@ def _node_deps_available():
 
 
 @pytest.fixture(scope='module')
-def native_owners(tmp_path_factory):
+def native_owners():
     if not _node_deps_available() or not os.path.isfile(ESBUILD):
         pytest.skip('node + jsdom + vite test bundler dev dependencies required')
-    output = tmp_path_factory.mktemp('paper-recommend-persist')
-    built = []
-    for source, name in (
-        (RECOMMEND_TS, 'recommend.js'),
-        (LIBRARY_TS, 'library.js'),
-    ):
-        target = output / name
-        compiled = subprocess.run(
-            [ESBUILD, source, '--bundle', '--format=iife',
-             '--platform=browser', f'--outfile={target}'],
-            capture_output=True, text=True, timeout=60)
-        assert compiled.returncode == 0, compiled.stderr
-        built.append(str(target))
-    return tuple(built)
+    with ExitStack() as stack:
+        built = tuple(
+            stack.enter_context(compiled_typescript(
+                source,
+                expose_feature_registry_to_window=True,
+            ))
+            for source in (RECOMMEND_TS, LIBRARY_TS)
+        )
+        yield built
 
 
 # The harness evals the REAL paper-reader.js in global scope (indirect eval),
@@ -122,12 +119,13 @@ window._fetchArxivPaper = globalThis._fetchArxivPaper = (reference, id) => {
   return new Promise(() => {});
 };
 if (typeof window._persistRecommendedCard === 'function') {
+  const featureState = window.__tofuTestFeatureRegistry;
   for (const name of ['_paperLibrary', '_activePaperId',
     '_activePaperFolderId', '_paperFolders', '_paperLibraryLoading']) {
     Object.defineProperty(globalThis, name, {
       configurable: true,
-      get() { return window[name]; },
-      set(value) { window[name] = value; },
+      get() { return featureState[name]; },
+      set(value) { featureState[name] = value; },
     });
   }
   for (const name of ['_persistRecommendedCard', '_isRecommendedEntry',
@@ -136,6 +134,7 @@ if (typeof window._persistRecommendedCard === 'function') {
   }
 }
 
+(async () => {
 const out = {};
 globalThis._paperLibrary = [];
 globalThis._activePaperId = '';
@@ -148,6 +147,7 @@ function candidate(card) { globalThis._applyRecommendEvent(recState, { type: 'ca
 
 // 1. Grounded card → auto-saved (one lightweight row + one PUT carrying arxivId).
 candidate({ arxiv_id: '2502.09992', title: 'Paper A', why: 'matches your query' });
+await new Promise((r) => setImmediate(r));  // flush the async persist PUT
 out.after_first_count = globalThis._paperLibrary.length;
 out.first_is_recommended = globalThis._isRecommendedEntry(globalThis._paperLibrary[0]);
 out.first_put_has_arxiv = puts.length === 1 && puts[0].body.arxivId === '2502.09992'
@@ -198,6 +198,7 @@ out.upgrade_filled_pdf = !!(upgraded && upgraded.pdfUrl && upgraded.parsedText);
 out.upgrade_no_longer_recommended = !(upgraded && globalThis._isRecommendedEntry(upgraded));
 
 console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e); process.exit(1); });
 """
 
 

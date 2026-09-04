@@ -17,8 +17,9 @@ serialized VERBATIM (no Anthropic allowlist rebuild), so the pollution reaches
 the wire — matching mrne3bqe (aws.claude-opus-4.8 via sankuai) hitting 503→429
 slot swaps at R4/R5.
 
-Fix: deep-copy ``body['messages']`` before the per-slot in-place rewrites so
-each adaptation is idempotent and never leaks back onto the caller / next slot.
+Fix: deep-copy ``body['messages']`` before model families that perform per-slot
+or wire-preparation rewrites. Non-mutating OpenAI/Responses slots reuse the
+canonical history by identity instead of copying a conversation per retry.
 
 The assertions are on ACTUAL serialized bytes, and every guard has a neuter
 negative control that reintroduces the shallow copy and MUST flip.
@@ -42,11 +43,12 @@ _MODEL = 'aws.claude-opus-4.8'
 
 class _Slot:
     def __init__(self, model, provider_id='sankuai', thinking_format='',
-                 protocol=''):
+                 protocol='', responses_profile=''):
         self.model = model
         self.provider_id = provider_id
         self.thinking_format = thinking_format
         self.protocol = protocol
+        self.responses_profile = responses_profile
 
 
 def _tools():
@@ -128,12 +130,104 @@ def test_adapt_does_not_mutate_caller_messages():
 
 
 @pytest.mark.unit
-def test_adapt_returns_independent_messages_list():
-    """The adapted body's messages must be a distinct object, not the caller's."""
+def test_mutating_slot_returns_independent_messages_list():
+    """A cache-marker slot receives a caller-independent message graph."""
     body = _prebuilt_body()
     adapted = _adapt(_Slot(_MODEL), body)
     assert adapted['messages'] is not body['messages'], (
         'adapted messages IS the caller list object — in-place rewrites leak')
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('model', ['gemini-3-pro', 'glm-5', 'qwen-max'])
+def test_every_mutating_model_family_receives_independent_messages(model):
+    body = _prebuilt_body()
+    before = copy.deepcopy(body['messages'])
+
+    adapted = _adapt(_Slot(model), body)
+
+    assert adapted['messages'] is not body['messages']
+    assert body['messages'] == before
+
+
+@pytest.mark.unit
+def test_non_mutating_responses_slot_reuses_canonical_history_safely():
+    from lib.llm._sse_core import prepare_request
+
+    body = _prebuilt_body()
+    before = copy.deepcopy(body['messages'])
+    slot = _Slot(
+        'gpt-5.6',
+        provider_id='openai',
+        protocol='responses',
+        responses_profile='openai',
+    )
+
+    adapted = _adapt(slot, body)
+    assert adapted['messages'] is body['messages']
+    plan = prepare_request(
+        adapted,
+        api_protocol='responses',
+        base_url='https://api.openai.com/v1',
+    )
+
+    assert body['messages'] == before
+    assert plan.body['input']
+
+
+@pytest.mark.unit
+def test_dispatch_reuses_admitted_tokens_for_completion_clamp(monkeypatch):
+    import lib.tasks_pkg.compaction._tokens as token_policy
+    import lib.token_counter.heuristic as heuristic
+    from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
+
+    monkeypatch.setattr(
+        token_policy, 'resolve_model_context_limit', lambda *a, **k: 100_000)
+    monkeypatch.setattr(
+        heuristic,
+        'cheap_estimate',
+        lambda *a, **k: pytest.fail(
+            'slot retry must reuse fresh prompt-admission evidence'),
+    )
+    body = {
+        'model': 'gpt-5.6-sol',
+        'messages': [{'role': 'user', 'content': 'large prompt'}],
+        'max_tokens': 40_000,
+        ADMITTED_INPUT_TOKENS_KEY: 60_000,
+    }
+
+    adapted = _adapt(_Slot('gpt-5.6-sol', provider_id='openai'), body)
+
+    assert adapted['max_tokens'] == 33_488
+    assert body['max_tokens'] == 40_000
+
+
+@pytest.mark.unit
+def test_model_fallback_discards_foreign_admission_evidence(monkeypatch):
+    import lib.tasks_pkg.compaction._tokens as token_policy
+    import lib.token_counter.heuristic as heuristic
+    from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
+
+    estimates = []
+    monkeypatch.setattr(
+        token_policy, 'resolve_model_context_limit', lambda *a, **k: 100_000)
+    monkeypatch.setattr(
+        heuristic,
+        'cheap_estimate',
+        lambda messages: estimates.append(messages) or 10_000,
+    )
+    body = {
+        'model': 'gpt-5.6-sol',
+        'messages': [{'role': 'user', 'content': 'large prompt'}],
+        'max_tokens': 40_000,
+        ADMITTED_INPUT_TOKENS_KEY: 60_000,
+    }
+
+    adapted = _adapt(_Slot('gpt-5.6-luna', provider_id='openai'), body)
+
+    assert len(estimates) == 1
+    assert ADMITTED_INPUT_TOKENS_KEY not in adapted
+    assert body[ADMITTED_INPUT_TOKENS_KEY] == 60_000
 
 
 @pytest.mark.unit

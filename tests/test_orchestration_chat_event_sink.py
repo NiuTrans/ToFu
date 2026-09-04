@@ -76,6 +76,48 @@ def test_turn_start_delta_and_finalize_share_one_task_projection():
     assert all(owner is task for owner, _event in forwarded)
 
 
+def test_tool_lifecycle_updates_reconnect_snapshot_without_duplicate_rows():
+    task = {'content': '', 'thinking': '', 'toolRounds': []}
+    forwarded = []
+    sink = OrchestrationChatTaskEventSink(
+        task, lambda _owner, event: forwarded.append(event))
+    sink({
+        'type': 'flow_iteration', 'phase': 'working', 'iteration': 1,
+        'flowProjection': 'autopilot', 'turnRole': 'worker',
+        'emits': 'assistant',
+    })
+    start = {
+        'type': 'tool_start', 'roundNum': 3, 'llmRound': 3,
+        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
+        'query': 'Read a.py', 'toolArgs': {'path': 'a.py'},
+        'status': 'searching', 'tStart': 100,
+    }
+    sink(start)
+    sink(start)  # reconnect replay / duplicate start is an upsert
+    sink({
+        'type': 'tool_result', 'roundNum': 3,
+        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
+        'results': [{'title': 'read_files'}], 'status': 'done', 'tEnd': 150,
+    })
+    sink({
+        'type': 'tool_complete', 'roundNum': 3,
+        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
+        'toolContent': 'ok', 'isError': False, 'tEnd': 151,
+    })
+
+    assert task['toolRounds'] == [{
+        'roundNum': 3, 'llmRound': 3,
+        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
+        'toolArgs': {'path': 'a.py'}, 'query': 'Read a.py',
+        'status': 'done', 'tStart': 100,
+        'results': [{'title': 'read_files'}], 'tEnd': 151,
+        'toolContent': 'ok',
+    }]
+    assert [event['type'] for event in forwarded] == [
+        'flow_iteration', 'tool_start', 'tool_start',
+        'tool_result', 'tool_complete']
+
+
 def test_discard_unknown_events_and_lockless_final_content_are_safe():
     task = {'content': 'partial', 'thinking': 'private'}
     forwarded = []

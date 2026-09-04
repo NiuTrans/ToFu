@@ -93,11 +93,14 @@ from ._files import (
 
 # ── CRUD / list / query (from _crud) ─────────────────────────────────
 from ._crud import (
+    MemoryRevisionConflict,
     list_all_memories,
     list_memories,
     get_memory,
     get_enabled_memories,
     get_eligible_memories,
+    iter_eligible_memories,
+    load_eligible_memories,
     create_memory,
     clear_memories,
     update_memory,
@@ -106,14 +109,16 @@ from ._crud import (
     toggle_memory,
 )
 
-# ``__all__`` preserved VERBATIM from the original single-file module — this
-# is what ``lib/memory/__init__.py`` picks up via ``from .storage import *``.
+# Historical exports stay intact; bounded iterator/hydration repository seams
+# are additive. ``lib/memory/__init__.py`` controls its own public surface.
 __all__ = [
     'GLOBAL_MEMORY_DIR', 'GLOBAL_MEMORY_SUBDIR', 'PROJECT_MEMORY_SUBDIR', 'MIN_DESCRIPTION_LENGTH',
     'SERVER_GLOBAL_MEMORY_SUBPATH',
     'LEGACY_PROJECT_MEMORY_SUBDIR', 'PROJECT_SKILLS_SUBDIR', 'SERVER_GLOBAL_SKILLS_SUBPATH',
     'list_all_memories', 'list_memories', 'get_memory', 'get_enabled_memories',
     'get_eligible_memories',
+    'iter_eligible_memories', 'load_eligible_memories',
+    'MemoryRevisionConflict',
     'create_memory', 'update_memory', 'delete_memory', 'clear_memories', 'merge_memories',
     'toggle_memory',
     'resolve_target_dir', 'resolve_skills_dir', 'run_storage_migrations',

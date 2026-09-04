@@ -47,13 +47,6 @@ logger = get_logger(__name__)
 # uses, else offline (replay) and live counts drift — the exact bug class this
 # whole effort fights. We re-export rather than re-implement.
 from lib.tasks_pkg.cache_tracking._detect import (  # noqa: E402
-    BUCKET_BODY_CHANGE,
-    BUCKET_BREAKPOINT_LOST,
-    BUCKET_NAMESPACE,
-    BUCKET_NO_BREAK,
-    BUCKET_OTHER,
-    BUCKET_TTL_FLIP,
-    BUCKET_UPSTREAM,
     classify_verdict,
 )
 
@@ -217,14 +210,3 @@ def aggregate_round_records(lines) -> dict:
     return counts
 
 
-def format_report(result: dict) -> str:
-    """Render a compact human report of a ``replay_rounds`` result."""
-    b = result.get('buckets', {})
-    total = sum(b.values())
-    lines = ['Cache-verdict replay — %d classified round(s)' % total]
-    for name in (BUCKET_NAMESPACE, BUCKET_TTL_FLIP, BUCKET_BREAKPOINT_LOST,
-                 BUCKET_BODY_CHANGE, BUCKET_UPSTREAM, BUCKET_NO_BREAK,
-                 BUCKET_OTHER):
-        if b.get(name):
-            lines.append('  %-24s %d' % (name, b[name]))
-    return '\n'.join(lines)

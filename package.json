@@ -12,7 +12,7 @@
     "typecheck:modules": "tsc -p tsconfig.vite.json --noEmit",
     "typecheck:count": "tsc --noEmit --pretty false 2>&1 | grep -c 'error TS' || true",
     "generate:runtime": "node scripts/compose_frontend_runtime.mjs --write",
-    "check:runtime": "node scripts/compose_frontend_runtime.mjs --check",
+    "check:runtime": "node scripts/compose_frontend_runtime.mjs --check && node scripts/check_lazy_runtime_bindings.mjs && node scripts/check_runtime_reachability.mjs",
     "generate:styles": "node scripts/compose_frontend_styles.mjs --write",
     "check:styles": "node scripts/compose_frontend_styles.mjs --check",
     "generate:conversation-sync": "python3 scripts/gen_conversation_sync_contract.py",

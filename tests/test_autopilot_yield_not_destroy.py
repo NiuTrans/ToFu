@@ -1,62 +1,9 @@
 #!/usr/bin/env python3
-"""Autopilot: yielding must not DESTROY, and only a HUMAN may preempt.
+"""Autopilot output survives a human preemption boundary.
 
-THE INCIDENT (conv ms3s8s0kjlvq18, 2026-07-28)
-----------------------------------------------
-Two gates read the SAME ``message_queue`` row and reached OPPOSITE verdicts in
-the same second:
-
-  06:45:54  the project brain queued a kickoff (``kind=workflow_step``)
-  06:54:38  the VU itself marked that epic ``done`` via project_board_complete
-  06:55:13  gate ① ``_has_pending_real_message`` → ``get_queue_depth`` (filter:
-            ``kind != KIND_AUTOPILOT``) counted the row as "a human is waiting"
-            → DISCARDED a finished 24-round / 15-minute VU reply
-  06:55:13  gate ② ``dispatch_next_queued`` → ``_brain_kickoff_still_wanted``
-            re-checked the board, saw ``done`` → discarded the row, spawned
-            NOTHING
-
-Net effect: the agent's question was never answered, the produced reply existed
-only as a truncated log line, the armed marker was cleared (so crash-resume
-would never revisit it) and a connected client held two dead task ids for 2h12m
-(``SyncDrift STALLED age=7920s``). No red signal anywhere.
-
-WHAT THIS SUITE PINS (owner-directed, 2026-07-28)
--------------------------------------------------
-Behaviour, never implementation — per the charter's "assert the RESULT" rule.
-Narrowing the kind check alone would have fixed that one instance and left the
-CAUSE (two readers, two filter sets), so the assertions below are written
-against the two invariants, not against the bug:
-
-  1. ``test_stale_kickoff_does_not_destroy_vu_output`` — THE incident, replayed:
-     a queued brain kickoff whose epic already finished must NOT be read as a
-     reason to stand down, so the VU output survives as a real turn.
-  2. ``test_dispatch_and_yield_gate_agree_on_the_same_row`` — the two readers
-     must never disagree about one row again (the structural cause).
-  3. ``test_machine_work_items_do_not_preempt`` — workflow / peer rows are
-     machine work: they wait for the run to end.
-  4. ``test_human_message_still_preempts`` — THE COMPLEMENT. Without it,
-     "autopilot never yields to anyone" would also pass, which would bury a
-     human under the loop — a worse bug than the one being fixed.
-  5. ``test_yield_preserves_output_and_concludes_the_run`` — yielding to a
-     human still preserves the produced reply in the SIDECAR and emits the
-     terminal ``autopilot_run_concluded`` fact.
-  6. ``test_preserved_reply_never_enters_conversation_history`` —
-     ``conv.messages`` is the history sent UPSTREAM; an undelivered VU reply
-     there would read back to the model as words the human actually said.
-  7. ``test_yield_does_not_disarm_autopilot`` — yielding PAUSES; it must not
-     silently turn the feature off.
-  8. ``test_mid_flight_stop_reasons_are_incomplete`` — a cut-short run must
-     never render as a clean conclusion.
-
-NEUTER (run manually to prove these bite; each MUST turn the suite red):
-  N1  ``has_pending_human_turn``: ``any(r['isHuman'] …)`` → ``bool(rows)``
-      (i.e. revert to the old "any non-autopilot row" judgement)  → 1,2,3 red
-  N2  ``_row_is_dispatchable``: ``return True`` unconditionally      → 1,2 red
-  N3  ``_preserve_unsent_vu_and_conclude``: drop the ``_store_run_record``
-      call                                                          → 5 red
-  N4  ``_preserve_unsent_vu_and_conclude``: drop the
-      ``_emit_run_concluded_event`` call                            → 5 red
-  N5  ``has_pending_human_turn``: ``return False`` unconditionally   → 4 red
+Project Brain no longer queues Board kickoffs or peer instructions.  This suite
+therefore covers only the generic queue distinction between human turns and
+machine-owned workflow rows plus the output-preservation contract.
 """
 
 import json
@@ -81,83 +28,8 @@ def _cid():
     return conversation_id
 
 
-def _queue_brain_kickoff(conv_id, board_task_id, project_path='/proj'):
-    """Enqueue a brain kickoff exactly as ``dispatch_epic`` does."""
-    return mq.enqueue_message(
-        conv_id,
-        {'text': 'go work this epic', 'boardTaskId': board_task_id,
-         'timestamp': 1000},
-        {'model': 'm', 'projectPath': project_path},
-        kind=mq.KIND_WORKFLOW, user_id=USER_ID)['queueId']
-
-
-def _board_says(monkeypatch, status):
-    """Point the board lookup at a single epic with ``status``."""
-    monkeypatch.setattr(
-        'lib.conversations.project_board.read_board',
-        lambda project_path, *, user_id: {
-            'tasks': [{'id': 'pt_epic', 'status': status,
-                       'owner_conv_id': ''}]})
-
-
 # ══════════════════════════════════════════════════════════════════
-#  1 + 2 — THE incident, and the structural cause behind it
-# ══════════════════════════════════════════════════════════════════
-
-def test_stale_kickoff_does_not_destroy_vu_output(monkeypatch):
-    """A kickoff whose epic already finished is NOT someone to stand down for.
-
-    The exact 06:55:13 state: one queued brain kickoff, its epic already
-    ``done``. Before the fix this made autopilot throw away a completed VU
-    reply while the dispatcher discarded the row and spawned nothing.
-    """
-    conv_id = _cid()
-    _queue_brain_kickoff(conv_id, 'pt_epic')
-    _board_says(monkeypatch, 'done')
-
-    assert mq.has_pending_human_turn(conv_id, user_id=USER_ID) is False, (
-        'a stale brain kickoff must NOT read as "a human is waiting" — that '
-        'reading is what destroyed a finished VU turn on 2026-07-28')
-    assert mq.next_dispatchable_turn(conv_id, user_id=USER_ID) is None, (
-        'nothing here will become a turn, so there is nobody to yield to')
-
-
-def test_dispatch_and_yield_gate_agree_on_the_same_row(monkeypatch):
-    """The two readers must never reach opposite verdicts on one row again.
-
-    This is the CAUSE, asserted directly: whatever the dispatcher would do with
-    the head row, the yield gate must agree. Drives the real dispatch path so
-    the agreement is observed end-to-end, not asserted about a helper.
-    """
-    conv_id = _cid()
-    _queue_brain_kickoff(conv_id, 'pt_epic')
-    _board_says(monkeypatch, 'done')
-
-    # What the yield gate believes.
-    gate_sees_a_turn = (
-        mq.next_dispatchable_turn(conv_id, user_id=USER_ID) is not None
-    )
-
-    # What the dispatcher actually DOES (stub the spawn pipeline).
-    submitted = []
-    monkeypatch.setattr(
-        mq,
-        '_submit_queued_turn_command',
-        lambda cid, uid, body: submitted.append((cid, uid, body)) or {
-            'attempt': {'attemptId': 'attempt-1'},
-        },
-    )
-    dispatched = mq.dispatch_next_queued(conv_id, user_id=USER_ID)
-    dispatcher_made_a_turn = bool(dispatched)
-
-    assert gate_sees_a_turn == dispatcher_made_a_turn, (
-        f'the two queue readers DISAGREED about the same row '
-        f'(yield gate saw a turn={gate_sees_a_turn}, dispatcher spawned='
-        f'{dispatcher_made_a_turn}) — that disagreement IS the bug')
-
-
-# ══════════════════════════════════════════════════════════════════
-#  3 + 4 — who may preempt a working run (and the complement)
+# Who may preempt a working run (and the complement)
 # ══════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize('kind', [mq.KIND_WORKFLOW, mq.KIND_PEER_MSG])

@@ -36,7 +36,8 @@ authored definition
 | `service.py` | owner-aware bucketing, provider identity checks, strategy application, compiled metric plans, analyzer dispatch | HTTP, storage, or product-specific metrics |
 | a plugin | strategies, conflict policy, metric extractors, analyzer | user identity, persistence, or route behavior |
 | `cost_experiments.py` | context-cost adapter, outcome diagnostics, legacy settings/report shape | provider discovery or generic assignment algorithms |
-| storage semantic operation | owner and experiment filtering before `LIMIT`, compact outcome projection | statistical decisions |
+| `cost_experiment_repository.py` | owner-scoped cursor resumption, source-scan and result bounds | SQL, backend paths, or statistical decisions |
+| storage semantic operation | bounded legacy-record walk, owner/exact-window filtering, compact outcome projection | statistical decisions |
 | `routes/config.py` | HTTP parsing, off-loop storage call, response envelope | SQL, bucketing, or inference |
 
 This split is deliberate: adding a strategy does not require changing the
@@ -91,6 +92,15 @@ Both high-volume boundaries compile provider lookups once: the request hot path
 uses a registry-generation-aware application plan, and each report scan uses a
 metric extraction plan. A plugin mount/unmount increments the registry generation
 and invalidates the request plan before its next use.
+
+Historical `task_results` can contain MiB-scale content/thinking alongside the
+small experiment outcome. Report recovery walks the backend-neutral primary key
+in resumable pages: one semantic RPC scans at most 256 source rows, each SQL
+fetch materializes at most eight BLOBs, and one report inspects at most 10,000
+rows. Exact experiment/window and current conversation ownership are rechecked
+before the 5,000-result cap. Exhausting the source bound marks the report
+truncated, which blocks promotion rather than treating an incomplete scan as
+evidence.
 
 Provider metadata, never callbacks, is discoverable at
 `GET /api/v1/experiments/capabilities`.
@@ -176,8 +186,8 @@ registry, assignment service, or decision vocabulary.
 - `tests/test_experiment_framework.py`: registry rollback/version coexistence,
   immutable specs, owner-scoped assignment, drift/failure behavior, schema, and
   compiled metric/analyzer dispatch.
-- `tests/test_cost_experiments.py`: product adapter, persistence outcome, report,
-  and HTTP capability/report surfaces.
+- `tests/test_cost_experiments.py`: product adapter, persistence outcome,
+  repository cursor resumption, report, and HTTP capability/report surfaces.
 - `tests/test_storage_sidecar_contract.py::test_task_results_cost_experiment_scan_projects_only_outcomes`:
   compact owner/experiment projection and post-filter cap semantics.
 - `tests/test_context_efficiency_audit.py::test_benchmark_jsonl_budget_public_price_and_acceptance`:

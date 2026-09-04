@@ -134,6 +134,58 @@ def test_registered_context_is_the_model_info_source_of_truth():
         }
 
 
+def test_capabilities_auto_infers_from_the_model_id():
+    from lib.model_registration import normalize_model_entry
+
+    # The edit form renders ['text'] before the first save; while the marker
+    # stands, normalization replaces it with name-pattern inference.
+    row = normalize_model_entry({
+        'model_id': 'claude-opus-4',
+        'capabilities': ['text'],
+        'capabilities_auto': True,
+        'rpm': 30,
+    })
+    assert row['capabilities_auto'] is True
+    assert row['capabilities'] == sorted(row['capabilities'])
+    assert 'vision' in row['capabilities']
+    assert 'thinking' not in row['capabilities']
+    assert row['thinking_default'] is False
+
+    thinking_row = normalize_model_entry({
+        'model_id': 'qwen3-32b-inhouse-finetune',
+        'capabilities': ['text'],
+        'capabilities_auto': True,
+    })
+    assert 'thinking' in thinking_row['capabilities']
+    assert thinking_row['thinking_default'] is True
+
+
+def test_capabilities_auto_preserves_an_explicit_thinking_default():
+    from lib.model_registration import normalize_model_entry
+
+    row = normalize_model_entry({
+        'model_id': 'qwen3-32b-inhouse-finetune',
+        'capabilities_auto': True,
+        'thinking_default': False,
+    })
+    assert 'thinking' in row['capabilities']
+    assert row['thinking_default'] is False
+
+
+def test_capabilities_auto_marker_dropped_by_explicit_toggle_edit():
+    from lib.model_registration import normalize_model_entry
+
+    row = normalize_model_entry({
+        'model_id': 'claude-opus-4',
+        'capabilities': ['text'],
+        # The frontend deletes the marker on any toggle interaction; a stale
+        # falsy marker must not survive normalization either.
+        'capabilities_auto': False,
+    })
+    assert row['capabilities'] == ['text']
+    assert 'capabilities_auto' not in row
+
+
 def test_glm53_uses_the_complete_registration_shape():
     from lib.provider_template_recipes import offering_recipes
 

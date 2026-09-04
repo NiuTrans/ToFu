@@ -81,6 +81,9 @@ def test_idle_stdio_parking_releases_transport_but_preserves_catalog(
     assert [row['function']['name']
             for row in bridge.get_openai_tool_defs()] == [namespaced]
     assert bridge.list_servers()[0]['parked'] is True
+    # Idle server-name churn must not accumulate one reconnect lock per
+    # historical config. The local holder is gone when parking returns.
+    assert len(bridge._reconnect_locks) == 0
 
 
 def test_idle_parking_skips_active_young_and_remote_servers(monkeypatch):
@@ -155,6 +158,40 @@ def test_credential_probe_thread_is_singleflight_and_exits(monkeypatch):
         assert time.monotonic() < deadline
         time.sleep(0.01)
     assert len(workers) == 1
+
+
+def test_credential_probe_process_slots_defer_without_spawning(monkeypatch):
+    import lib.mcp.client._bridge as bridge_module
+
+    bridge, _handle, _ = _bridge_with_local_server()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    monkeypatch.setattr(
+        bridge_module, '_cred_probe_slots', threading.BoundedSemaphore(1))
+    monkeypatch.setattr(
+        bridge, '_cred_probe_spec',
+        lambda _name: {'tool': 'echo', 'args': {}})
+
+    def _probe(name):
+        calls.append(name)
+        entered.set()
+        release.wait(1)
+
+    monkeypatch.setattr(bridge, '_run_cred_probe', _probe)
+    try:
+        assert bridge._probe_cred_health_async('first') is True
+        assert entered.wait(1)
+        assert bridge._probe_cred_health_async('second') is False
+        assert 'second' not in bridge._cred_probe_inflight
+        assert calls == ['first']
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 1
+    while bridge._cred_probe_inflight:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
 
 
 def test_call_transparently_reconnects_a_parked_catalog(monkeypatch):

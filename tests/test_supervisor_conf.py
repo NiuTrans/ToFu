@@ -19,6 +19,40 @@ pwd = pytest.importorskip(
     "pwd", reason="system-supervisord deployment is supported only on POSIX hosts")
 pytestmark = pytest.mark.unit
 
+
+def _child_environment(**overrides: str) -> dict[str, str]:
+    """Build a subprocess environment free of the host filesystem interceptor.
+
+    This managed host injects a BeeGFS/DolphinFS client into every dynamically
+    linked child via ``LD_PRELOAD`` (``libdolphinfs_client_preload.so``). The
+    interceptor is irrelevant to what these tests verify and has been observed
+    to SIGSEGV child binaries (``install``/``mv``/``python``) under full-suite
+    load, surfacing as ``install.sh: line N: ... Segmentation fault (core
+    dumped) "$@"``. Strip it so the subprocess contract is hermetic; this
+    mirrors the ``*_startup_boundary`` tests and ``guard.sh``'s
+    ``unset LD_PRELOAD``.
+
+    ``LD_LIBRARY_PATH`` is stripped for the same reason: any earlier test in
+    the worker that launches headless Chromium runs
+    ``chromium_env.ensure_chromium_env()``, which permanently prepends the
+    conda env's ``lib/`` to the process-wide variable.  That directory ships a
+    libattr build (``libattr.so.1.1.2501``) that is ABI-incompatible with the
+    system libacl: coreutils children (``install -m``) then SIGSEGV inside
+    ``acl_set_fd`` via a null call (gdb: ``copy_internal -> set_acl ->
+    qset_acl -> acl_set_fd -> 0x0``; on-demand repro:
+    ``LD_LIBRARY_PATH=$CONDA_PREFIX/lib install -m 0644 a b`` -> rc 139).
+    """
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"LD_PRELOAD", "LD_LIBRARY_PATH"}
+    }
+    environment.update(overrides)
+    return environment
+
+
+
+
 ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR_DIRECTORY = ROOT / "deploy" / "supervisor"
 TEMPLATE = SUPERVISOR_DIRECTORY / "tofu.conf.template"
@@ -236,6 +270,7 @@ def test_unrepresentable_path_fails_without_overwriting_output(tmp_path: Path):
             "--home", str(home),
             "--output", str(output),
         ],
+        env=_child_environment(),
         capture_output=True,
         text=True,
         timeout=10,
@@ -258,6 +293,7 @@ def test_installer_help_and_dry_run_are_non_mutating_interfaces(tmp_path: Path):
     help_result = subprocess.run(
         ["bash", str(INSTALLER), "--help"],
         cwd=tmp_path,
+        env=_child_environment(),
         capture_output=True,
         text=True,
         timeout=10,
@@ -278,7 +314,7 @@ def test_installer_help_and_dry_run_are_non_mutating_interfaces(tmp_path: Path):
         capture_output=True,
         text=True,
         timeout=10,
-        env={**os.environ, "TOFU_BROWSER_LIBS_DIR": str(tmp_path / "missing")},
+        env=_child_environment(TOFU_BROWSER_LIBS_DIR=str(tmp_path / "missing")),
     )
     assert dry_run.returncode == 0, dry_run.stderr
     assert _parse(dry_run.stdout)["directory"] == str(ROOT)
@@ -309,6 +345,7 @@ def test_installer_resolves_a_relocated_checkout_from_its_own_path(tmp_path: Pat
             "--home", str(home),
             "--port", "15434",
         ],
+        env=_child_environment(),
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -337,6 +374,7 @@ def test_relocated_checkout_with_stale_marker_fails_closed(tmp_path: Path):
             "--user", pwd.getpwuid(os.getuid()).pw_name,
             "--home", str(home),
         ],
+        env=_child_environment(),
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -470,18 +508,17 @@ def _system_install_fixture(
     else:
         ss_source += "exit 0\n"
     _write_executable(fake_bin / "ss", ss_source)
-    environment = {
-        **os.environ,
-        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "FAKE_SUPERVISOR_STATE": str(state_file),
-        "FAKE_SUPERVISOR_LOG": str(supervisor_log),
-        "FAKE_REREAD_FAIL_ONCE": "1" if reread_fail_once else "0",
-        "FAKE_REREAD_FAILED_MARKER": str(reread_failed_marker),
-        "FAKE_SERVERCTL_LOG": str(serverctl_log),
-        "FAKE_LISTENER_STATE": str(listener_state),
-        "FAKE_PROJECT_LISTENER_PID": str(listener_pid or ""),
-        "TOFU_BROWSER_LIBS_DIR": str(tmp_path / "missing-browser-bundle"),
-    }
+    environment = _child_environment(
+        PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        FAKE_SUPERVISOR_STATE=str(state_file),
+        FAKE_SUPERVISOR_LOG=str(supervisor_log),
+        FAKE_REREAD_FAIL_ONCE="1" if reread_fail_once else "0",
+        FAKE_REREAD_FAILED_MARKER=str(reread_failed_marker),
+        FAKE_SERVERCTL_LOG=str(serverctl_log),
+        FAKE_LISTENER_STATE=str(listener_state),
+        FAKE_PROJECT_LISTENER_PID=str(listener_pid or ""),
+        TOFU_BROWSER_LIBS_DIR=str(tmp_path / "missing-browser-bundle"),
+    )
     command = [
         "bash", str(project / "deploy" / "supervisor" / "install.sh"),
         "--python", sys.executable,
@@ -655,7 +692,7 @@ def test_system_install_handoff_requires_project_lock_identity(tmp_path: Path):
 
 
 def test_system_install_never_stops_an_unknown_port_owner(tmp_path: Path):
-    unrelated_process = subprocess.Popen(["sleep", "30"])
+    unrelated_process = subprocess.Popen(["sleep", "30"], env=_child_environment())
     try:
         listener_pid = unrelated_process.pid
         project, config_directory, command, environment = _system_install_fixture(
@@ -683,6 +720,7 @@ def test_system_install_never_stops_an_unknown_port_owner(tmp_path: Path):
 def test_installer_rejects_invalid_cli_before_host_changes(tmp_path: Path, argument: str):
     result = subprocess.run(
         ["bash", str(INSTALLER), argument],
+        env=_child_environment(),
         cwd=tmp_path,
         capture_output=True,
         text=True,

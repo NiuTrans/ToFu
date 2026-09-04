@@ -61,12 +61,16 @@
 #     when the user runs `python server.py` from a shell where the Tofu env
 #     wasn't `conda activate`d. This avoids any need to mutate ~/.bashrc.
 #
-#  The legacy compatibility path below relies on conda-forge. It:
+#  Default backend (uv): `uv venv` + `uv pip install -r requirements.txt`
+#  from prebuilt wheels — `uv pip` covers every requirement, including the few
+#  packages the legacy path installs via pip (PIP_ONLY_PKGS). The conda-forge
+#  path below is the FALLBACK / legacy path, forced by --use-conda, very old
+#  glibc, or a failed uv install. It:
 #    1. Locates an acceptable conda OR installs a sibling Miniforge
 #    2. (Sibling installs only) updates conda itself for solver fixes
-#    3. Clones the repo if needed
+#    3. Clones the repo if needed (conda can supply git)
 #    4. Creates a fresh conda env with Python 3.12
-#    5. Installs ALL Python dependencies from conda-forge (no pip)
+#    5. Installs Python dependencies from conda-forge (a few via pip)
 #    6. Installs ripgrep, fd-find, and Chromium shared libs from conda-forge
 #    7. Installs the Playwright Chromium browser binary
 #    8. Writes .tofu_env.json marker so server.py/bootstrap.py auto-activate
@@ -408,7 +412,46 @@ case "$OS" in
     Darwin)  PLATFORM="MacOSX" ;;
     *)       fail "Unsupported OS: $OS (Windows: download Tofu-Setup-*.exe from the release page)" ;;
 esac
+# Normalize arch spellings to the two names the Miniforge download paths use
+# (Miniforge3-${PLATFORM}-${ARCH}.sh). Anything else must fail fast instead of
+# surfacing late as a bogus "All Miniforge mirrors failed" during the download.
+case "$ARCH" in
+    amd64|x86_64)  ARCH="x86_64" ;;
+    arm64|aarch64) ARCH="aarch64" ;;
+    *)  fail "Unsupported architecture: ${ARCH} — install.sh supports x86_64/amd64 and aarch64/arm64 only. Use the Docker image instead (see docs/INSTALL.md)." ;;
+esac
 info "Platform: $OS $ARCH"
+
+# ── Disk preflight ──────────────────────────────────────────
+# ENOSPC used to surface only deep inside `uv pip install` / a conda solve.
+# Check the install-dir parent's free space up front so a nearly-full disk
+# fails here with a clear message. df is best-effort: if it is missing or
+# unparsable we keep going (the package managers still report ENOSPC honestly).
+_disk_preflight() {
+    local _df_parent
+    _df_parent="$(cd "$(dirname "${INSTALL_DIR}")" 2>/dev/null && pwd)"
+    [[ -n "$_df_parent" ]] || _df_parent="$(dirname "${INSTALL_DIR}")"
+    local _free_kb
+    if ! _free_kb="$(df -Pk "$_df_parent" 2>/dev/null | awk 'NR==2 {print $4}')" \
+            || [[ -z "$_free_kb" ]]; then
+        warn "Could not measure free disk space on ${_df_parent} (df unavailable) — skipping disk preflight"
+        return 0
+    fi
+    [[ "$_free_kb" =~ ^[0-9]+$ ]] || { warn "Could not parse free disk space for ${_df_parent} — skipping disk preflight"; return 0; }
+    local _fail_kb=$((2 * 1024 * 1024))
+    local _warn_gb=4
+    local _extra=""
+    [[ "$WITH_DOCLING" -eq 1 ]] && { _warn_gb=6; _extra=" with --with-docling"; }
+    local _warn_kb=$((_warn_gb * 1024 * 1024))
+    if (( _free_kb < _fail_kb )); then
+        fail "Not enough free disk space: $((_free_kb / 1024)) MB free on ${_df_parent} (need at least 2 GB). Free space or choose another --dir."
+    elif (( _free_kb < _warn_kb )); then
+        warn "Low disk space: $((_free_kb / 1024)) MB free on ${_df_parent} (recommend at least ${_warn_gb} GB${_extra}). Continuing."
+    else
+        info "Disk space: $((_free_kb / 1024 / 1024)) GB free on ${_df_parent}"
+    fi
+}
+_disk_preflight
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 0.5: Ensure source is present (backend-agnostic)
@@ -565,11 +608,38 @@ _glibc_ge_228() {
 # Best-effort: ensure a `uv` binary is available. Returns 0 if usable.
 _ensure_uv() {
     command -v uv &>/dev/null && return 0
+    # Offline / air-gapped escape hatch: a pre-placed uv binary. Use it as-is
+    # (symlinked onto PATH under the name `uv` if necessary) and skip the
+    # astral.sh download entirely.
+    if [[ -n "${TOFU_UV_LOCAL:-}" && -x "${TOFU_UV_LOCAL}" ]]; then
+        info "Using local uv from TOFU_UV_LOCAL: ${TOFU_UV_LOCAL}"
+        local _uv_dir
+        _uv_dir="$(cd "$(dirname "${TOFU_UV_LOCAL}")" 2>/dev/null && pwd)"
+        if [[ -n "$_uv_dir" && "$(basename "${TOFU_UV_LOCAL}")" == "uv" ]]; then
+            export PATH="${_uv_dir}:${PATH}"
+        else
+            local _uv_abs="${_uv_dir:-$(dirname "${TOFU_UV_LOCAL}")}/$(basename "${TOFU_UV_LOCAL}")"
+            local _uv_link_dir
+            _uv_link_dir="$(mktemp -d "${TMPDIR:-/tmp}/tofu-uv.XXXXXX")"
+            ln -s "$_uv_abs" "${_uv_link_dir}/uv"
+            export PATH="${_uv_link_dir}:${PATH}"
+        fi
+        command -v uv &>/dev/null && return 0
+    elif [[ -n "${TOFU_UV_LOCAL:-}" ]]; then
+        warn "TOFU_UV_LOCAL set but not executable: ${TOFU_UV_LOCAL} — falling back to download"
+    fi
     info "uv not found — installing it (astral.sh, bounded)..."
     local _t=""
     command -v timeout &>/dev/null && _t="timeout -k 5 120"
     if command -v curl &>/dev/null; then
-        $_t sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' >/dev/null 2>&1 || true
+        # Capture curl stderr into the install log so proxy/network failures are
+        # visible for diagnosis (previously hidden behind /dev/null + `|| true`).
+        # A failure still falls back to conda — the return below stays non-zero.
+        if $_t sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' >>"$TOFU_INSTALL_LOG" 2>&1; then
+            :
+        else
+            warn "uv installer failed (see ${TOFU_INSTALL_LOG}); astral.sh may be unreachable behind a proxy"
+        fi
     fi
     # uv installs to ~/.local/bin or ~/.cargo/bin — put both on PATH for this run.
     export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
@@ -1208,8 +1278,12 @@ fi
 if [[ "$_SOURCE_CHECKOUT_READY" -ne 1 ]]; then
     step "Completing deferred Tofu source checkout"
     if ! command -v git &>/dev/null; then
-        info "git not found — installing via conda-forge..."
-        conda install -n base -c conda-forge --override-channels -y git
+        if [[ "$CONDA_OWNED_BY_US" -eq 1 ]]; then
+            info "git not found — installing into the conda base we own..."
+            conda install -n base -c conda-forge --override-channels -y git
+        else
+            fail "git not found, and the conda in use is user-owned (we never mutate it). Install git manually (e.g. apt-get install git / yum install git / brew install git), or create the Tofu env and run 'conda install -n ${ENV_NAME} -c conda-forge git', then re-run install.sh"
+        fi
     fi
     _prepare_source_checkout \
         || fail "git is still unavailable after conda setup; cannot clone Tofu"
@@ -2568,6 +2642,39 @@ if [[ "$NO_LAUNCH" -eq 1 ]]; then
     exit 0
 fi
 
+# ── Port preflight ──────────────────────────────────────────
+# A busy port previously failed only at server launch with a generic message.
+# Probe it now so a collision fails fast with a clear hint (and the owning
+# PID when ss/lsof can reveal it — best-effort, no hard dependency).
+_port_is_free() {
+    "$ENV_PYTHON" - "$PORT" <<'PYEOF' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    probe.bind(('0.0.0.0', port))
+except OSError:
+    sys.exit(1)
+finally:
+    probe.close()
+PYEOF
+}
+
+if ! _port_is_free; then
+    _PORT_OWNER=""
+    if command -v ss &>/dev/null; then
+        _PORT_OWNER="$(ss -ltnp 2>/dev/null | grep -E ":${PORT}[[:space:]]" | head -n1 | sed 's/^[[:space:]]*//' || true)"
+    elif command -v lsof &>/dev/null; then
+        _PORT_OWNER="$(lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | tail -n +2 | head -n1 || true)"
+    fi
+    if [[ -n "$_PORT_OWNER" ]]; then
+        fail "Port ${PORT} is already in use: ${_PORT_OWNER} — choose a free port with --port"
+    fi
+    fail "Port ${PORT} is already in use — choose a free port with --port"
+fi
 step "Starting Tofu server"
 echo ""
 echo -e "  ${BOLD}🧈 Tofu is starting on port ${PORT}...${NC}"

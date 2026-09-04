@@ -343,7 +343,6 @@ global.document = {{ addEventListener(){{}}, removeEventListener(){{}},
   querySelectorAll: () => [],
   createElement: () => ({{ style:{{}}, setAttribute(){{}}, appendChild(){{}} }}) }};
 eval(fs.readFileSync({json.dumps(TOOL_ROUNDS_JS)}, 'utf8'));
-if (global.window._cmdTimerTicker) clearInterval(global.window._cmdTimerTicker);
 // A REALISTIC epoch. An artificially small NOW makes `NOW - 3900000` NEGATIVE,
 // which _cmdTimerAnchor correctly rejects as "not a real clock" — so a toy
 // value would test the rejection path instead of the hour formatting.
@@ -360,11 +359,7 @@ console.log(JSON.stringify({{
   noClock:    mk({{}}),
   tickerArmed: typeof _tickCmdTimers === 'function',
 }}));
-// tool_rounds.js installs a REAL setInterval on load (the 1 Hz chip ticker).
-// An unref'd interval keeps node's event loop alive forever, so the harness
-// must exit explicitly — the same trap tests/_tool_rounds_wire_parity_harness.js
-// documents. clearInterval above only covers the handle we can see via
-// window._cmdTimerTicker; exit() is the guarantee.
+// No live chip was rendered, so the demand-scoped owner owns no timer.
 process.exit(0);
 ''')
     assert out['countdown'] == '1m30s left'

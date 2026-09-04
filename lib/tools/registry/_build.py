@@ -79,10 +79,10 @@ def _build_fetch(ctx: ToolContext) -> list[dict]:
     return [build_fetch_url_tool()]
 
 
-def _build_server_download(ctx: ToolContext) -> list[dict]:
+def _build_browser_download(ctx: ToolContext) -> list[dict]:
     """Append-only explicit server-location download capability."""
-    from lib.tools.search import build_download_url_to_server_tool
-    return [build_download_url_to_server_tool()]
+    from lib.tools.search import build_browser_download_url_to_server_tool
+    return [build_browser_download_url_to_server_tool()]
 
 
 def _build_read_files(ctx: ToolContext) -> list[dict]:
@@ -232,11 +232,8 @@ def _build_conv_ref(ctx: ToolContext) -> list[dict]:
     # Both branches require at least one base tool (current_count > 0): with no
     # tools at all there's no schema to extend.
     #
-    # The Project Brain tools (charter/board/peer) used to be appended here;
-    # they now live in the dedicated ``project_brain`` (eager reads) and
-    # ``project_brain_write`` (searchable advisory writes) specs, so the
-    # cross-conversation mechanism is actually VISIBLE on a plain project
-    # turn instead of hiding behind a keyword-triggered searchable family.
+    # Project Brain is signal-driven and contributes no tool schemas.  The
+    # adjacent project_integration spec owns the two retained execution tools.
     if not ctx.durable_state_available or ctx.current_count <= 0:
         return []
     if ctx.has_conv_ref or (ctx.project_enabled and ctx.project_path):
@@ -248,34 +245,13 @@ def _build_conv_ref(ctx: ToolContext) -> list[dict]:
     return []
 
 
-def _build_project_brain(ctx: ToolContext) -> list[dict]:
-    # Project Brain READ surface (charter/board/peer-status/feed) — eager and
-    # resident in project mode. The per-turn injections already reference
-    # project_charter_read / project_board_read BY NAME, and the whole point
-    # of the brain is that the model knows the cross-conversation mechanism
-    # exists; a keyword-triggered searchable family failed both (the model
-    # cannot search for a mechanism it has never heard of). Read-only, ~2.7k
-    # chars of schema.
+def _build_project_integration(ctx: ToolContext) -> list[dict]:
+    """Expose only execution controls for an existing isolated workspace."""
     if not ctx.durable_state_available or ctx.current_count <= 0:
         return []
     if ctx.project_enabled and ctx.project_path:
-        from lib.tools.conversation import BRAIN_READ_TOOLS
-        return list(BRAIN_READ_TOOLS)
-    return []
-
-
-def _build_project_brain_write(ctx: ToolContext) -> list[dict]:
-    # Project Brain ADVISORY-WRITE surface (charter propose, board
-    # post/claim/complete/block, peer message/intervene) — deferred to Tool
-    # Search (the large half of the family), still exactly callable by name
-    # through the task-level executable catalog. The read-side schemas point
-    # at these names. Charter COMMIT stays human-gated and is never exposed
-    # (CHARTER_TOOLS is the enforcement point).
-    if not ctx.durable_state_available or ctx.current_count <= 0:
-        return []
-    if ctx.project_enabled and ctx.project_path:
-        from lib.tools.conversation import BRAIN_WRITE_TOOLS
-        return list(BRAIN_WRITE_TOOLS)
+        from lib.tools.conversation import INTEGRATION_TOOLS
+        return list(INTEGRATION_TOOLS)
     return []
 
 
@@ -362,6 +338,25 @@ def _build_todo(ctx: ToolContext) -> list[dict]:
     return [TODO_WRITE_TOOL]
 
 
+def _build_local_serve(ctx: ToolContext) -> list[dict]:
+    # Managed local deployment (install + run an inference engine for a
+    # user-supplied model path) is a DEFAULT capability like the scheduler:
+    # it attaches whenever any base tool exists. It is discoverable through
+    # Tool Search rather than eagerly wired, so idle turns pay nothing.
+    # TOFU_LOCAL_SERVE=0 is the retraction switch.
+    if (not ctx.durable_state_available
+            or ctx.lean or not ctx.has_base_tools):
+        return []
+    import os
+    if os.environ.get('TOFU_LOCAL_SERVE', '1').strip().lower() in (
+            '0', 'false', 'no', 'off'):
+        return []
+    from lib.local_serve.tool_defs import LOCAL_SERVE_TOOLS
+    logger.debug('[Task %s] 🖥️ Local-serve tools enabled (%d tools)',
+                 ctx.tid, len(LOCAL_SERVE_TOOLS))
+    return list(LOCAL_SERVE_TOOLS)
+
+
 def _build_scheduler(ctx: ToolContext) -> list[dict]:
     # Scheduler tools are a DEFAULT capability (like memory / todo): they
     # attach whenever ANY base tool exists, NOT gated on a user toggle. The
@@ -403,6 +398,34 @@ def _build_swarm(ctx: ToolContext) -> list[dict]:
     return [SPAWN_AGENTS_TOOL, AWAIT_AGENTS_TOOL, GET_AGENT_RESULT_TOOL]
 
 
+def _freeze_empty_mcp_wire(ctx: ToolContext) -> None:
+    """Freeze an empty MCP wire for this conversation's selection scope.
+
+    The tools array opens every provider request, so a server that connects
+    mid-conversation must not enter it — the composer surfaces those schemas
+    in a per-turn tail block instead (``execute_tools`` still reaches them
+    through the authority catalog). Freezing at the scope's first assembly
+    keeps the wire byte-stable from turn one. Explicit non-adaptive exposure
+    modes (progressive/inline) manage their own wire and are left alone.
+    """
+    exposure = str(ctx.cfg.get(
+        'mcpToolExposure', 'auto') or 'auto').strip().lower()
+    if exposure in ('progressive', 'wrapper', 'legacy', 'inline', 'all', 'full'):
+        return
+    try:
+        from lib.mcp.tool_search import (
+            freeze_wire_definitions,
+            mcp_selection_scope_id,
+        )
+        scope = mcp_selection_scope_id(
+            task_id=getattr(ctx, 'task_id', ''),
+            conv_id=getattr(ctx, 'conv_id', ''),
+            owner_user_id=getattr(ctx, 'owner_user_id', 0))
+        ctx.cfg['_mcpSelectionScopeId'] = scope
+        freeze_wire_definitions(scope, [])
+    except Exception as exc:
+        logger.debug('[Task %s] MCP empty-wire freeze failed: %s', ctx.tid, exc)
+
 def _build_mcp(ctx: ToolContext) -> list[dict]:
     # Bridge to external MCP servers — schemas fetched dynamically at request
     # time.  Default: enabled.  Benchmarks may pass mcpEnabled=False.
@@ -415,48 +438,38 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
         if bridge.connected:
             mcp_tools = bridge.get_openai_tool_defs()
             if mcp_tools:
+                catalog_fingerprint = ''
                 try:
-                    snapshot = bridge.get_tool_catalog_snapshot()
+                    catalog_fingerprint, snapshot = (
+                        bridge.get_tool_catalog_projection())
                 except AttributeError as exc:
-                    logger.debug('[Tools] bridge catalog snapshot unavailable: %s',
+                    logger.debug('[Tools] bridge catalog projection unavailable: %s',
                                  exc)
-                    # Compatibility for lightweight third-party/fake bridges.
-                    snapshot = [{
-                        'openai_def': tool,
-                        'namespaced_name': (
-                            (tool.get('function') or {}).get('name') or ''),
-                        'meta': {},
-                    } for tool in mcp_tools]
+                    try:
+                        snapshot = bridge.get_tool_catalog_snapshot()
+                    except AttributeError as snapshot_exc:
+                        logger.debug('[Tools] bridge catalog snapshot unavailable: %s',
+                                     snapshot_exc)
+                        # Compatibility for lightweight third-party/fake bridges.
+                        snapshot = [{
+                            'openai_def': tool,
+                            'namespaced_name': (
+                                (tool.get('function') or {}).get('name') or ''),
+                            'meta': {},
+                        } for tool in mcp_tools]
                 # The cached full list is the allowed upper bound and becomes
                 # part of the task authority catalog even when only a small
                 # native-schema subset is visible on the initial wire.
-                ctx.cfg['_mcpAllowedToolCatalog'] = list(mcp_tools)
+                ctx.cfg['_mcpAllowedToolCatalog'] = mcp_tools
                 # Keep rich MCP discovery metadata beside the schemas. It is
                 # consumed by local retrieval only and must never be copied
                 # into the provider-visible function definitions.
-                _search_text_by_name = {}
-                for _row in snapshot:
-                    if not isinstance(_row, dict):
-                        continue
-                    _definition = _row.get('openai_def') or {}
-                    _function = _definition.get('function') or {}
-                    _name = str(_function.get('name')
-                                or _row.get('namespaced_name') or '')
-                    if not _name:
-                        continue
-                    _meta = _row.get('meta') or {}
-                    _meta = _meta if isinstance(_meta, dict) else {}
-                    _values = [
-                        _row.get('server_id'), _row.get('server_name'),
-                        _row.get('tool_name'), _row.get('description'),
-                        _meta.get('bundle'), _meta.get('profiles'),
-                        _meta.get('intents'), _meta.get('aliases'),
-                    ]
-                    _search_text_by_name[_name] = ' '.join(
-                        ' '.join(str(item) for item in value)
-                        if isinstance(value, (list, tuple, set))
-                        else str(value or '')
-                        for value in _values)
+                try:
+                    _search_text_by_name = (
+                        bridge.get_tool_catalog_search_text_projection())
+                except AttributeError:
+                    from lib.mcp.tool_search import catalog_search_text_by_name
+                    _search_text_by_name = catalog_search_text_by_name(snapshot)
                 ctx.cfg['_mcpToolSearchTextByName'] = _search_text_by_name
 
                 exposure = str(ctx.cfg.get(
@@ -493,14 +506,32 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
                                 and message.get('role') == 'user'):
                             query = _message_text(message)[-8_000:]
                             break
-                    from lib.mcp.tool_search import select_active_mcp_tools
+                    from lib.mcp.tool_search import (
+                        mcp_selection_scope_id,
+                        recent_conversation_mcp_tool_names,
+                        select_active_mcp_tools,
+                    )
+                    selection_scope_id = mcp_selection_scope_id(
+                        task_id=getattr(ctx, 'task_id', ''),
+                        conv_id=getattr(ctx, 'conv_id', ''),
+                        owner_user_id=getattr(ctx, 'owner_user_id', 0),
+                    )
+                    ctx.cfg['_mcpSelectionScopeId'] = selection_scope_id
+                    configured_used = list(
+                        ctx.cfg.get('_mcpUsedToolNames') or [])
+                    historical_used = recent_conversation_mcp_tool_names(
+                        getattr(ctx, 'messages', None),
+                        limit=ctx.cfg.get('mcpActiveToolLimit', 8),
+                    )
+                    used_names = list(dict.fromkeys(
+                        [*configured_used, *historical_used]))
                     try:
                         active = select_active_mcp_tools(
                             snapshot, task_id=getattr(ctx, 'task_id', ''),
-                            query=query,
-                            used_names=list(
-                                ctx.cfg.get('_mcpUsedToolNames') or []),
-                            limit=ctx.cfg.get('mcpActiveToolLimit', 8))
+                            selection_scope_id=selection_scope_id,
+                            query=query, used_names=used_names,
+                            limit=ctx.cfg.get('mcpActiveToolLimit', 8),
+                            catalog_fingerprint=catalog_fingerprint)
                     except Exception as search_exc:
                         # Discovery is an optimization, never an availability
                         # gate. A corrupt index or unexpected metadata must
@@ -526,6 +557,7 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
                 return list(mcp_tools)
     except Exception as e:
         logger.debug('[Task %s] MCP bridge not available: %s', ctx.tid, e)
+    _freeze_empty_mcp_wire(ctx)
     return []
 
 
@@ -568,6 +600,7 @@ def _register_builtins() -> None:
                  provides=frozenset({'read_files'}),
                  idempotent_tools=frozenset({'read_files'}),
                  programmatic_tools=frozenset({'read_files'}),
+                 result_recovery_by_name={'read_files': 'source'},
                  script_safe=True,
                  category='project', description='Read local files',
                  gate='常开（无需项目）'),
@@ -652,6 +685,10 @@ def _register_builtins() -> None:
                  idempotent_tools=frozenset({
                      'browser_list_tabs',
                  }),
+                 # Read-only/idempotent does not mean snapshot-stable. Tabs,
+                 # page DOM, history and cookies may change between identical
+                 # calls, so this live family opts out of same-task reuse.
+                 cacheable_tools=frozenset(),
                  discovery_policy='searchable',
                  category='browser', description='Browser automation tools',
                  gate='安装并连接浏览器扩展（设置 → 网络）',
@@ -699,7 +736,12 @@ def _register_builtins() -> None:
         ToolSpec('image_gen', _build_image_gen, phase='base',
                  provides=frozenset({'generate_image'}),
                  discovery_policy='searchable',
-                 category='image', description='Image generation',
+                 search_hints={
+                     'generate_image': (
+                         'create edit image picture cover poster illustration '
+                         '生成图片 编辑图片 封面图 海报 插画 配图'),
+                 },
+                 category='image', description='Image generation and editing',
                  gate='设置 → 显示 → 图像生成开关',
                  exposure_gate=lambda ctx: ctx.image_gen_enabled,
                  pin_on_exposure=True),
@@ -718,6 +760,12 @@ def _register_builtins() -> None:
                      'motion_video_env_check', 'motion_video_storyboard_check',
                      'motion_video_check', 'motion_video_probe',
                  }),
+                 # These inspect mutable project files or host capabilities.
+                 cacheable_tools=frozenset(),
+                 unchanged_receipt_tools=frozenset({
+                     'motion_video_env_check', 'motion_video_storyboard_check',
+                     'motion_video_check', 'motion_video_probe',
+                 }),
                  discovery_policy='searchable',
                  category='video',
                  description='Motion video (MG animation) generation',
@@ -728,16 +776,20 @@ def _register_builtins() -> None:
                                      'edit_slides'}),
                  discovery_policy='searchable',
                  search_hints={
-                     'produce_video': 'make finished video 制作视频',
+                     'produce_video': (
+                         'make finished video film clip short video '
+                         '制作视频 生成视频 做个视频 科普视频 短视频 宣传片'),
                      'produce_report': 'write complete report 生成报告',
                      'produce_research': 'deep research study 深度研究',
                      'produce_slides': (
-                         'deck presentation powerpoint ppt slides '
-                         '演示文稿 幻灯片'),
+                         'deck presentation powerpoint ppt pptx slides keynote '
+                         '演示文稿 幻灯片 课件 路演 做PPT'),
                      'edit_slides': 'revise presentation deck 编辑幻灯片',
                  },
                  category='video',
-                 description='High-level topic → finished video / report / research',
+                 description=(
+                     'High-level topic → finished video / editable slides / '
+                     'report / research'),
                  gate='搜索开启后可用',
                  exposure_gate=lambda ctx: (
                      ctx.search_mode in ('single', 'multi')
@@ -747,6 +799,12 @@ def _register_builtins() -> None:
         ToolSpec('page_preview', _build_page_preview, phase='base',
                  provides=frozenset({'browser_preview_page'}),
                  discovery_policy='searchable',
+                 search_hints={
+                     'browser_preview_page': (
+                         'render preview test html webpage frontend headless '
+                         'chromium screenshot 真实浏览器 渲染网页 页面预览 '
+                         '看看效果 前端界面'),
+                 },
                  category='browser',
                  description='Server-side rendered page preview',
                  gate='挂载项目后可用'),
@@ -755,6 +813,11 @@ def _register_builtins() -> None:
                  write_tools=frozenset(),
                  idempotent_tools=frozenset({'list_conversations',
                                              'get_conversation'}),
+                 # Sibling turns can advance while this long task is running.
+                 cacheable_tools=frozenset(),
+                 unchanged_receipt_tools=frozenset({
+                     'list_conversations', 'get_conversation',
+                 }),
                  programmatic_tools=frozenset({
                      'list_conversations', 'get_conversation',
                  }),
@@ -764,89 +827,16 @@ def _register_builtins() -> None:
                  # branch was added to close.
                  category='conversation', description='Conversation reference tools',
                  gate='项目模式 或 @ 提及一个会话'),
-        # Project Brain READ surface — the cross-conversation mechanism the
-        # model must KNOW about on every project turn: the per-turn charter /
-        # board injections already name project_charter_read / project_board_read,
-        # and peer_status / feed_read are the live + narrative complements.
-        # Eager (resident) so a plain project turn actually sees the schemas;
-        # ~2.7k chars, all read-only. Registered right after conv_ref so the
-        # conversation family stays adjacent.
-        ToolSpec('project_brain', _build_project_brain, phase='base',
+        # Project Brain contributes zero schemas.  These two tools belong to
+        # the isolated execution pipeline and are bound to the automatic work
+        # ID; they do not read or mutate Board/Feed/Charter state.
+        ToolSpec('project_integration', _build_project_integration, phase='base',
                  provides=frozenset({
-                     'project_charter_read', 'project_board_read',
-                     'project_peer_status', 'project_feed_read',
-                     'integration_status',
-                 }),
-                 write_tools=frozenset(),
-                 idempotent_tools=frozenset({
-                     'project_charter_read', 'project_board_read',
-                     'project_peer_status', 'project_feed_read',
-                     'integration_status',
-                 }),
-                 programmatic_tools=frozenset({
-                     'project_charter_read', 'project_board_read',
-                     'project_peer_status', 'project_feed_read',
-                     'integration_status',
-                 }),
-                 search_hints={
-                     'project_charter_read': (
-                         'read project north star committed decisions '
-                         '查看项目章程 共同决定'),
-                     'project_board_read': (
-                         'read coordination board epics claimed open '
-                         '查看项目看板 任务认领状态'),
-                     'project_peer_status': (
-                         'live sibling conversations status who is working '
-                         '查看项目伙伴实时状态'),
-                     'project_feed_read': (
-                         'cross-conversation activity feed history '
-                         '查看项目动态 跨对话历史'),
-                     'integration_status': (
-                         'isolated writer workspace queue state review '
-                         '查看集成工作区状态 隔离任务'),
-                 },
-                 category='conversation',
-                 description='Project brain read tools (charter/board/peer/feed)',
-                 gate='项目模式'),
-        # Project Brain ADVISORY-WRITE surface — propose/post/claim/complete/
-        # block/message/intervene. No write_tools: each only queues an
-        # advisory item a human/peer can drop. project_charter_commit used to
-        # be reachable here — it was the widest blast radius in the family
-        # (every sibling reads a committed decision as shared intent), and it
-        # is now human-only. Deferred to Tool Search; the read-side schemas
-        # name these tools, and the executable catalog keeps them callable.
-        ToolSpec('project_brain_write', _build_project_brain_write,
-                 phase='base',
-                 provides=frozenset({
-                     'project_charter_propose',
-                     'project_board_post', 'project_board_claim',
-                     'project_board_complete', 'project_board_block',
-                     'project_message', 'project_intervene',
                      'integration_checkpoint', 'integration_submit',
                  }),
                  write_tools=frozenset(),
                  discovery_policy='searchable',
                  search_hints={
-                     'project_board_claim': (
-                         'take ownership assign work item to me volunteer '
-                         '认领任务 我来做 接手'),
-                     'project_board_complete': (
-                         'finish close mark work item done 完成任务'),
-                     'project_board_post': (
-                         'create new epic work item on project board '
-                         '发布项目任务 新建工作项'),
-                     'project_board_block': (
-                         'mark epic waiting on human external gate '
-                         '标记任务阻塞 需要人类'),
-                     'project_charter_propose': (
-                         'propose new project decision for human review '
-                         '提议项目决定'),
-                     'project_message': (
-                         'send direct message to project peer teammate '
-                         '给项目伙伴发消息'),
-                     'project_intervene': (
-                         'ask sibling conversation to stop change course '
-                         '干预项目伙伴 停止'),
                      'integration_checkpoint': (
                          'snapshot isolated worktree progress milestone '
                          '保存隔离工作区检查点'),
@@ -855,7 +845,7 @@ def _register_builtins() -> None:
                          '提交隔离任务人工审查'),
                  },
                  category='conversation',
-                 description='Project brain advisory-write tools',
+                 description='Isolated project integration execution controls',
                  gate='项目模式'),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
@@ -890,20 +880,28 @@ def _register_builtins() -> None:
         # Explicit server-file semantics are append-only so every established
         # hot tool keeps its prompt-cache position. It rides the same runtime
         # availability gate as fetch_url but has its own stable contract/name.
-        ToolSpec('server_download', _build_server_download, phase='base',
-                 provides=frozenset({'download_url_to_server'}),
-                 idempotent_tools=frozenset({'download_url_to_server'}),
+        ToolSpec('browser_download', _build_browser_download, phase='base',
+                 provides=frozenset({'browser_download_url_to_server'}),
+                 cacheable_tools=frozenset(),
                  search_hints={
-                     'download_url_to_server': (
-                         'download save fetch archive zip file to server project '
-                         'logged-in browser cookies intranet SSO '
-                         '下载 保存 服务器 内网 登录 文件 压缩包'
+                     'browser_download_url_to_server': (
+                         'download_url_to_server download save copy export fetch '
+                         'archive zip install unzip latest file to server project '
+                         'logged-in browser link button cookies intranet SSO '
+                         '下载 保存 拷贝 复制 导出 安装 解压 最新版 服务器 本地 '
+                         '内网 登录 文件 压缩包 链接 按钮'
                      ),
                  },
-                 category='search', description='Download a URL to server staging',
-                 gate='抓取开关（默认开）',
+                 discovery_policy='eager',
+                 native_route_groups=frozenset({
+                     'search', 'fetch', 'browser', 'download'}),
+                 category='browser',
+                 description='Download a URL or page link to server staging',
+                 gate='抓取开关（默认开）或连接浏览器扩展',
                  exposure_gate=lambda ctx: (
-                     ctx.fetch_enabled or ctx.search_enabled)),
+                     ctx.fetch_enabled or ctx.search_enabled
+                     or ctx.search_mode in ('single', 'multi')
+                     or ctx.browser_enabled)),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
                  provides=frozenset({
@@ -915,6 +913,9 @@ def _register_builtins() -> None:
                      'delete_memory', 'merge_memories',
                  }),
                  idempotent_tools=frozenset({'search_memories'}),
+                 # Memory CRUD can change the same query inside one task.
+                 cacheable_tools=frozenset(),
+                 unchanged_receipt_tools=frozenset({'search_memories'}),
                  programmatic_tools=frozenset({'search_memories'}),
                  search_hints={
                      'search_memories': (
@@ -960,6 +961,51 @@ def _register_builtins() -> None:
                  provides=frozenset({'todo_write'}),
                  category='task', description='Structured task checklist',
                  gate='常开（有任意基础工具即挂载）'),
+        ToolSpec('local_serve', _build_local_serve, phase='capability',
+                 provides=frozenset({
+                     'local_serve_prepare', 'local_serve_deploy',
+                     'local_serve_status', 'local_serve_list',
+                     'local_serve_stop', 'local_serve_remove',
+                 }),
+                 # deploy spawns a background install+server; remove destroys
+                 # the registration — both ALWAYS need a human click (receipt
+                 # enforced again in the handler). stop kills a running server
+                 # but is trivially reversible (deploy starts it again), so it
+                 # is an ordinary write gated only in Manual mode.
+                 write_tools=frozenset({
+                     'local_serve_deploy', 'local_serve_stop',
+                     'local_serve_remove',
+                 }),
+                 confirmation_tools=frozenset({
+                     'local_serve_deploy', 'local_serve_remove',
+                 }),
+                 idempotent_tools=frozenset({
+                     'local_serve_prepare', 'local_serve_list',
+                 }),
+                 # status reflects a live server; prepare re-probes hardware.
+                 cacheable_tools=frozenset(),
+                 unchanged_receipt_tools=frozenset({'local_serve_list'}),
+                 programmatic_tools=frozenset({'local_serve_list'}),
+                 discovery_policy='searchable',
+                 search_hints={
+                     'local_serve_prepare': (
+                         'inspect local model path hardware plan deploy '
+                         '本地模型 路径 检查 部署方案'),
+                     'local_serve_deploy': (
+                         'install engine start local model server vllm sglang '
+                         'ollama llamacpp 部署 启动 本地模型 安装'),
+                     'local_serve_status': (
+                         'check deployment progress log 部署进度 状态 日志'),
+                     'local_serve_list': 'list local deployments 本地部署 列表',
+                     'local_serve_stop': (
+                         'stop local model server 停止 本地服务'),
+                     'local_serve_remove': (
+                         'remove unregister local deployment 移除 注销 本地部署'),
+                 },
+                 category='local_serve',
+                 description='Managed local model deployment '
+                             '(vLLM/SGLang/Ollama/llama.cpp)',
+                 gate='常开（有任意基础工具即挂载；TOFU_LOCAL_SERVE=0 摘除）'),
         ToolSpec('scheduler', _build_scheduler, phase='capability',
                  provides=frozenset({
                      'schedule_create', 'schedule_list', 'schedule_manage',
@@ -974,6 +1020,9 @@ def _register_builtins() -> None:
                      'timer_create', 'timer_manage',
                  }),
                  idempotent_tools=frozenset({'schedule_list'}),
+                 # Create/manage calls and the scheduler worker mutate this.
+                 cacheable_tools=frozenset(),
+                 unchanged_receipt_tools=frozenset({'schedule_list'}),
                  programmatic_tools=frozenset({'schedule_list'}),
                  discovery_policy='searchable',
                  search_hints={
@@ -998,7 +1047,12 @@ def _register_builtins() -> None:
                 'read_tool_artifact', 'search_tool_artifact'}),
             programmatic_tools=frozenset({
                 'read_tool_artifact', 'search_tool_artifact'}),
-            discovery_policy='searchable',
+            # A V2 envelope can instruct the model to continue only if the
+            # continuation function is already callable on that same wire
+            # turn. Keeping it behind Tool Search created a dead-end pointer:
+            # models repeatedly reissued the source read because the recovery
+            # tool named by the result was absent from their visible surface.
+            discovery_policy='eager',
             script_safe=True,
             catalog_active_only=True,
             search_hints={
@@ -1037,6 +1091,11 @@ def _register_builtins() -> None:
                  # "every state-changing tool is partitioned" rule, recorded
                  # here so it reads as a decision rather than an omission.
                  idempotent_tools=frozenset({'list_artifacts'}),
+                 # Sub-agents can publish artifacts between two list calls.
+                 cacheable_tools=frozenset(),
+                 unchanged_receipt_tools=frozenset({
+                     'get_agent_result', 'list_artifacts',
+                 }),
                  category='swarm', description='Async multi-agent swarm',
                  gate='常开（默认工具，无开关）'),
         ToolSpec('mcp', _build_mcp, phase='capability',

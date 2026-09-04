@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import json
@@ -25,10 +26,28 @@ VITE_ENTRIES = {
 # Compatibility name for callers that only need the primary entry key.
 VITE_ENTRY = VITE_ENTRIES['main']
 I18N_CATALOG_DIGEST_FIELD = 'tofuI18nCatalogSha256'
+VITE_AUTHORING_DIGEST_FIELD = 'tofuAuthoringSha256'
 I18N_LOCALE_PATHS = tuple(
     os.path.join(BASE_DIR, 'frontend', 'src', 'i18n', 'locales', f'{language}.json')
     for language in ('zh', 'en')
 )
+VITE_AUTHORING_CONFIG_PATHS = tuple(
+    os.path.join(BASE_DIR, *relative_path.split('/'))
+    for relative_path in (
+        'package.json',
+        'package-lock.json',
+        'tsconfig.json',
+        'tsconfig.vite.json',
+        'vite.config.mjs',
+        'scripts/build_frontend.mjs',
+        'scripts/compose_frontend_runtime.mjs',
+        'scripts/compose_frontend_styles.mjs',
+        'scripts/gen_i18n_contract.mjs',
+    )
+)
+VITE_AUTHORING_SUFFIXES = frozenset({
+    '.css', '.html', '.js', '.json', '.ts', '.ttf', '.woff', '.woff2',
+})
 _CACHE_TTL_SECONDS = 5.0
 _cache_lock = threading.Lock()
 _cache: dict[tuple[object, ...], tuple[float, str]] = {}
@@ -142,11 +161,56 @@ def _validate_i18n_catalog_digest(
             'Vite i18n chunks are stale; run npm run build:frontend')
 
 
+def _source_vite_authoring_digest() -> str:
+    """Hash every Vite build input with stable repository-relative framing."""
+    digest = hashlib.sha256()
+    digest.update(b'tofu-vite-authoring-v1\0')
+    inputs = sorted(
+        vite_authoring_inputs(),
+        key=lambda path: os.path.relpath(path, BASE_DIR).replace(os.sep, '/'),
+    )
+    for path in inputs:
+        relative_path = os.path.relpath(path, BASE_DIR).replace(os.sep, '/')
+        digest.update(relative_path.encode('utf-8'))
+        digest.update(b'\0')
+        with open(path, 'rb') as handle:
+            while True:
+                chunk = handle.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
+def _validate_vite_authoring_digest(
+        manifest: dict, *, validate_authoring_sources: bool) -> None:
+    main = manifest.get(VITE_ENTRY)
+    value = main.get(VITE_AUTHORING_DIGEST_FIELD) \
+        if isinstance(main, dict) else None
+    if (not isinstance(value, str) or len(value) != 64
+            or any(character not in '0123456789abcdef' for character in value)):
+        raise ValueError('Vite manifest has no valid authoring-input digest')
+    if not validate_authoring_sources:
+        return
+    source_root = os.path.join(BASE_DIR, 'frontend', 'src')
+    if not os.path.isdir(source_root):
+        # Minimal release images may contain only the committed artifact. Its
+        # digest remains mandatory, while absence of all authoring sources is
+        # not interpreted as drift.
+        return
+    if value != _source_vite_authoring_digest():
+        raise ValueError(
+            'Vite authoring inputs are stale; run npm run build:frontend')
+
+
 def _load_manifest(
         entries: tuple[str, ...], *, validate_authoring_sources: bool) -> dict:
     with open(VITE_MANIFEST, encoding='utf-8') as handle:
         manifest = _validate_manifest(json.load(handle), entries)
     _validate_i18n_catalog_digest(
+        manifest, validate_authoring_sources=validate_authoring_sources)
+    _validate_vite_authoring_digest(
         manifest, validate_authoring_sources=validate_authoring_sources)
     return manifest
 
@@ -159,18 +223,58 @@ def _validate_vite_artifact(
     if unknown:
         raise ViteAssetError(f'unknown Vite entries: {sorted(unknown)!r}')
     try:
-        return _load_manifest(
+        manifest = _load_manifest(
             selected,
             validate_authoring_sources=validate_authoring_sources,
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise ViteAssetError(f'required Vite artifact is invalid: {exc}') from exc
+    _publish_vite_build_ids(manifest)
+    return manifest
 
 
 def validate_vite_artifact(entries: tuple[str, ...] | None = None) -> dict:
     """Validate a deployment graph, including checked-out locale freshness."""
     return _validate_vite_artifact(
         entries, validate_authoring_sources=True)
+
+
+def vite_authoring_inputs() -> tuple[str, ...]:
+    """Return the deterministic source/config inputs to the Vite publication."""
+    inputs = [
+        path for path in VITE_AUTHORING_CONFIG_PATHS
+        if os.path.isfile(path)
+    ]
+    source_root = os.path.join(BASE_DIR, 'frontend', 'src')
+
+    def _raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, child_directories, filenames in os.walk(
+            source_root, topdown=True, onerror=_raise_walk_error,
+            followlinks=False):
+        child_directories.sort()
+        for filename in sorted(filenames):
+            if os.path.splitext(filename)[1].lower() \
+                    not in VITE_AUTHORING_SUFFIXES:
+                continue
+            path = os.path.join(directory, filename)
+            if os.path.isfile(path):
+                inputs.append(path)
+    return tuple(inputs)
+
+
+def validate_source_vite_artifact(
+        entries: tuple[str, ...] | None = None) -> dict:
+    """Validate a source checkout's graph and authoring-content digest.
+
+    Runtime requests deliberately consume the last atomically published graph.
+    Lifecycle preflight is the separate boundary that may invoke Node, so it
+    must reject an otherwise valid graph when any build input differs from the
+    published generation and rebuild before the old worker is stopped. Content
+    hashing remains correct when checkout/archive mtimes are rewritten.
+    """
+    return validate_vite_artifact(entries)
 
 
 def validate_published_vite_artifact(
@@ -258,7 +362,12 @@ def _manifest_tags(manifest: dict, entry_name: str = 'main') -> str:
             if asset not in styles:
                 styles.append(asset)
         for bundled in row.get('assets') or ():
-            asset = _require_asset(bundled, tuple(_FONT_MIME_TYPES))
+            # Every attached URL asset is part of the validated publication,
+            # but only the small allowlist of first-paint fonts earns an HTML
+            # preload. Data assets such as locale JSON remain fetch-on-demand.
+            asset = _require_asset(bundled)
+            if posixpath.splitext(asset)[1].lower() not in _FONT_MIME_TYPES:
+                continue
             if _font_preload_basename(asset) not in _FONT_PRELOAD_BASENAMES:
                 continue
             if asset not in fonts:
@@ -320,11 +429,38 @@ def get_vite_asset_tags(entry: str = 'main') -> str:
 def clear_vite_asset_cache() -> None:
     with _cache_lock:
         _cache.clear()
+    with _build_id_state_lock:
+        _build_ids.clear()
+        global _build_id_manifest_key
+        _build_id_manifest_key = None
 
 
-# Stat-keyed cache for get_vite_build_id — same TTL discipline as the tags
-# cache above (a rebuild swaps the manifest mtime, which mints a fresh key).
-_build_id_cache: dict[tuple[object, ...], tuple[float, str]] = {}
+# Runtime request handlers read only this bounded snapshot. Full graph
+# validation publishes it during the required frontend startup phase. A
+# low-rate background refresh may replace it after an atomic manifest swap,
+# but no HTTP/WebSocket event-loop path performs filesystem I/O.
+_build_id_state_lock = threading.Lock()
+_build_id_refresh_io_lock = threading.Lock()
+_build_ids: dict[str, str] = {}
+_build_id_manifest_key: tuple[int, int] | None = None
+_build_id_refresh_pending = False
+
+
+def _publish_vite_build_ids(
+        manifest: dict, *, manifest_key: tuple[int, int] | None = None) -> None:
+    published: dict[str, str] = {}
+    for entry_name, manifest_entry in VITE_ENTRIES.items():
+        row = manifest.get(manifest_entry)
+        if not isinstance(row, dict):
+            continue
+        build_id = posixpath.basename(str(row.get('file') or ''))
+        if build_id:
+            published[entry_name] = build_id
+    with _build_id_state_lock:
+        _build_ids.clear()
+        _build_ids.update(published)
+        global _build_id_manifest_key
+        _build_id_manifest_key = manifest_key
 
 
 def get_vite_build_id(entry: str = 'main') -> str:
@@ -332,39 +468,82 @@ def get_vite_build_id(entry: str = 'main') -> str:
 
     The browser compares this against the bundle IT was loaded with: a long-
     lived tab keeps running yesterday's JS until something tells it the disk
-    moved on, and ``/api/health`` is that channel. Returns '' in dev-server
-    mode or on any manifest problem — the client then simply never reloads
-    (fail-quiet: a missing build id must never cause a reload loop)."""
+    moved on. Explicit health diagnostics and push pongs consume the startup-
+    validated in-memory snapshot, so liveness never depends on FUSE/network
+    filesystem latency. Returns '' in dev-server mode or before validation —
+    the client then simply never reloads (fail-quiet: a missing build id must
+    never cause a reload loop)."""
     if entry not in VITE_ENTRIES or _dev_server():
         return ''
-    try:
-        stat = os.stat(VITE_MANIFEST)
-    except OSError:
+    with _build_id_state_lock:
+        return _build_ids.get(entry, '')
+
+
+def refresh_vite_build_ids() -> str:
+    """Refresh the validated snapshot from disk outside the serving loop.
+
+    The I/O lock is deliberately held across ``stat`` and validation. A wedged
+    network mount therefore consumes at most one executor worker instead of
+    creating a cache-stampede of health/build probes. The last valid snapshot
+    remains authoritative on every failure.
+    """
+    if _dev_server():
         return ''
-    key = (stat.st_mtime_ns, stat.st_size)
-    now = time.monotonic()
-    cached = _build_id_cache.get(key)
-    if cached and now - cached[0] < _CACHE_TTL_SECONDS:
-        return cached[1]
-    build_id = ''
+    with _build_id_refresh_io_lock:
+        try:
+            stat = os.stat(VITE_MANIFEST)
+            key = (stat.st_mtime_ns, stat.st_size)
+            with _build_id_state_lock:
+                if key == _build_id_manifest_key and _build_ids:
+                    return _build_ids.get('main', '')
+            manifest = _load_manifest(
+                tuple(VITE_ENTRIES), validate_authoring_sources=False)
+            _publish_vite_build_ids(manifest, manifest_key=key)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError,
+                KeyError) as exc:
+            logger.debug('[Vite] background build-id refresh unavailable: %s', exc)
+        return get_vite_build_id('main')
+
+
+def request_vite_build_id_refresh() -> bool:
+    """Submit at most one background manifest refresh to the loop executor."""
     try:
-        manifest = _load_manifest(
-            (entry,), validate_authoring_sources=False)
-        build_id = posixpath.basename(
-            str(manifest[VITE_ENTRIES[entry]].get('file') or ''))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError,
-            KeyError) as exc:
-        logger.debug('[Vite] build id unavailable: %s', exc)
-        build_id = ''
-    _build_id_cache.clear()
-    _build_id_cache[key] = (now, build_id)
-    return build_id
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    with _build_id_state_lock:
+        global _build_id_refresh_pending
+        if _build_id_refresh_pending:
+            return False
+        _build_id_refresh_pending = True
+    try:
+        future = loop.run_in_executor(None, refresh_vite_build_ids)
+    except Exception:
+        with _build_id_state_lock:
+            _build_id_refresh_pending = False
+        return False
+
+    def _settled(completed) -> None:
+        with _build_id_state_lock:
+            global _build_id_refresh_pending
+            _build_id_refresh_pending = False
+        try:
+            completed.result()
+        except Exception as exc:  # defensive: refresh itself is fail-quiet
+            logger.debug('[Vite] build-id refresh executor failed: %s', exc)
+
+    future.add_done_callback(_settled)
+    return True
 
 
 __all__ = [
     'I18N_CATALOG_DIGEST_FIELD', 'I18N_LOCALE_PATHS',
+    'VITE_AUTHORING_DIGEST_FIELD',
+    'VITE_AUTHORING_CONFIG_PATHS', 'VITE_AUTHORING_SUFFIXES',
     'VITE_ENTRIES', 'VITE_ENTRY', 'VITE_MANIFEST', 'VITE_OUT_DIR',
     'ViteAssetError', 'clear_vite_asset_cache', 'get_vite_asset_tags',
-    'get_vite_build_id', 'validate_published_vite_artifact',
-    'validate_vite_artifact',
+    'get_vite_build_id', 'refresh_vite_build_ids',
+    'request_vite_build_id_refresh', 'validate_published_vite_artifact',
+    'validate_source_vite_artifact', 'validate_vite_artifact',
+    'vite_authoring_inputs',
 ]

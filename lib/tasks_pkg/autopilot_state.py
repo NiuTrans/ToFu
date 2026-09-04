@@ -27,6 +27,7 @@ side effects are limited to ``conversations.settings`` writes via
   * :func:`_extract_objective_from_db` — DB read via
     ``conv_message_builder._load_messages_from_db``.
   * :func:`_get_or_persist_objective` — settings read-through mint.
+  * :func:`_update_objective_from_receipt` — re-pin from an L2 receipt.
   * :func:`_get_or_persist_run_id` — settings read-through mint.
   * :func:`_record_vu_turn_and_check_budget` — budget-guard RMW.
   * :func:`_clear_run_id` — run-end cleanup.
@@ -64,6 +65,12 @@ _VU_HISTORY_CAP = 6
 
 
 _PROGRESS_LEDGER_CAP = 8
+
+
+# Run stamps and their boundary follow-ups are normally near the transcript
+# tail. The repository preserves exact fallback when an older run lies outside
+# this bounded first read.
+_AUTOPILOT_RESOLVER_MESSAGE_WINDOW = 128
 
 
 # ── Objective extraction ────────────────────────────────────────────
@@ -132,12 +139,16 @@ def _get_or_persist_objective(
     *,
     user_id: int,
 ) -> str:
-    """Resolve the immutable autopilot objective for a conversation.
+    """Resolve the pinned autopilot objective for a conversation.
 
     The objective is the north star the virtual user measures the assistant
     against.  It is captured ONCE (the first real user message) and pinned to
     ``settings.autopilotObjective`` so every follow-up task's VU sees the SAME
     anchor even after compaction has trimmed the early conversation history.
+    The pin is NOT frozen: :func:`_update_objective_from_receipt` re-pins it
+    when an L2 compaction receipt records a newer binding human goal, so the
+    VU tracks goal replacement instead of measuring against a stale opening
+    ask.
 
     Read-through cache: returns the persisted value if present; otherwise
     derives it from ``messages``, persists it, and returns it.  All failures
@@ -186,6 +197,57 @@ def _get_or_persist_objective(
         logger.warning('[Autopilot] objective resolve failed conv=%s: %s — '
                        'deriving from live messages', conv_id[:8], e)
         return _extract_objective(messages)
+
+
+def _update_objective_from_receipt(
+    conv_id: str,
+    objective: str,
+    *,
+    user_id: int,
+) -> bool:
+    """Re-pin ``settings.autopilotObjective`` from an L2 compaction receipt.
+
+    The receipt's ``### Objective`` is model-authored from the full verbatim
+    user-message evidence, so it reflects the CURRENT effective goal —
+    including a human explicitly replacing their opening ask. When it differs
+    from the pin, overwrite the pin so the virtual user measures the
+    assistant against the latest binding human goal rather than a stale
+    opening request.
+
+    No-ops (returns False): empty conv_id/objective, NO existing pin (never
+    mint one here — pinning is :func:`_get_or_persist_objective`'s job, so
+    non-autopilot conversations stay untouched), an identical pin, or a
+    missing conversation row. All failures are non-fatal — compaction must
+    never fail because run bookkeeping couldn't update.
+    """
+    objective = (objective or '').strip()
+    if not conv_id or not objective:
+        return False
+    try:
+        from lib.conversations import update_conversation_settings
+        out = {'updated': False}
+
+        def _mut(settings):
+            existing = (settings.get('autopilotObjective') or '').strip()
+            if not existing or existing == objective:
+                return False  # no pin to refresh / already current — skip write
+            settings['autopilotObjective'] = objective
+            out['updated'] = True
+            logger.info('[Autopilot] conv=%s objective re-pinned from L2 '
+                        'receipt (%d → %d chars)',
+                        conv_id[:8], len(existing), len(objective))
+            return None
+
+        # notify=False: same internal-bookkeeping convention as the mint path.
+        res = update_conversation_settings(
+            conv_id, _mut, user_id=user_id, notify=False)
+        if res is None:
+            return False
+        return out['updated']
+    except Exception as e:
+        logger.warning('[Autopilot] objective re-pin failed conv=%s: %s',
+                       conv_id[:8], e)
+        return False
 
 
 def _get_or_persist_run_id(conv_id: str, *, user_id: int) -> str:
@@ -406,6 +468,80 @@ def _clear_run_id(conv_id: str, *, user_id: int) -> None:
 # ── Run resolvers (DB reads) ────────────────────────────────────────
 
 
+def _snapshot_pinned_run_id(snapshot) -> str:
+    """Return a validated settings pin from one conversation snapshot."""
+    raw_settings = snapshot.get('settings')
+    try:
+        settings = (
+            dict(raw_settings)
+            if isinstance(raw_settings, dict)
+            else json.loads(raw_settings or '{}')
+        ) if raw_settings else {}
+    except (json.JSONDecodeError, TypeError) as error:
+        logger.debug(
+            '[Autopilot] settings JSON parse failed, using fallback: %s',
+            error,
+        )
+        settings = {}
+    return str(settings.get('autopilotRunId') or '').strip()
+
+
+def _latest_stamped_run_id(messages: list) -> str:
+    """Return the newest non-empty autopilot run stamp in ``messages``."""
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        run_id = str(message.get('_autopilotRunId') or '').strip()
+        if run_id:
+            return run_id
+    return ''
+
+
+def _snapshot_has_unloaded_prefix(snapshot) -> bool:
+    """Whether a bounded snapshot proves that older messages were omitted."""
+    messages = snapshot.messages
+    raw_count = snapshot.get('msg_count')
+    if (
+        isinstance(raw_count, int)
+        and not isinstance(raw_count, bool)
+        and raw_count >= 0
+    ):
+        return raw_count > len(messages)
+    # Compatibility fakes/older authorities may omit msg_count. A completely
+    # filled window is ambiguous and therefore takes the correctness fallback.
+    return len(messages) >= _AUTOPILOT_RESOLVER_MESSAGE_WINDOW
+
+
+def _anchor_from_messages(messages: list, run_id: str) -> tuple[bool, str]:
+    """Return ``(stamp_found, boundary_turn_id)`` for one message projection."""
+    stamped_idx = -1
+    for index, message in enumerate(messages):
+        if (
+            isinstance(message, dict)
+            and str(message.get('_autopilotRunId') or '').strip() == run_id
+        ):
+            stamped_idx = index
+    if stamped_idx < 0:
+        return False, ''
+    boundary = stamped_idx
+    for index in range(stamped_idx + 1, len(messages)):
+        message = messages[index]
+        if not isinstance(message, dict):
+            break
+        if str(message.get('_autopilotRunId') or '').strip():
+            break
+        if message.get('role') == 'user' and not message.get('_isVirtualUser'):
+            break
+        boundary = index
+    anchor = messages[boundary]
+    turn_id = (
+        str(anchor.get('_turnId') or '').strip()
+        if isinstance(anchor, dict)
+        else ''
+    )
+    return True, turn_id
+
+
 def _resolve_recent_run_id(conv_id: str, *, user_id: int) -> str:
     """Return the most recent VU turn's ``_autopilotRunId`` for a conversation.
 
@@ -418,23 +554,36 @@ def _resolve_recent_run_id(conv_id: str, *, user_id: int) -> str:
         return ''
     try:
         from lib.conversations.repository import get_conversation
+        metadata = get_conversation(
+            conv_id, user_id=user_id, include_messages=False)
+        if metadata is None:
+            return ''
+        pinned = _snapshot_pinned_run_id(metadata)
+        if pinned:
+            return pinned
+
+        tail = get_conversation(
+            conv_id,
+            user_id=user_id,
+            message_window=_AUTOPILOT_RESOLVER_MESSAGE_WINDOW,
+        )
+        if tail is None:
+            return ''
+        # A run can be pinned between the metadata and tail reads.
+        pinned = _snapshot_pinned_run_id(tail)
+        if pinned:
+            return pinned
+        run_id = _latest_stamped_run_id(tail.messages)
+        if run_id or not _snapshot_has_unloaded_prefix(tail):
+            return run_id
+
         snapshot = get_conversation(conv_id, user_id=user_id)
         if snapshot is None:
             return ''
-        msgs = snapshot.messages
-        raw_settings = snapshot.get('settings')
-        try:
-            settings = (dict(raw_settings) if isinstance(raw_settings, dict)
-                        else json.loads(raw_settings or '{}')) if raw_settings else {}
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Autopilot] settings JSON parse failed, using fallback: %s', e)
-            settings = {}
-        pinned = (settings.get('autopilotRunId') or '').strip()
-        if pinned:
-            return pinned
-        for m in reversed(msgs):
-            if isinstance(m, dict) and (m.get('_autopilotRunId') or '').strip():
-                return m['_autopilotRunId'].strip()
+        return (
+            _snapshot_pinned_run_id(snapshot)
+            or _latest_stamped_run_id(snapshot.messages)
+        )
     except Exception as e:
         logger.debug('[Autopilot] _resolve_recent_run_id failed conv=%s: %s',
                      conv_id[:8], e)
@@ -465,32 +614,23 @@ def _resolve_run_anchor_turn_id(
         return ''
     try:
         from lib.conversations.repository import get_conversation
-        snapshot = get_conversation(conv_id, user_id=user_id)
-        msgs = snapshot.messages if snapshot is not None else []
-        if not msgs:
+        snapshot = get_conversation(
+            conv_id,
+            user_id=user_id,
+            message_window=_AUTOPILOT_RESOLVER_MESSAGE_WINDOW,
+        )
+        if snapshot is None:
             return ''
-        # Last turn STAMPED with this run id (only the VU turn carries it).
-        stamped_idx = -1
-        for i, m in enumerate(msgs):
-            if isinstance(m, dict) and (m.get('_autopilotRunId') or '').strip() == run_id:
-                stamped_idx = i
-        if stamped_idx < 0:
+        found, anchor = _anchor_from_messages(snapshot.messages, run_id)
+        if found or not _snapshot_has_unloaded_prefix(snapshot):
+            return anchor
+
+        full_snapshot = get_conversation(conv_id, user_id=user_id)
+        if full_snapshot is None:
             return ''
-        # Extend past the VU turn over the unstamped agent follow-up(s) it
-        # prompted: stop at the next run-stamped turn (a new VU turn), a real
-        # (non-VU) human turn, or end-of-list.
-        boundary = stamped_idx
-        for j in range(stamped_idx + 1, len(msgs)):
-            m = msgs[j]
-            if not isinstance(m, dict):
-                break
-            if (m.get('_autopilotRunId') or '').strip():
-                break
-            if m.get('role') == 'user' and not m.get('_isVirtualUser'):
-                break
-            boundary = j
-        anchor = msgs[boundary]
-        return (anchor.get('_turnId') or '').strip() if isinstance(anchor, dict) else ''
+        _found, anchor = _anchor_from_messages(
+            full_snapshot.messages, run_id)
+        return anchor
     except Exception as e:
         logger.debug('[Autopilot] _resolve_run_anchor_turn_id failed conv=%s run=%s: %s',
                      conv_id[:8], run_id, e)
@@ -503,6 +643,7 @@ __all__ = [
     '_extract_objective',
     '_extract_objective_from_db',
     '_get_or_persist_objective',
+    '_update_objective_from_receipt',
     '_get_or_persist_run_id',
     '_record_vu_turn_and_check_budget',
     '_clear_run_id',

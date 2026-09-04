@@ -147,7 +147,9 @@ def _finalize_tool_round(
     #   surface (paper / swarm / timer); we then fall back to `tEnd` rather than
     #   inventing a start, so a duration is either honest or zero — never
     #   fabricated.
-    _t_end = now_ms()
+    _t_end = (round_entry or {}).get('tEnd') or now_ms()
+    # A late finalize must not clobber the real completion time already
+    # stamped by ``_settle_tool_result`` (which preserves an existing tEnd).
     round_entry['tEnd'] = _t_end
     _t_start = round_entry.get('tStart')
     if _t_start is None:

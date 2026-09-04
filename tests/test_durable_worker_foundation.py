@@ -79,7 +79,10 @@ def test_conversation_attempt_dispatch_atomically_binds_one_durable_job(
     task_id = f'conversation-attempt:{attempt_id}'
     assert dispatched['created'] is True
     assert dispatched['attempt']['taskId'] == task_id
-    assert dispatched['attempt']['status'] == 'running'
+    # Dispatch BINDS (task_id + queued job) but leaves the attempt pending;
+    # the physical pending→running transition is a separate worker-entry
+    # operation (mark_task_started → turn.attempt.start).
+    assert dispatched['attempt']['status'] == 'pending'
     assert dispatched['job']['taskId'] == task_id
     assert dispatched['job']['status'] == 'queued'
     assert dispatched['job']['payload'] == {
@@ -99,7 +102,7 @@ def test_conversation_attempt_dispatch_atomically_binds_one_durable_job(
     assert len(dispatch_changes) == 1
     assert dispatch_changes[0]['type'] == 'attempt.event'
     assert dispatch_changes[0]['payload']['event']['payload']['status'] == (
-        'running')
+        'pending')
 
     durable_attempt = get_attempt(attempt_id, user_id=71)
     durable_job = client.query('worker_job.get', {

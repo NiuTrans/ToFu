@@ -74,6 +74,7 @@ def execute_runtime_flow(
     task_id: str,
     definition: dict,
     *,
+    owner_user_id: int,
     initial_context: str = '',
     abort_check: Callable[[], bool] | None = None,
     subflow_resolver: Callable[[str], dict | None] | None = None,
@@ -94,7 +95,10 @@ def execute_runtime_flow(
         lambda event: runtime.append_event(task_id, event),
         durable_project=projection.project_event if projection else None,
     )
-    executor_options = {'human_gate_scope': task_id}
+    executor_options = {
+        'human_gate_scope': task_id,
+        'human_gate_owner_user_id': owner_user_id,
+    }
     if subflow_resolver is not None:
         executor_options['subflow_resolver'] = subflow_resolver
     outcome = execute_flow(
@@ -163,6 +167,7 @@ def spawn_runtime_flow(
             runtime,
             runtime_task_id,
             definition,
+            owner_user_id=owner_user_id,
             initial_context=initial_context,
             abort_check=task['abort_event'].is_set,
             subflow_resolver=subflow_resolver,

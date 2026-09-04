@@ -29,10 +29,48 @@ jobs:
         run: uv run --frozen --extra dev make docs-check
       - name: Verify architecture boundaries and debt ratchets
         run: uv run --frozen --extra dev make architecture-check
+      - name: Verify monorepo package and dependency boundaries
+        run: uv run --frozen --extra dev make monorepo-check
       - name: Verify test-suite health ratchet
         run: uv run --frozen --extra dev make suite-health
       - name: Run repository health diagnostics
         run: uv run --frozen --extra dev make healthcheck
+
+  tofu-search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Sync standalone search member
+        run: uv lock --check && uv sync --frozen --package tofu-search --extra dev --extra mcp
+      - name: Lint search member
+        run: uv run --frozen --package tofu-search ruff check --isolated --select F packages/tofu-search/tofu_search
+      - name: Test search member
+        run: uv run --frozen --package tofu-search pytest -c packages/tofu-search/pyproject.toml packages/tofu-search/tests
+
+  tofu-trading:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Sync trading plugin and host contract
+        run: uv lock --check && uv sync --frozen --package tofu-trading --extra dev
+      - name: Lint trading member
+        run: uv run --frozen --package tofu-trading ruff check --isolated --select F plugins/tofu-trading/tofu_trading
+      - name: Test trading member
+        run: uv run --frozen --package tofu-trading pytest -c plugins/tofu-trading/pyproject.toml plugins/tofu-trading/tests
 
   # ── Unit tier (the bulk of the suite) — parallelised across workers ──
   # Split out from api/slow so the fast, DB-free bulk runs on its own and

@@ -10,8 +10,19 @@ OPERATIONS = {
         'query', False, ops._research_artifacts_get),
     'research.directions.list': ops.OperationSpec(
         'query', False, ops._research_directions_list),
+
+    'research.workspace.get': ops.OperationSpec(
+        'query', False, ops._research_workspace_get),
+    'research.workspace.put': ops.OperationSpec(
+        'command', True, ops._research_workspace_put),
     'paper.report.upsert': ops.OperationSpec('command', True, ops._paper_report_upsert),
     'paper.report.get': ops.OperationSpec('query', False, ops._paper_report_get),
+    'paper.report.resolve': ops.OperationSpec(
+        'query', False, ops._paper_report_resolve),
+    'paper.report.reopen': ops.OperationSpec(
+        'query', False, ops._paper_report_reopen),
+    'paper.report.excerpts': ops.OperationSpec(
+        'query', False, ops._paper_report_excerpts),
     'paper.report.latest': ops.OperationSpec(
         'query', False, ops._paper_report_latest),
     'paper.report.second_pass.merge': ops.OperationSpec(
@@ -29,6 +40,14 @@ OPERATIONS = {
         'query', False, ops._paper_library_recent),
     'paper.library.list': ops.OperationSpec(
         'query', False, ops._paper_library_list),
+    'paper.library.summaries': ops.OperationSpec(
+        'query', False, ops._paper_library_summaries),
+    'paper.library.get': ops.OperationSpec(
+        'query', False, ops._paper_library_get),
+    'paper.library.reader': ops.OperationSpec(
+        'query', False, ops._paper_library_reader),
+    'paper.library.inputs': ops.OperationSpec(
+        'query', False, ops._paper_library_inputs),
     'paper.library.identity': ops.OperationSpec(
         'query', False, ops._paper_library_identity),
     'paper.library.title.backfill': ops.OperationSpec(

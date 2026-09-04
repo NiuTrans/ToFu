@@ -149,37 +149,61 @@ def _model_mode(mode, schedule):
     system head (only block 0 warm — the live 74k floor). ``cold_tail`` = the
     tail marker itself did not read back this round.
     """
-    os.environ['TOFU_CACHE_MID_MODE'] = mode
-    os.environ.setdefault('CACHE_EXTENDED_TTL', '1')
+    # Import BEFORE mutating anything so a first-time import of ``lib`` reflects
+    # the ambient (not yet polluted) environment — the values this helper must
+    # restore. The cache module reads both env vars per call, so this reordering
+    # does not change what the replay measures; it only lets us capture the
+    # pristine state to hand back.
     import lib as _lib
-    _lib.CACHE_EXTENDED_TTL = True
     import lib.llm.cache as C
-    importlib.reload(C)
-    _lib.CACHE_EXTENDED_TTL = True
 
-    head_collapses = 0
-    cold_tail_rounds = 0
-    armed_rounds = 0
-    prev_sent = None                 # ALL marker positions SENT last round
-    for body in _sequence(schedule):
-        C.add_cache_breakpoints(body)
-        pos, _total = _marker_block_positions(body)
-        # warm THIS round = reachable from LAST round's SENT markers (all cached)
-        _warm, warm_end = _warm_frontier(pos, prev_sent)
-        tail_block = pos[-1] if pos else 0
-        body_markers = [p for p in pos if p > 0]
-        if tail_block > 0:
-            armed_rounds += 1
-            if tail_block not in _warm:
-                cold_tail_rounds += 1
-            if warm_end == 0 and len(body_markers) >= 1:
-                head_collapses += 1
-        # Next round can read back from ANY marker we sent this round (they were
-        # all written to the cache), plus the always-warm system base.
-        prev_sent = set(pos) | {0}
-    return {'head_collapses': head_collapses,
-            'cold_tail_rounds': cold_tail_rounds,
-            'armed_rounds': armed_rounds}
+    saved_mid = os.environ.get('TOFU_CACHE_MID_MODE')
+    saved_ttl_env = os.environ.get('CACHE_EXTENDED_TTL')
+    saved_ttl = _lib.CACHE_EXTENDED_TTL
+
+    try:
+        os.environ['TOFU_CACHE_MID_MODE'] = mode
+        os.environ.setdefault('CACHE_EXTENDED_TTL', '1')
+        _lib.CACHE_EXTENDED_TTL = True
+        importlib.reload(C)
+        _lib.CACHE_EXTENDED_TTL = True
+
+        head_collapses = 0
+        cold_tail_rounds = 0
+        armed_rounds = 0
+        prev_sent = None                 # ALL marker positions SENT last round
+        for body in _sequence(schedule):
+            C.add_cache_breakpoints(body)
+            pos, _total = _marker_block_positions(body)
+            # warm THIS round = reachable from LAST round's SENT markers (all cached)
+            _warm, warm_end = _warm_frontier(pos, prev_sent)
+            tail_block = pos[-1] if pos else 0
+            body_markers = [p for p in pos if p > 0]
+            if tail_block > 0:
+                armed_rounds += 1
+                if tail_block not in _warm:
+                    cold_tail_rounds += 1
+                if warm_end == 0 and len(body_markers) >= 1:
+                    head_collapses += 1
+            # Next round can read back from ANY marker we sent this round (they
+            # were all written to the cache), plus the always-warm system base.
+            prev_sent = set(pos) | {0}
+        return {'head_collapses': head_collapses,
+                'cold_tail_rounds': cold_tail_rounds,
+                'armed_rounds': armed_rounds}
+    finally:
+        # Restore the env vars + lib global, then re-reload the cache module so
+        # any later test in the same worker sees the pristine pre-replay state.
+        if saved_mid is None:
+            os.environ.pop('TOFU_CACHE_MID_MODE', None)
+        else:
+            os.environ['TOFU_CACHE_MID_MODE'] = saved_mid
+        if saved_ttl_env is None:
+            os.environ.pop('CACHE_EXTENDED_TTL', None)
+        else:
+            os.environ['CACHE_EXTENDED_TTL'] = saved_ttl_env
+        _lib.CACHE_EXTENDED_TTL = saved_ttl
+        importlib.reload(C)
 
 
 # A realistic schedule: 30 normal rounds, three parallel batches (12,12,8) in

@@ -1,0 +1,290 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/model_routing_v2.schema.json",
+  "title": "Tofu model routing v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "revision",
+    "creators",
+    "models",
+    "providers",
+    "provider_accesses",
+    "connections",
+    "credentials",
+    "offerings",
+    "deployments"
+  ],
+  "properties": {
+    "contract_version": {"const": "tofu.model-routing/v2"},
+    "revision": {"type": "integer", "minimum": 0},
+    "creators": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {"$ref": "#/$defs/creator"}
+    },
+    "models": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {"$ref": "#/$defs/model"}
+    },
+    "providers": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/provider"}
+    },
+    "provider_accesses": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/providerAccess"}
+    },
+    "connections": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {"$ref": "#/$defs/connection"}
+    },
+    "credentials": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {"$ref": "#/$defs/credentialMetadata"}
+    },
+    "offerings": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {"$ref": "#/$defs/offering"}
+    },
+    "deployments": {
+      "type": "array",
+      "maxItems": 8192,
+      "items": {"$ref": "#/$defs/deployment"}
+    },
+    "migration": {"$ref": "#/$defs/migrationMetadata"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f]+$"
+    },
+    "identifierList": {
+      "type": "array",
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output", "currency", "unit"],
+      "properties": {
+        "input": {"type": "number", "minimum": 0},
+        "output": {"type": "number", "minimum": 0},
+        "currency": {"enum": ["USD", "CNY"]},
+        "unit": {"const": "per_million_tokens"},
+        "cache_read": {"type": "number", "minimum": 0},
+        "cache_write": {"type": "number", "minimum": 0}
+      }
+    },
+    "creator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["creator_id", "name"],
+      "properties": {
+        "creator_id": {"$ref": "#/$defs/identifier"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "website": {"type": "string", "maxLength": 1024}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "creator_id", "model_id", "display_name", "capabilities",
+        "context_window", "quality_rank"
+      ],
+      "properties": {
+        "creator_id": {"$ref": "#/$defs/identifier"},
+        "model_id": {"$ref": "#/$defs/identifier"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "context_window": {"type": "integer", "minimum": 1},
+        "quality_rank": {"type": "number"},
+        "list_pricing": {"$ref": "#/$defs/pricing"},
+        "lifecycle": {"enum": ["stable", "preview", "dated_snapshot", "retired"]}
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "name", "scope"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "scope": {"enum": ["public", "owner"]},
+        "brand": {"type": "string", "maxLength": 128},
+        "website": {"type": "string", "maxLength": 1024}
+      }
+    },
+    "quotaPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rpm": {"type": "integer", "minimum": 0},
+        "tpm": {"type": "integer", "minimum": 0},
+        "daily_tokens": {"type": "integer", "minimum": 0},
+        "balance": {"type": "number", "minimum": 0},
+        "currency": {"enum": ["USD", "CNY"]}
+      }
+    },
+    "providerAccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_access_id", "provider_id", "enabled", "quota_policy"],
+      "properties": {
+        "provider_access_id": {"$ref": "#/$defs/identifier"},
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "enabled": {"type": "boolean"},
+        "quota_policy": {"$ref": "#/$defs/quotaPolicy"},
+        "display_name": {"type": "string", "maxLength": 256}
+      }
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "connection_id", "provider_access_id", "base_url", "protocol",
+        "enabled", "priority", "extra_headers"
+      ],
+      "properties": {
+        "connection_id": {"$ref": "#/$defs/identifier"},
+        "provider_access_id": {"$ref": "#/$defs/identifier"},
+        "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "protocol": {"enum": ["openai", "openai_responses", "anthropic", "local", "custom"]},
+        "enabled": {"type": "boolean"},
+        "priority": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "region": {"type": "string", "maxLength": 128},
+        "gateway_namespace": {"type": "string", "maxLength": 256},
+        "adapter": {"$ref": "#/$defs/desktopAdapter"},
+        "extra_headers": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": {"type": "string", "maxLength": 2048}
+        }
+      }
+    },
+    "desktopAdapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "port"],
+      "properties": {
+        "agent_id": {"$ref": "#/$defs/identifier"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "credentialAuthorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connection_ids", "models"],
+      "properties": {
+        "connection_ids": {"$ref": "#/$defs/identifierList"},
+        "models": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/modelRef"}
+        }
+      }
+    },
+    "credentialMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential_id", "provider_access_id", "kind", "secret_reference",
+        "key_hint", "enabled", "authorization", "quota_policy"
+      ],
+      "properties": {
+        "credential_id": {"$ref": "#/$defs/identifier"},
+        "provider_access_id": {"$ref": "#/$defs/identifier"},
+        "kind": {"enum": ["api_key", "oauth", "local_identity", "subscription"]},
+        "secret_reference": {"type": "string", "maxLength": 256},
+        "key_hint": {"type": "string", "maxLength": 64},
+        "enabled": {"type": "boolean"},
+        "authorization": {"$ref": "#/$defs/credentialAuthorization"},
+        "quota_policy": {"$ref": "#/$defs/quotaPolicy"}
+      }
+    },
+    "modelRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["creator_id", "model_id"],
+      "properties": {
+        "creator_id": {"$ref": "#/$defs/identifier"},
+        "model_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "offering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offering_id", "provider_access_id", "identity_state", "enabled",
+        "capabilities", "context_window", "priority"
+      ],
+      "properties": {
+        "offering_id": {"$ref": "#/$defs/identifier"},
+        "provider_access_id": {"$ref": "#/$defs/identifier"},
+        "identity_state": {"enum": ["confirmed", "pending_identity"]},
+        "model": {"$ref": "#/$defs/modelRef"},
+        "pending_model_id": {"type": "string", "maxLength": 256},
+        "enabled": {"type": "boolean"},
+        "stale": {"type": "boolean"},
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "context_window": {"type": "integer", "minimum": 1},
+        "actual_pricing": {"$ref": "#/$defs/pricing"},
+        "priority": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"identity_state": {"const": "confirmed"}}},
+          "then": {"required": ["model"], "not": {"required": ["pending_model_id"]}},
+          "else": {"required": ["pending_model_id"], "not": {"required": ["model"]}}
+        }
+      ]
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_id", "offering_id", "connection_id", "wire_model_id",
+        "enabled", "identity_confidence", "probe_status", "priority"
+      ],
+      "properties": {
+        "deployment_id": {"$ref": "#/$defs/identifier"},
+        "offering_id": {"$ref": "#/$defs/identifier"},
+        "connection_id": {"$ref": "#/$defs/identifier"},
+        "wire_model_id": {"$ref": "#/$defs/identifier"},
+        "enabled": {"type": "boolean"},
+        "identity_confidence": {"enum": ["high", "medium", "low", "pending"]},
+        "probe_status": {"enum": ["passed", "failed", "unprobed", "stale"]},
+        "priority": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      }
+    },
+    "migrationMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "migrated_at", "receipt_id"],
+      "properties": {
+        "source": {"type": "string", "maxLength": 128},
+        "migrated_at": {"type": "number", "minimum": 0},
+        "receipt_id": {"$ref": "#/$defs/identifier"}
+      }
+    }
+  }
+}

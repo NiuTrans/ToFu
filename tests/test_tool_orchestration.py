@@ -127,9 +127,27 @@ def test_local_wire_schema_is_stable_when_programmatic_policy_toggles():
     assert active.programmatic_backend == 'local'
     assert inactive.multi_agent_backend == active.multi_agent_backend \
         == 'local_swarm'
-    assert inactive.body['tools'] == active.body['tools']
-    assert tool_schema_fingerprint(inactive.body['tools']) \
-        == tool_schema_fingerprint(active.body['tools'])
+    # The programmatic toggle may compact the search_tools/execute_tools
+    # gateway pair (500-token ceiling), but availability stays stable: same
+    # names, same order, non-gateway tools byte-identical, and the compacted
+    # execute_tools keeps a functional calls+program contract.
+    gateway_names = {'search_tools', 'execute_tools'}
+    inactive_names = [t['function']['name'] for t in inactive.body['tools']]
+    active_names = [t['function']['name'] for t in active.body['tools']]
+    assert inactive_names == active_names
+    inactive_rest = [t for t in inactive.body['tools']
+                     if t['function']['name'] not in gateway_names]
+    active_rest = [t for t in active.body['tools']
+                   if t['function']['name'] not in gateway_names]
+    assert inactive_rest == active_rest
+    assert tool_schema_fingerprint(inactive_rest) \
+        == tool_schema_fingerprint(active_rest)
+    active_execute = next(
+        t for t in active.body['tools']
+        if t['function']['name'] == 'execute_tools')
+    execute_props = active_execute['function']['parameters']['properties']
+    assert 'calls' in execute_props
+    assert 'program' in execute_props
 
 
 @pytest.mark.parametrize(
@@ -309,7 +327,7 @@ def test_read_only_worker_catalog_closes_advisory_and_artifact_mutators():
         },
         all_tools=[
             _tool('read_files'), _tool('write_file'),
-            _tool('project_message'), _tool('integration_submit'),
+            _tool('integration_submit'),
             _tool('ask_human'), _tool('await_agents'),
             _tool('get_agent_result'),
         ],
@@ -318,7 +336,7 @@ def test_read_only_worker_catalog_closes_advisory_and_artifact_mutators():
     names = set(_wire_names(agent.tools))
     assert {'read_files', 'execute_tools',
             'read_artifact', 'list_artifacts'} <= names
-    assert not ({'write_file', 'project_message', 'integration_submit',
+    assert not ({'write_file', 'integration_submit',
                  'store_artifact', 'ask_human', 'await_agents',
                  'get_agent_result'} & names)
     assert agent._ptc_local == {
@@ -330,9 +348,10 @@ def test_native_and_local_workers_share_noninteractive_leaf_boundary():
     from lib.swarm.routing import read_only_agent_banned_names
 
     banned = read_only_agent_banned_names({'write_file'})
-    assert {'write_file', 'store_artifact', 'project_message', 'ask_human',
+    assert {'write_file', 'store_artifact', 'ask_human',
             'spawn_agents', 'await_agents', 'get_agent_result',
             'await_task'} <= banned
+    assert 'project_message' not in banned
 
 
 def test_read_only_spawn_wave_budget_rejects_before_launch():

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import (
@@ -37,6 +37,18 @@ logger = get_logger(__name__)
 
 TOOL_RESULT_V2_MAX_TOKENS = 8_000
 ROUND_TOOL_RESULT_V2_MAX_TOKENS = 24_000
+# Reconstructible source reads may use the otherwise-idle remainder of the
+# round budget. Parallel siblings are still reduced by the aggregate guard.
+SOURCE_TOOL_RESULT_V2_MAX_TOKENS = ROUND_TOOL_RESULT_V2_MAX_TOKENS
+
+_SUMMARY_TRUNCATION_MARKER = "\n… [summary truncated]"
+_ARTIFACT_CONTINUATION_MARKER = (
+    "\n… [truncated; continue with read_tool_artifact using the envelope's "
+    "artifactRef as artifact_ref and its cursor]"
+)
+_NARROWER_QUERY_MARKER = (
+    "\n… [truncated; rerun the source tool with a narrower query or range]"
+)
 
 
 #: Longest run of uninterrupted non-whitespace that still looks like prose or
@@ -201,10 +213,17 @@ def _result_tokens(content: str, model: str) -> int:
         return max(1, (len(content) + 3) // 4) if content else 0
 
 
-def _fit_summary(text: str, *, token_budget: int, model: str) -> str:
+def _model_result_tokens(content: str, model: str) -> int:
+    """Count only bytes that will actually enter the provider message."""
+    from lib.tools.result_envelope import model_text_from_tool_result
+
+    return _result_tokens(model_text_from_tool_result(content), model)
+
+
+def _fit_summary(text: str, *, token_budget: int, model: str,
+                 marker: str = _SUMMARY_TRUNCATION_MARKER) -> str:
     if _result_tokens(text, model) <= token_budget:
         return text
-    marker = "\n… [summary truncated; use artifactRef]"
     low, high, best = 0, len(text), marker
     while low <= high:
         middle = (low + high) // 2
@@ -246,67 +265,177 @@ def _candidate_items(content: str) -> tuple[str, list[Any], bool]:
     return content, [], False
 
 
+def _normalized_recovery_policy(value: Any) -> str:
+    policy = str(value or "artifact").strip().lower()
+    return policy if policy in {"artifact", "source", "none"} else "artifact"
+
+
+def _bounded_source_arguments(
+    tool_name: str,
+    tool_arguments: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a bounded, immediately executable source-recovery query.
+
+    ``read_files`` handlers annotate specs with ``_base``/``_display_path`` in
+    place. Those values are execution internals and can be very long; source
+    recovery retains only the public path/range contract and at most 20 reads.
+    A broad original read is narrowed to a shared 600-line slice so replaying
+    ``recovery.arguments`` cannot reproduce the overflow loop that made the
+    recovery necessary. Other future source-recoverable tools get a
+    JSON-bounded public copy.
+    """
+    arguments = tool_arguments if isinstance(tool_arguments, Mapping) else {}
+    if tool_name == "read_files":
+        raw_reads = arguments.get("reads")
+        single = raw_reads is None and arguments.get("path") is not None
+        if single:
+            raw_reads = [arguments]
+        if not isinstance(raw_reads, list):
+            return {}
+        public_reads = [raw for raw in raw_reads[:20]
+                        if isinstance(raw, Mapping)
+                        and raw.get("path") is not None]
+        if not public_reads:
+            return {}
+        lines_per_read = max(40, 600 // len(public_reads))
+        reads: list[dict[str, Any]] = []
+        for raw in public_reads:
+            item: dict[str, Any] = {"path": str(raw.get("path") or "")[:1024]}
+            raw_start = raw.get("start_line")
+            start_line = (raw_start if isinstance(raw_start, int)
+                          and not isinstance(raw_start, bool)
+                          and raw_start > 0 else 1)
+            raw_end = raw.get("end_line")
+            requested_end = (raw_end if isinstance(raw_end, int)
+                             and not isinstance(raw_end, bool)
+                             and raw_end > 0 else None)
+            # The read_files handler repairs a reversed range by swapping it
+            # and then reads that swapped window. Mirror the swap here so the
+            # recovery slice stays inside the window that was actually read;
+            # otherwise the narrowed end drifts to start+lines_per_read past
+            # the real evidence (start=2900,end=1010 read 1010-2900 but
+            # recovered 2900-3499).
+            if (requested_end is not None and start_line > 1
+                    and requested_end < start_line):
+                start_line, requested_end = requested_end, start_line
+            item["start_line"] = start_line
+            item["end_line"] = min(
+                requested_end if requested_end is not None
+                else start_line + lines_per_read - 1,
+                start_line + lines_per_read - 1,
+            )
+            reads.append(item)
+        if single and len(reads) == 1:
+            return reads[0]
+        return {"reads": reads} if reads else {}
+
+    try:
+        encoded = json.dumps(
+            dict(arguments), ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), default=str)
+    except Exception as e:
+        logger.debug('tool argument budgeting serialization failed: %s', e)
+        return {}
+    if len(encoded.encode("utf-8")) > 8_192:
+        return {}
+    try:
+        decoded = json.loads(encoded)
+    except (TypeError, ValueError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _source_recovery(
+    tool_name: str,
+    tool_arguments: Mapping[str, Any] | None,
+):
+    from lib.tools.result_envelope import ToolResultRecoveryV2
+
+    return ToolResultRecoveryV2(
+        kind="source", tool=str(tool_name or "source_tool"),
+        arguments=_bounded_source_arguments(tool_name, tool_arguments),
+    )
+
+
 def _materialize_envelope(*, status: str, summary: str, items: list[Any],
                           artifact_ref: str, truncated: bool, raw_bytes: int,
                           observed_at_ms: int, world_version: str,
-                          evidence_id: str, model: str) -> str:
+                          evidence_id: str, model: str,
+                          recovery=None,
+                          token_budget: int = TOOL_RESULT_V2_MAX_TOKENS) -> str:
     from lib.tools.result_envelope import ToolResultEnvelopeV2
 
-    accepted: list[Any] = []
-    summary_budget = (TOOL_RESULT_V2_MAX_TOKENS // 2
-                      if items else TOOL_RESULT_V2_MAX_TOKENS - 500)
-    fitted_summary = _fit_summary(
-        summary, token_budget=max(256, summary_budget), model=model)
-    truncated = truncated or fitted_summary != summary
-    for item in items:
-        candidate = ToolResultEnvelopeV2(
-            status=status, summary=fitted_summary,
-            items=tuple([*accepted, item]), artifact_ref=artifact_ref,
-            cursor="0" if artifact_ref else "", truncated=truncated,
+    recovery_marker = (_ARTIFACT_CONTINUATION_MARKER if artifact_ref
+                       else _NARROWER_QUERY_MARKER)
+
+    def _render(candidate_summary: str, candidate_items: list[Any],
+                candidate_truncated: bool) -> str:
+        visible_status = (
+            "partial" if candidate_truncated and status == "ok" else status)
+        return ToolResultEnvelopeV2(
+            status=visible_status, summary=candidate_summary,
+            items=tuple(candidate_items), artifact_ref=artifact_ref,
+            cursor="0" if artifact_ref else "",
+            truncated=candidate_truncated,
             raw_bytes=raw_bytes, visible_bytes=0,
             observed_at_ms=observed_at_ms, world_version=world_version,
-            evidence_id=evidence_id,
-        ).to_model_text()
-        if _result_tokens(candidate, model) > TOOL_RESULT_V2_MAX_TOKENS:
+            evidence_id=evidence_id, recovery=recovery,
+        ).with_visible_bytes().to_envelope_text()
+
+    # Preserve a complete result whenever its final model projection fits.
+    # A fixed summary/item split is only a fallback allocation, not permission
+    # to discard data that already fits inside the public 8k contract.
+    if not truncated:
+        complete = _render(summary, items, False)
+        if _model_result_tokens(complete, model) <= token_budget:
+            return complete
+
+    accepted: list[Any] = []
+    summary_budget = (token_budget // 2 if items else token_budget - 500)
+    fitted_summary = _fit_summary(
+        summary, token_budget=max(256, summary_budget), model=model,
+        marker=recovery_marker)
+    truncated = truncated or fitted_summary != summary
+    for item in items:
+        candidate = _render(
+            fitted_summary, [*accepted, item], truncated)
+        if _model_result_tokens(candidate, model) > token_budget:
             truncated = True
             break
         accepted.append(item)
-    envelope = ToolResultEnvelopeV2(
-        status=status, summary=fitted_summary, items=tuple(accepted),
-        artifact_ref=artifact_ref, cursor="0" if artifact_ref else "",
-        truncated=truncated or len(accepted) < len(items),
-        raw_bytes=raw_bytes, visible_bytes=0,
-        observed_at_ms=observed_at_ms, world_version=world_version,
-        evidence_id=evidence_id,
-    )
-    visible = envelope.to_model_text()
-    # Iterate until the self-described byte count reaches a fixed point. The
-    # decimal width can cross a power-of-ten boundary on the first update.
-    for _ in range(8):
-        visible_bytes = len(visible.encode("utf-8"))
-        if envelope.visible_bytes == visible_bytes:
-            break
-        envelope = ToolResultEnvelopeV2(
-            status=envelope.status, summary=envelope.summary,
-            items=envelope.items, artifact_ref=envelope.artifact_ref,
-            cursor=envelope.cursor, truncated=envelope.truncated,
-            raw_bytes=envelope.raw_bytes,
-            visible_bytes=visible_bytes,
-            observed_at_ms=envelope.observed_at_ms,
-            world_version=envelope.world_version,
-            evidence_id=envelope.evidence_id,
-        )
-        visible = envelope.to_model_text()
-    if _result_tokens(visible, model) <= TOOL_RESULT_V2_MAX_TOKENS:
+    final_truncated = truncated or len(accepted) < len(items)
+    visible = _render(fitted_summary, accepted, final_truncated)
+    if _model_result_tokens(visible, model) <= token_budget:
         return visible
-    # Extremely token-dense text gets one final deterministic reduction.
-    return _materialize_envelope(
-        status=status,
-        summary=_fit_summary(fitted_summary, token_budget=512, model=model),
-        items=[], artifact_ref=artifact_ref, truncated=True,
-        raw_bytes=raw_bytes, observed_at_ms=observed_at_ms,
-        world_version=world_version, evidence_id=evidence_id, model=model,
-    ) if len(fitted_summary) > 128 else visible
+
+    # The summary budget above is only a first-pass allocation. JSON string
+    # escaping is content-dependent for structured projections. Fit against
+    # the final model-visible value, preserving the largest deterministic
+    # prefix and every item that can coexist with it.
+    remaining_items = list(accepted)
+    while True:
+        low, high = 0, len(summary)
+        best_visible = ""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate_summary = (
+                summary if middle == len(summary)
+                else summary[:middle].rstrip() + recovery_marker)
+            candidate = _render(candidate_summary, remaining_items, True)
+            if _model_result_tokens(candidate, model) <= token_budget:
+                best_visible = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best_visible:
+            return best_visible
+        if remaining_items:
+            remaining_items.pop()
+            continue
+        # Envelope metadata plus the bounded marker is deliberately tiny. This
+        # is defensive for a pathological token counter, and still guarantees
+        # a deterministic bounded result instead of unbounded recursion.
+        return _render("Result truncated.", [], True)
 
 
 def _materialize_file_read_envelope(
@@ -321,6 +450,8 @@ def _materialize_file_read_envelope(
     evidence_id: str,
     model: str,
     max_preview_chars: int | None = None,
+    recovery=None,
+    token_budget: int = TOOL_RESULT_V2_MAX_TOKENS,
 ) -> str:
     """Fit every file identity first, then share preview space max-min fairly.
 
@@ -383,18 +514,19 @@ def _materialize_file_read_envelope(
             observed_at_ms=observed_at_ms,
             world_version=world_version,
             evidence_id=evidence_id,
+            recovery=recovery,
         ).with_visible_bytes()
 
     # Identity/status is non-negotiable. Progressive fallbacks only remove
     # optional detail and shorten pathological paths; at the read_files schema
-    # maximum of 20 items the last form remains far below the 8k-token ceiling.
+    # maximum of 20 items the last form remains far below either token ceiling.
     minimal = _render(0, path_limit=384, include_details=True)
-    if _result_tokens(minimal.to_model_text(), model) > TOOL_RESULT_V2_MAX_TOKENS:
+    if _result_tokens(minimal.to_model_text(), model) > token_budget:
         minimal = _render(0, path_limit=160, include_details=False)
-    if _result_tokens(minimal.to_model_text(), model) > TOOL_RESULT_V2_MAX_TOKENS:
+    if _result_tokens(minimal.to_model_text(), model) > token_budget:
         fitted_summary = _fit_summary(summary, token_budget=128, model=model)
         minimal = _render(0, path_limit=48, include_details=False)
-    if _result_tokens(minimal.to_model_text(), model) > TOOL_RESULT_V2_MAX_TOKENS:
+    if _result_tokens(minimal.to_model_text(), model) > token_budget:
         # Defensive last form for malformed non-schema callers. It still keeps
         # one identity/status row per input instead of reverting to prefix bias.
         fitted_summary = "Batch read result; re-read named files as needed."
@@ -407,7 +539,7 @@ def _materialize_file_read_envelope(
     if max_preview_chars is not None:
         high = min(high, max(0, int(max_preview_chars)))
     if high <= 0:
-        return minimal.to_model_text()
+        return minimal.to_envelope_text()
 
     best = minimal
     low = 1
@@ -415,12 +547,12 @@ def _materialize_file_read_envelope(
         middle = (low + high) // 2
         candidate = _render(middle, path_limit=384, include_details=True)
         if _result_tokens(candidate.to_model_text(), model) \
-                <= TOOL_RESULT_V2_MAX_TOKENS:
+                <= token_budget:
             best = candidate
             low = middle + 1
         else:
             high = middle - 1
-    return best.to_model_text()
+    return best.to_envelope_text()
 
 
 def _store_tool_result_artifact(content: str, *, user_id: int,
@@ -443,8 +575,20 @@ def budget_tool_result_v2(tool_name: str, content: str, *, user_id: int,
                           model: str = "", observed_at_ms: int = 0,
                           world_version: str = "",
                           tool_arguments: dict[str, Any] | None = None,
-                          projection_items: list[Any] | None = None) -> str:
-    """Return an 8k-token envelope; every tool, including read_files, is bound."""
+                          projection_items: list[Any] | None = None,
+                          producer_metadata: Mapping[str, Any] | None = None,
+                          recovery_policy: str = "artifact") -> str:
+    """Return one bounded envelope under the tool's declared recovery policy.
+
+    Volatile results retain the conservative 8k+artifact contract. Cheaply
+    reconstructible source reads may consume the full 24k round allowance so a
+    single useful read does not spill while 16k tokens sit idle; the aggregate
+    guard still enforces the same round ceiling when siblings run in parallel.
+    """
+    recovery_policy = _normalized_recovery_policy(recovery_policy)
+    token_budget = (
+        SOURCE_TOOL_RESULT_V2_MAX_TOKENS
+        if recovery_policy == "source" else TOOL_RESULT_V2_MAX_TOKENS)
     if not isinstance(content, str):
         content = json.dumps(content, ensure_ascii=False, default=str)
     # Tool gateways and nested runtimes may already have applied this exact
@@ -458,42 +602,74 @@ def budget_tool_result_v2(tool_name: str, content: str, *, user_id: int,
         existing = None
     if (isinstance(existing, dict)
             and existing.get("contractVersion") == "tofu.tool-result/v2"
-            and _result_tokens(content, model) <= TOOL_RESULT_V2_MAX_TOKENS):
+            and _model_result_tokens(content, model) <= token_budget):
         return content
     raw = content.encode("utf-8", errors="replace")
     evidence_id = "ev_" + hashlib.sha256(raw).hexdigest()[:24]
     raw_result_tokens = _result_tokens(content, model)
-    exceeds_inline_budget = (
-        raw_result_tokens > TOOL_RESULT_V2_MAX_TOKENS - 1_000)
+    exceeds_inline_budget = raw_result_tokens > token_budget
     preserve_file_identities = False
+    summary, items, structurally_truncated = _candidate_items(content)
+
+    # Structured projections can differ in size from their source JSON. Detect
+    # that before deciding whether a durable recovery artifact is necessary.
+    # The probe is limited to already-small raw values, so it cannot duplicate
+    # a multi-megabyte result on the hot path.
+    if not exceeds_inline_budget:
+        from lib.tools.result_envelope import ToolResultEnvelopeV2
+        inline_probe = ToolResultEnvelopeV2(
+            status="ok", summary=summary, items=tuple(items),
+            raw_bytes=len(raw), observed_at_ms=max(
+                0, int(observed_at_ms or 0)),
+            world_version=str(world_version or ""),
+            evidence_id=evidence_id,
+        ).with_visible_bytes().to_envelope_text()
+        exceeds_inline_budget = (
+            _model_result_tokens(inline_probe, model) > token_budget)
+
     if tool_name == "read_files" and exceeds_inline_budget:
         from lib.tools.result_projection import (
             normalize_file_read_projection_items,
         )
         file_items = normalize_file_read_projection_items(
             projection_items, tool_arguments)
-        if len(file_items) > 1:
+        if len(file_items) > (0 if recovery_policy == "source" else 1):
             items = file_items
             summary = (
                 f"read_files returned {len(file_items)} file results. Every "
-                "file is represented in items with a bounded preview; use "
-                "artifactRef for the complete batch."
+                "file is represented in items with a bounded preview; "
+                + (
+                    "rerun read_files using recovery.arguments with narrower "
+                    "per-file ranges for omitted source evidence."
+                    if recovery_policy == "source" else
+                    "use read_tool_artifact with artifactRef as artifact_ref "
+                    "and cursor for the complete batch."
+                )
             )
             structurally_truncated = True
             preserve_file_identities = True
-        else:
-            summary, items, structurally_truncated = _candidate_items(content)
-    else:
-        summary, items, structurally_truncated = _candidate_items(content)
-    # Leave room for envelope metadata. Structured results also need a
-    # recovery handle whenever the finite item preview omits raw entries.
-    needs_artifact = (
-        exceeds_inline_budget
-        or structurally_truncated)
+    # Structured results also need an honest recovery declaration whenever the
+    # finite item preview omits raw entries. Internal envelope metadata itself
+    # consumes no model budget.
+    producer_truncated = bool(
+        isinstance(producer_metadata, Mapping)
+        and (producer_metadata.get("truncated")
+             or producer_metadata.get("status") == "partial"))
+    envelope_overflow = exceeds_inline_budget or structurally_truncated
+    needs_recovery = envelope_overflow or producer_truncated
     artifact_ref = (_store_tool_result_artifact(
         content, user_id=user_id, observed_at_ms=observed_at_ms)
-        if needs_artifact else "")
-    if needs_artifact and not artifact_ref:
+        if envelope_overflow and recovery_policy == "artifact" else "")
+    # A producer-side cap means the missing bytes never reached this boundary,
+    # so persisting the already-truncated string cannot recover them. Point the
+    # model back to the source tool even when its normal overflow policy is an
+    # artifact.
+    recovery = (
+        _source_recovery(tool_name, tool_arguments)
+        if producer_truncated
+        or (envelope_overflow and recovery_policy == "source")
+        else None)
+    if needs_recovery and not artifact_ref and recovery is None:
         if preserve_file_identities:
             summary = (
                 f"read_files returned {len(items)} file results; every file is "
@@ -502,7 +678,9 @@ def budget_tool_result_v2(tool_name: str, content: str, *, user_id: int,
             )
         else:
             summary = (
-                _fit_summary(summary, token_budget=5_000, model=model)
+                _fit_summary(
+                    summary, token_budget=5_000, model=model,
+                    marker=_NARROWER_QUERY_MARKER)
                 + "\n[Full result unavailable; rerun with a narrower query.]"
             )
     if preserve_file_identities:
@@ -516,18 +694,22 @@ def budget_tool_result_v2(tool_name: str, content: str, *, user_id: int,
             world_version=str(world_version or ""),
             evidence_id=evidence_id,
             model=model,
+            recovery=recovery,
+            token_budget=token_budget,
         )
     return _materialize_envelope(
-        status="partial" if needs_artifact else "ok",
+        status="partial" if needs_recovery else "ok",
         summary=summary,
         items=items,
         artifact_ref=artifact_ref,
-        truncated=needs_artifact,
+        truncated=needs_recovery,
         raw_bytes=len(raw),
         observed_at_ms=max(0, int(observed_at_ms or 0)),
         world_version=str(world_version or ""),
         evidence_id=evidence_id,
         model=model,
+        recovery=recovery,
+        token_budget=token_budget,
     )
 
 
@@ -587,9 +769,10 @@ def enforce_round_aggregate_budget(
 def enforce_round_aggregate_budget_v2(
     tool_results: dict[str, tuple[str, str, str]], *, user_id: int,
     model: str = "", observed_at_ms: int = 0,
+    recovery_by_call_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, tuple[str, str, str]]:
     """Bound all model-visible results in a round to 24k aggregate tokens."""
-    total = sum(_result_tokens(content, model)
+    total = sum(_model_result_tokens(content, model)
                 for content, _, _ in tool_results.values()
                 if isinstance(content, str))
     if total <= ROUND_TOOL_RESULT_V2_MAX_TOKENS:
@@ -597,21 +780,39 @@ def enforce_round_aggregate_budget_v2(
     candidates = sorted(
         ((tc_id, value) for tc_id, value in tool_results.items()
          if isinstance(value[0], str)),
-        key=lambda row: (-_result_tokens(row[1][0], model), row[0]),
+        key=lambda row: (-_model_result_tokens(row[1][0], model), row[0]),
     )
     for tc_id, (content, tool_name, tool_use_id) in candidates:
         if total <= ROUND_TOOL_RESULT_V2_MAX_TOKENS:
             break
-        before = _result_tokens(content, model)
+        before = _model_result_tokens(content, model)
         try:
             value = json.loads(content)
         except (TypeError, ValueError):
             value = {}
-        artifact_ref = str(value.get("artifactRef") or "") \
-            if isinstance(value, dict) else ""
-        if not artifact_ref:
+        declared = ((recovery_by_call_id or {}).get(tc_id) or {})
+        existing_recovery = (value.get("recovery")
+                             if isinstance(value, dict) else None)
+        if not isinstance(existing_recovery, Mapping):
+            existing_recovery = {}
+        recovery_policy = _normalized_recovery_policy(
+            declared.get("policy") or (
+                "source" if existing_recovery.get("kind") == "source"
+                else "artifact"))
+        source_arguments = declared.get("arguments")
+        if not isinstance(source_arguments, Mapping):
+            source_arguments = existing_recovery.get("arguments")
+        if not isinstance(source_arguments, Mapping):
+            source_arguments = {}
+
+        artifact_ref = (
+            str(value.get("artifactRef") or "")
+            if isinstance(value, dict) and recovery_policy == "artifact" else "")
+        if not artifact_ref and recovery_policy == "artifact":
             artifact_ref = _store_tool_result_artifact(
                 content, user_id=user_id, observed_at_ms=observed_at_ms)
+        recovery = (_source_recovery(tool_name, source_arguments)
+                    if recovery_policy == "source" else None)
         evidence_id = (str(value.get("evidenceId") or "")
                        if isinstance(value, dict) else "")
         if not evidence_id:
@@ -627,24 +828,44 @@ def enforce_round_aggregate_budget_v2(
             source_freshness.get("observedAtMs") or 0)
         source_world_version = str(
             source_freshness.get("worldVersion") or "")
-        if artifact_ref:
+        if recovery is not None:
+            reduced_summary = (
+                f"{tool_name} result exceeded the shared round budget; "
+                f"rerun {tool_name} using recovery.arguments with a narrower "
+                "query or range for omitted source evidence."
+            )
+        elif artifact_ref:
             reduced_summary = (
                 f"{tool_name} result moved behind the round aggregate "
-                "budget; read or search artifactRef as needed."
+                "budget; continue with read_tool_artifact using artifactRef "
+                "as artifact_ref and cursor, or search_tool_artifact."
             )
         else:
             source_summary = (str(value.get("summary") or "")
                               if isinstance(value, dict) else "")
             preview = _fit_summary(
-                source_summary or content, token_budget=512, model=model)
-            reduced_summary = (
-                "Full aggregate result unavailable because artifact "
-                "persistence failed; rerun with a narrower query.\n"
-                + preview
-            )
+                source_summary or content, token_budget=512, model=model,
+                marker=_NARROWER_QUERY_MARKER)
+            if recovery_policy == "none":
+                reduced_summary = (
+                    "Result reduced by the shared round budget; this tool "
+                    "declares no overflow recovery.\n" + preview)
+            else:
+                reduced_summary = (
+                    "Full aggregate result unavailable because artifact "
+                    "persistence failed; rerun with a narrower query.\n"
+                    + preview
+                )
         source_items = (value.get("items")
                         if isinstance(value, dict) else None)
-        from lib.tools.result_projection import is_file_read_projection
+        from lib.tools.result_projection import (
+            is_file_read_projection,
+            normalize_file_read_projection_items,
+        )
+        if (recovery_policy == "source" and tool_name == "read_files"
+                and not is_file_read_projection(source_items)):
+            source_items = normalize_file_read_projection_items(
+                None, source_arguments)
         if is_file_read_projection(source_items):
             reduced = _materialize_file_read_envelope(
                 status="partial",
@@ -659,6 +880,7 @@ def enforce_round_aggregate_budget_v2(
                 model=model,
                 # Aggregate pressure may remove previews, never identities.
                 max_preview_chars=0,
+                recovery=recovery,
             )
         else:
             reduced = _materialize_envelope(
@@ -670,9 +892,10 @@ def enforce_round_aggregate_budget_v2(
                     0, source_observed_at_ms or int(observed_at_ms or 0)),
                 world_version=source_world_version,
                 evidence_id=evidence_id, model=model,
+                recovery=recovery,
             )
         tool_results[tc_id] = (reduced, tool_name, tool_use_id)
-        total -= max(0, before - _result_tokens(reduced, model))
+        total -= max(0, before - _model_result_tokens(reduced, model))
     return tool_results
 
 

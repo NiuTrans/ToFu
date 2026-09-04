@@ -25,7 +25,8 @@ Endpoints pinned (frontend consumption order):
   2. GET  /api/v1/conversations    — sidebar list ({ok, items[]})
   3. GET  /api/v1/conversations/<id> — conversation open (messages[]…)
   4. GET  /api/v1/server-config    — model picker data source (providers[]…)
-  5. POST /api/images/upload       — attachment upload ({ok, filename})
+  5. GET  /api/v1/mcp/catalog      — Settings catalog + compact tool summary
+  6. POST /api/images/upload       — attachment upload ({ok, filename})
 """
 
 from __future__ import annotations
@@ -211,6 +212,17 @@ _SERVER_CONFIG_SPEC = {
     }],
     'models': 'any',
     'dropdown_models': 'any',
+    'mcp_tool_summary': {
+        'servers': [{'name': str, 'count': int}],
+        'total': int,
+    },
+    'feature_flags': {
+        'pptx_translate_enabled': bool,
+        'cache_extended_ttl': bool,
+        'debug_mode': bool,
+        'optimizer_enabled': bool,
+        'artifacts_enabled': bool,
+    },
     'model_price_display': {
         'base_currency': str,
         'usd_rates': {
@@ -237,6 +249,15 @@ _SERVER_CONFIG_SPEC = {
         'contract_version': str,
         'spec_digest': str,
         'spec': dict,
+    },
+}
+
+_MCP_CATALOG_SPEC = {
+    'ok': bool,
+    'catalog': list,
+    'mcp_tool_summary': {
+        'servers': [{'name': str, 'count': int}],
+        'total': int,
     },
 }
 
@@ -385,6 +406,12 @@ class TestFieldContract:
         assert resp.status_code == 200
         _assert_endpoint_shape(resp.get_json(), _SERVER_CONFIG_SPEC,
                                'GET /api/v1/server-config (model picker)')
+
+    def test_mcp_catalog_summary_shape(self, flask_client):
+        resp = flask_client.get('/api/v1/mcp/catalog')
+        assert resp.status_code == 200
+        _assert_endpoint_shape(resp.get_json(), _MCP_CATALOG_SPEC,
+                               'GET /api/v1/mcp/catalog')
 
     def test_cost_experiment_report_shape(self, flask_client):
         resp = flask_client.get('/api/v1/cost-experiments/report?days=14')

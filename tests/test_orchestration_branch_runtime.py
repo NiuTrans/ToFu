@@ -86,6 +86,33 @@ def test_branch_runtime_keeps_deterministic_fallback_and_empty_projection():
     }]
 
 
+def test_branch_runtime_does_not_match_label_inside_another_word():
+    class ContainingLabelsNavigator:
+        labels = {'a': 'A', 'b': 'Data'}
+
+        def node_label(self, node_id):
+            return self.labels[node_id]
+
+    runtime, events, _calls = _runtime(
+        successors=['a', 'b'], classifier='Data',
+        params={'classifier': 'router'},
+    )
+    runtime._navigator = ContainingLabelsNavigator()
+
+    assert runtime.run('branch', 'seed') == 'b'
+    assert events[-1]['how'] == 'classifier'
+
+
+def test_branch_runtime_falls_back_when_distinct_options_are_mentioned():
+    runtime, events, _calls = _runtime(
+        successors=['a', 'b'], classifier='Alpha path or Beta path',
+        params={'classifier': 'router'},
+    )
+
+    assert runtime.run('branch', 'seed') == 'a'
+    assert events[-1]['how'] == 'first-edge'
+
+
 def test_engine_delegates_branch_policy_to_the_focused_runtime():
     engine = (ROOT / 'lib' / 'orchestration_engine.py').read_text()
     branch = (ROOT / 'lib' / 'orchestration_branch_runtime.py').read_text()

@@ -9,8 +9,11 @@ import pytest
 from lib.task_replay import (
     TASK_REPLAY_FORMAT,
     TASK_REPLAY_TERMINAL_EVENT_TYPES,
+    TASK_REPLAY_TERMINAL_STATUSES,
+    TaskReplayPage,
     memory_replay_page,
     missing_replay_page,
+    project_bounded_replay_payload,
     safe_replay_cursor,
     sse_last_event_id_to_cursor,
     sse_resume_serviceable,
@@ -84,6 +87,108 @@ def test_memory_page_frames_keep_absolute_sequences_after_head_eviction():
     ]
     assert page.next_cursor == 43
     assert page.cursor_reset is False
+
+
+def test_durable_frames_and_http_cursor_preserve_sparse_sequences():
+    page = TaskReplayPage(
+        events=[
+            {'type': 'phase', 'seq': 3},
+            {'type': 'done', 'seq': 9},
+        ],
+        next_cursor=10,
+        run_status='done',
+        done=True,
+        requested_cursor=0,
+        cursor_reset=True,
+    )
+
+    assert page.frames == [
+        (3, {'type': 'phase', 'seq': 3}),
+        (9, {'type': 'done', 'seq': 9}),
+    ]
+    projected = project_bounded_replay_payload(
+        page.payload(), max_events=1, max_event_bytes=10_000)
+    assert [event['seq'] for event in projected['events']] == [3]
+    assert projected['next_cursor'] == 4
+    assert projected['caught_up'] is False
+
+
+def test_interrupted_status_is_terminal_without_becoming_an_event_type():
+    assert 'interrupted' in TASK_REPLAY_TERMINAL_STATUSES
+    assert 'interrupted' not in TASK_REPLAY_TERMINAL_EVENT_TYPES
+    page = task_memory_replay_page(
+        {'status': 'interrupted', 'events': [], '_eventNextSeq': 7}, 7)
+    assert page.done is True
+    assert page.next_cursor == 7
+
+
+def test_bounded_http_page_advances_only_past_delivered_absolute_events():
+    events = [
+        {'type': 'progress', 'seq': sequence}
+        for sequence in range(40, 43)
+    ]
+    full = memory_replay_page(
+        events, 0, status='done', done=True, base_cursor=40,
+    ).payload({
+        'finishedAt': 123,
+        'artifact_quality': {'degraded': False},
+        'result': {'answer': 'complete'},
+    })
+
+    first = project_bounded_replay_payload(
+        full, max_events=2, max_event_bytes=10_000)
+
+    assert [event['seq'] for event in first['events']] == [40, 41]
+    assert first['next_cursor'] == 42
+    assert first['cursor'] == {'requested': 0, 'next': 42, 'reset': True}
+    assert first['status'] == 'done'
+    assert first['done'] is False
+    assert first['caught_up'] is False
+    assert 'finishedAt' not in first
+    assert 'artifact_quality' not in first
+    assert 'result' not in first
+    assert len(full['events']) == 3
+    assert full['next_cursor'] == 43
+
+    final = project_bounded_replay_payload(
+        memory_replay_page(
+            events, first['next_cursor'], status='done', done=True,
+            base_cursor=40,
+        ).payload({
+            'finishedAt': 123,
+            'artifact_quality': {'degraded': False},
+            'result': {'answer': 'complete'},
+        }),
+        max_events=2,
+        max_event_bytes=10_000,
+    )
+    assert [event['seq'] for event in final['events']] == [42]
+    assert final['next_cursor'] == 43
+    assert final['caught_up'] is True
+    assert final['done'] is True
+    assert final['result'] == {'answer': 'complete'}
+
+
+def test_bounded_http_page_targets_bytes_without_splitting_one_event():
+    events = [
+        {'type': 'delta', 'seq': sequence, 'content': '界' * 200}
+        for sequence in range(2)
+    ]
+    full = memory_replay_page(
+        events, 0, status='running', done=False,
+    ).payload()
+
+    page = project_bounded_replay_payload(
+        full, max_events=128, max_event_bytes=700)
+
+    assert [event['seq'] for event in page['events']] == [0]
+    assert page['next_cursor'] == 1
+    assert page['caught_up'] is False
+
+    oversized = project_bounded_replay_payload(
+        full, max_events=128, max_event_bytes=1)
+    assert [event['seq'] for event in oversized['events']] == [0]
+    assert oversized['next_cursor'] == 1
 
 
 @pytest.mark.parametrize(

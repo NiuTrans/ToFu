@@ -127,7 +127,6 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
     from types import SimpleNamespace
 
     import lib.oauth.codex_catalog as codex_catalog
-    import lib.llm_dispatch.model_catalog_sync as model_catalog_sync
     import lib.scheduler.manager as scheduler_manager
     import routes
     import routes.plugin_registry as plugin_registry
@@ -147,8 +146,6 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
         scheduler_manager, 'start_scheduler_worker', start_scheduler_worker)
     monkeypatch.setattr(codex_catalog, 'start_codex_catalog_refresher',
                         lambda: calls.append('codex-catalog') or True)
-    monkeypatch.setattr(model_catalog_sync, 'start_model_catalog_sync',
-                        lambda: calls.append('model-catalog'))
     monkeypatch.setattr(plugin_registry, 'run_startup_hooks',
                         lambda app: calls.append('plugin') or 1)
 
@@ -156,16 +153,15 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
         extensions = {}
 
     app = App()
-    assert routes.start_registered_background_services(app) == 4
+    assert routes.start_registered_background_services(app) == 3
     assert routes.start_registered_background_services(app) == 0
     assert calls == [
-        'scheduler', 'codex-catalog', 'model-catalog', 'plugin',
+        'scheduler', 'codex-catalog', 'plugin',
     ]
 
 
 def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
     import lib.knowledge.enrichment as knowledge_enrichment
-    import lib.llm_dispatch.model_catalog_sync as model_catalog_sync
     import lib.oauth.codex_catalog as codex_catalog
     import lib.scheduler.manager as scheduler_manager
     import routes
@@ -184,9 +180,6 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         codex_catalog, 'stop_codex_catalog_refresher',
         stopped('codex-catalog'))
     monkeypatch.setattr(
-        model_catalog_sync, 'stop_model_catalog_sync',
-        stopped('model-catalog'))
-    monkeypatch.setattr(
         plugin_registry, 'run_shutdown_hooks',
         lambda app: calls.append(('plugin', {'app': app})) or 1)
 
@@ -194,12 +187,11 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert routes.stop_registered_background_services(app, timeout=0.25) == 5
+    assert routes.stop_registered_background_services(app, timeout=0.25) == 4
     assert routes.stop_registered_background_services(app, timeout=0.25) == 0
     assert calls == [
         ('plugin', {'app': app}),
         ('knowledge', {'timeout': 0.25}),
-        ('model-catalog', {'timeout': 0.25}),
         ('codex-catalog', {'timeout': 0.25}),
         ('scheduler', {'timeout': 0.25}),
     ]
@@ -207,7 +199,6 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
 
 def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
     import lib.knowledge.enrichment as knowledge_enrichment
-    import lib.llm_dispatch.model_catalog_sync as model_catalog_sync
     import lib.oauth.codex_catalog as codex_catalog
     import lib.scheduler.manager as scheduler_manager
     import routes
@@ -219,13 +210,11 @@ def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
         scheduler_manager, 'stop_scheduler_worker', lambda **_kwargs: False)
     monkeypatch.setattr(
         codex_catalog, 'stop_codex_catalog_refresher', lambda **_kwargs: True)
-    monkeypatch.setattr(
-        model_catalog_sync, 'stop_model_catalog_sync', lambda **_kwargs: True)
     monkeypatch.setattr(plugin_registry, 'run_shutdown_hooks', lambda _app: 0)
 
     class App:
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert routes.stop_registered_background_services(app) == 3
+    assert routes.stop_registered_background_services(app) == 2
     assert app.extensions['tofu_registered_background_services'] is True

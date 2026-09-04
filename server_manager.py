@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shlex
 import signal
@@ -25,7 +26,10 @@ from pathlib import Path
 from typing import Any
 
 from runtime_guards import (
+    RESOURCE_BUDGET_AUTOMATIC_ENV,
     RESOURCE_BUDGET_ENV_KEYS,
+    RESOURCE_BUDGET_POLICY_ENV,
+    RESOURCE_BUDGET_POLICY_VERSION,
     _persistent_data_path,
     deployment_resource_default,
     install_process_resource_defaults,
@@ -44,7 +48,18 @@ DEFAULT_FAILURE_HISTORY_KEEP = 50
 DEFAULT_WORKER_RSS_CGROUP_FRACTION = 0.70
 DEFAULT_SIDECAR_LEASE_RELEASE_WAIT = 10.0
 DEFAULT_STORAGE_LEASE_POLL_INTERVAL = 0.1
+DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT = 660.0
+DEFAULT_EXIT_INTENT_WINDOW = 120.0
+CLEAN_WORKER_EXIT_REASONS = frozenset(
+    {'manual', 'signal', 'restart', 'memory_recycle'})
 MIB = 1024 * 1024
+WORKER_BUDGET_STATUS_KEYS = (
+    'TOFU_MAX_INFLIGHT_TASKS',
+    'TOFU_AGENT_WORKERS',
+    'TOFU_TASK_RSS_RESERVE_MB',
+    'TOFU_PROCESS_RSS_RELIEF_MB',
+    'TOFU_PROCESS_RSS_RECYCLE_MB',
+)
 CGROUP_OOM_EVENT_PATHS = (
     '/sys/fs/cgroup/memory.events',
     '/sys/fs/cgroup/memory/memory.oom_control',
@@ -59,6 +74,9 @@ SERVER_ENV_KEYS = frozenset({
     'TOFU_DATA_DIR', 'TOFU_DATA_LAYOUT',
     'XDG_DATA_HOME', 'LOCALAPPDATA',
     'TOFU_SERVER_PYTHON_CACHE', 'TOFU_SERVER_PYTHON_CACHE_DIR',
+    # Agent scheduling is created before request handling starts. Preserve
+    # explicit project overrides across manager-owned worker generations.
+    'TOFU_AGENT_QUEUE_CAPACITY', 'TOFU_AGENT_STUCK_REPLACEMENTS',
     # These must exist before the Python worker starts. Loading them later in
     # server.py's dotenv phase cannot reconfigure glibc or already-imported
     # BLAS/OpenMP runtimes.
@@ -66,6 +84,16 @@ SERVER_ENV_KEYS = frozenset({
     'OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
     'NUMEXPR_NUM_THREADS',
 }) | RESOURCE_BUDGET_ENV_KEYS
+
+_DATA_LOCATION_ENV_KEYS = (
+    'TOFU_DATA_DIR',
+    'XDG_DATA_HOME',
+    'LOCALAPPDATA',
+)
+_PYTEST_CONTEXT_ENV_KEYS = (
+    'PYTEST_CURRENT_TEST',
+    'TOFU_PYTEST_RUN_ROOT',
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +240,45 @@ def proc_env_value(pid: int, name: str) -> str | None:
     except (OSError, ValueError, TypeError):
         pass
     return None
+
+
+def worker_resource_budget_snapshot(pid: int | None) -> dict[str, Any]:
+    """Expose a credential-free subset of the live worker's boot budget."""
+    if not isinstance(pid, int) or pid <= 0:
+        return {}
+    wanted = {
+        *WORKER_BUDGET_STATUS_KEYS,
+        RESOURCE_BUDGET_POLICY_ENV,
+        RESOURCE_BUDGET_AUTOMATIC_ENV,
+    }
+    found: dict[str, str] = {}
+    try:
+        for item in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0'):
+            key_bytes, separator, value_bytes = item.partition(b'=')
+            if not separator:
+                continue
+            key = key_bytes.decode('utf-8', errors='ignore')
+            if key in wanted:
+                found[key] = value_bytes.decode('utf-8', errors='replace')
+    except (OSError, ValueError, TypeError):
+        return {}
+    automatic = sorted({
+        name for name in found.get(
+            RESOURCE_BUDGET_AUTOMATIC_ENV, '').split(',')
+        if name in RESOURCE_BUDGET_ENV_KEYS
+    })
+    policy_version = found.get(RESOURCE_BUDGET_POLICY_ENV, '')
+    return {
+        'policyVersion': policy_version or None,
+        'currentPolicyVersion': RESOURCE_BUDGET_POLICY_VERSION,
+        'policyCurrent': policy_version == RESOURCE_BUDGET_POLICY_VERSION,
+        'automatic': automatic,
+        'values': {
+            name: found[name]
+            for name in WORKER_BUDGET_STATUS_KEYS
+            if name in found
+        },
+    }
 
 
 def proc_cmdline(pid: int) -> str | None:
@@ -534,6 +601,36 @@ def _readiness_failure_detail(
     return f'{reason}; {suffix}' if reason else suffix
 
 
+def _settle_readiness_probe(
+    result: dict[str, Any],
+    *,
+    scheme: str,
+    port: int,
+    status: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Project one already-fetched readiness response onto a live worker."""
+    storage = payload.get('storage')
+    readiness_state = payload.get('state')
+    storage_state = storage.get('state') if isinstance(storage, dict) else None
+    ready = bool(
+        200 <= status < 300
+        and payload.get('ok') is True
+        and payload.get('ready') is True)
+    result.update({
+        'ready': ready,
+        'readinessState': readiness_state,
+        'storageState': storage_state,
+    })
+    if ready:
+        result['url'] = f'{scheme}://localhost:{port}'
+        return result
+    detail = 'application readiness failed: ' + _readiness_failure_detail(
+        status, payload)
+    result.update(readinessError=detail, error=detail)
+    return result
+
+
 def probe_application_readiness(
     port: int,
     expected_pid: int | None,
@@ -541,11 +638,12 @@ def probe_application_readiness(
     preferred_scheme: str = '',
     timeout: float = 2.0,
 ) -> dict[str, Any]:
-    """Verify loopback worker identity, then its dependency readiness.
+    """Verify loopback worker identity and its dependency readiness.
 
     ``health`` remains a compatibility alias for identity liveness. It must
     not be used as traffic readiness; callers require both ``liveness`` and
-    ``ready``.
+    ``ready``. Current workers return their PID from ``/api/ready``, allowing
+    one normal probe. Older workers fall back to the two-endpoint contract.
     """
     result: dict[str, Any] = {
         'health': False,
@@ -579,6 +677,42 @@ def probe_application_readiness(
     for scheme in schemes:
         context = ssl._create_unverified_context() if scheme == 'https' else None
         base_url = f'{scheme}://127.0.0.1:{checked_port}'
+        ready_status = None
+        ready_payload = None
+        ready_error = ''
+        try:
+            ready_status, ready_payload = _read_probe_json(
+                base_url + '/api/ready', timeout=timeout, context=context)
+        except (OSError, ValueError, urllib.error.URLError,
+                json.JSONDecodeError) as exc:
+            ready_error = f'{scheme} readiness probe failed: {exc}'
+
+        if ready_payload is not None and ready_payload.get('pid') is not None:
+            payload_pid = ready_payload.get('pid')
+            if payload_pid != expected_pid:
+                last_error = (
+                    'readiness response PID does not match the locked worker '
+                    f'(expected {expected_pid}, got {payload_pid})')
+                continue
+            result.update({
+                'health': True,
+                'liveness': True,
+                'scheme': scheme,
+                'liveUrl': f'{scheme}://localhost:{checked_port}',
+                'payloadPid': payload_pid,
+                'pidMatches': True,
+                'livenessError': '',
+            })
+            return _settle_readiness_probe(
+                result,
+                scheme=scheme,
+                port=checked_port,
+                status=int(ready_status),
+                payload=ready_payload,
+            )
+
+        # Compatibility path for a worker generation whose readiness payload
+        # predates the PID field, or when readiness transport itself failed.
         try:
             health_status, health_payload = _read_probe_json(
                 base_url + '/api/health', timeout=timeout, context=context)
@@ -613,35 +747,17 @@ def probe_application_readiness(
             'pidMatches': True,
             'livenessError': '',
         })
-        try:
-            ready_status, ready_payload = _read_probe_json(
-                base_url + '/api/ready', timeout=timeout, context=context)
-        except (OSError, ValueError, urllib.error.URLError,
-                json.JSONDecodeError) as exc:
-            detail = f'{scheme} readiness probe failed: {exc}'
+        if ready_payload is None:
+            detail = ready_error or f'{scheme} readiness probe failed'
             result.update(readinessError=detail, error=detail)
             return result
-
-        storage = ready_payload.get('storage')
-        readiness_state = ready_payload.get('state')
-        storage_state = (
-            storage.get('state') if isinstance(storage, dict) else None)
-        ready = bool(
-            200 <= ready_status < 300
-            and ready_payload.get('ok') is True
-            and ready_payload.get('ready') is True)
-        result.update({
-            'ready': ready,
-            'readinessState': readiness_state,
-            'storageState': storage_state,
-        })
-        if ready:
-            result['url'] = f'{scheme}://localhost:{checked_port}'
-            return result
-        detail = 'application readiness failed: ' + _readiness_failure_detail(
-            ready_status, ready_payload)
-        result.update(readinessError=detail, error=detail)
-        return result
+        return _settle_readiness_probe(
+            result,
+            scheme=scheme,
+            port=checked_port,
+            status=int(ready_status),
+            payload=ready_payload,
+        )
 
     result['livenessError'] = last_error or 'identity liveness probe failed'
     result['error'] = result['livenessError']
@@ -722,6 +838,104 @@ def project_server_env(project_path: str) -> dict[str, str]:
     return result
 
 
+def _path_is_pytest_owned(raw_path: object, project_path: str) -> bool:
+    """Return whether a path is inside a recognizable pytest-owned root."""
+    value = str(raw_path or '').strip()
+    if not value:
+        return False
+    try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = Path(project_path) / path
+        parts = path.resolve(strict=False).parts
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for part in parts:
+        if part.startswith(('tofu-pytest-runs-', 'tofu-test-data-',
+                            'tofu-test-storage-')):
+            return True
+        if part.startswith('pytest-of-'):
+            return True
+        if part.startswith('pytest-') and part[7:].isdigit():
+            return True
+        if part.startswith('popen-gw') and part[8:].isdigit():
+            return True
+    return False
+
+
+def production_server_environment_error(
+    project_path: str,
+    environment: dict[str, object],
+) -> str:
+    """Reject test-owned state from a non-test (production) checkout.
+
+    Test projects are allowed to use their disposable data roots. The unsafe
+    combination is a durable/real checkout plus either a pytest process marker
+    or a data-location variable rooted in pytest's temporary namespace.
+    """
+    if _path_is_pytest_owned(project_path, project_path):
+        return ''
+    for key in _DATA_LOCATION_ENV_KEYS:
+        if _path_is_pytest_owned(environment.get(key), project_path):
+            return (
+                f'production lifecycle refused: {key} points into '
+                'pytest-owned temporary storage')
+    for key in _PYTEST_CONTEXT_ENV_KEYS:
+        if str(environment.get(key) or '').strip():
+            return (
+                f'production lifecycle refused: inherited pytest context '
+                f'({key})')
+    if str(environment.get('TOFU_TESTING') or '').strip() == '1':
+        return 'production lifecycle refused: inherited pytest context (TOFU_TESTING)'
+    return ''
+
+
+def run_frontend_preflight(
+    project_path: str,
+    python_executable: str,
+    environment: dict[str, str],
+    operation: str,
+) -> tuple[bool, str]:
+    """Run the project's repair-capable frontend gate in an isolated process.
+
+    The manager intentionally imports no application dependency graph. The
+    child command owns role selection, content-digest validation, the shared
+    build lock, and optional Node repair. Its output inherits the bounded
+    manager log rather than accumulating in an in-memory capture buffer.
+    """
+    command_path = Path(project_path) / 'serverctl.py'
+    if not command_path.is_file():
+        return False, f'frontend preflight command is missing: {command_path}'
+    child_environment = dict(environment)
+    child_environment['TOFU_PROJECT_PATH'] = str(Path(project_path).resolve())
+    try:
+        completed = subprocess.run(
+            [
+                python_executable,
+                str(command_path),
+                'prepare-frontend',
+                '--operation',
+                str(operation or 'manager worker spawn')[:120],
+            ],
+            cwd=project_path,
+            env=child_environment,
+            stdin=subprocess.DEVNULL,
+            timeout=DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, (
+            'frontend preflight exceeded '
+            f'{DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT:.0f}s')
+    except OSError as exc:
+        return False, f'frontend preflight could not start: {exc}'
+    if completed.returncode:
+        return False, (
+            f'frontend preflight exited {completed.returncode}; '
+            'see the manager log for the validation/build error')
+    return True, ''
+
+
 class LifecycleManager:
     """Own exactly one project's desired/observed server state."""
 
@@ -740,6 +954,7 @@ class LifecycleManager:
         self._stop_event = threading.Event()
         self._monitor: threading.Thread | None = None
         self._worker_bytecode_cache_lock_fd: int | None = None
+        self._state_needs_save = False
         self._project_env = project_server_env(self.project)
         loaded = _read_json(self.state_path)
         self._had_state = loaded.get('version') == STATE_VERSION
@@ -771,6 +986,8 @@ class LifecycleManager:
         self.worker_rss_recycle_bytes = worker_rss_recycle_limit_bytes(
             rss_limit_mb, environment=profile_environment)
         self._state = self._load_state()
+        if self._state_needs_save:
+            self._save()
         self._adopt_existing()
         self._restore_worker_bytecode_cache_lease()
 
@@ -786,6 +1003,19 @@ class LifecycleManager:
             'serverEnv': default_env,
             'port': _server_port([], {**os.environ, **default_env}),
             'restartCount': 0,
+            # restartCount predates exit-intent accounting and may contain a
+            # mixture of crashes and controlled signal/restart drains.  These
+            # counters start at this version's accounting epoch instead of
+            # laundering that historical ambiguity into precise telemetry.
+            'workerFailureCount': 0,
+            'plannedExitCount': 0,
+            'exitAccountingSince': _now(),
+            'lastWorkerExitAt': 0.0,
+            'lastWorkerExitKind': '',
+            'lastWorkerExitReason': '',
+            'lastConsumedExitMarker': '',
+            'pendingRecoverySource': '',
+            'pendingWorkerExitIntent': {},
             'consecutiveFailures': 0,
             'failureHistory': [],
             'activeFailureAt': 0.0,
@@ -807,6 +1037,7 @@ class LifecycleManager:
             'nextRetryAt': 0.0,
             'wedgeSince': 0.0,
             'lastError': '',
+            'environmentQuarantine': {},
             'lastTransitionAt': _now(),
             'launchSource': '',
             'updatedAt': _now(),
@@ -824,12 +1055,61 @@ class LifecycleManager:
             state['serverArgs'] = []
         if not isinstance(state.get('serverEnv'), dict):
             state['serverEnv'] = {}
+        normalized_environment = {
+            str(key): str(value)
+            for key, value in state['serverEnv'].items()
+            if key in SERVER_ENV_KEYS
+            and value is not None
+            and str(value) != ''
+        }
+        if normalized_environment != state['serverEnv']:
+            self._state_needs_save = True
+        state['serverEnv'] = normalized_environment
         if not isinstance(state.get('failureHistory'), list):
             state['failureHistory'] = []
         if not isinstance(state.get('storageBlocker'), dict):
             state['storageBlocker'] = {}
         if not isinstance(state.get('workerBytecodeCache'), dict):
             state['workerBytecodeCache'] = {}
+        if not isinstance(state.get('pendingRecoverySource'), str):
+            state['pendingRecoverySource'] = ''
+        if not isinstance(state.get('pendingWorkerExitIntent'), dict):
+            state['pendingWorkerExitIntent'] = {}
+        if not isinstance(state.get('environmentQuarantine'), dict):
+            state['environmentQuarantine'] = {}
+
+        project_environment_error = production_server_environment_error(
+            self.project, self._project_env)
+        persisted_environment_error = production_server_environment_error(
+            self.project, state['serverEnv'])
+        environment_error = project_environment_error or persisted_environment_error
+        if environment_error:
+            discarded_keys = sorted(state['serverEnv'])
+            state['serverArgs'] = []
+            if project_environment_error:
+                # An explicit unsafe .env must be corrected by the operator;
+                # silently falling back to a different authority is surprising.
+                state['desired'] = 'stopped'
+                state['serverEnv'] = {}
+            else:
+                # Persisted request provenance is unavailable. Discard the
+                # whole forwarded envelope, not only the path that exposed it.
+                state['serverEnv'] = dict(self._project_env)
+            effective_environment = dict(os.environ)
+            effective_environment.update(state['serverEnv'])
+            state['port'] = _server_port([], effective_environment)
+            state['environmentQuarantine'] = {
+                'detectedAt': _now(),
+                'reason': environment_error,
+                'discardedKeys': discarded_keys,
+            }
+            state['observed'] = (
+                'degraded' if state.get('desired') == 'running' else 'stopped')
+            state['lastError'] = environment_error
+            state['lastTransitionAt'] = _now()
+            self._state_needs_save = True
+            logger.error('%s; persisted worker environment was quarantined',
+                         environment_error)
         return state
 
     def _recent_failure_times(self, now: float | None = None) -> list[float]:
@@ -864,6 +1144,103 @@ class LifecycleManager:
 
     def _active_storage_lease(self) -> dict[str, Any]:
         return read_storage_lease_status(self._storage_data_dir())
+
+    def _clean_exit_marker_for_remembered_worker(self) -> dict[str, Any]:
+        """Return a fresh PID-bound clean-exit certificate, or an empty dict.
+
+        The marker is application-owned and best-effort, so the manager fails
+        safe unless every identity field agrees with the worker generation it
+        actually supervised.  Timestamp fencing rejects a stale clean marker
+        left by PID reuse or an earlier generation.
+        """
+        worker = self._state.get('worker') or {}
+        pid = worker.get('pid')
+        if not isinstance(pid, int):
+            return {}
+        marker = _read_json(
+            self._storage_data_dir() / '.server_shutdown.json')
+        reason = str(marker.get('reason') or '')
+        if (marker.get('state') != 'clean'
+                or marker.get('pid') != pid
+                or marker.get('host') != _hostname()
+                or reason not in CLEAN_WORKER_EXIT_REASONS):
+            return {}
+        try:
+            clean_ts = float(marker.get('clean_ts'))
+            spawned_at = float(worker.get('spawnedAt') or 0)
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        now = _now()
+        if (not math.isfinite(clean_ts)
+                or clean_ts < max(0.0, spawned_at - 1.0)
+                or clean_ts > now + 5.0):
+            return {}
+        marker_key = f'{pid}:{clean_ts:.6f}:{reason}'
+        return {
+            'pid': pid,
+            'reason': reason,
+            'cleanTs': clean_ts,
+            'markerKey': marker_key,
+            'alreadyConsumed': (
+                marker_key == self._state.get('lastConsumedExitMarker')),
+        }
+
+    def _pending_exit_intent_for_worker(
+        self,
+        pid: int,
+        clean_ts: float,
+    ) -> dict[str, Any]:
+        """Return one fresh manager-authored intent for the exact worker."""
+        intent = self._state.get('pendingWorkerExitIntent') or {}
+        reason = str(intent.get('reason') or '')
+        if (intent.get('pid') != pid
+                or intent.get('host') != _hostname()
+                or reason not in {'manual', 'restart'}):
+            return {}
+        try:
+            requested_at = float(intent.get('requestedAt'))
+            spawned_at = float(
+                (self._state.get('worker') or {}).get('spawnedAt') or 0)
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        now = _now()
+        if (not math.isfinite(requested_at)
+                or requested_at < max(0.0, spawned_at - 1.0)
+                or requested_at > now + 5.0
+                or requested_at > clean_ts + 1.0
+                or clean_ts - requested_at > DEFAULT_EXIT_INTENT_WINDOW):
+            return {}
+        return dict(intent)
+
+    def _record_planned_exit(
+        self,
+        reason: str,
+        *,
+        pid: int | None,
+        marker_key: str,
+        recovery_source: str = '',
+    ) -> bool:
+        """Consume one controlled exit without spending crash-loop budget."""
+        if marker_key and marker_key == self._state.get(
+                'lastConsumedExitMarker'):
+            return False
+        now = _now()
+        self._state['plannedExitCount'] = int(
+            self._state.get('plannedExitCount') or 0) + 1
+        self._state['lastWorkerExitAt'] = now
+        self._state['lastWorkerExitKind'] = 'planned'
+        self._state['lastWorkerExitReason'] = reason
+        self._state['lastConsumedExitMarker'] = marker_key
+        self._state['pendingRecoverySource'] = recovery_source
+        self._state['pendingWorkerExitIntent'] = {}
+        self._state['nextRetryAt'] = 0.0
+        self._state['worker'] = {}
+        self._release_worker_bytecode_cache_lease()
+        logger.info(
+            'worker controlled exit recorded pid=%s reason=%s recovery=%s',
+            pid, reason, recovery_source or 'none')
+        self._save()
+        return True
 
     def _wait_for_stopped_sidecar_release(
         self,
@@ -918,7 +1295,12 @@ class LifecycleManager:
             f'{holder} holds the storage lease; refusing to start a second '
             'storage authority')
 
-    def _defer_for_storage_lease(self, lease: dict[str, Any]) -> bool:
+    def _defer_for_storage_lease(
+        self,
+        lease: dict[str, Any],
+        *,
+        resume_source: str = '',
+    ) -> bool:
         """Persist a bounded startup blocker; return true for maintenance."""
         maintenance = lease.get('kind') == 'offline_maintenance'
         self._state['storageBlocker'] = {
@@ -928,9 +1310,10 @@ class LifecycleManager:
                 'holderVerified',
             )
         }
+        if resume_source:
+            self._state['storageBlocker']['resumeSource'] = resume_source
         self._release_worker_bytecode_cache_lease()
         self._state['worker'] = {}
-        self._state['nextRetryAt'] = 0.0
         self._set_observed(
             'maintenance' if maintenance else 'conflict',
             self._storage_blocker_message(lease),
@@ -1203,6 +1586,18 @@ class LifecycleManager:
             return f'pid {pid} is not server.py'
         if status.get('projectMatches') is False:
             return f'pid {pid} cwd is {status.get("processCwd")}, not this project'
+        worker_environment = {
+            key: proc_env_value(pid, key)
+            for key in (
+                *_DATA_LOCATION_ENV_KEYS,
+                *_PYTEST_CONTEXT_ENV_KEYS,
+                'TOFU_TESTING',
+            )
+        }
+        environment_error = production_server_environment_error(
+            self.project, worker_environment)
+        if environment_error:
+            return f'pid {pid} has unsafe environment: {environment_error}'
         external_owner = status.get('externalOwner')
         if external_owner and external_owner != 'supervisor':
             return f'pid {pid} is owned by {external_owner}, not tofu-manager'
@@ -1316,6 +1711,8 @@ class LifecycleManager:
                 last_error = str(
                     probe.get('readinessError') if liveness
                     else probe.get('livenessError') or last_error)
+            worker_resource_budget = worker_resource_budget_snapshot(
+                low.get('pid'))
             return {
                 **low,
                 'desired': self._state.get('desired'),
@@ -1335,8 +1732,22 @@ class LifecycleManager:
                 'storageLease': storage_lease or None,
                 'owner': 'tofu-manager',
                 'managerPid': os.getpid(),
+                'resourceBudgetPolicyVersion': RESOURCE_BUDGET_POLICY_VERSION,
+                'workerResourceBudget': worker_resource_budget or None,
                 'worker': worker,
                 'restartCount': int(self._state.get('restartCount') or 0),
+                'workerFailureCount': int(
+                    self._state.get('workerFailureCount') or 0),
+                'plannedExitCount': int(
+                    self._state.get('plannedExitCount') or 0),
+                'exitAccountingSince': float(
+                    self._state.get('exitAccountingSince') or 0),
+                'lastWorkerExitAt': float(
+                    self._state.get('lastWorkerExitAt') or 0),
+                'lastWorkerExitKind': (
+                    self._state.get('lastWorkerExitKind') or ''),
+                'lastWorkerExitReason': (
+                    self._state.get('lastWorkerExitReason') or ''),
                 'consecutiveFailures': int(self._state.get('consecutiveFailures') or 0),
                 'recentFailureCount': recent_failure_count,
                 'failureWindowSeconds': self.failure_window,
@@ -1361,6 +1772,8 @@ class LifecycleManager:
                 'lastRecoverySeconds': self._state.get('lastRecoverySeconds'),
                 'nextRetryAt': float(self._state.get('nextRetryAt') or 0),
                 'lastError': last_error,
+                'environmentQuarantine': dict(
+                    self._state.get('environmentQuarantine') or {}),
                 'launchSource': self._state.get('launchSource') or '',
                 'serverArgs': list(self._state.get('serverArgs') or []),
                 'serverEnv': dict(self._state.get('serverEnv') or {}),
@@ -1370,12 +1783,48 @@ class LifecycleManager:
                 'stateFile': str(self.state_path),
             }
 
+    def _validated_server_environment(
+        self,
+        server_env: dict[str, str] | None,
+    ) -> tuple[dict[str, str] | None, dict[str, str], str]:
+        """Return project values, effective forwarded values, and an error."""
+        current_project_environment = project_server_env(self.project)
+        project_environment_error = production_server_environment_error(
+            self.project, current_project_environment)
+        if project_environment_error:
+            return current_project_environment, {}, project_environment_error
+        if server_env is None:
+            candidate = {
+                str(key): str(value)
+                for key, value in (self._state.get('serverEnv') or {}).items()
+            }
+            project_environment = None
+        else:
+            unsafe = sorted(str(key) for key in set(server_env) - SERVER_ENV_KEYS)
+            if unsafe:
+                return None, {}, (
+                    f'unsupported serverEnv key(s): {", ".join(unsafe)}')
+            project_environment = current_project_environment
+            candidate = {
+                **project_environment,
+                **{
+                    str(key): str(value)
+                    for key, value in server_env.items()
+                    if value is not None and str(value) != ''
+                },
+            }
+        effective_environment: dict[str, object] = dict(os.environ)
+        effective_environment.update(candidate)
+        environment_error = production_server_environment_error(
+            self.project, effective_environment)
+        return project_environment, candidate, environment_error
+
     def _spawn(self, source: str) -> dict[str, Any]:
-        self._release_worker_bytecode_cache_lease()
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self._maintain_process_logs(force=True)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._disable_legacy_guard()
+        # A persisted planned-recovery intent is consumed by this exact spawn
+        # attempt.  If process creation itself fails, _spawn latches a real
+        # crashloop instead of replaying the old clean marker forever.
+        self._state['pendingRecoverySource'] = ''
+        self._state['pendingWorkerExitIntent'] = {}
         env = os.environ.copy()
         env['TOFU_SERVER_WORKER'] = '1'
         env['TOFU_MANAGED_BY'] = 'supervisor'
@@ -1388,12 +1837,44 @@ class LifecycleManager:
         env['PORT'] = str(self.port)
         env.update({str(key): str(value)
                     for key, value in (self._state.get('serverEnv') or {}).items()})
+        environment_error = production_server_environment_error(
+            self.project, env)
+        if environment_error:
+            self._state['desired'] = 'stopped'
+            self._state['environmentQuarantine'] = {
+                'detectedAt': _now(),
+                'reason': environment_error,
+                'discardedKeys': [],
+            }
+            self._set_observed('stopped', environment_error)
+            self._save()
+            logger.error('%s; worker spawn was blocked', environment_error)
+            return {'ok': False, 'message': environment_error}
+        self._release_worker_bytecode_cache_lease()
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._maintain_process_logs(force=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._disable_legacy_guard()
         # Apply native-process settings only after the project .env overlay is
         # present. glibc reads MALLOC_ARENA_MAX at exec time; translating the
         # Tofu knob before this merge would silently ignore a user's override.
         install_process_resource_defaults(env)
         self.worker_rss_recycle_bytes = worker_rss_recycle_limit_bytes(
             env.get('TOFU_PROCESS_RSS_RECYCLE_MB'), environment=env)
+        frontend_ready, frontend_error = run_frontend_preflight(
+            self.project,
+            self.python,
+            env,
+            f'manager {source}',
+        )
+        if not frontend_ready:
+            message = (
+                'worker spawn refused before lifecycle change: '
+                f'{frontend_error}')
+            self._set_observed('crashloop', message)
+            self._save()
+            logger.error('%s', message)
+            return {'ok': False, 'message': message}
         bytecode_activation = None
         bytecode_status: dict[str, object] = {
             'selected': False,
@@ -1464,6 +1945,10 @@ class LifecycleManager:
                 return {'ok': False, 'message': 'serverArgs must be a JSON array'}
             if server_env is not None and not isinstance(server_env, dict):
                 return {'ok': False, 'message': 'serverEnv must be a JSON object'}
+            project_environment, forwarded_environment, environment_error = (
+                self._validated_server_environment(server_env))
+            if environment_error:
+                return {'ok': False, 'message': environment_error}
             status = read_lock_status(self.project)
             if status.get('running'):
                 identity_error = self._identity_error(status)
@@ -1501,15 +1986,9 @@ class LifecycleManager:
                     return {'ok': False, 'message': 'serverArgs exceeds safety limit'}
                 self._state['serverArgs'] = cleaned
             if server_env is not None:
-                unsafe = sorted(set(server_env) - SERVER_ENV_KEYS)
-                if unsafe:
-                    return {'ok': False,
-                            'message': f'unsupported serverEnv key(s): {", ".join(unsafe)}'}
-                self._project_env = project_server_env(self.project)
-                forwarded_env = {
-                    str(key): str(value) for key, value in server_env.items()
-                    if value is not None and str(value) != ''}
-                self._state['serverEnv'] = {**self._project_env, **forwarded_env}
+                self._project_env = dict(project_environment or {})
+                self._state['serverEnv'] = forwarded_environment
+                self._state['environmentQuarantine'] = {}
             if server_args is not None or server_env is not None:
                 effective_env = dict(os.environ)
                 effective_env.update(self._state.get('serverEnv') or {})
@@ -1626,8 +2105,21 @@ class LifecycleManager:
             if not status.get('running'):
                 status = self._remembered_worker_status() or status
             was_running = bool(status.get('running'))
+            planned_reason = ''
+            if was_running:
+                self._remember_worker(status)
+                planned_reason = (
+                    'restart' if keep_desired_running else 'manual')
             self._state['desired'] = 'running' if keep_desired_running else 'stopped'
             self._state['launchSource'] = source
+            self._state['pendingWorkerExitIntent'] = ({
+                'pid': status.get('pid'),
+                'host': _hostname(),
+                'reason': planned_reason,
+                'requestedAt': _now(),
+                'recoverySource': (
+                    'manager-restart' if keep_desired_running else ''),
+            } if was_running else {})
             if not keep_desired_running:
                 self._state['storageBlocker'] = {}
             self._set_observed('stopping' if was_running else 'stopped')
@@ -1635,12 +2127,24 @@ class LifecycleManager:
             self._save()  # desired=stopped must win before the signal is sent
             ok, killed, message = self._terminate(status)
             if ok:
-                self._state['worker'] = {}
-                self._release_worker_bytecode_cache_lease()
+                if was_running:
+                    self._record_planned_exit(
+                        planned_reason,
+                        pid=status.get('pid'),
+                        marker_key=(
+                            f'manager:{status.get("pid")}:{_now():.6f}:'
+                            f'{planned_reason}'),
+                        recovery_source=(
+                            'manager-restart' if keep_desired_running else ''),
+                    )
+                else:
+                    self._state['worker'] = {}
+                    self._release_worker_bytecode_cache_lease()
                 self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
                 self._state['lastError'] = ''
             else:
+                self._state['pendingWorkerExitIntent'] = {}
                 self._set_observed('conflict', message)
             self._save()
             return {
@@ -1659,6 +2163,10 @@ class LifecycleManager:
                 return {'ok': False, 'message': 'serverArgs must be a JSON array'}
             if server_env is not None and not isinstance(server_env, dict):
                 return {'ok': False, 'message': 'serverEnv must be a JSON object'}
+            project_environment, forwarded_environment, environment_error = (
+                self._validated_server_environment(server_env))
+            if environment_error:
+                return {'ok': False, 'message': environment_error}
             if server_args is None and server_env is None:
                 live = read_lock_status(self.project)
                 if live.get('running') and not self._identity_error(live):
@@ -1666,15 +2174,9 @@ class LifecycleManager:
             if server_args is not None:
                 self._state['serverArgs'] = [str(arg) for arg in server_args]
             if server_env is not None:
-                unsafe = sorted(set(server_env) - SERVER_ENV_KEYS)
-                if unsafe:
-                    return {'ok': False,
-                            'message': f'unsupported serverEnv key(s): {", ".join(unsafe)}'}
-                self._project_env = project_server_env(self.project)
-                forwarded_env = {
-                    str(key): str(value) for key, value in server_env.items()
-                    if value is not None and str(value) != ''}
-                self._state['serverEnv'] = {**self._project_env, **forwarded_env}
+                self._project_env = dict(project_environment or {})
+                self._state['serverEnv'] = forwarded_environment
+                self._state['environmentQuarantine'] = {}
             if server_args is not None or server_env is not None:
                 effective_env = dict(os.environ)
                 effective_env.update(self._state.get('serverEnv') or {})
@@ -1722,6 +2224,7 @@ class LifecycleManager:
                         self._save()
                         return
                 self._state['worker'] = {}
+                self._state['pendingWorkerExitIntent'] = {}
                 self._release_worker_bytecode_cache_lease()
                 self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
@@ -1803,26 +2306,133 @@ class LifecycleManager:
                     self._set_observed('starting')
                     self._save()
                     return
-            storage_lease = self._active_storage_lease()
-            if storage_lease.get('held'):
-                self._defer_for_storage_lease(storage_lease)
-                return
             prior_storage_blocker = dict(
                 self._state.get('storageBlocker') or {})
             if prior_storage_blocker:
+                storage_lease = self._active_storage_lease()
+                if storage_lease.get('held'):
+                    self._defer_for_storage_lease(
+                        storage_lease,
+                        resume_source=str(
+                            prior_storage_blocker.get('resumeSource') or ''),
+                    )
+                    return
                 self._state['storageBlocker'] = {}
                 self._state['lastError'] = ''
-                self._clear_failure_budget()
                 source = (
-                    'storage-maintenance-complete'
-                    if prior_storage_blocker.get('kind')
-                    == 'offline_maintenance'
-                    else 'storage-lease-released')
+                    str(prior_storage_blocker.get('resumeSource') or '')
+                    or str(self._state.get('pendingRecoverySource') or '')
+                    or ('storage-maintenance-complete'
+                        if prior_storage_blocker.get('kind')
+                        == 'offline_maintenance'
+                        else 'storage-lease-released'))
+                retry_at = float(self._state.get('nextRetryAt') or 0)
+                if retry_at and _now() < retry_at:
+                    self._set_observed(
+                        'starting',
+                        f'storage lease released; retrying at {retry_at:.3f}',
+                    )
+                    self._save()
+                    return
+                if retry_at:
+                    self._state['nextRetryAt'] = 0.0
                 self._spawn(source)
                 return
-            self._record_failure()
 
-    def _record_failure(self) -> None:
+            pending_recovery = str(
+                self._state.get('pendingRecoverySource') or '')
+            if pending_recovery:
+                storage_lease = self._active_storage_lease()
+                if storage_lease.get('held'):
+                    self._defer_for_storage_lease(
+                        storage_lease, resume_source=pending_recovery)
+                    return
+                self._spawn(pending_recovery)
+                return
+
+            clean_exit = self._clean_exit_marker_for_remembered_worker()
+            if clean_exit and not clean_exit.get('alreadyConsumed'):
+                reason = str(clean_exit['reason'])
+                pid = int(clean_exit['pid'])
+                marker_key = str(clean_exit['markerKey'])
+                pending_intent = self._pending_exit_intent_for_worker(
+                    pid, float(clean_exit['cleanTs']))
+                if (reason == 'signal'
+                        and pending_intent.get('reason') == 'restart'):
+                    reason = 'restart'
+                if reason == 'manual':
+                    self._state['desired'] = 'stopped'
+                    self._record_planned_exit(
+                        reason,
+                        pid=pid,
+                        marker_key=marker_key,
+                    )
+                    self._state['storageBlocker'] = {}
+                    self._set_observed('stopped')
+                    self._state['lastError'] = ''
+                    self._save()
+                    return
+                if reason == 'restart':
+                    recovery_source = (
+                        str(pending_intent.get('recoverySource') or '')
+                        or 'clean-restart-recovery')
+                    self._record_planned_exit(
+                        reason,
+                        pid=pid,
+                        marker_key=marker_key,
+                        recovery_source=recovery_source,
+                    )
+                    storage_lease = self._active_storage_lease()
+                    if storage_lease.get('held'):
+                        self._defer_for_storage_lease(
+                            storage_lease, resume_source=recovery_source)
+                    else:
+                        self._spawn(recovery_source)
+                    return
+                # Generic SIGTERM proves a graceful drain, not who intended
+                # it. Only a manager-authored PID intent or explicit restart
+                # marker bypasses accounting. Memory recycle also spends
+                # budget so a leak/recycle loop cannot run forever.
+                exit_cause = (
+                    'unintended_signal' if reason == 'signal' else
+                    'memory_recycle')
+                self._state['lastError'] = (
+                    f'worker exited after unplanned graceful signal pid {pid}'
+                    if reason == 'signal' else
+                    f'worker requested graceful memory recycle pid {pid}')
+                self._record_failure(
+                    exit_cause=exit_cause,
+                    failure_reason=self._state['lastError'],
+                )
+                if self._state.get('observed') == 'crashloop':
+                    return
+                if self._launcher_is_alive():
+                    return
+                storage_lease = self._active_storage_lease()
+                if storage_lease.get('held'):
+                    self._defer_for_storage_lease(
+                        storage_lease, resume_source='automatic-recovery')
+                return
+
+            # Count the worker generation before waiting for its orphaned child
+            # Sidecar lease.  The old order treated a real crash as mere storage
+            # maintenance, then erased the failure budget when the lease fell.
+            self._record_failure()
+            if self._state.get('observed') == 'crashloop':
+                return
+            if self._launcher_is_alive():
+                return
+            storage_lease = self._active_storage_lease()
+            if storage_lease.get('held'):
+                self._defer_for_storage_lease(
+                    storage_lease, resume_source='automatic-recovery')
+
+    def _record_failure(
+        self,
+        *,
+        exit_cause: str | None = None,
+        failure_reason: str | None = None,
+    ) -> None:
         # A crash-loop is a latched operator boundary. Reconciliation keeps
         # observing the absent worker every monitor interval, but that is not
         # a new worker exit and must not inflate lifetime diagnostics (or turn
@@ -1852,35 +2462,45 @@ class LifecycleManager:
         if current_oom is not None:
             self._state['lastCgroupOomKillCount'] = current_oom
         prior_error = self._state.get('lastError') or ''
-        if prior_error.startswith('manager RSS ceiling exceeded'):
-            exit_cause = 'manager_rss_recycle'
-            failure_reason = prior_error
+        if exit_cause and failure_reason:
+            classified_exit_cause = exit_cause
+            classified_failure_reason = failure_reason
+        elif prior_error.startswith('manager RSS ceiling exceeded'):
+            classified_exit_cause = 'manager_rss_recycle'
+            classified_failure_reason = prior_error
         elif oom_delta:
-            exit_cause = 'cgroup_oom_event'
-            failure_reason = (
+            classified_exit_cause = 'cgroup_oom_event'
+            classified_failure_reason = (
                 f'worker disappeared while shared cgroup oom_kill advanced '
                 f'by {oom_delta}')
         elif prior_error.startswith('recovered wedged worker'):
-            exit_cause = 'health_wedge'
-            failure_reason = prior_error
+            classified_exit_cause = 'health_wedge'
+            classified_failure_reason = prior_error
         else:
-            exit_cause = 'unexpected_exit'
-            failure_reason = prior_error or 'worker exited unexpectedly'
+            classified_exit_cause = 'unexpected_exit'
+            classified_failure_reason = (
+                prior_error or 'worker exited unexpectedly')
         self._state['failureHistory'] = history
         self._state['activeFailureAt'] = (
             float(self._state.get('activeFailureAt') or 0) or now)
         self._state['lastFailureAt'] = now
-        self._state['lastFailureReason'] = failure_reason
-        self._state['lastExitCause'] = exit_cause
+        self._state['lastFailureReason'] = classified_failure_reason
+        self._state['lastExitCause'] = classified_exit_cause
+        self._state['lastWorkerExitAt'] = now
+        self._state['lastWorkerExitKind'] = 'failure'
+        self._state['lastWorkerExitReason'] = classified_exit_cause
         self._state['lastCgroupOomDelta'] = oom_delta
         self._state['consecutiveFailures'] = failures
         self._state['restartCount'] = int(self._state.get('restartCount') or 0) + 1
+        self._state['workerFailureCount'] = int(
+            self._state.get('workerFailureCount') or 0) + 1
+        self._state['pendingWorkerExitIntent'] = {}
         self._state['worker'] = {}
         self._release_worker_bytecode_cache_lease()
         logger.warning(
             'worker failure %d/%d in %.0fs window (consecutive=%d, cause=%s): %s',
             recent_failures, self.max_failures, self.failure_window,
-            failures, exit_cause, failure_reason)
+            failures, classified_exit_cause, classified_failure_reason)
         if recent_failures >= self.max_failures:
             self._set_observed('crashloop',
                                f'worker failed {recent_failures} times in '

@@ -49,6 +49,27 @@ def test_scheduler_dispatches_backup_through_the_storage_authority(monkeypatch):
     assert '12.0 MiB' in message
 
 
+def test_default_backup_task_uses_the_launch_probed_deadline(monkeypatch):
+    import lib.scheduler.manager as manager_module
+
+    manager = manager_module.ScheduledTaskManager.__new__(
+        manager_module.ScheduledTaskManager)
+    captured = {}
+    monkeypatch.setattr(
+        manager_module, '_storage_backup_timeout_seconds', lambda: 21_600)
+    monkeypatch.setattr(
+        manager,
+        '_ensure_default_task',
+        lambda **kwargs: (captured.update(kwargs) or ({'id': 'backup'}, False)),
+    )
+
+    manager._ensure_default_storage_backup_task()
+
+    assert captured['system_key'] == 'storage-backup'
+    assert captured['max_runtime'] == 21_600
+    assert captured['task_type'] == 'storage_backup'
+
+
 def test_distributed_scheduler_never_invokes_application_backup(monkeypatch):
     import lib.scheduler.manager as manager_module
 
@@ -145,7 +166,7 @@ def test_schema_36_retires_database_specific_tasks_and_adds_system_identity(
     ).fetchone()[0]
     connection.close()
 
-    assert int(version) == schema.SCHEMA_VERSION == 40
+    assert int(version) == schema.SCHEMA_VERSION
     assert 'system_key' in columns
     assert [tuple(row) for row in tasks] == [('user-task', '')]
 

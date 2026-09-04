@@ -1,4 +1,9 @@
 import { registerAction } from '../../action-registry';
+
+import {
+  readBrowserStorage,
+  writeBrowserStorage,
+} from '../../core/browser-storage';
 import { t, type I18nKey } from '../../i18n';
 
 export interface ReaderPreferences {
@@ -25,18 +30,18 @@ function clampIndex(value: unknown, maximum: number, fallback: number): number {
 export function readReaderPreferences(): ReaderPreferences {
   let scaleIdx: unknown = DEFAULT_SCALE_INDEX;
   let widthIdx: unknown = DEFAULT_WIDTH_INDEX;
-  try {
-    const raw = localStorage.getItem(PREFS_KEY);
-    if (raw) {
+  const raw = readBrowserStorage(PREFS_KEY);
+  if (raw) {
+    try {
       const parsed: unknown = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
         const record = parsed as Record<string, unknown>;
         scaleIdx = record.scaleIdx;
         widthIdx = record.widthIdx;
       }
+    } catch (error: unknown) {
+      console.warn('[Paper:Reader] invalid prefs ignored:', error);
     }
-  } catch (error: unknown) {
-    console.warn('[Paper:Reader] read prefs failed:', error);
   }
   return {
     scaleIdx: clampIndex(
@@ -47,14 +52,12 @@ export function readReaderPreferences(): ReaderPreferences {
 
 /** Persist one validated snapshot. Storage denial never breaks the reader. */
 export function persistReaderPreferences(prefs: ReaderPreferences): void {
-  try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({
-      scaleIdx: prefs.scaleIdx,
-      widthIdx: prefs.widthIdx,
-    }));
-  } catch (error: unknown) {
-    console.warn('[Paper:Reader] persist prefs failed:', error);
-  }
+  writeBrowserStorage(PREFS_KEY, JSON.stringify({
+    scaleIdx: clampIndex(
+      prefs.scaleIdx, FONT_SCALES.length - 1, DEFAULT_SCALE_INDEX),
+    widthIdx: clampIndex(
+      prefs.widthIdx, WIDTHS.length - 1, DEFAULT_WIDTH_INDEX),
+  }));
 }
 
 /** Apply preferences to both report and review surfaces and sync controls. */

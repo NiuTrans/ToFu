@@ -69,6 +69,8 @@ PAPER_FEATURES = os.path.join(ROOT, 'frontend', 'src', 'features', 'paper')
 TYPED_TRANSPORT = os.path.join(ROOT, 'frontend', 'src', 'api', 'transport.ts')
 CONVERSATION_SYNC = os.path.join(
     ROOT, 'frontend', 'src', 'core', 'conversation-sync.ts')
+RUNTIME_PRELUDE = os.path.join(
+    ROOT, 'frontend', 'src', 'runtime', 'sections', '_prelude.js')
 
 
 def _src(*parts):
@@ -139,11 +141,9 @@ class TestApiDefaultIsUnbounded:
     def test_probe_call_sites_still_pass_their_own_budget(self):
         """The probes must not have been silently un-bounded by the default
         change — they carry their own budgets, so they are unaffected."""
-        for rel, needle in (
-            ('core/backend_offline_monitor.js', 'AbortSignal.timeout('),
-        ):
-            assert needle in _live(rel), \
-                f'{rel} lost its explicit probe budget'
+        prelude = _live_native(RUNTIME_PRELUDE)
+        assert 'AbortSignal.timeout(timeoutMs)' in prelude, (
+            'the backend-availability health probe lost its explicit budget')
 
 
     def test_translation_has_no_abort_timer(self):
@@ -250,7 +250,6 @@ class TestGenerationPathsHaveNoTimer:
 #: which is the point of the ratchet.
 _PROBE_FILES = frozenset({
     'core/backend_offline_monitor.js',   # offline detection probe
-    'core/health_stream_timer.js',       # per-stream health check
     'core/conversation_catalog.js',      # bounded catalog liveness/retry probe
     'core/pending_sync.js',              # queued-write flush probe
     'main/main_send_pipeline.js',        # chat-START handshake (not the stream)

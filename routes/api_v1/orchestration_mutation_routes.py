@@ -15,7 +15,7 @@ from lib.request_parser import parse_body
 from lib.task_runtime_ports import TaskRouteRuntimePort
 from routes._task_routes import register_task_routes
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 from .orchestration_mutation_http import (
     human_approval_request_schema,
     human_input_request_schema,
@@ -69,7 +69,11 @@ def register_orchestration_mutation_routes(
             approved = prepared.approved
             return orchestration_mutation_service_response(
                 'api_v1.orchestrations.approve_gate',
-                lambda: human_gate_service().approve(request_id, approved),
+                lambda: human_gate_service().approve(
+                    request_id,
+                    approved,
+                    owner_user_id=request_user_id(),
+                ),
                 endpoint='human-approve',
                 on_success=lambda: logger.info(
                     '[Orchestrations] human approve req=%s approved=%s',
@@ -103,7 +107,10 @@ def register_orchestration_mutation_routes(
             return orchestration_mutation_service_response(
                 'api_v1.orchestrations.input_gate',
                 lambda: human_gate_service().input(
-                    request_id, response_text),
+                    request_id,
+                    response_text,
+                    owner_user_id=request_user_id(),
+                ),
                 endpoint='human-input',
                 on_success=lambda: logger.info(
                     '[Orchestrations] human input req=%s len=%d',

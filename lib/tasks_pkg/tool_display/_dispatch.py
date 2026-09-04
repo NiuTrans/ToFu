@@ -19,11 +19,8 @@ from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tools.browser import BROWSER_TOOL_NAMES, PAGE_PREVIEW_TOOL_NAMES
 from lib.tools.code_exec import CODE_EXEC_TOOL_NAMES
 from lib.tools.conversation import (
-    BOARD_TOOL_NAMES,
-    CHARTER_TOOL_NAMES,
     CONV_REF_TOOL_NAMES,
     INTEGRATION_TOOL_NAMES,
-    PEER_TOOL_NAMES,
 )
 from lib.tools.image_edit import IMAGE_EDIT_TOOL_NAMES
 from lib.tools.image_gen import IMAGE_GEN_TOOL_NAMES
@@ -45,6 +42,7 @@ from lib.tasks_pkg.tool_display._renderers import (
     _tool_display_inspect_image,
     _tool_display_execute,
     _tool_display_knowledge,
+    _tool_display_local_serve,
     _tool_display_memory,
     _tool_display_mcp,
     _tool_display_motion_video,
@@ -52,13 +50,33 @@ from lib.tasks_pkg.tool_display._renderers import (
     _tool_display_project,
     _tool_display_scheduler,
     _tool_display_search_settings,
+    _tool_display_server_download,
     _tool_display_skills,
     _tool_display_swarm,
     _tool_display_todo,
     _tool_display_tool_search,
     _tool_display_web_search,
 )
+from lib.tasks_pkg.tool_display._context import enrich_display_args
 from lib.tasks_pkg.tool_display._roots import _resolve_tool_root_name
+
+
+def _tool_attention_kind(task, tool_name):
+    """Return stable semantic importance from the request-owned contract.
+
+    Runtime/error state remains a separate frontend concern.  This field says
+    whether a settled call is routine observation, an attended interaction,
+    or an operation worth keeping exposed.  Unknown contracts fail visible.
+    """
+    documents = ((task or {}).get('_toolContractDocumentsByName') or {})
+    document = documents.get(tool_name) if isinstance(documents, dict) else None
+    permission = (str(document.get('permission') or '')
+                  if isinstance(document, dict) else '')
+    if permission == 'approval':
+        return 'interactive'
+    if permission == 'read' or tool_name in TOOL_RESULT_ARTIFACT_NAMES:
+        return 'routine'
+    return 'important'
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -83,6 +101,9 @@ def _build_display_dispatch_table():
     # Hidden from the wire schema but accepted as a robust compatibility call.
     table['execute_tools'] = _tool_display_execute
     table['fetch_url'] = _tool_display_fetch_url
+    table['browser_download_url_to_server'] = _tool_display_server_download
+    # Persisted rounds created before the browser-prefix migration still render.
+    table['download_url_to_server'] = _tool_display_server_download
     table['context_compact'] = _tool_display_compact
 
     # Progressive MCP bridge tools are built-ins too. Route them through the
@@ -132,10 +153,8 @@ def _build_display_dispatch_table():
     for name in CONV_REF_TOOL_NAMES:
         table[name] = _tool_display_conv_ref
 
-    # Project-brain tools (board / charter / peer / feed) — friendly collapsed
-    # label + no spurious "unregistered tool" WARNING on every call.
-    for name in (BOARD_TOOL_NAMES | CHARTER_TOOL_NAMES | PEER_TOOL_NAMES
-                 | INTEGRATION_TOOL_NAMES):
+    # Retained isolated-workspace execution controls.
+    for name in INTEGRATION_TOOL_NAMES:
         table[name] = _tool_display_brain
 
     for name in TOOL_RESULT_ARTIFACT_NAMES:
@@ -144,6 +163,11 @@ def _build_display_dispatch_table():
     # Scheduler tools
     for name in SCHEDULER_TOOL_NAMES:
         table[name] = _tool_display_scheduler
+
+    # Managed local-deployment tools (prepare/deploy/status/list/stop/remove)
+    from lib.local_serve.tool_defs import LOCAL_SERVE_TOOL_NAMES
+    for name in LOCAL_SERVE_TOOL_NAMES:
+        table[name] = _tool_display_local_serve
 
     # Desktop tools
     for name in DESKTOP_TOOL_NAMES:
@@ -240,8 +264,20 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
     else:
         handler = _TOOL_DISPLAY_DISPATCH.get(fn_name, _tool_display_generic)
 
+    # Readability enrichment: resolve machine handles (conversation ids,
+    # tab ids) into human titles on a throwaway args COPY for the renderer.
+    # The original fn_args continues to execution/persistence untouched.
+    display_args = fn_args
+    if task is not None:
+        try:
+            display_args = enrich_display_args(
+                fn_name, fn_args, conv_id=conv_id, task=task)
+        except Exception as e:
+            logger.debug('[ToolDisplay] arg enrichment failed for %s: %s',
+                         fn_name, e)
+
     try:
-        display_query, extra = handler(fn_name, fn_args, tc_id, tc_args_str)
+        display_query, extra = handler(fn_name, display_args, tc_id, tc_args_str)
     except Exception as e:
         logger.warning('[ToolDisplay] handler for %s raised: %s', fn_name, e)
         display_query = fn_name
@@ -257,14 +293,44 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
     if task is not None and fn_name in TOOL_RESULT_ARTIFACT_NAMES:
         try:
             from lib.tool_result_artifacts import (
-                artifact_provenance, continuation_display_label)
+                artifact_provenance, continuation_display_label,
+                continuation_origin_meta)
             _origin = artifact_provenance(
                 task, str((fn_args or {}).get('artifact_ref') or ''))
+            if not _origin:
+                # Batch form carries no top-level ref — each searches[]/
+                # reads[] item has its own. The common batch searches ONE
+                # spill with several patterns, so the first resolvable item
+                # origin labels the row; a mixed-spill batch keeps the first
+                # match (per-item chips would not fit the one-line row).
+                _items = ((fn_args or {}).get('searches')
+                          or (fn_args or {}).get('reads'))
+                if isinstance(_items, list):
+                    for _item in _items:
+                        if not isinstance(_item, dict):
+                            continue
+                        _origin = artifact_provenance(
+                            task, str(_item.get('artifact_ref') or ''))
+                        if _origin:
+                            break
             if _origin:
+                _origin_args = fn_args if isinstance(fn_args, dict) else {}
                 display_query = continuation_display_label(
-                    fn_name,
-                    fn_args if isinstance(fn_args, dict) else {},
-                    _origin)
+                    fn_name, _origin_args, _origin)
+                # Structured twin of the flat label, riding the round entry +
+                # tool_start event exactly like ``_toolRoot``: the frontend
+                # renders an origin chip (``R54 compacted``) before the source
+                # label instead of stacking two "Read" verbs. Recovery-rebuilt
+                # rounds lose this key and fall back to parsing the flat label.
+                _origin_meta = continuation_origin_meta(
+                    fn_name, _origin_args, _origin)
+                if _origin_meta:
+                    extra['_artifactOrigin'] = {
+                        k: v for k, v in _origin_meta.items()
+                        if v is not None and v != ''}
+                    if _origin_meta.get('sourceToolCallId'):
+                        extra['parentToolCallId'] = str(
+                            _origin_meta['sourceToolCallId'])
         except Exception as _origin_err:
             logger.debug('[ToolDisplay] artifact origin relabel failed for '
                          '%s: %s', fn_name, _origin_err)
@@ -290,6 +356,7 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
         'toolCallId': tc_id,
         'toolArgs': tc_args_str,
         'tStart': _t_start,
+        'attentionKind': _tool_attention_kind(task, fn_name),
     }
     round_entry.update(extra)
 
@@ -306,6 +373,7 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
         toolCallId=tc_id,
         toolArgs=tc_args_str,
         tStart=_t_start,
+        attentionKind=round_entry['attentionKind'],
     )
     # Copy relevant extra fields into event (toolName, _swarm, etc.)
     for k, v in extra.items():

@@ -33,6 +33,13 @@ from lib.api_response import (
     api_not_found, api_ok,
 )
 from lib.log import get_logger
+from lib.memory.contracts import (
+    MEMORY_BODY_MAX_CHARS,
+    MEMORY_DESCRIPTION_MAX_CHARS,
+    MEMORY_NAME_MAX_CHARS,
+    MEMORY_TAG_MAX_CHARS,
+    MEMORY_TAG_MAX_ITEMS,
+)
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
 
@@ -87,8 +94,8 @@ def list_memories_v1():
     from lib.memory.storage import list_memories
     scope = request.args.get('scope', 'all')
     summary = request.args.get('summary', '').lower() in ('1', 'true', 'yes')
-    memories = [m for m in list_memories(project_path=_project_path(),
-                                         scope=scope)
+    memories = [m for m in list_memories(
+        project_path=_project_path(), scope=scope, include_body=not summary)
                 if not m.get('is_package')]
     for m in memories:
         m.pop('filepath', None)
@@ -116,10 +123,16 @@ def get_memory_v1(memory_id):
     tags=['memory'],
     request_body={'required': True, 'content': {'application/json': {
         'schema': {'type': 'object', 'required': ['name'], 'properties': {
-            'name': {'type': 'string'},
-            'description': {'type': 'string'},
-            'body': {'type': 'string'},
-            'tags': {'type': 'array', 'items': {'type': 'string'}},
+            'name': {'type': 'string', 'minLength': 1,
+                     'maxLength': MEMORY_NAME_MAX_CHARS},
+            'description': {'type': 'string',
+                            'maxLength': MEMORY_DESCRIPTION_MAX_CHARS},
+            'body': {'type': 'string',
+                     'maxLength': MEMORY_BODY_MAX_CHARS},
+            'tags': {'type': 'array', 'maxItems': MEMORY_TAG_MAX_ITEMS,
+                     'uniqueItems': True,
+                     'items': {'type': 'string', 'minLength': 1,
+                               'maxLength': MEMORY_TAG_MAX_CHARS}},
             'scope': {'type': 'string', 'enum': ['global', 'project']}}}}}},
 )
 def create_memory_v1():
@@ -128,14 +141,17 @@ def create_memory_v1():
     name = data.get('name', 'Untitled')
     logger.info('[Memory.v1] creating %r (scope=%s)', name,
                 data.get('scope', 'global'))
-    mem = create_memory(
-        name=name,
-        description=data.get('description', ''),
-        body=data.get('body', ''),
-        tags=data.get('tags'),
-        scope=data.get('scope', 'global'),
-        project_path=_project_path(),
-    )
+    try:
+        mem = create_memory(
+            name=name,
+            description=data.get('description', ''),
+            body=data.get('body', ''),
+            tags=data.get('tags'),
+            scope=data.get('scope', 'global'),
+            project_path=_project_path(),
+        )
+    except ValueError as e:
+        return api_bad_request(e)
     logger.info('[Memory.v1] created %s', mem.get('id', '?'))
     mem.pop('filepath', None)
     return api_created(mem)
@@ -145,12 +161,14 @@ def create_memory_v1():
 @require_auth
 @api_meta(summary='Update a memory', tags=['memory'])
 def update_memory_v1(memory_id):
-    from lib.memory.storage import update_memory
+    from lib.memory.storage import MemoryRevisionConflict, update_memory
     data = parse_body(force=True)
     try:
         mem = update_memory(memory_id, data, project_path=_project_path())
+    except MemoryRevisionConflict as e:
+        return api_conflict(e)
     except ValueError as e:
-        # Package guard: skill packages are managed via /api/v1/skills.
+        # Payload bounds/package authority failures are actionable 400s.
         return api_bad_request(e)
     if not mem:
         return api_not_found('Memory not found')
@@ -162,10 +180,12 @@ def update_memory_v1(memory_id):
 @require_auth
 @api_meta(summary='Delete a memory', tags=['memory'])
 def delete_memory_v1(memory_id):
-    from lib.memory.storage import delete_memory
+    from lib.memory.storage import MemoryRevisionConflict, delete_memory
     logger.warning('[Memory.v1] deleting %s', memory_id)
     try:
         ok = delete_memory(memory_id, project_path=_project_path())
+    except MemoryRevisionConflict as e:
+        return api_conflict(e)
     except ValueError as e:
         # Package guard: uninstall skill packages via /api/v1/skills.
         return api_bad_request(e)
@@ -183,7 +203,7 @@ def delete_memory_v1(memory_id):
     tags=['memory'],
 )
 def merge_memories_v1():
-    from lib.memory.storage import merge_memories
+    from lib.memory.storage import MemoryRevisionConflict, merge_memories
     data = parse_body(force=True)
     logger.info('[Memory.v1] merging %s → %s',
                 data.get('memory_ids', []), data.get('name', '?'))
@@ -197,6 +217,8 @@ def merge_memories_v1():
             scope=data.get('scope', 'project'),
             project_path=_project_path(),
         )
+    except MemoryRevisionConflict as e:
+        return api_conflict(e)
     except ValueError as e:
         logger.debug('[Memory.v1] merge validation error: %s', e)
         return api_bad_request(e)
@@ -209,10 +231,15 @@ def merge_memories_v1():
 @require_auth
 @api_meta(summary='Enable / disable a memory', tags=['memory'])
 def toggle_memory_v1(memory_id):
-    from lib.memory.storage import toggle_memory
+    from lib.memory.storage import MemoryRevisionConflict, toggle_memory
     data = parse_body()
-    mem = toggle_memory(memory_id, enabled=data.get('enabled'),
-                         project_path=_project_path())
+    try:
+        mem = toggle_memory(memory_id, enabled=data.get('enabled'),
+                            project_path=_project_path())
+    except MemoryRevisionConflict as e:
+        return api_conflict(e)
+    except ValueError as e:
+        return api_bad_request(e)
     if not mem:
         return api_not_found('Memory not found')
     mem.pop('filepath', None)

@@ -8,15 +8,13 @@ offer the manual trigger when NOTHING has been generated."
 The report is generated + cached per ``(paper_hash, lang)`` and the active
 report language is a per-paper persisted choice. So a paper can have a report in
 one language while the ACTIVE language (the one the toggle currently points at)
-has none. Before this fix, ``_loadOrGenerateReport`` step 4 rendered the manual
-Generate prompt in that case — hiding a report the user already paid to
-generate. The fix adds step 3.5: on a clean miss for the active language, probe
-the OTHER report language and, if it has a persisted report, adopt that language
-and paint it (no auto-start).
+has none. The fused report resolver selects the requested or fallback language
+in one owner-scoped query; the typed runtime adopts the resolved language and
+paints it without auto-starting paid work.
 
 This harness loads the REAL shipped ``static/js/paper-reader.js`` under jsdom
-with an ``Api.paper.reportCache`` that returns a report ONLY for ``lang==='en'``
-(the non-active language) and a MISS for the active ``'zh'``. It asserts:
+with an ``Api.paper.reportResolve`` that returns an English fallback for the
+active Chinese request. It asserts:
 
   • opening the tab issues ZERO ``reportStart`` (never auto-generates);
   • the English report body is painted (not the Generate button);
@@ -24,7 +22,7 @@ with an ``Api.paper.reportCache`` that returns a report ONLY for ``lang==='en'``
     export all resolve consistently);
   • ``.paper-report-generate-btn`` is ABSENT.
 
-Negative-control (source-level): a COPY of paper-reader.js with step 3.5 removed
+Negative-control (source-level): a COPY of the typed owner with cache adoption removed
 must FALL BACK to the Generate prompt → the harness FAILS the "report painted"
 and "generate button absent" checks. The shipped file is never modified.
 
@@ -40,15 +38,15 @@ import subprocess
 import pytest
 
 from tests._paper_vite import compiled_typescript
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root, shipped_source_text
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-# _loadOrGenerateReport (incl. step 3.5) moved to paper/report.js (Epic E split,
-# 2026-07-11); paper-reader.js keeps _reportView + _activeReportLang + helpers.
+# The retained sections provide renderers and view adapters; the typed owner
+# owns fused lookup/cache resolution and fallback-language adoption.
 REPORT_JS = os.path.join(JS_DIR, 'paper', 'report.js')
 CORE_JS = os.path.join(JS_DIR, 'paper-reader.js')
 PAPER_JS = REPORT_JS  # the file under test (holds the step-3.5 markers)
@@ -87,12 +85,18 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win.t = global.t = (k) => k;
 
-// reportCache returns a report ONLY for the NON-active language (en). The
-// active language (zh) misses. lookup always misses (no running task).
-const calls = { start: [], cacheByLang: [] };
+// One fused resolve returns the NON-active language (en) for a zh request.
+const calls = { start: [], cacheByLang: [], resolveByLang: [] };
 global.Api = win.Api = { paper: {
   libraryList: async () => ({ ok: true, papers: [{ id: 'paper-1', title: 'P', paperHash: 'phash-1' }] }),
   reportLookup: async () => ({ ok: false }),
+  reportResolve: async (_hash, lang) => {
+    calls.resolveByLang.push(lang);
+    return {
+      ok: true, cached: true, report: 'ENGLISH_REPORT_BODY',
+      paper_hash: 'phash-1', lang: 'en', meta: null,
+    };
+  },
   reportCache:  async (body) => {
     calls.cacheByLang.push(body.lang);
     if (body.lang === 'en') return { ok: true, report: 'ENGLISH_REPORT_BODY', paper_hash: 'phash-1', meta: null };
@@ -118,10 +122,12 @@ Object.keys(win).forEach((name) => {
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
-_saveActivePaperState = () => {};
-_getActivePaperEntry = () => null;
+_saveActivePaperState = win._saveActivePaperState = () => {};
+_getActivePaperEntry = win._getActivePaperEntry = () => null;
 _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
-_renderFinalReport = (c, text) => { if (c) c.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>'; };
+win._renderFinalReport = _renderFinalReport = (c, text) => {
+  if (c) c.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>';
+};
 _syncReportToolbar = () => {};
 _populatePaperReportModelDropdown = () => {};
 if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSidebar = () => {}; }
@@ -140,6 +146,7 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   _paperReviewModel = 'm';
   _paperReviewVenue = 'neurips';
   _activePaperId = 'paper-1';
+  win._activePaperId = _activePaperId;
   _i18nLang = 'en';
   _paperActiveTab = 'report';
 
@@ -151,9 +158,9 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
 
   // Must NOT auto-generate.
   check('no_autostart', calls.start.length === 0);
-  // The active-language (zh) cache was probed, then the other (en) was probed.
-  check('probed_zh_then_en',
-        calls.cacheByLang.indexOf('zh') !== -1 && calls.cacheByLang.indexOf('en') !== -1);
+  check('one_fused_zh_resolve',
+        calls.resolveByLang.length === 1 && calls.resolveByLang[0] === 'zh'
+        && calls.cacheByLang.length === 0);
   // The English report body is painted (not the Generate button).
   const html = document.getElementById('paperReportContent').innerHTML;
   check('english_report_painted', html.indexOf('ENGLISH_REPORT_BODY') !== -1);
@@ -169,12 +176,20 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
 """
 
 
-def _run_harness(report_js: str, core_js: str = CORE_JS) -> subprocess.CompletedProcess:
+def _run_harness(
+    report_js: str,
+    core_js: str = CORE_JS,
+    runtime_contents: str | None = None,
+) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_paper_other_lang_fallback_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:
-        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+        with compiled_typescript(
+            REPORT_RUNTIME_TS,
+            contents=runtime_contents,
+            expose_feature_registry_to_window=True,
+        ) as runtime_js:
             return subprocess.run(
                 ['node', harness, report_js, ROOT, core_js, runtime_js],
                 capture_output=True, text=True, timeout=60,
@@ -199,44 +214,30 @@ def test_report_tab_shows_other_generated_language():
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_source_level_negative_control_without_step35_falls_to_generate_prompt():
-    """Remove step 3.5 and prove the report is hidden behind the Generate prompt.
+def test_source_level_negative_control_without_cache_adoption_shows_prompt():
+    """Remove typed cache adoption and prove fallback is hidden by the prompt.
 
-    We patch a COPY of paper-reader.js deleting the ``view.kind === 'report'``
-    other-language probe block, so ``_loadOrGenerateReport`` falls straight to
-    the manual Generate prompt on a clean active-language miss. The harness must
+    We patch a COPY of the typed owner so a fused cached response falls through
+    to the manual Generate prompt. The harness must
     then FAIL the "english_report_painted" + "generate_button_absent" checks.
     The shipped file is untouched.
     """
-    src = open(PAPER_JS, encoding='utf-8').read()
-
-    start = src.index("  if (view.kind === 'report' && _paperHash) {\n    var otherLang")
-    end = src.index("  // (4) No cache in EITHER language")
-    assert start != -1 and end != -1 and end > start, \
-        'step 3.5 markers not found — test is stale, update the markers'
-    broken = src[:start] + src[end:]
+    src = shipped_source_text('frontend/src/features/paper/report-runtime.ts')
+    marker = "  if (resolved?.ok && resolved.report && container) {"
+    assert marker in src, 'cache-adoption marker not found — test is stale'
+    broken = src.replace(marker, "  if (false && resolved?.report && container) {", 1)
     assert broken != src, 'negative-control patch was a no-op'
+    proc = _run_harness(PAPER_JS, runtime_contents=broken)
+    out = proc.stdout.strip()
+    assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
+    assert 'FAIL english_report_painted' in out, \
+        'removing cache adoption still painted the report — guard is non-load-bearing:\n' + out
+    assert 'FAIL generate_button_absent' in out, \
+        'removing cache adoption still hid the Generate button — guard is non-load-bearing:\n' + out
 
-    tmp = os.path.join(HERE, '_paper_reader_no_step35.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        proc = _run_harness(tmp)
-        out = proc.stdout.strip()
-        assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
-        assert 'FAIL english_report_painted' in out, \
-            'removing step 3.5 still painted the report — guard is non-load-bearing:\n' + out
-        assert 'FAIL generate_button_absent' in out, \
-            'removing step 3.5 still hid the Generate button — guard is non-load-bearing:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-    assert open(PAPER_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
+    assert shipped_source_text('frontend/src/features/paper/report-runtime.ts') == src, (
+        'typed report runtime was modified!'
+    )
 
 
 if __name__ == '__main__':
@@ -245,6 +246,6 @@ if __name__ == '__main__':
     else:
         test_report_tab_shows_other_generated_language()
         print('positive: PASS')
-        test_source_level_negative_control_without_step35_falls_to_generate_prompt()
+        test_source_level_negative_control_without_cache_adoption_shows_prompt()
         print('negative-control: PASS')
         print('ALL PASSED')

@@ -32,9 +32,9 @@ import time
 import uuid
 from urllib.parse import urlparse
 
-from lib.json_store import read_json
 from lib.log import get_logger
 from lib.proxy import SUBSCRIPTION_HOSTS
+from lib.storage.errors import StorageError
 from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
@@ -43,7 +43,10 @@ __all__ = [
     'ALLOWED_EGRESS_HOSTS',
     'EgressUnavailable',
     'EgressResponse',
+    'UnknownEgressAgent',
+    'egress_agent_selection',
     'host_allowed',
+    'pin_egress_agent',
     'route_request',
     'egress_http',
 ]
@@ -89,6 +92,10 @@ class EgressUnavailable(RuntimeError):
     """No usable path to the provider: direct is blocked AND no suitable
     desktop agent is online. The message always carries user-actionable
     guidance (start an agent / pick one in Settings)."""
+
+
+class UnknownEgressAgent(ValueError):
+    """The requested device is not currently eligible for owner egress."""
 
 
 class EgressResponse:
@@ -165,7 +172,10 @@ def _probe_host(url: str) -> str:
     else:
         _probe_network_fail_cache.invalidate(host)
         _probe_cache.set(host, verdict)
-    logger.info('[Egress] probe %s → %s', host, verdict)
+    # RouteManager owns transition/recovery/failure INFO records. Emitting this
+    # steady verdict for every subscription request produced 2,264 duplicate
+    # summaries in one retained 200k-line window.
+    logger.debug('[Egress] probe %s → %s', host, verdict)
     return verdict
 
 
@@ -177,7 +187,7 @@ def _probe_host_paths(url: str, host: str) -> str:
     )
     routes = subscription_route_candidates(url)
     if routes:
-        logger.info('[Egress] probe %s ok via %s', host, routes[0].label)
+        logger.debug('[Egress] probe %s ok via %s', host, routes[0].label)
         return 'ok'
     verdict = subscription_route_verdict(url)
     return verdict if verdict in ('geo_blocked', 'network_fail') \
@@ -185,34 +195,92 @@ def _probe_host_paths(url: str, host: str) -> str:
 
 
 def _online_egress_agents(user_id: str = '') -> list:
-    """Online agents advertising the egress capability, tenant-scoped.
+    """Online egress-capable agents for one explicit positive owner.
 
-    Legacy single-user deployments (``user_id=''``) see every egress agent
-    (bridge v1/legacy semantics); a real tenant only sees its own.
+    Empty/invalid ownership returns no candidates.  The old deployment-global
+    fallback could route one user's subscription request through another
+    user's desktop as soon as multi-user mode was enabled.
     """
     from lib.desktop import online_agents
+    try:
+        from lib.identity import require_user_id
+        owner_scope = str(require_user_id(
+            user_id, context='desktop egress candidate owner'))
+    except ValueError:
+        return []
     out = []
     for a in online_agents():
         caps = a.get('capabilities') or {}
         if not caps.get('egress'):
             continue
-        if user_id and (a.get('user_id') or '') != user_id:
+        if str(a.get('user_id') or '') != owner_scope:
             continue
         out.append(a)
     return out
 
 
-def _pinned_agent(user_id: str) -> str:
-    """The user's pinned egress agent id from
-    ``data/config/oauth_egress_agents.json`` (Settings → OAuth, multi-agent
-    deployments). '' when unset."""
+def _required_owner_scope(user_id: object) -> str:
+    """Validate the owner before any addressed bridge command is enqueued."""
     try:
-        from lib.config_dir import config_path
-        data = read_json(config_path('oauth_egress_agents.json'), default={}) or {}
-        return str(data.get(user_id or '', '') or '')
-    except Exception as e:
-        logger.debug('[Egress] pinned-agent read failed: %s', e)
+        from lib.identity import require_user_id
+        return str(require_user_id(user_id, context='desktop egress command owner'))
+    except ValueError as exc:
+        raise EgressUnavailable(
+            'desktop egress requires an explicit positive owner') from exc
+
+
+def _pinned_agent(user_id: str) -> str:
+    """Return one durable owner pin, or no preference when it is unavailable.
+
+    Ownerless diagnostics cannot acquire candidates at all; this helper also
+    refuses to manufacture a deployment-global preference for them. A storage
+    outage degrades only the ordering hint for a valid owner and cannot make
+    otherwise-routable subscription traffic fail.
+    """
+    try:
+        from lib.desktop.egress_preferences import (
+            EgressAgentPreferenceRepository,
+        )
+        from lib.identity import require_user_id
+
+        owner_user_id = require_user_id(
+            user_id, context='desktop egress route owner')
+        return EgressAgentPreferenceRepository(owner_user_id).pinned_agent()
+    except (StorageError, ValueError, RuntimeError) as e:
+        logger.debug('[Egress] pinned-agent unavailable: %s', e)
         return ''
+
+
+def egress_agent_selection(owner_user_id: int) -> tuple[str, list[dict]]:
+    """Return the durable pin and currently eligible devices for one owner."""
+    from lib.desktop.egress_preferences import EgressAgentPreferenceRepository
+    from lib.identity import require_user_id
+
+    owner = require_user_id(
+        owner_user_id, context='desktop egress selection owner')
+    agents = _online_egress_agents(str(owner))
+    pinned = EgressAgentPreferenceRepository(owner).pinned_agent()
+    return pinned, agents
+
+
+def pin_egress_agent(owner_user_id: int, agent_id: str) -> str:
+    """Persist one eligible online device, or clear the owner's selection."""
+    from lib.desktop.egress_preferences import EgressAgentPreferenceRepository
+    from lib.identity import require_user_id
+
+    owner = require_user_id(
+        owner_user_id, context='desktop egress selection owner')
+    if not isinstance(agent_id, str) or len(agent_id) > 128:
+        raise ValueError('agent_id must be a string of at most 128 characters')
+    if agent_id:
+        eligible_ids = {
+            str(agent.get('agent_id') or '')
+            for agent in _online_egress_agents(str(owner))
+        }
+        if agent_id not in eligible_ids:
+            raise UnknownEgressAgent(
+                'agent_id is not an online egress-capable device for this owner')
+    return EgressAgentPreferenceRepository(owner).set_pinned_agent(agent_id)
 
 
 #: agent_id → monotonic ts of the last TRANSPORT-level egress success
@@ -468,6 +536,7 @@ def open_stream(url: str, *, method: str = 'POST', headers: dict = None,
             within the connect window.
     """
     _check_target(url, target, loopback_port)
+    user_id = _required_owner_scope(user_id)
     candidates = ([agent_id] if agent_id is not None
                   else route_candidates(url, user_id=user_id))
     from lib.desktop import enqueue_desktop_command
@@ -631,16 +700,22 @@ def egress_status(host: str, *, user_id: str = '') -> dict:
         return {'state': 'direct', 'verdict': verdict, 'agents': [],
                 **diagnostics}
     from lib.desktop import online_agents
+    try:
+        owner_scope = _required_owner_scope(user_id)
+    except EgressUnavailable:
+        owner_scope = ''
     all_agents = online_agents()
     capable = [a for a in all_agents
                if (a.get('capabilities') or {}).get('egress')
-               and (not user_id or (a.get('user_id') or '') == user_id)]
+               and owner_scope
+               and str(a.get('user_id') or '') == owner_scope]
     if capable:
         return {'state': 'agent', 'verdict': verdict,
                 'agents': [{'agent_id': a['agent_id'], 'name': a.get('name', '')}
                            for a in capable], **diagnostics}
     scoped_any = [a for a in all_agents
-                  if not user_id or (a.get('user_id') or '') == user_id]
+                  if owner_scope
+                  and str(a.get('user_id') or '') == owner_scope]
     if scoped_any:
         return {'state': 'agent_no_capability', 'verdict': verdict,
                 'agents': [{'agent_id': a['agent_id'], 'name': a.get('name', '')}
@@ -668,6 +743,7 @@ def egress_http(url: str, *, method: str = 'POST', headers: dict = None,
             timed out, or the agent hit a network error.
     """
     _check_target(url, target, loopback_port)
+    user_id = _required_owner_scope(user_id)
     from lib.desktop import send_desktop_command
     params = {
         'url': url,

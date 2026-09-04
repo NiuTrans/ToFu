@@ -90,13 +90,6 @@ def compose_task_context(
 
 def compose_context(messages: list[dict], request: ComposeRequest) -> ComposeResult:
     blocks = collect_context_blocks(messages, request)
-    # Codex world-state diff port: annotate the volatile turn-stability tail
-    # blocks (board / goals / related-convs) with what changed since this
-    # conv's last turn. Runs at THIS single boundary only — endpoint re-entry
-    # (replace_managed re-compose) would otherwise double-annotate. Round-
-    # scoped appends go through append_context_blocks and are never diffed.
-    from lib.tasks_pkg.context_composer._world_diff import annotate_turn_blocks
-    annotate_turn_blocks(request.conv_id or '', blocks)
     result = render_context(messages, blocks, request)
     if request.task is not None:
         request.task['_contextManifest'] = result.manifest

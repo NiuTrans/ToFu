@@ -10,7 +10,7 @@ from lib.storage.errors import StorageError
 from lib.storage_sidecar.adapters.base import Session
 
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 57
 
 
 _TABLES = (
@@ -28,6 +28,17 @@ _TABLES = (
         response_json BLOB NOT NULL,
         committed_at_ms BIGINT NOT NULL
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_command_receipts_v2 (
+        command_key BLOB PRIMARY KEY,
+        operation TEXT NOT NULL,
+        request_digest BLOB NOT NULL,
+        response_json BLOB NOT NULL,
+        committed_at_ms BIGINT NOT NULL,
+        CHECK (length(command_key) = 32),
+        CHECK (length(request_digest) = 32)
+    ) WITHOUT ROWID
     """,
     """
     CREATE TABLE IF NOT EXISTS storage_logical_outbox (
@@ -73,17 +84,36 @@ _TABLES = (
         stream_kind TEXT NOT NULL DEFAULT 'task',
         event_type TEXT NOT NULL DEFAULT '',
         event_kind TEXT NOT NULL DEFAULT '',
+        owner_user_id BIGINT NOT NULL DEFAULT 0,
+        project_key TEXT NOT NULL DEFAULT '',
+        project_sequence BIGINT NOT NULL DEFAULT 0,
         event_json BLOB NOT NULL,
         created_at_ms BIGINT NOT NULL,
         PRIMARY KEY (task_id, sequence)
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS storage_project_brain_projects (
+        owner_user_id BIGINT NOT NULL,
+        project_key TEXT NOT NULL,
+        head_sequence BIGINT NOT NULL,
+        checkpoint_sequence BIGINT NOT NULL DEFAULT 0,
+        projection_json JSONDOC NOT NULL,
+        updated_at_ms BIGINT NOT NULL,
+        PRIMARY KEY (owner_user_id, project_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_storage_project_brain_updated
+    ON storage_project_brain_projects(owner_user_id, updated_at_ms, project_key)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS storage_rate_limit_events (
         event_id TEXT PRIMARY KEY,
         endpoint TEXT NOT NULL,
         client_key TEXT NOT NULL,
-        occurred_at_ms BIGINT NOT NULL
+        occurred_at_ms BIGINT NOT NULL,
+        expires_at_ms BIGINT NOT NULL
     )
     """,
     """
@@ -107,7 +137,10 @@ _TABLES = (
         priority BIGINT NOT NULL DEFAULT 100,
         created_at_ms BIGINT NOT NULL,
         leased_until_ms BIGINT,
-        lease_task_id TEXT NOT NULL DEFAULT ''
+        lease_task_id TEXT NOT NULL DEFAULT '',
+        input_turn_id TEXT NOT NULL DEFAULT '',
+        output_turn_id TEXT NOT NULL DEFAULT '',
+        attempt_id TEXT NOT NULL DEFAULT ''
     )
     """,
     """
@@ -181,6 +214,7 @@ _TABLES = (
         conversation_id TEXT NOT NULL,
         user_id BIGINT NOT NULL,
         title TEXT NOT NULL DEFAULT 'New Chat',
+        messages_json JSONDOC NOT NULL DEFAULT '[]',
         created_at_ms BIGINT NOT NULL DEFAULT 0,
         updated_at_ms BIGINT NOT NULL DEFAULT 0,
         settings_json JSONDOC NOT NULL DEFAULT '{}',
@@ -334,11 +368,17 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS storage_conversation_turns (
         turn_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, user_id BIGINT NOT NULL,
+        presentation_id TEXT NOT NULL DEFAULT '',
         lane_id TEXT NOT NULL DEFAULT 'main', parent_turn_id TEXT,
         ordinal BIGINT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'reply',
         run_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
         current_attempt_id TEXT, projection_json JSONDOC NOT NULL DEFAULT '{}',
-        projection_revision BIGINT NOT NULL DEFAULT 0, settlement_json JSONDOC NOT NULL DEFAULT '{}',
+        projection_revision BIGINT NOT NULL DEFAULT 0,
+        projection_checkpoint_revision BIGINT,
+        projection_materialized_revision BIGINT,
+        projection_patch_count BIGINT NOT NULL DEFAULT 0,
+        projection_patch_bytes BIGINT NOT NULL DEFAULT 0,
+        settlement_json JSONDOC NOT NULL DEFAULT '{}',
         created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
         UNIQUE(conversation_id, lane_id, ordinal)
     )
@@ -350,6 +390,18 @@ _TABLES = (
     """
     CREATE INDEX IF NOT EXISTS idx_storage_conversation_turns_owner_order
     ON storage_conversation_turns(conversation_id, user_id, lane_id, ordinal)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_turn_projection_checkpoints (
+        turn_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        user_id BIGINT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        projection_revision BIGINT NOT NULL,
+        projection_json JSONDOC NOT NULL,
+        projection_bytes BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+    )
     """,
     """
     CREATE TABLE IF NOT EXISTS storage_turn_search (
@@ -432,9 +484,13 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS storage_generation_attempts (
         attempt_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, turn_id TEXT NOT NULL,
         command_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '', operation TEXT NOT NULL,
+        dispatch_mode TEXT NOT NULL DEFAULT '',
+        queue_id TEXT NOT NULL DEFAULT '',
+        queue_state TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT 'pending', base_projection_revision BIGINT NOT NULL,
         resume_anchor_json JSONDOC NOT NULL DEFAULT '{}', config_json JSONDOC NOT NULL DEFAULT '{}',
-        error_json JSONDOC NOT NULL DEFAULT '{}', created_at BIGINT NOT NULL,
+        error_json JSONDOC NOT NULL DEFAULT '{}',
+        timing_trace_json JSONDOC NOT NULL DEFAULT '{}', created_at BIGINT NOT NULL,
         started_at BIGINT, settled_at BIGINT, superseded_at BIGINT,
         UNIQUE(conversation_id, command_id)
     )
@@ -442,6 +498,47 @@ _TABLES = (
     """
     CREATE INDEX IF NOT EXISTS idx_storage_generation_attempts_turn
     ON storage_generation_attempts(turn_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_storage_generation_attempts_task
+    ON storage_generation_attempts(task_id) WHERE task_id <> ''
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_storage_generation_attempts_conversation_created
+    ON storage_generation_attempts(
+        conversation_id, created_at DESC, attempt_id DESC
+    ) WHERE task_id <> ''
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_raw_archives (
+        archive_id TEXT PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        round_num BIGINT NOT NULL,
+        transport_attempt BIGINT NOT NULL DEFAULT 0,
+        request_blob BLOB NOT NULL,
+        response_blob BLOB NOT NULL,
+        request_bytes BIGINT NOT NULL,
+        response_bytes BIGINT NOT NULL,
+        stored_bytes BIGINT NOT NULL,
+        request_sha256 TEXT NOT NULL,
+        response_sha256 TEXT NOT NULL,
+        integrity TEXT NOT NULL,
+        truncation_reason TEXT NOT NULL DEFAULT '',
+        summary_json JSONDOC NOT NULL DEFAULT '{}',
+        created_at_ms BIGINT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_storage_raw_archives_task_round
+    ON storage_raw_archives(user_id, task_id, round_num, created_at_ms, archive_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_storage_raw_archives_attempt
+    ON storage_raw_archives(user_id, attempt_id, created_at_ms, archive_id)
     """,
     """
     CREATE TABLE IF NOT EXISTS storage_attempt_events (
@@ -469,6 +566,7 @@ _TABLES = (
         change_type TEXT NOT NULL,
         turn_id TEXT NOT NULL DEFAULT '',
         attempt_id TEXT NOT NULL DEFAULT '',
+        attempt_sequence BIGINT,
         event_json JSONDOC NOT NULL,
         created_at BIGINT NOT NULL,
         PRIMARY KEY(conversation_id, user_id, sync_sequence)
@@ -477,47 +575,6 @@ _TABLES = (
     """
     CREATE INDEX IF NOT EXISTS idx_storage_conversation_changes_retention
     ON storage_conversation_changes(created_at)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS storage_board_tasks (
-        id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, project_path TEXT NOT NULL DEFAULT '',
-        title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open',
-        owner_conv_id TEXT NOT NULL DEFAULT '', lease_expires_at BIGINT NOT NULL DEFAULT 0,
-        created_by_conv TEXT NOT NULL DEFAULT '', depends_on JSONDOC NOT NULL DEFAULT '[]',
-        kind TEXT NOT NULL DEFAULT 'epic', dispatched BIGINT NOT NULL DEFAULT 0,
-        blocked_until BIGINT NOT NULL DEFAULT 0, block_count BIGINT NOT NULL DEFAULT 0,
-        block_reason TEXT NOT NULL DEFAULT '', wait_paths JSONDOC NOT NULL DEFAULT '[]',
-        dispatch_target TEXT NOT NULL DEFAULT '', write_set JSONDOC NOT NULL DEFAULT '[]',
-        block_question TEXT NOT NULL DEFAULT '', human_answer TEXT NOT NULL DEFAULT '',
-        blocked_by TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL DEFAULT 0,
-        updated_at BIGINT NOT NULL DEFAULT 0
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_storage_board_tasks_project
-    ON storage_board_tasks(user_id, project_path, created_at, id)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS storage_watch_items (
-        item_id TEXT PRIMARY KEY, user_id BIGINT NOT NULL,
-        project_path TEXT NOT NULL, kind TEXT NOT NULL,
-        text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open',
-        promoted BIGINT NOT NULL DEFAULT 0, response_fingerprint TEXT NOT NULL DEFAULT '',
-        created_by_conv TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL DEFAULT 0,
-        updated_at BIGINT NOT NULL DEFAULT 0
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_storage_watch_items_project
-    ON storage_watch_items(user_id, project_path, updated_at DESC)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS storage_watch_responses (
-        item_id TEXT NOT NULL, sequence BIGINT NOT NULL, project_path TEXT NOT NULL,
-        response TEXT NOT NULL DEFAULT '', pillar_state_json JSONDOC NOT NULL DEFAULT '{}',
-        trigger TEXT NOT NULL DEFAULT '', ts BIGINT NOT NULL DEFAULT 0,
-        PRIMARY KEY(item_id, sequence)
-    )
     """,
     """
     CREATE TABLE IF NOT EXISTS orchestration_runs (
@@ -734,6 +791,30 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS storage_model_routing_authorities (
+        owner_user_id BIGINT NOT NULL,
+        tenant_id TEXT NOT NULL DEFAULT '',
+        revision BIGINT NOT NULL,
+        document_json JSONDOC NOT NULL,
+        backup_json JSONDOC,
+        migration_receipt_json JSONDOC,
+        updated_at DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (owner_user_id, tenant_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_model_routing_secrets (
+        owner_user_id BIGINT NOT NULL,
+        tenant_id TEXT NOT NULL DEFAULT '',
+        secret_reference TEXT NOT NULL,
+        ciphertext TEXT NOT NULL,
+        key_hint TEXT NOT NULL DEFAULT '',
+        created_at DOUBLE PRECISION NOT NULL,
+        updated_at DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (owner_user_id, tenant_id, secret_reference)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS chat_artifacts (
         id TEXT PRIMARY KEY,
         conv_id TEXT NOT NULL,
@@ -776,6 +857,13 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS storage_desktop_egress_preferences (
+        owner_user_id BIGINT PRIMARY KEY,
+        agent_id TEXT NOT NULL DEFAULT '',
+        updated_at_ms BIGINT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS storage_knowledge_documents (
         user_id BIGINT NOT NULL,
         id TEXT NOT NULL,
@@ -789,6 +877,8 @@ _TABLES = (
         text_chars BIGINT NOT NULL DEFAULT 0,
         chunk_count BIGINT NOT NULL DEFAULT 0,
         pages BIGINT NOT NULL DEFAULT 0,
+        scope TEXT NOT NULL DEFAULT 'library',
+        media_metadata_json TEXT NOT NULL DEFAULT '{}',
         created_at DOUBLE PRECISION NOT NULL,
         updated_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (user_id, id),
@@ -833,6 +923,7 @@ _TABLES = (
         enrichment_status TEXT NOT NULL DEFAULT 'not_requested',
         enrichment_model TEXT NOT NULL DEFAULT '',
         enrichment_error TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
         created_at DOUBLE PRECISION NOT NULL,
         updated_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (user_id, id),
@@ -1128,6 +1219,10 @@ _TABLES = (
     ON paper_library(paper_hash, updated_at DESC)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_paper_lib_arxiv
+    ON paper_library(user_id, arxiv_id, updated_at DESC)
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_chat_artifact_conv
     ON chat_artifacts(conv_id, created_at DESC)
     """,
@@ -1170,6 +1265,11 @@ _TABLES = (
     """
     CREATE INDEX IF NOT EXISTS idx_byo_providers_owner_created
     ON byo_providers(tenant_id, owner_user_id, created_at DESC, id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_model_routing_secrets_owner_updated
+    ON storage_model_routing_secrets(
+        tenant_id, owner_user_id, updated_at, secret_reference)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_swarm_sessions_status
@@ -1552,6 +1652,266 @@ _MIGRATIONS = {
         "ALTER TABLE storage_compaction_archives ADD COLUMN "
         "receipt_json JSONDOC NOT NULL DEFAULT '{}'",
     ),
+    # Uploaded chat documents and videos reuse the knowledge source/chunk/asset
+    # authority instead of creating a second file registry.  ``scope`` keeps
+    # attachment-only sources out of opt-in global knowledge retrieval, while
+    # bounded JSON metadata carries media processing state and frame timing.
+    41: (
+        "ALTER TABLE storage_knowledge_documents ADD COLUMN "
+        "scope TEXT NOT NULL DEFAULT 'library'",
+        "ALTER TABLE storage_knowledge_documents ADD COLUMN "
+        "media_metadata_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE storage_knowledge_assets ADD COLUMN "
+        "metadata_json TEXT NOT NULL DEFAULT '{}'",
+    ),
+    # A recoverable delete must preserve the frozen pre-turn transcript
+    # archive as faithfully as the normalized turn rows; otherwise restoring
+    # a conversation whose only durable transcript is messages_json comes
+    # back as an empty chat (irreversible history loss on a recoverable op).
+    42: (
+        "ALTER TABLE storage_conversation_trash ADD COLUMN "
+        "messages_json JSONDOC NOT NULL DEFAULT '[]'",
+    ),
+    # Rate-limit rows are reconstructible enforcement state. The old schema
+    # carried no per-row expiry, so a client seen only once could occupy disk
+    # forever and no backend-neutral cleanup could distinguish its window.
+    # Reset that cache once, then require every new event to own an exact TTL.
+    43: (
+        "DROP TABLE storage_rate_limit_events",
+        "CREATE TABLE storage_rate_limit_events ("
+        "event_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, "
+        "client_key TEXT NOT NULL, occurred_at_ms BIGINT NOT NULL, "
+        "expires_at_ms BIGINT NOT NULL)",
+    ),
+    # Goal Mode has one durable lifecycle owner per conversation.  The
+    # semantic start operation supersedes the prior run transactionally; this
+    # partial index is the cross-process/SQL-backend fence that prevents two
+    # concurrent writers from publishing two active GoalRuns.
+    44: (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_runs_one_active "
+        "ON orchestration_runs(tenant_id, user_id, orch_id) "
+        "WHERE created_by = 'chat_goal_mode' "
+        "AND status IN ('pending', 'running', 'paused')",
+    ),
+    # An accepted conversation command records whether its pending attempt is
+    # eligible for the in-process model executor.  The partial index lets the
+    # serving-loop recovery owner find only rows that provably never reached a
+    # claim/bind, without polling through historical attempts or mistaking
+    # external-channel persistence attempts for model work.
+    45: (
+        "ALTER TABLE storage_generation_attempts ADD COLUMN "
+        "dispatch_mode TEXT NOT NULL DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS idx_storage_generation_attempts_dispatchable "
+        "ON storage_generation_attempts(created_at, attempt_id) "
+        "WHERE status = 'pending' AND task_id = '' "
+        "AND dispatch_mode = 'conversation_executor'",
+    ),
+    # Timing evidence belongs to one immutable generation attempt, not to the
+    # mutable current Turn projection.  This keeps regenerated attempts
+    # independently inspectable and lets frequent, bounded browser receipts
+    # update a small document instead of rewriting a potentially multi-MiB
+    # assistant projection.
+    46: (
+        "ALTER TABLE storage_generation_attempts ADD COLUMN "
+        "timing_trace_json JSONDOC NOT NULL DEFAULT '{}'",
+        "CREATE INDEX IF NOT EXISTS idx_storage_generation_attempts_task "
+        "ON storage_generation_attempts(task_id) WHERE task_id <> ''",
+    ),
+    # Request Inspector discovery must not depend on a global task-result scan:
+    # the durable attempt is the trace authority, so page its compact identity
+    # rows directly by owner-checked conversation and creation time.  The
+    # partial index contributes exactly one entry per externally addressable
+    # generation attempt and stores no trace JSON or message content.
+    47: (
+        "CREATE INDEX IF NOT EXISTS "
+        "idx_storage_generation_attempts_conversation_created "
+        "ON storage_generation_attempts("
+        "conversation_id, created_at DESC, attempt_id DESC) "
+        "WHERE task_id <> ''",
+    ),
+    # A live Turn may retain its current full projection as a bounded chain of
+    # already-durable attempt-event patches. Nullable materialized revision is
+    # the no-backfill compatibility sentinel: NULL means projection_json is at
+    # projection_revision. Constant defaults keep this expansion metadata-only
+    # on both SQLite and PostgreSQL; no historical projection is decoded.
+    48: (
+        "ALTER TABLE storage_conversation_turns ADD COLUMN "
+        "projection_materialized_revision BIGINT",
+        "ALTER TABLE storage_conversation_turns ADD COLUMN "
+        "projection_patch_count BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE storage_conversation_turns ADD COLUMN "
+        "projection_patch_bytes BIGINT NOT NULL DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS idx_storage_attempt_events_projection_chain "
+        "ON storage_attempt_events(attempt_id, projection_revision, sequence)",
+    ),
+    # Large live Turn projections can move to a separately stored checkpoint
+    # while their hot row keeps only bounded head metadata. Version 48 was
+    # already published without this column, so this expansion owns a new
+    # migration number; changing an applied migration would strand established
+    # authorities at a schema shape the recorded version does not describe.
+    49: (
+        "ALTER TABLE storage_conversation_turns ADD COLUMN "
+        "projection_checkpoint_revision BIGINT",
+    ),
+    # Schema 49 briefly allowed an unchanged live frame to advance the Turn
+    # revision while leaving its external checkpoint at the prior revision.
+    # Repair only that exact one-revision/no-head cohort. The checkpoint body
+    # remains the current projection, so this changes metadata without reading,
+    # decoding, or rewriting the potentially multi-MiB JSON document.
+    50: (
+        "UPDATE storage_turn_projection_checkpoints SET "
+        "projection_revision=projection_revision+1 WHERE EXISTS ("
+        "SELECT 1 FROM storage_conversation_turns AS turn_row WHERE "
+        "turn_row.turn_id=storage_turn_projection_checkpoints.turn_id AND "
+        "turn_row.conversation_id="
+        "storage_turn_projection_checkpoints.conversation_id AND "
+        "turn_row.user_id=storage_turn_projection_checkpoints.user_id AND "
+        "turn_row.current_attempt_id="
+        "storage_turn_projection_checkpoints.attempt_id AND "
+        "turn_row.projection_checkpoint_revision="
+        "storage_turn_projection_checkpoints.projection_revision AND "
+        "turn_row.projection_revision="
+        "storage_turn_projection_checkpoints.projection_revision+1 AND "
+        "turn_row.projection_materialized_revision IS NULL AND "
+        "turn_row.projection_patch_count=0 AND "
+        "turn_row.projection_patch_bytes=0)",
+        "UPDATE storage_conversation_turns SET "
+        "projection_checkpoint_revision=projection_revision WHERE "
+        "projection_checkpoint_revision IS NOT NULL AND "
+        "projection_revision=projection_checkpoint_revision+1 AND "
+        "projection_materialized_revision IS NULL AND "
+        "projection_patch_count=0 AND projection_patch_bytes=0 AND EXISTS ("
+        "SELECT 1 FROM storage_turn_projection_checkpoints AS checkpoint "
+        "WHERE checkpoint.turn_id=storage_conversation_turns.turn_id AND "
+        "checkpoint.conversation_id="
+        "storage_conversation_turns.conversation_id AND "
+        "checkpoint.user_id=storage_conversation_turns.user_id AND "
+        "checkpoint.attempt_id="
+        "storage_conversation_turns.current_attempt_id AND "
+        "checkpoint.projection_revision="
+        "storage_conversation_turns.projection_revision)",
+    ),
+    # Attempt events already own their exact durable envelope. Conversation
+    # replay rows can reference that authority while it is retained instead
+    # of encoding the same potentially multi-MiB document a second time. NULL
+    # is the compatibility sentinel for historical self-contained rows; no
+    # existing JSON is read or rewritten by this metadata-only expansion.
+    51: (
+        "ALTER TABLE storage_conversation_changes ADD COLUMN "
+        "attempt_sequence BIGINT",
+        "CREATE INDEX IF NOT EXISTS "
+        "idx_storage_conversation_changes_attempt_event_reference "
+        "ON storage_conversation_changes(attempt_id, attempt_sequence) "
+        "WHERE attempt_sequence IS NOT NULL",
+    ),
+    # Arbitrary command IDs and hexadecimal digests dominate the permanent
+    # receipt key footprint. New writes use a fixed-width SHA-256 command key
+    # and binary request digest while retaining operation attribution. The
+    # historical table remains readable and is deliberately not backfilled at
+    # startup. SQLite stores the primary key once; PostgreSQL renders the same
+    # logical table without its SQLite-only physical table option.
+    52: (
+        "CREATE TABLE IF NOT EXISTS storage_command_receipts_v2 ("
+        "command_key BLOB PRIMARY KEY, operation TEXT NOT NULL, "
+        "request_digest BLOB NOT NULL, response_json BLOB NOT NULL, "
+        "committed_at_ms BIGINT NOT NULL, "
+        "CHECK (length(command_key) = 32), "
+        "CHECK (length(request_digest) = 32)) WITHOUT ROWID",
+    ),
+    # Egress-agent selection is durable user preference, not ephemeral bridge
+    # transport.  The explicit empty value also serves as the per-owner marker
+    # that the retired oauth_egress_agents.json source has been considered.
+    53: (
+        "CREATE TABLE IF NOT EXISTS storage_desktop_egress_preferences ("
+        "owner_user_id BIGINT PRIMARY KEY, agent_id TEXT NOT NULL DEFAULT '', "
+        "updated_at_ms BIGINT NOT NULL)",
+    ),
+    # Model/provider configuration is one owner-scoped revisioned v2
+    # aggregate. Credential plaintext remains outside that document and only
+    # encrypted secret references participate in its CAS transaction.
+    54: (
+        "CREATE TABLE IF NOT EXISTS storage_model_routing_authorities ("
+        "owner_user_id BIGINT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '', "
+        "revision BIGINT NOT NULL, document_json JSONDOC NOT NULL, "
+        "backup_json JSONDOC, migration_receipt_json JSONDOC, "
+        "updated_at DOUBLE PRECISION NOT NULL, "
+        "PRIMARY KEY (owner_user_id, tenant_id))",
+        "CREATE TABLE IF NOT EXISTS storage_model_routing_secrets ("
+        "owner_user_id BIGINT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '', "
+        "secret_reference TEXT NOT NULL, ciphertext TEXT NOT NULL, "
+        "key_hint TEXT NOT NULL DEFAULT '', created_at DOUBLE PRECISION NOT NULL, "
+        "updated_at DOUBLE PRECISION NOT NULL, "
+        "PRIMARY KEY (owner_user_id, tenant_id, secret_reference))",
+        "CREATE INDEX IF NOT EXISTS idx_model_routing_secrets_owner_updated "
+        "ON storage_model_routing_secrets("
+        "tenant_id, owner_user_id, updated_at, secret_reference)",
+    ),
+    # A browser presentation identity survives optimistic acceptance, queue
+    # activation and reconnect. Queue rows now point at the already-created
+    # Turn pair/Attempt instead of acting as a second transcript authority.
+    55: (
+        "ALTER TABLE storage_conversation_turns ADD COLUMN "
+        "presentation_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE storage_generation_attempts ADD COLUMN "
+        "queue_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE storage_generation_attempts ADD COLUMN "
+        "queue_state TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE storage_queue_items ADD COLUMN "
+        "input_turn_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE storage_queue_items ADD COLUMN "
+        "output_turn_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE storage_queue_items ADD COLUMN "
+        "attempt_id TEXT NOT NULL DEFAULT ''",
+        "DROP INDEX IF EXISTS idx_storage_generation_attempts_dispatchable",
+    ),
+    # Project Brain is cut over atomically to one owner/project event stream
+    # plus a rebuild checkpoint.  The generic event table keeps task events
+    # byte-compatible through defaults while project rows carry their owner,
+    # normalized project key, and monotonic project sequence explicitly.
+    56: (
+        "ALTER TABLE storage_events ADD COLUMN "
+        "owner_user_id BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE storage_events ADD COLUMN "
+        "project_key TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE storage_events ADD COLUMN "
+        "project_sequence BIGINT NOT NULL DEFAULT 0",
+        "CREATE TABLE IF NOT EXISTS storage_project_brain_projects ("
+        "owner_user_id BIGINT NOT NULL, project_key TEXT NOT NULL, "
+        "head_sequence BIGINT NOT NULL, "
+        "checkpoint_sequence BIGINT NOT NULL DEFAULT 0, "
+        "projection_json JSONDOC NOT NULL, updated_at_ms BIGINT NOT NULL, "
+        "PRIMARY KEY (owner_user_id, project_key))",
+        "CREATE INDEX IF NOT EXISTS idx_storage_project_brain_updated "
+        "ON storage_project_brain_projects("
+        "owner_user_id, updated_at_ms, project_key)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "idx_storage_events_project_sequence "
+        "ON storage_events(owner_user_id, project_key, project_sequence) "
+        "WHERE project_sequence > 0",
+    ),
+    # Provider-bound Request Inspector evidence is durable user data. Each
+    # row belongs to an owner-checked Attempt, stores independently compressed
+    # request/response bodies, and participates in an explicit global byte
+    # budget rather than TTL or silent eviction.
+    57: (
+        "CREATE TABLE IF NOT EXISTS storage_raw_archives ("
+        "archive_id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, "
+        "conversation_id TEXT NOT NULL, turn_id TEXT NOT NULL, "
+        "attempt_id TEXT NOT NULL, task_id TEXT NOT NULL, "
+        "round_num BIGINT NOT NULL, transport_attempt BIGINT NOT NULL DEFAULT 0, "
+        "request_blob BLOB NOT NULL, response_blob BLOB NOT NULL, "
+        "request_bytes BIGINT NOT NULL, response_bytes BIGINT NOT NULL, "
+        "stored_bytes BIGINT NOT NULL, request_sha256 TEXT NOT NULL, "
+        "response_sha256 TEXT NOT NULL, integrity TEXT NOT NULL, "
+        "truncation_reason TEXT NOT NULL DEFAULT '', "
+        "summary_json JSONDOC NOT NULL DEFAULT '{}', created_at_ms BIGINT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_storage_raw_archives_task_round "
+        "ON storage_raw_archives("
+        "user_id, task_id, round_num, created_at_ms, archive_id)",
+        "CREATE INDEX IF NOT EXISTS idx_storage_raw_archives_attempt "
+        "ON storage_raw_archives("
+        "user_id, attempt_id, created_at_ms, archive_id)",
+    ),
 }
 
 
@@ -1562,18 +1922,37 @@ _ADD_COLUMN_STATEMENT = re.compile(
 )
 
 
-# These indexes reference ownership columns introduced in schema 28. Creating
-# them with the latest table catalogue before migrations run would make a
-# recoverable v27 database fail startup when one of its old optional indexes is
-# absent. Install them only after the table rebuild and version publication
-# work have succeeded; IF NOT EXISTS keeps current-schema startup constant-time.
+# These indexes reference columns introduced or tables rebuilt by ordered
+# migrations. Creating them with the latest table catalogue before migrations
+# run would make a recoverable older database fail startup. Install them only
+# after the expansion and version publication work have succeeded; IF NOT
+# EXISTS keeps current-schema startup constant-time.
 _POST_MIGRATION_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_events_project_sequence "
+    "ON storage_events(owner_user_id, project_key, project_sequence) "
+    "WHERE project_sequence > 0",
+    "CREATE INDEX IF NOT EXISTS "
+    "idx_storage_conversation_changes_attempt_event_reference "
+    "ON storage_conversation_changes(attempt_id, attempt_sequence) "
+    "WHERE attempt_sequence IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_storage_generation_attempts_dispatchable "
+    "ON storage_generation_attempts(created_at, attempt_id) "
+    "WHERE status = 'pending' AND task_id = '' "
+    "AND dispatch_mode = 'conversation_executor' AND queue_state = ''",
+    "CREATE INDEX IF NOT EXISTS storage_rate_limit_bucket_idx "
+    "ON storage_rate_limit_events(endpoint, client_key, occurred_at_ms)",
+    "CREATE INDEX IF NOT EXISTS storage_rate_limit_expiry_idx "
+    "ON storage_rate_limit_events(expires_at_ms, event_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_system_task "
     "ON storage_scheduled_tasks(user_id, system_key) WHERE system_key <> ''",
     "CREATE INDEX IF NOT EXISTS idx_orch_runs_status ON orchestration_runs"
     "(tenant_id, user_id, status, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_orch_runs_orch ON orchestration_runs"
     "(tenant_id, user_id, orch_id, created_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_runs_one_active "
+    "ON orchestration_runs(tenant_id, user_id, orch_id) "
+    "WHERE created_by = 'chat_goal_mode' "
+    "AND status IN ('pending', 'running', 'paused')",
     "CREATE INDEX IF NOT EXISTS idx_orch_definitions_owner_updated "
     "ON orchestration_definitions"
     "(tenant_id, user_id, updated_at_ms DESC, id)",
@@ -1609,6 +1988,21 @@ def _column_exists(session: Session, table_name: str, column_name: str) -> bool:
     return any(str(row['name'] or '') == column_name for row in rows)
 
 
+def _table_exists(session: Session, table_name: str) -> bool:
+    """Return whether a trusted schema-migration table exists."""
+    if session.backend == 'postgres':
+        return session.fetch_one(
+            'SELECT 1 AS present FROM information_schema.tables '
+            'WHERE table_schema = current_schema() AND table_name = ?',
+            (table_name,),
+        ) is not None
+    return session.fetch_one(
+        "SELECT 1 AS present FROM sqlite_master "
+        "WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ) is not None
+
+
 def _migration_statement_already_applied(
     session: Session, statement: str,
 ) -> bool:
@@ -1619,6 +2013,20 @@ def _migration_statement_already_applied(
     newly created table whose additive column already exists. Detect this
     before ``ALTER TABLE`` so PostgreSQL's startup transaction is not aborted.
     """
+    # The signal-driven Project Brain cut removed these legacy authorities
+    # from the latest schema. A very old or partially restored database may
+    # never have created one of them; historical ALTER/INDEX migrations must
+    # then be treated as moot so migration 56 can perform the atomic cutover.
+    for retired_table in (
+        'storage_board_tasks',
+        'storage_watch_items',
+        'storage_watch_runs',
+        'storage_watch_responses',
+    ):
+        if (retired_table in statement
+                and not _table_exists(session, retired_table)):
+            return True
+
     match = _ADD_COLUMN_STATEMENT.match(statement)
     if match is None:
         return False
@@ -1645,16 +2053,20 @@ def _optimizer_ownership_is_current(session: Session) -> bool:
 
 
 def _sql_for_backend(session: Session, sql: str) -> str:
-    """Render logical binary/JSON spellings for table and migration SQL."""
+    """Render logical types and backend-specific physical table options."""
     if session.backend == 'postgres':
-        return sql.replace(' BLOB ', ' BYTEA ').replace(' JSONDOC ', ' JSONB ')
+        return (
+            sql.replace(' BLOB ', ' BYTEA ')
+            .replace(' JSONDOC ', ' JSONB ')
+            .replace(' WITHOUT ROWID', '')
+        )
     return sql.replace(' JSONDOC ', ' TEXT ')
 
 
 def initialize_schema(session: Session) -> None:
     for sql in _TABLES:
-        # PostgreSQL has BYTEA rather than BLOB.  This is the only logical
-        # binary type spelling that differs in the sidecar-owned v1 schema.
+        # PostgreSQL has BYTEA rather than BLOB and uses its ordinary primary
+        # key heap where SQLite can store a fixed-width key WITHOUT ROWID.
         # JSONDOC preserves the legacy/cutover representation: JSONB on PG,
         # TEXT on SQLite, while callers still exchange decoded documents.
         session.execute(_sql_for_backend(session, sql))

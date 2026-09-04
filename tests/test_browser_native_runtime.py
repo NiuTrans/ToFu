@@ -64,19 +64,19 @@ def _isolated_browser_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(adapters, 'audit_log', mock.Mock())
     with _state._clients_lock:
         _state._clients.clear()
-    with sessions._leases_lock:
-        for timer in sessions._lease_timers.values():
-            timer.cancel()
-        sessions._lease_timers.clear()
+    with sessions._leases_changed:
+        for lease in sessions._leases.values():
+            lease.released_at = 1
         sessions._leases.clear()
+        sessions._leases_changed.notify_all()
     yield
     with _state._clients_lock:
         _state._clients.clear()
-    with sessions._leases_lock:
-        for timer in sessions._lease_timers.values():
-            timer.cancel()
-        sessions._lease_timers.clear()
+    with sessions._leases_changed:
+        for lease in sessions._leases.values():
+            lease.released_at = 1
         sessions._leases.clear()
+        sessions._leases_changed.notify_all()
 
 
 def test_capability_negotiation_rejects_old_protocol_and_gates_adapters():
@@ -118,7 +118,6 @@ def test_browser_access_defaults_readable_and_isolates_denials_and_grants():
     from lib.browser.access import (
         BrowserAccessDenied,
         BrowserWriteAuthorizationRequired,
-        grant_write,
         has_write_grant,
         require_access,
         replace_read_denials,
@@ -132,11 +131,14 @@ def test_browser_access_defaults_readable_and_isolates_denials_and_grants():
     # Policies are per-user; Alice's denial cannot leak into Bob's browser.
     assert require_access('bob', 'https://docs.example.com/page') == 'docs.example.com'
 
-    with pytest.raises(BrowserWriteAuthorizationRequired):
-        require_access('bob', 'https://shop.example.net/cart', access='write',
-                       client_id='c1', profile='Work')
-    grant_write('bob', 'shop.example.net', client_id='c1', profile='Work')
+    # Writes auto-grant on first use (unattended deployment): no interactive
+    # approval round-trip.  A write that cannot name its browser client still
+    # fails closed.
+    assert require_access('bob', 'https://shop.example.net/cart', access='write',
+                          client_id='c1', profile='Work') == 'shop.example.net'
     assert has_write_grant('bob', 'shop.example.net', client_id='c1', profile='Work')
+    with pytest.raises(BrowserWriteAuthorizationRequired):
+        require_access('carol', 'https://shop.example.net/cart', access='write')
     # Grants are exact-domain and exact browser identity: redirects and a
     # second profile cannot inherit the authorization.
     assert not has_write_grant('bob', 'pay.example.net', client_id='c1', profile='Work')
@@ -145,8 +147,8 @@ def test_browser_access_defaults_readable_and_isolates_denials_and_grants():
     assert not has_write_grant('bob', 'shop.example.net', client_id='c1', profile='Work')
 
 
-def test_page_write_requires_one_domain_grant_and_read_adapter_can_click():
-    from lib.browser.access import BrowserWriteAuthorizationRequired, grant_write
+def test_page_write_auto_grants_domain_and_read_adapter_can_click():
+    from lib.browser.access import has_write_grant
     from lib.browser.page import BrowserPage
     from lib.browser.sessions import acquire_browser_lease
 
@@ -163,12 +165,9 @@ def test_page_write_requires_one_domain_grant_and_read_adapter_can_click():
                                   session='persistent', tab_id=7)
     page = BrowserPage(lease, sender=sender)
     page._url = 'https://app.example.com/form'
-    with pytest.raises(BrowserWriteAuthorizationRequired):
-        page.click(selector='#submit')
-    assert [row[0] for row in calls] == ['page_state']
-
-    grant_write(ALICE, 'app.example.com', client_id='c1', profile='Work')
+    # First write auto-grants the durable domain authorization and runs.
     assert page.click(selector='#submit')['ok'] is True
+    assert has_write_grant(ALICE, 'app.example.com', client_id='c1', profile='Work')
     click = next(row for row in calls if row[0] == 'page_click')
     assert click[1]['expectedDomain'] == 'app.example.com'
     # A trusted read adapter may paginate without turning every internal
@@ -176,8 +175,8 @@ def test_page_write_requires_one_domain_grant_and_read_adapter_can_click():
     assert page.click(selector='.next', trusted_read=True)['ok'] is True
 
 
-def test_page_redirect_cannot_inherit_previous_domains_write_grant():
-    from lib.browser.access import BrowserWriteAuthorizationRequired, grant_write
+def test_page_redirect_auto_grants_current_domain_not_the_previous_one():
+    from lib.browser.access import grant_write, has_write_grant
     from lib.browser.page import BrowserPage
     from lib.browser.sessions import acquire_browser_lease
 
@@ -195,9 +194,11 @@ def test_page_redirect_cannot_inherit_previous_domains_write_grant():
                                   session='persistent', tab_id=7)
     page = BrowserPage(lease, sender=sender)
     page._url = 'https://shop.example.com/cart'
-    with pytest.raises(BrowserWriteAuthorizationRequired):
-        page.click(selector='#confirm')
-    assert calls == ['page_state']
+    # Auto-grant resolves the CURRENT url: the redirect target gets its own
+    # exact-domain grant rather than inheriting shop.example.com's.
+    assert page.click(selector='#confirm')['ok'] is True
+    assert has_write_grant(ALICE, 'pay.example.net', client_id='c1', profile='Work')
+    assert calls[0] == 'page_state' and 'page_click' in calls
 
 
 @pytest.mark.parametrize('session,should_close', [
@@ -224,6 +225,40 @@ def test_lease_release_always_stops_capture_and_only_closes_ephemeral_tab(
     assert lease.active is False
     release_browser_lease(lease, sender=sender)
     assert len(commands) == (2 if should_close else 1), 'release must be idempotent'
+
+
+def test_lease_capacity_and_single_sweeper_bound_resident_resources(
+        monkeypatch):
+    import lib.browser.sessions as sessions
+
+    _register('c1')
+    monkeypatch.setattr(sessions, '_lease_capacity', lambda: 2)
+    first = sessions.acquire_browser_lease(
+        owner_user_id=ALICE, client_id='c1', session='persistent', timeout=60)
+    second = sessions.acquire_browser_lease(
+        owner_user_id=ALICE, client_id='c1', session='persistent', timeout=60)
+    assert sessions.lease_runtime_snapshot() == {
+        'active': 2,
+        'capacity': 2,
+        'expiring': 2,
+        'sweeperAlive': True,
+    }
+    assert sum(
+        thread.name == 'browser-lease-sweeper' and thread.is_alive()
+        for thread in __import__('threading').enumerate()
+    ) == 1
+    with pytest.raises(sessions.BrowserSessionCapacityError):
+        sessions.acquire_browser_lease(
+            owner_user_id=ALICE, client_id='c1', session='persistent',
+            timeout=60)
+
+    no_op_sender = lambda *_args, **_kwargs: ({}, None)
+    sessions.release_browser_lease(first, sender=no_op_sender)
+    replacement = sessions.acquire_browser_lease(
+        owner_user_id=ALICE, client_id='c1', session='persistent', timeout=60)
+    assert sessions.lease_runtime_snapshot()['active'] == 2
+    sessions.release_browser_lease(second, sender=no_op_sender)
+    sessions.release_browser_lease(replacement, sender=no_op_sender)
 
 
 def test_adapter_schema_validation_and_audit_redaction():
@@ -379,8 +414,14 @@ def test_approved_browser_write_is_promoted_to_a_durable_domain_grant(
     import lib.browser.access as access
 
     calls = []
-    monkeypatch.setattr(_approval, 'request_write_approval',
-                        lambda approval_id, timeout: True)
+
+    def approve_for_owner(approval_id, timeout, *, owner_user_id):
+        assert approval_id and timeout > 0
+        assert owner_user_id == int(ALICE)
+        return True
+
+    monkeypatch.setattr(
+        _approval, 'request_write_approval', approve_for_owner)
     monkeypatch.setattr(_approval, 'append_event', lambda *args, **kwargs: None)
     monkeypatch.setattr(
         access, 'browser_tool_access',

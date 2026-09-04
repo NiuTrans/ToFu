@@ -252,25 +252,6 @@ def _detect_bare_html_docs(text: str) -> list[dict[str, Any]]:
     return out
 
 
-def _mask_fence_regions(text: str, blocks: list[dict[str, Any]]) -> str:
-    """Replace fenced regions in *text* with same-length spaces so that
-    bare-HTML detection doesn't re-detect them.  Length-preserving so
-    indices on the raw text remain valid for downstream callers."""
-    if not blocks:
-        return text
-    out = list(text)
-    for b in blocks:
-        sr = b.get('source_ref') or {}
-        s = sr.get('start')
-        e = sr.get('end')
-        if s is None or e is None:
-            continue
-        for i in range(s, min(e, len(out))):
-            if out[i] != '\n':
-                out[i] = ' '
-    return ''.join(out)
-
-
 def _mask_all_code_regions(text: str) -> str:
     """Wipe ALL code regions (fenced + inline) before bare-HTML scan.
 

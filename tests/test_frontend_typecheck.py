@@ -59,8 +59,8 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 # bump it, we drove the count DOWN by ~440 by attacking root causes:
 #   • Fixed genuine bugs / false-positives in source: em-dash-in-JSDoc parse
 #     errors (TS1127/1016) in the pre-Turn renderer + streaming_render.js; pdfProcessing
-#     boolean→counter init (core.js); _streamZoneCache reset shape mismatch
-#     (health_stream_timer.js); undocumented optional @param on
+#     boolean→counter init (core.js); the former stream-zone reset shape
+#     mismatch; undocumented optional @param on
 #     _streamingBubbleHTML / getMessages (TS2554/1016); _i18nLang union type.
 #   • Removed the dead `_updatePricingDisplay`/`pricingData`/`loadPricing` unit.
 #   • Realigned the harness with its STATED purpose (see tsconfig.json header:

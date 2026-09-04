@@ -25,8 +25,7 @@ the qualname). Those are shape-sensitive; a partial ``@safe_route`` would drop
 their diagnostic side effects. Guarded here so a future well-meaning cleanup
 does not silently convert them without noticing.
 
-Two test layers, mirroring the pattern used by
-``tests/test_api_response_route_conversions.py``:
+Two test layers apply the repository's response-envelope contract:
 
   1. WIRE-SAFETY parity — the decorated handlers still return a 500 with the
      ``ok:False`` envelope shape when they raise. Uses the real
@@ -184,8 +183,8 @@ def _agents_src() -> str:
 # Same strict gate: FINAL except is a pure logger.error/warning +
 # api_internal_error(e) with no distinct context, no side effects.
 # Batch 5 audit found 6 candidates matching:
-#   * routes/config.py — feishu_status, discover_models_endpoint
-_CONVERTED_CONFIG_HANDLERS = ('feishu_status', 'discover_models_endpoint')
+#   * routes/config.py — feishu_status
+_CONVERTED_CONFIG_HANDLERS = ('feishu_status',)
 
 
 def _config_src() -> str:
@@ -467,7 +466,6 @@ def test_batch5_ad_hoc_final_except_patterns_gone():
         # around the converted handlers.
         for _label, _fn_marker in (
             ('feishu_status', 'def feishu_status'),
-            ('discover_models_endpoint', 'def discover_models_endpoint'),
         ):
             if _fn_marker not in src:
                 continue

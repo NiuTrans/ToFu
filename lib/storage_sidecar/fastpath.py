@@ -432,6 +432,62 @@ def shadow_paths(shadow_dir: Path) -> tuple[Path, Path]:
     return shadow_dir / SNAPSHOT_NAME, shadow_dir / SHADOW_WAL_NAME
 
 
+def local_front_matches_shadow(local_db: Path, data_dir: Path) -> bool:
+    """Whether one local ``tofu.db`` proves lineage to this data directory.
+
+    This is a read-only discovery predicate for diagnostics. A filename match
+    alone is never enough: both manifests must name the same authority UUID and
+    the local manifest must point at this deployment's exact shadow directory.
+    """
+    local_db = Path(local_db).expanduser()
+    data_dir = Path(data_dir).expanduser()
+    if local_db.name != 'tofu.db' or not local_db.is_file():
+        return False
+    shadow_dir = data_dir / SHADOW_DIRNAME
+    local_manifest = read_local_manifest(local_db.parent)
+    shadow_manifest = read_shadow_manifest(shadow_dir)
+    if not local_manifest or not shadow_manifest:
+        return False
+    local_uuid = str(local_manifest.get('authority_uuid') or '')
+    shadow_uuid = str(shadow_manifest.get('authority_uuid') or '')
+    if not local_uuid or local_uuid != shadow_uuid:
+        return False
+    recorded_shadow = str(local_manifest.get('shadow_dir') or '').strip()
+    if not recorded_shadow:
+        return False
+    try:
+        return Path(recorded_shadow).expanduser().resolve() == shadow_dir.resolve()
+    except OSError:
+        return False
+
+
+def matching_local_fronts(
+    data_dir: Path,
+    *,
+    environ: Any = os.environ,
+) -> list[Path]:
+    """Return bounded fastpath candidates whose manifests prove ownership.
+
+    Candidate enumeration is the same deployment-keyed policy used at startup,
+    but this function performs no mkdir, benchmark, mutation, or recovery. It
+    exists so offline readers do not duplicate private fastpath layout rules.
+    """
+    matches: list[Path] = []
+    seen: set[str] = set()
+    for candidate in _candidate_dirs(Path(data_dir), environ):
+        local_db = candidate / 'tofu.db'
+        if not local_front_matches_shadow(local_db, Path(data_dir)):
+            continue
+        try:
+            key = str(local_db.resolve())
+        except OSError:
+            key = str(local_db)
+        if key not in seen:
+            seen.add(key)
+            matches.append(local_db)
+    return matches
+
+
 def _bounded_content_witness(path: Path, size: int) -> str:
     """Hash all small sources or bounded, deterministic large-file samples."""
     digest = hashlib.sha256()
@@ -1236,6 +1292,7 @@ def _seed_from_classic(
 __all__ = [
     'FastpathDecision', 'SHADOW_DIRNAME', 'clear_classic_seed_provenance',
     'decide', 'reconcile',
+    'local_front_matches_shadow', 'matching_local_fronts',
     'read_local_manifest', 'read_shadow_manifest', 'shadow_paths',
     'verified_classic_seed_provenance', 'write_local_manifest',
     'write_shadow_manifest',

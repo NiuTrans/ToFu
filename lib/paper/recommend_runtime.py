@@ -38,15 +38,6 @@ def _recommend_key(description: str) -> str:
     return hashlib.sha1((description or '').strip().encode('utf-8')).hexdigest()[:16]
 
 
-def _recommend_latest_for(desc_key: str, *, user_id: int) -> dict | None:
-    """Return the most recent recommend task for a description key, or None."""
-    with _recommend_index_lock:
-        tid = _recommend_latest_index.get((user_id, desc_key))
-    if not tid:
-        return None
-    return _recommend_runtime.get_owned(tid, user_id=user_id)
-
-
 def _recommend_register_latest(
     desc_key: str, task_id: str, *, user_id: int,
 ) -> None:

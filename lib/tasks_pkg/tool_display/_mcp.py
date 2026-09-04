@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 _MCP_RESOURCE_KEYS = (
     'file_path',      # overleaf/github — which file
     'path',           # github/hope_dfs_ls — which file/dir
+    'file_name',      # hope_mlp_log_get — which log file (stdout/stderr/…)
     'name',           # create_project / create_branch — new-resource name
     'title',          # issue/PR title
     'issue_number',   # github — which issue
@@ -29,8 +30,10 @@ _MCP_RESOURCE_KEYS = (
     'doc',            # xuecheng_* — doc id or full collabpage URL
     'app_id',         # hope_fetch_source_code / hope_get_status (appid variant)
     'appid',          # hope_get_status / hope_change_priority
+    'experiment_id_or_name',  # llm_experiment_get — canvas experiment
     'job_id',         # hope_mlp_job_* — psx… job id
     'job_ids',        # hope_mlp_job_info — comma-separated
+    'ids',            # llm_experiment_update_params — comma-separated
     'run_id',         # hope_mlp_run_* — MLP run id
     'runid',          # hope_get_status / hope_stop_job (legacy spelling)
     'session_id',     # hope_stop_session
@@ -56,6 +59,18 @@ _MCP_CONTAINER_KEYS = (
 
 # Per-segment length cap for resource + container in the title line.
 _MCP_SEG_MAX = 40
+
+# Keys that state the *operation* performed on the resource rather than the
+# resource itself (read direction, server-side filter, target field). A
+# parallel batch routinely calls the SAME tool on the SAME resource with
+# only these args differing (e.g. get_log_file with regex A vs regex B);
+# without them every sibling row renders an identical title and looks like a
+# duplicate execution. Rendered as compact chips after the resource label.
+# Curated — never blanket-render every scalar arg — so tokens, payloads and
+# other bulky/sensitive values can never leak into a title line.
+_MCP_MODIFIER_KEYS = ('method', 'regex', 'field', 'node_id', 'dry_run')
+_MCP_MODIFIER_MAX = 2
+_MCP_MODIFIER_SEG_MAX = 28
 
 
 # ── Overleaf project-name cache ──────────────────────────────────────
@@ -170,9 +185,9 @@ def _render_mcp_arg(key: str, val) -> str:
         s = _short_project_id(s)
     elif key == 'doc':
         s = _short_doc_id(s)
-    elif key in ('job_id', 'app_id', 'appid'):
+    elif key in ('job_id', 'app_id', 'appid', 'pod_name'):
         s = _short_job_id(s)
-    elif key == 'job_ids':
+    elif key in ('job_ids', 'ids'):
         # comma-separated list: shorten each, cap to first 2
         parts = [_short_job_id(p) for p in s.split(',') if p.strip()]
         if len(parts) > 2:
@@ -184,6 +199,44 @@ def _render_mcp_arg(key: str, val) -> str:
     if len(s) > _MCP_SEG_MAX:
         s = s[:_MCP_SEG_MAX - 1] + '…'
     return s
+
+
+def _render_modifier_chip(key: str, val) -> str:
+    """Render one modifier arg as a short chip, or '' when not informative."""
+    if val is None or val is False:
+        return ''
+    if key == 'dry_run':
+        return 'dry-run'
+    s = str(val).strip()
+    if not s:
+        return ''
+    if len(s) > _MCP_MODIFIER_SEG_MAX:
+        s = s[:_MCP_MODIFIER_SEG_MAX - 1] + '…'
+    if key == 'regex':
+        return f'/{s}/'
+    if key in ('field', 'node_id'):
+        return f'{key}={s}'
+    return s
+
+
+def _mcp_modifier_chips(fn_args, resource: str) -> list:
+    """Collect up to ``_MCP_MODIFIER_MAX`` operation chips for a call.
+
+    Chips that merely restate the resource label are dropped; duplicates
+    collapse. The cap bounds title-line growth — the resource + container
+    remain the primary identity, chips only disambiguate."""
+    if not isinstance(fn_args, dict):
+        return []
+    chips = []
+    for key in _MCP_MODIFIER_KEYS:
+        if key not in fn_args:
+            continue
+        chip = _render_modifier_chip(key, fn_args[key])
+        if chip and chip != resource and chip not in chips:
+            chips.append(chip)
+        if len(chips) >= _MCP_MODIFIER_MAX:
+            break
+    return chips
 
 
 def _mcp_arg_suffix(fn_args):
@@ -242,6 +295,11 @@ def _mcp_arg_suffix(fn_args):
             sect_short = sect_short[:_MCP_SEG_MAX - 1] + '…'
         resource = f'{resource} › {sect_short}'
 
+    # ── Operation chips (method/regex/field/…) ─────────────────────────
+    chips = _mcp_modifier_chips(fn_args, resource)
+    if chips:
+        resource = ' · '.join([resource, *chips]) if resource else ' · '.join(chips)
+
     # ── Compose ────────────────────────────────────────────────────────
     # issue/PR number: if the resource label is a #number, and we have an
     # owner/repo container, render as ``owner/repo#N`` (no "@") — that's
@@ -273,8 +331,9 @@ def _mcp_links(fn_args):
     Currently covers:
       * overleaf ``project_id`` → ``…/project/<id>`` (always — synthesized
         from the deployment base when no exact URL was harvested)
-      * xuecheng ``doc``        → harvested ``…/collabpage/<id>`` URL (only
-        when one was seen in a prior tool result — no canonical base assumed)
+      * xuecheng ``doc``        → ``…/collabpage/<id>`` (always — synthesized
+        from the learned-or-default km.internal.example.com base when no exact URL was
+        harvested)
     """
     if not isinstance(fn_args, dict):
         return {}

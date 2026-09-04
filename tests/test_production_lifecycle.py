@@ -51,6 +51,7 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
             validate_storage_boundary=phase('boundary'),
             init_database=phase('database'),
             start_storage=phase('storage'),
+            bootstrap_model_routing=phase('model-routing'),
             validate_imports=phase('imports'),
             start_workers=phase('workers'),
         ),
@@ -70,6 +71,7 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
             validate_storage_boundary=lambda: None,
             init_database=lambda: None,
             start_storage=lambda: None,
+            bootstrap_model_routing=lambda: None,
             validate_imports=lambda: None,
             start_workers=lambda _app: None,
         ),
@@ -87,16 +89,16 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
 
     asyncio.run(exercise())
     assert [name for name, _ in calls] == [
-        'assets', 'boundary', 'storage', 'database', 'imports', 'workers', 'optional',
-        'announce', 'shutdown',
+        'assets', 'boundary', 'storage', 'database', 'model-routing',
+        'imports', 'workers', 'optional', 'announce', 'shutdown',
     ]
-    assert calls[5][1] == (app,)
+    assert calls[6][1] == (app,)
     assert calls[-1][1][:2] == (stop, app)
     assert any(
-        line.startswith('[startup phase 1/8] start | Frontend assets')
+        line.startswith('[startup phase 1/9] start | Frontend assets')
         for line in boot_lines)
     assert any(
-        line.startswith('[startup phase 8/8] done | Readiness announcement | ')
+        line.startswith('[startup phase 9/9] done | Readiness announcement | ')
         for line in boot_lines)
 
 
@@ -119,6 +121,7 @@ def test_shutdown_checkpoint_skips_post_database_startup():
             validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=init_database,
             start_storage=lambda: calls.append('storage'),
+            bootstrap_model_routing=lambda: calls.append('model-routing'),
             validate_imports=lambda: calls.append('imports'),
             start_workers=lambda _app: calls.append('workers'),
         ),
@@ -170,6 +173,7 @@ def test_startup_failure_uses_native_rollback_cleanup():
             validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=fail_database,
             start_storage=lambda: calls.append('storage'),
+            bootstrap_model_routing=lambda: calls.append('model-routing'),
             validate_imports=lambda: calls.append('imports'),
             start_workers=lambda _app: calls.append('workers'),
         ),
@@ -210,6 +214,7 @@ def test_frontend_artifact_failure_blocks_readiness_and_runs_rollback():
             validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=lambda: calls.append('database'),
             start_storage=lambda: calls.append('storage'),
+            bootstrap_model_routing=lambda: calls.append('model-routing'),
             validate_imports=lambda: calls.append('imports'),
             start_workers=lambda _app: calls.append('workers'),
         ),
@@ -251,6 +256,7 @@ def test_storage_handshake_failure_blocks_workers_and_runs_cleanup():
             validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=lambda: calls.append('database'),
             start_storage=fail_storage,
+            bootstrap_model_routing=lambda: calls.append('model-routing'),
             validate_imports=lambda: calls.append('imports'),
             start_workers=lambda _app: calls.append('workers'),
         ),
@@ -293,6 +299,8 @@ def test_server_composition_wires_required_storage_phase(monkeypatch):
     assert captured['target_app'] is app_sentinel
     steps = captured['steps']
     assert steps.start_storage is server_module._start_storage_sidecar
+    from lib.model_routing import bootstrap_personal_model_routing
+    assert steps.bootstrap_model_routing is bootstrap_personal_model_routing
     assert (
         steps.validate_storage_boundary
         is server_module._validate_storage_cutover_boundary

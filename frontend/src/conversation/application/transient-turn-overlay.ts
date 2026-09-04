@@ -54,7 +54,18 @@ export function createTransientTurnOverlay(): TransientTurnOverlay {
       const turnsById = { ...state.turnsById };
       const laneOrder = Object.fromEntries(Object.entries(state.laneOrder)
         .map(([laneId, turnIds]) => [laneId, [...(turnIds ?? [])]]));
+      const authoritativeTurnByPresentationId = new Map(
+        Object.values(state.turnsById).flatMap((turn) => (
+          turn ? [[turn.presentationId || turn.turnId, turn.turnId] as const] : []
+        )),
+      );
       for (const turn of overlays.values()) {
+        const authoritativeTurnId = authoritativeTurnByPresentationId.get(
+          turn.presentationId || turn.turnId,
+        );
+        if (authoritativeTurnId && authoritativeTurnId !== turn.turnId) {
+          continue;
+        }
         turnsById[turn.turnId] = turn;
         const laneId = turn.laneId || 'main';
         const order = laneOrder[laneId] ?? (laneOrder[laneId] = []);

@@ -34,10 +34,10 @@ PET = SRC / "runtime" / "scene" / "tofu-pet.js"
 RETAINED_SECTIONS = SRC / "runtime" / "sections"
 RETAINED_MANIFEST = RETAINED_SECTIONS / "manifest.json"
 
-#: A free `t('…')` / `t("…")` call — NOT a method call (`.t(`), not a longer
-#: identifier (`format(`), not a property (`$t(` is still a free-ish global
-#: in some harnesses, but Vue-style `$t` is excluded by the `$` lookbehind).
-FREE_T_CALL_RE = re.compile(r"(?<![\w$.])t\s*\(\s*['\"]")
+#: A free `t(…)` call — literal and computed keys both need a lexical binding.
+#: This is NOT a method call (`.t(`), longer identifier (`format(`), or
+#: Vue-style `$t` property (excluded by the `$` lookbehind).
+FREE_T_CALL_RE = re.compile(r"(?<![\w$.])t\s*\(")
 
 #: Ways a module legitimately obtains `t`:
 #:  - ES module import binding:  import { t } from ... / import t from ...
@@ -87,11 +87,16 @@ def test_no_frontend_module_calls_a_bare_free_t():
 
 
 def test_retained_sections_are_one_manifest_owned_translation_scope():
-    """Every skipped section must be inside the composed runtime boundary."""
+    """Every skipped section must belong to one declared lexical bundle."""
     payload = json.loads(RETAINED_MANIFEST.read_text(encoding="utf-8"))
     rows = payload.get("sections")
-    assert payload.get("version") == 1 and isinstance(rows, list)
-    declared = {Path(row["path"]).as_posix() for row in rows}
+    lazy_bundles = payload.get("lazyBundles")
+    assert payload.get("version") == 2 and isinstance(rows, list)
+    assert isinstance(lazy_bundles, list)
+    all_rows = list(rows)
+    for bundle in lazy_bundles:
+        all_rows.extend(bundle["sections"])
+    declared = {Path(row["path"]).as_posix() for row in all_rows}
     actual = {
         path.relative_to(RETAINED_SECTIONS).as_posix()
         for path in RETAINED_SECTIONS.rglob("*.js")
@@ -112,6 +117,16 @@ def test_retained_sections_are_one_manifest_owned_translation_scope():
     assert SAFE_BINDING_RE.search(composed), (
         "the composed retained runtime lost its module-level t binding"
     )
+    for bundle in lazy_bundles:
+        generated = (ROOT / bundle["output"]).read_text(encoding="utf-8")
+        # Translation-free bundles (for example Image Generation) need no t
+        # import. Requiring every lazy owner to manufacture a call merely to
+        # satisfy this guard would add the exact empty dependency the guard is
+        # supposed to prevent.
+        if FREE_T_CALL_RE.search(generated):
+            assert SAFE_BINDING_RE.search(generated), (
+                f"lazy runtime {bundle['name']} lost its module-level t binding"
+            )
 
 
 def test_pet_chunk_keeps_its_defensive_t_guard():

@@ -46,7 +46,17 @@ import hashlib
 from typing import Callable, Optional
 
 from lib.identity import require_user_id
+from lib.llm_errors import AbortedError
 from lib.log import get_logger
+from lib.paper.contracts import (
+    PAPER_FANIN_MAX_PAPERS,
+    PAPER_FANIN_MAX_TEXT_CHARS,
+    PAPER_SURVEY_MAX_CLUSTERS,
+    PAPER_SURVEY_MAX_GAPS,
+    PAPER_SURVEY_MAX_GROUND_PROBES,
+    PAPER_SURVEY_MAX_IDS_PER_ENTRY,
+    PAPER_SURVEY_MAX_MATRIX_ROWS,
+)
 
 logger = get_logger(__name__)
 
@@ -62,11 +72,11 @@ OPEN_GAPS_SCHEMA_VERSION = 1
 # Per-paper input cap (chars) — keeps N papers inside the context window. A
 # report is already distilled, so this is generous; raw parsed_text is the
 # fallback and gets the same ceiling.
-_SURVEY_PER_PAPER_CHARS = 6000
+_SURVEY_PER_PAPER_CHARS = PAPER_FANIN_MAX_TEXT_CHARS
 
 # How many library papers to feed the synthesis at most (a survey of hundreds
 # is summarized from the most relevant slice, not the entire shelf).
-_SURVEY_MAX_PAPERS = 40
+_SURVEY_MAX_PAPERS = PAPER_FANIN_MAX_PAPERS
 
 _SURVEY_TEMPERATURE = 0.3      # below insight's 0.45 — survey is descriptive, not divergent
 _SURVEY_MAX_TOKENS = 8000
@@ -119,7 +129,27 @@ def _load_paper_inputs(
 
     user_id = require_user_id(user_id, context='paper survey input load')
     try:
-        entries = PaperLibraryRepository(user_id).list_entries()
+        paper_limit = max(1, min(int(max_papers), _SURVEY_MAX_PAPERS))
+        content_limit = max(1, min(int(per_paper_chars),
+                                   _SURVEY_PER_PAPER_CHARS))
+    except (TypeError, ValueError, OverflowError) as error:
+        logger.warning('[Paper:Survey] invalid input budget: %s', error)
+        return []
+    requested_ids = []
+    requested_seen = set()
+    for index, raw in enumerate(arxiv_ids or ()):
+        if index >= paper_limit:
+            break
+        normalized = _norm_id(raw)
+        if not normalized or normalized in requested_seen:
+            continue
+        requested_seen.add(normalized)
+        requested_ids.append(normalized)
+        if len(requested_ids) >= paper_limit:
+            break
+    try:
+        entries = PaperLibraryRepository(user_id).by_arxiv_ids(
+            requested_ids, max_text_chars=content_limit)
     except Exception as error:
         logger.error(
             '[Paper:Survey] library input load failed: %s', error,
@@ -135,16 +165,24 @@ def _load_paper_inputs(
 
     from lib.paper.artifact_repository import PaperArtifactRepository
     artifacts = PaperArtifactRepository(user_id)
+    try:
+        reports_by_hash = artifacts.report_excerpts(
+            [entry.paper_hash for entry in entries if entry.paper_hash],
+            lang, max_chars=content_limit)
+    except Exception as error:
+        logger.warning(
+            '[Paper:Survey] batch report excerpt load failed: %s', error)
+        reports_by_hash = {}
     output = []
     seen = set()
-    for raw in arxiv_ids or []:
+    for raw in requested_ids:
         normalized = _norm_id(raw)
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        if len(output) >= max_papers:
+        if len(output) >= paper_limit:
             logger.info(
-                '[Paper:Survey] input cap %d reached', max_papers)
+                '[Paper:Survey] input cap %d reached', paper_limit)
             break
         entry = entries_by_arxiv_id.get(normalized)
         if entry is None:
@@ -155,16 +193,10 @@ def _load_paper_inputs(
         content = ''
         source_kind = ''
         if entry.paper_hash:
-            try:
-                report = artifacts.get_report(entry.paper_hash, lang)
-                if report and report.report.strip():
-                    content = report.report
-                    source_kind = 'report'
-            except Exception as error:
-                logger.debug(
-                    '[Paper:Survey] report lookup failed for %s: %s',
-                    normalized, error,
-                )
+            report = reports_by_hash.get(entry.paper_hash)
+            if report and report.report.strip():
+                content = report.report
+                source_kind = 'report'
         if not content:
             content = entry.parsed_text
             source_kind = 'parsed_text'
@@ -175,7 +207,7 @@ def _load_paper_inputs(
             'paper_hash': entry.paper_hash,
             'title': entry.title or f'arXiv:{normalized}',
             'source': source_kind,
-            'content': content[:per_paper_chars],
+            'content': content[:content_limit],
         })
 
     logger.info(
@@ -189,13 +221,26 @@ def _load_paper_inputs(
 
 # ── The library-verifiable structural gate (pin #1) ────────────────────────
 
-def _library_id_set(*, user_id: int, folder_id: str = '') -> set:
-    """Return normalized arXiv ids from exactly one owner's bookshelf."""
+def _library_id_set(candidate_ids=(), *, user_id: int,
+                    folder_id: str = '') -> set:
+    """Resolve only referenced arXiv ids against one owner's bookshelf."""
     from lib.paper.library_repository import PaperLibraryRepository
 
     user_id = require_user_id(user_id, context='paper survey library lookup')
+    requested_ids = []
+    requested_seen = set()
+    for index, raw in enumerate(candidate_ids or ()):
+        if index >= _SURVEY_MAX_PAPERS:
+            break
+        normalized = _norm_id(raw)
+        if not normalized or normalized in requested_seen:
+            continue
+        requested_seen.add(normalized)
+        requested_ids.append(normalized)
+        if len(requested_ids) >= _SURVEY_MAX_PAPERS:
+            break
     try:
-        entries = PaperLibraryRepository(user_id).list_entries()
+        entries = PaperLibraryRepository(user_id).by_arxiv_ids(requested_ids)
     except Exception as error:
         logger.error(
             '[Paper:Survey] library id-set query failed: %s',
@@ -215,7 +260,8 @@ def _library_id_set(*, user_id: int, folder_id: str = '') -> set:
 
 
 def _tier_ids(id_list, lib_ids: set, stripped: list, tiers: dict,
-              ground_fn, ground_cache: dict) -> list:
+              ground_fn, ground_cache: dict, ground_state: dict,
+              abort_check=None) -> list:
     """Classify each id into library / grounded / hallucinated (R2/R3 seam v2).
 
     Returns the kept ids (library + grounded). Records:
@@ -230,8 +276,13 @@ def _tier_ids(id_list, lib_ids: set, stripped: list, tiers: dict,
     fallback that keeps a real-but-not-yet-harvested citation alive; anything
     else is a fabrication.
     """
+    if not isinstance(id_list, (list, tuple)):
+        return []
+    if len(id_list) > PAPER_SURVEY_MAX_IDS_PER_ENTRY:
+        ground_state['references_truncated'] += (
+            len(id_list) - PAPER_SURVEY_MAX_IDS_PER_ENTRY)
     kept = []
-    for raw in (id_list or []):
+    for raw in id_list[:PAPER_SURVEY_MAX_IDS_PER_ENTRY]:
         nid = _norm_id(raw)
         if not nid:
             # A dict entry with no salvageable id is an unverifiable CLAIM —
@@ -245,7 +296,21 @@ def _tier_ids(id_list, lib_ids: set, stripped: list, tiers: dict,
             continue
         # Not in the shelf — is it a real paper (grounded) or a hallucination?
         if nid not in ground_cache:
-            ground_cache[nid] = bool(ground_fn(nid)) if ground_fn else False
+            if abort_check is not None and abort_check():
+                raise AbortedError('paper survey grounding aborted')
+            if ground_state['probes'] >= PAPER_SURVEY_MAX_GROUND_PROBES:
+                ground_state['probes_suppressed'] += 1
+                ground_cache[nid] = False
+            else:
+                ground_state['probes'] += 1
+                try:
+                    ground_cache[nid] = (
+                        bool(ground_fn(nid)) if ground_fn else False)
+                except Exception as error:
+                    logger.debug(
+                        '[Paper:Survey] grounding probe failed for %s: %s',
+                        nid, error)
+                    ground_cache[nid] = False
         if ground_cache[nid]:
             kept.append(nid)
             tiers[nid] = 'grounded'
@@ -256,7 +321,7 @@ def _tier_ids(id_list, lib_ids: set, stripped: list, tiers: dict,
 
 def _verify_against_library(gap_map: dict, *, user_id: int,
                             folder_id: str = '', lib_ids: Optional[set] = None,
-                            ground_fn=None) -> dict:
+                            ground_fn=None, abort_check=None) -> dict:
     """Grade every arXiv id in an open-gap map into three tiers (R2/R3 seam v2).
 
     Walks ``clusters[].papers``, ``method_matrix[].paper``, and
@@ -281,46 +346,86 @@ def _verify_against_library(gap_map: dict, *, user_id: int,
     Returns a NEW dict with added meta:
       * ``stripped_ids`` — hallucinations removed (replay/debug);
       * ``missing_ids`` — grounded-but-unharvested ids to harvest next;
+      * ``verification_budget`` — applied structure/probe ceilings and any
+        truncation, so degraded model output remains observable;
       * per-gap: ``evidence_tiers`` / ``library_evidence_count`` /
         ``grounded_evidence_count`` / ``low_confidence``.
 
-    ``ground_fn`` defaults to the module's ``_fetch_arxiv_title`` dependency; pass a
-    stub in tests to avoid the network.
+    With no ``ground_fn``, all candidates use one bounded batch request. Passing
+    a custom function retains the per-id seam used by deterministic tests.
     """
     user_id = require_user_id(user_id, context='paper survey verification')
+    if abort_check is not None and abort_check():
+        raise AbortedError('paper survey verification aborted')
     if not isinstance(gap_map, dict):
         return {'schema_version': OPEN_GAPS_SCHEMA_VERSION, 'clusters': [],
                 'method_matrix': [], 'open_gaps': [], 'stripped_ids': [],
                 'missing_ids': []}
     if lib_ids is None:
-        lib_ids = _library_id_set(user_id=user_id, folder_id=folder_id)
-    if ground_fn is None:
+        lib_ids = _library_id_set(
+            _extract_survey_ids(gap_map), user_id=user_id,
+            folder_id=folder_id)
+    use_batch_grounding = ground_fn is None
+    if use_batch_grounding:
         ground_fn = _fetch_arxiv_title
 
     out = dict(gap_map)
     out['schema_version'] = OPEN_GAPS_SCHEMA_VERSION
     stripped: list = []
     all_tiers: dict = {}      # id → 'library'|'grounded' across the whole map
-    ground_cache: dict = {}   # id → bool, one probe per distinct id
+    ground_cache: dict = {}   # id → bool, one probe per distinct id; bounded by construction (function-local per-run memo)
+    ground_state = {
+        'probes': 0,
+        'probes_suppressed': 0,
+        'references_truncated': 0,
+        'batches': 0,
+    }
+    if use_batch_grounding:
+        candidates = sorted(
+            _extract_survey_ids(gap_map) - set(lib_ids)
+        )[:PAPER_SURVEY_MAX_GROUND_PROBES]
+        if candidates:
+            if abort_check is not None and abort_check():
+                raise AbortedError('paper survey grounding aborted')
+            ground_state['probes'] = len(candidates)
+            ground_state['batches'] = 1
+            try:
+                batch_titles = _fetch_arxiv_titles(candidates)
+            except Exception as error:
+                logger.warning(
+                    '[Paper:Survey] batch grounding failed for %d id(s): %s',
+                    len(candidates), error)
+                batch_titles = {}
+            if not isinstance(batch_titles, dict):
+                batch_titles = {}
+            ground_cache.update({
+                arxiv_id: bool(batch_titles.get(arxiv_id))
+                for arxiv_id in candidates
+            })
 
     # clusters
+    raw_clusters = gap_map.get('clusters')
+    cluster_rows = raw_clusters if isinstance(raw_clusters, list) else []
     clusters = []
-    for c in (gap_map.get('clusters') or []):
+    for c in cluster_rows[:PAPER_SURVEY_MAX_CLUSTERS]:
         if not isinstance(c, dict):
             continue
         c2 = dict(c)
         c2['papers'] = _tier_ids(c.get('papers'), lib_ids, stripped, all_tiers,
-                                 ground_fn, ground_cache)
+                                 ground_fn, ground_cache, ground_state,
+                                 abort_check)
         clusters.append(c2)
     out['clusters'] = clusters
 
     # method_matrix — a row IS a paper; drop only a hallucinated-paper row
+    raw_matrix = gap_map.get('method_matrix')
+    matrix_rows = raw_matrix if isinstance(raw_matrix, list) else []
     matrix = []
-    for m in (gap_map.get('method_matrix') or []):
+    for m in matrix_rows[:PAPER_SURVEY_MAX_MATRIX_ROWS]:
         if not isinstance(m, dict):
             continue
         kept = _tier_ids([m.get('paper')], lib_ids, stripped, all_tiers,
-                         ground_fn, ground_cache)
+                         ground_fn, ground_cache, ground_state, abort_check)
         if kept:
             m2 = dict(m)
             m2['paper'] = kept[0]   # normalized bare id (salvaged if dict-shaped)
@@ -328,15 +433,18 @@ def _verify_against_library(gap_map: dict, *, user_id: int,
     out['method_matrix'] = matrix
 
     # open_gaps — drop only when ALL evidence is hallucination; flag low_confidence
+    raw_gaps = gap_map.get('open_gaps')
+    gap_rows = raw_gaps if isinstance(raw_gaps, list) else []
     gaps = []
     dropped_gaps = 0
-    for g in (gap_map.get('open_gaps') or []):
+    for g in gap_rows[:PAPER_SURVEY_MAX_GAPS]:
         if not isinstance(g, dict):
             continue
         g2 = dict(g)
         gap_tiers: dict = {}
         g2['evidence'] = _tier_ids(g.get('evidence'), lib_ids, stripped, gap_tiers,
-                                   ground_fn, ground_cache)
+                                   ground_fn, ground_cache, ground_state,
+                                   abort_check)
         if not g2['evidence']:
             dropped_gaps += 1
             logger.info('[Paper:Survey] dropped hallucinated open_gap %s (all evidence '
@@ -363,6 +471,23 @@ def _verify_against_library(gap_map: dict, *, user_id: int,
     uniq_stripped = sorted(set(stripped))
     out['stripped_ids'] = uniq_stripped
     out['missing_ids'] = missing
+    out['verification_budget'] = {
+        'max_clusters': PAPER_SURVEY_MAX_CLUSTERS,
+        'max_method_matrix_rows': PAPER_SURVEY_MAX_MATRIX_ROWS,
+        'max_open_gaps': PAPER_SURVEY_MAX_GAPS,
+        'max_ids_per_entry': PAPER_SURVEY_MAX_IDS_PER_ENTRY,
+        'max_ground_probes': PAPER_SURVEY_MAX_GROUND_PROBES,
+        'clusters_truncated': max(
+            0, len(cluster_rows) - PAPER_SURVEY_MAX_CLUSTERS),
+        'method_matrix_rows_truncated': max(
+            0, len(matrix_rows) - PAPER_SURVEY_MAX_MATRIX_ROWS),
+        'open_gaps_truncated': max(
+            0, len(gap_rows) - PAPER_SURVEY_MAX_GAPS),
+        'references_truncated': ground_state['references_truncated'],
+        'ground_probes': ground_state['probes'],
+        'ground_batches': ground_state['batches'],
+        'ground_probes_suppressed': ground_state['probes_suppressed'],
+    }
     if uniq_stripped or missing:
         logger.warning('[Paper:Survey] library gate — %d hallucination(s) stripped, '
                        '%d grounded-not-harvested → missing_ids, %d gap(s) dropped',
@@ -417,6 +542,12 @@ def _fetch_arxiv_title(arxiv_id):
         return ''
 
 
+def _fetch_arxiv_titles(arxiv_ids):
+    """One-request grounding seam for the default survey verifier."""
+    from lib.paper.arxiv import fetch_arxiv_titles_batch
+    return fetch_arxiv_titles_batch(arxiv_ids)
+
+
 def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
                        abort=None, on_tool_event=None, usage_meter=None):
     """Agentic fan-in synthesis: research the frontier, then emit the survey.
@@ -430,7 +561,9 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
     emit the markdown survey followed by a fenced ```json``` block carrying the
     open_gaps map; we split on the last JSON object.
     """
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop import AbortSignal
+    from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
+    from lib.paper.agent_usage import PaperAgentUsageMeter
     from lib.paper.prompts import date_anchor_clause
     from lib.paper.tools import (
         PaperToolResultBudgetV2,
@@ -440,6 +573,8 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
         make_research_tool_executor,
     )
 
+    usage_meter = usage_meter or PaperAgentUsageMeter.for_stage(
+        'survey', fallback_model=model or '')
     system = date_anchor_clause(lang) + _survey_system_prompt(lang)
     parts = [f'## RESEARCH DIRECTION\n\n{direction}\n',
              '## LIBRARY PAPERS (already parsed — synthesize from these, do NOT re-read)\n']
@@ -470,10 +605,8 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
         def _on_content(text):
             _round['content'] += text
 
-        allowed_tools = (usage_meter.allowed_tools(tools)
-                         if usage_meter else tools)
         effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
-            allowed_tools, owner_user_id=user_id)
+            tools, owner_user_id=user_id)
         logger.info('[Paper:Survey] round %d — msgs=%d tools=%s papers=%d',
                     rnd + 1, len(messages), 'yes' if effective_tools else 'no',
                     len(paper_inputs))
@@ -487,8 +620,6 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
-        if usage_meter:
-            usage_meter.observe_agent_round(usage, msg)
 
     def _begin_tool_round(rnd, msg):
         _round['content'] = ''
@@ -501,7 +632,9 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
         log_prefix='[Paper:Survey]',
         contract_documents_for_round=contracts_by_round.get)
 
-    run_agent_loop(
+    run_guarded_paper_agent_loop(
+        context='Paper Survey agent',
+        usage_meter=usage_meter,
         abort=abort_signal,
         round_tools=paper_tools, dispatch=_dispatch, execute_tool=_execute_tool,
         on_round_result=_on_round_result, on_tool_round=_begin_tool_round,
@@ -603,6 +736,7 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int,
           'error': str,                     # set when ok is False
         }
     """
+    from lib.paper.agent_usage import paper_agent_dispatch_budget
     from lib.research.telemetry import ResearchUsageMeter, research_token_budget
 
     user_id = require_user_id(user_id, context='paper survey')
@@ -610,7 +744,8 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int,
     usage_meter = ResearchUsageMeter(
         'survey', fallback_model=model or '',
         token_budget=research_token_budget(
-            'TOFU_RESEARCH_SURVEY_TOKEN_BUDGET', _SURVEY_AGENT_TOKEN_BUDGET))
+            'TOFU_RESEARCH_SURVEY_TOKEN_BUDGET', _SURVEY_AGENT_TOKEN_BUDGET),
+        dispatch_budget=paper_agent_dispatch_budget('survey'), repeat_limit=0)
     if not direction:
         return {'ok': False, 'error': 'empty direction', 'direction': '',
                 'lang': lang, 'survey_md': '', 'open_gaps': {}, 'citation_audit': None,
@@ -630,7 +765,6 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int,
             inputs, direction, lang, user_id=user_id, model=model, abort=abort,
             on_tool_event=on_tool_event, usage_meter=usage_meter)
     except Exception as e:
-        from lib.llm_errors import AbortedError
         if isinstance(e, AbortedError):
             logger.info('[Paper:Survey] aborted during synthesis')
             return {'ok': False, 'error': 'aborted', 'direction': direction, 'lang': lang,
@@ -651,9 +785,18 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int,
     # race and matches the harvest→survey data contract.
     surveyed_ids = {_norm_id(p.get('arxiv_id')) for p in inputs if isinstance(p, dict)}
     surveyed_ids.discard('')
-    gap_map = _verify_against_library(
-        raw_gap_map, user_id=user_id, folder_id=folder_id,
-        lib_ids=surveyed_ids)
+    try:
+        gap_map = _verify_against_library(
+            raw_gap_map, user_id=user_id, folder_id=folder_id,
+            lib_ids=surveyed_ids, abort_check=abort)
+    except AbortedError:
+        logger.info('[Paper:Survey] aborted during evidence verification')
+        return {
+            'ok': False, 'error': 'aborted', 'direction': direction,
+            'lang': lang, 'survey_md': '', 'open_gaps': {},
+            'citation_audit': None, 'inputs_used': len(inputs),
+            'usage': usage_meter.snapshot(),
+        }
     gap_map.setdefault('schema_version', OPEN_GAPS_SCHEMA_VERSION)
     gap_map['direction'] = direction
     gap_map['lang'] = lang
@@ -692,14 +835,24 @@ def _extract_survey_ids(gap_map: dict) -> set:
     ids = set()
     if not isinstance(gap_map, dict):
         return ids
-    for c in gap_map.get('clusters') or []:
-        for p in (c.get('papers') or []) if isinstance(c, dict) else []:
+    raw_clusters = gap_map.get('clusters')
+    clusters = raw_clusters if isinstance(raw_clusters, list) else []
+    for c in clusters[:PAPER_SURVEY_MAX_CLUSTERS]:
+        papers = c.get('papers') if isinstance(c, dict) else []
+        papers = papers if isinstance(papers, list) else []
+        for p in papers[:PAPER_SURVEY_MAX_IDS_PER_ENTRY]:
             ids.add(_norm_id(p))
-    for m in gap_map.get('method_matrix') or []:
+    raw_matrix = gap_map.get('method_matrix')
+    matrix = raw_matrix if isinstance(raw_matrix, list) else []
+    for m in matrix[:PAPER_SURVEY_MAX_MATRIX_ROWS]:
         if isinstance(m, dict):
             ids.add(_norm_id(m.get('paper')))
-    for g in gap_map.get('open_gaps') or []:
-        for e in (g.get('evidence') or []) if isinstance(g, dict) else []:
+    raw_gaps = gap_map.get('open_gaps')
+    gaps = raw_gaps if isinstance(raw_gaps, list) else []
+    for g in gaps[:PAPER_SURVEY_MAX_GAPS]:
+        evidence = g.get('evidence') if isinstance(g, dict) else []
+        evidence = evidence if isinstance(evidence, list) else []
+        for e in evidence[:PAPER_SURVEY_MAX_IDS_PER_ENTRY]:
             ids.add(_norm_id(e))
     ids.discard('')
     return ids

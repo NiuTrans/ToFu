@@ -31,6 +31,12 @@ from lib.storage_sidecar.durability import (
     fsync_directory, fsync_file, load_manifest,
     sha256_file, write_json_durable,
 )
+from runtime_guards import storage_backup_timeout_seconds
+
+
+def _maintenance_timeout_seconds(command: str) -> int:
+    """Share the bounded backup budget across online and offline commands."""
+    return storage_backup_timeout_seconds() if command == 'backup' else 3600
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -93,7 +99,10 @@ def _online(config: SidecarConfig, command: str) -> dict:
         if command == 'integrity-check':
             return supervisor.client.maintenance('system.integrity_check', deadline=60)
         if command == 'backup':
-            return supervisor.client.maintenance('system.backup', deadline=3600)
+            return supervisor.client.maintenance(
+                'system.backup',
+                deadline=float(_maintenance_timeout_seconds(command)),
+            )
         if command == 'baseline':
             return supervisor.client.maintenance('system.baseline', deadline=3600)
     raise RuntimeError('unknown online maintenance command')
@@ -318,7 +327,7 @@ def _offline_sqlite_maintenance(
     )
     lease.acquire()
     try:
-        deadline_at = time.monotonic() + 3600
+        deadline_at = time.monotonic() + _maintenance_timeout_seconds(command)
         if command == 'baseline':
             result = _offline_sqlite_baseline(config, deadline_at)
             reports = config.data_dir / 'storage-maintenance'

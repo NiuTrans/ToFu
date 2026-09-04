@@ -11,6 +11,7 @@ from lib.log import get_logger
 from lib.scheduler.contract import (
     DUE_CLAIM_INTERVAL_SECONDS,
     MAX_TASKS_PER_OWNER,
+    timer_live_capacity,
 )
 from lib.storage.errors import StorageError
 from lib.storage_sidecar.adapters.base import Session
@@ -133,9 +134,25 @@ def _timer_active_count(session: Session, payload: Mapping[str, Any]) -> int:
 
 def _timer_create(session: Session, payload: Mapping[str, Any]) -> Any:
     timer_id = _timer_id(payload)
+    user_id = _integer(payload, "user_id", minimum=1)
     required = ("conv_id", "check_instruction", "continuation_message")
     for key in required:
         _required_text(payload, key, 20000 if key != "conv_id" else 256)
+    # The durable row is the admission authority. Lock by owner so concurrent
+    # creates cannot both observe the last free slot; this also prevents a
+    # rejected create from leaving an unserviceable active row behind.
+    session.lock_key("timer_active_capacity", str(user_id))
+    active = session.fetch_one(
+        "SELECT COUNT(*) AS n FROM storage_timers "
+        "WHERE user_id=? AND status='active'",
+        (user_id,),
+    )
+    capacity = timer_live_capacity()
+    if int(active["n"] or 0) >= capacity:
+        raise StorageError(
+            "database_conflict",
+            f"Active timer capacity reached ({capacity})",
+        )
     session.lock_key("timer", timer_id)
     if session.fetch_one("SELECT 1 FROM storage_timers WHERE id = ?", (timer_id,)):
         raise StorageError("database_conflict", "Timer already exists")
@@ -148,7 +165,7 @@ def _timer_create(session: Session, payload: Mapping[str, Any]) -> Any:
     fields.update(
         {
             "id": timer_id,
-            "user_id": _integer(payload, "user_id", minimum=1),
+            "user_id": user_id,
             "poll_interval": _integer(payload, "poll_interval", default=60, minimum=10),
             "max_polls": _integer(payload, "max_polls", default=120, minimum=0),
             "tools_config": _dump(dict(config)),

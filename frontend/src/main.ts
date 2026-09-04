@@ -5,12 +5,11 @@
 import './styles/fonts.css';
 import {
   getRuntimeService,
-  loadFeatureFlags,
   runtimeReady,
   resolveRuntimeAction,
   setRuntimeService,
 } from './runtime/app-runtime.js';
-import { ready as i18nReady, setLanguage, t } from './i18n';
+import { ready as i18nReady, t } from './i18n';
 import { installActionRegistry, resolveRegisteredAction } from './action-registry';
 import { type FeatureCallable } from './runtime-bridge';
 import { connectFeatureRuntime, getFeatureBinding } from './feature-registry';
@@ -32,46 +31,82 @@ interface TofuSceneRuntimeBridge {
 
 const settingsEntries = new Set([
   'openSettings', 'closeSettings', 'saveSettings', 'switchSettingsTab',
+  '_oauthLogin',
   'populateToolsInventory', 'searchToolsInventory',
 ]);
 const memoryEntries = new Set([
   'toggleMemory', 'openMemoryModal', 'closeMemoryModal', 'toggleMemoryAddForm',
-  'toggleMemoryFromModal', 'openMemoryCreateForm', 'refreshPreferences', 'savePreferences',
-  '_populatePreferencesTab',
+  'toggleMemoryFromModal', 'refreshPreferences', 'savePreferences',
+  '_populatePreferencesTab', 'installSkillFromFileInput', '_openSkillsStoreFromMemory',
 ]);
-const skillsEntries = new Set(['_populateSkillsTab', '_skillsSetScope', '_skillsFilter']);
+const skillsEntries = new Set([
+  '_populateSkillsTab', '_skillsSetScope', '_skillsFilter', '_skillsInstallFromInput',
+]);
+const paperEntries = new Set(['togglePaperMode', 'toggleResearchMode']);
 const imageEntries = new Set([
   'enterImageGenMode', 'exitImageGenMode', 'generateImageDirect', 'selectIgAspect',
-  'selectIgCount', 'selectIgResolution', 'toggleIgModelDropdown',
+  'selectIgCount', 'selectIgModel', 'selectIgResolution', 'toggleIgModelDropdown',
+  '_igCancelGeneration', '_igRetryGenerationTurn',
 ]);
 const projectBrainEntries = new Set([
-  'openProjectBrain', 'toggleProjectBrain', 'openProjectBrainInfluence',
+  'openProjectBrain', 'toggleProjectBrain',
 ]);
 const mydayEntries = new Set(['openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate']);
-const miscEntries = new Set([
+const utilityPanelEntries = new Set([
+  'openUpdateDialog', 'closeUpdateModal', '_renderSettingsUpdatePill',
+  'toggleTimerPanel', 'toggleOptimizerPanel',
+]);
+const knowledgeEntries = new Set([
   'openKnowledgeBase', 'closeKnowledgeBase',
-  'openProjectModal', 'closeProjectModal', 'resolveWriteApproval',
-  'submitStdinInput', 'submitStdinEof', 'submitHumanGuidanceChoice',
+]);
+const projectEntries = new Set([
+  'openProjectModal', 'closeProjectModal',
+]);
+const localControlEntries = new Set([
+  'openLocalControlModal', 'closeLocalControlModal',
+  'toggleBrowserFromLocalModal', 'toggleDesktopFromLocalModal',
+  '_lcEnsureAgentRelay',
+]);
+const diagnosticsPresenterEntries = new Set([
+  'toggleDebug', 'closeDebug', 'copyDebugContent',
+  'openRequestInspectorForTask', 'openToolDebugPanel',
+]);
+const compactionViewerEntries = new Set(['openCompactionViewer']);
+const miscEntries = new Set([
+  'resolveWriteApproval', 'submitStdinInput', 'submitStdinEof',
+  'submitHumanGuidanceChoice',
   'submitHumanGuidanceFreeText', 'undoConvModifications', 'undoAllModifications',
   'redoConvModifications', 'openApplyModal', 'closeApplyModal', 'confirmApplyCode',
-  '_toggleCostPopover', 'openUpdateDialog', 'closeUpdateModal',
-  '_renderSettingsUpdatePill', 'toggleTimerPanel', 'toggleOptimizerPanel',
+  '_toggleCostPopover',
 ]);
 
 const routedFeatureEntries = new Set([
   ...settingsEntries, ...memoryEntries, ...skillsEntries, ...imageEntries,
-  ...projectBrainEntries, ...mydayEntries, ...miscEntries,
-  'togglePaperMode', 'openOrchestration', 'openTaskMode', '_wireConvSyncPush',
+  ...projectBrainEntries, ...mydayEntries, ...utilityPanelEntries,
+  ...knowledgeEntries, ...projectEntries, ...localControlEntries,
+  ...diagnosticsPresenterEntries, ...compactionViewerEntries,
+  ...miscEntries, ...paperEntries,
+  'openOrchestration', 'openTaskMode', '_wireConvSyncPush',
 ]);
 
 function domainLoader(name: string): () => Promise<DomainModule> {
   if (settingsEntries.has(name)) return () => import('./features/settings');
   if (memoryEntries.has(name)) return () => import('./features/memory');
   if (skillsEntries.has(name)) return () => import('./features/skills');
-  if (name === 'togglePaperMode') return () => import('./features/paper');
+  if (paperEntries.has(name)) return () => import('./features/paper');
   if (imageEntries.has(name)) return () => import('./features/image');
   if (projectBrainEntries.has(name)) return () => import('./features/project-brain');
   if (mydayEntries.has(name)) return () => import('./features/myday');
+  if (utilityPanelEntries.has(name)) return () => import('./features/utility-panels');
+  if (knowledgeEntries.has(name)) return () => import('./features/knowledge');
+  if (projectEntries.has(name)) return () => import('./features/project');
+  if (localControlEntries.has(name)) return () => import('./features/local-control');
+  if (diagnosticsPresenterEntries.has(name)) {
+    return () => import('./features/diagnostics-presenters');
+  }
+  if (compactionViewerEntries.has(name)) {
+    return () => import('./features/compaction-viewer');
+  }
   if (miscEntries.has(name)) return () => import('./features/misc');
   if (name === 'openOrchestration' || name === 'openTaskMode') {
     return () => import('./features/orchestration');
@@ -82,17 +117,13 @@ function domainLoader(name: string): () => Promise<DomainModule> {
 
 export interface TofuModuleBridge {
   version: 3;
-  loadDiagnostics(): Promise<typeof import('./features/diagnostics')>;
   collectDiagnostics(): Promise<string>;
-  loadDebug(): Promise<typeof import('./features/debug')>;
   preloadBackground(): Promise<void>;
   canInvokeFeature(name: string): boolean;
   prepareFeature(name: string): Promise<void>;
   invokeFeature(name: string, args: readonly unknown[], stub: FeatureCallable): Promise<unknown>;
   resolveAction(name: string): FeatureCallable | undefined;
   sceneRuntime: TofuSceneRuntimeBridge;
-  t: typeof t;
-  setLanguage: typeof setLanguage;
 }
 
 declare global {
@@ -141,9 +172,7 @@ const sceneRuntime: TofuSceneRuntimeBridge = Object.seal({
 // a dynamic chunk and does not tax the first screen.
 window.TofuModules = Object.freeze({
   version: 3 as const,
-  loadDiagnostics: () => import('./features/diagnostics'),
   collectDiagnostics: async () => (await import('./features/diagnostics')).collectDiagnostics(),
-  loadDebug: () => import('./features/debug'),
   preloadBackground: async () => (await import('./features/background')).preload(),
   canInvokeFeature: (name: string) => routedFeatureEntries.has(name),
   prepareFeature: async (name: string) => {
@@ -159,8 +188,6 @@ window.TofuModules = Object.freeze({
   },
   resolveAction,
   sceneRuntime,
-  t,
-  setLanguage,
 });
 
 connectFeatureRuntime(
@@ -168,10 +195,22 @@ connectFeatureRuntime(
   setRuntimeService,
 );
 
+// The native agent can open this exact deep link when an authenticated browser
+// must carry its SSO-protected polls. Only that entry pays for Local Control at
+// boot; ordinary sessions wait for the first explicit panel action.
+try {
+  if (window.location.hash === '#tofu-agent-relay') {
+    void window.TofuModules.prepareFeature('_lcEnsureAgentRelay').catch((error: unknown) => {
+      console.warn('[modules] Local Control relay deep link failed', error);
+    });
+  }
+} catch (error) {
+  console.warn('[modules] Local Control relay location unavailable', error);
+}
+
 installActionRegistry(resolveBinding);
 
 installLegacyApiBindings();
-void loadFeatureFlags();
 
 window.dispatchEvent(new CustomEvent('tofu:modules-ready', {
   detail: { version: window.TofuModules.version },
@@ -182,13 +221,22 @@ const preloadBackground = (): void => {
     console.warn('[modules] background feature preload failed', error);
   });
 };
+const preloadUtilityPanels = (): void => {
+  window.TofuModules?.prepareFeature('openUpdateDialog').catch((error: unknown) => {
+    console.warn('[modules] utility panels preload failed', error);
+  });
+};
+const preloadIdleFeatures = (): void => {
+  preloadBackground();
+  preloadUtilityPanels();
+};
 const idleCallback = (window as Window & {
   requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
 }).requestIdleCallback;
 if (idleCallback) {
-  idleCallback(preloadBackground, { timeout: 5000 });
+  idleCallback(preloadIdleFeatures, { timeout: 5000 });
 } else {
-  globalThis.setTimeout(preloadBackground, 2000);
+  globalThis.setTimeout(preloadIdleFeatures, 2000);
 }
 
 const loadAmbientScene = async (): Promise<void> => {

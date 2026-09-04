@@ -6,9 +6,12 @@ import json
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import httpx
 import pytest
+
+from lib.tools.result_envelope import model_text_from_tool_result
 
 
 pytestmark = pytest.mark.unit
@@ -164,9 +167,11 @@ def test_tool_contract_compiles_search_help_and_validates_execution():
             "required": ["id"], "additionalProperties": False,
         },
         ptc_eligible=True,
+        result_recovery="source",
     )
     assert contract.provider_schema()["function"]["description"] == "Read a sample."
     assert contract.search_document()["help"].startswith("Read a bounded")
+    assert contract.search_document()["resultRecovery"] == "source"
     assert contract.validate_arguments({"id": "x"}) == {"id": "x", "limit": 3}
     documents = compile_execution_contract_documents(
         [contract.provider_schema()],
@@ -197,6 +202,84 @@ def test_tool_contract_compiles_search_help_and_validates_execution():
         bounded_array.validate_arguments({"ids": []})
     assert empty.value.code == "too_few_items"
 
+    bounded_text = ToolContractV2(
+        name="caption_sample", model_description="Caption a sample.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "caption": {"type": "string", "minLength": 2, "maxLength": 5},
+            },
+            "required": ["caption"],
+        },
+    )
+    with pytest.raises(ToolContractError) as too_long:
+        bounded_text.validate_arguments({"caption": "123456"})
+    assert too_long.value.code == "invalid_argument_length"
+    assert "(got 6 chars; allowed 2–5)" in str(too_long.value)
+    with pytest.raises(ToolContractError) as too_short:
+        bounded_text.validate_arguments({"caption": "x"})
+    assert too_short.value.code == "invalid_argument_length"
+    assert "(got 1 chars; allowed 2–5)" in str(too_short.value)
+
+
+def test_tool_contract_json_compilation_preserves_request_isolation():
+    from lib.tools.contracts import (
+        ToolContractV2,
+        compile_execution_contract_documents,
+    )
+
+    class _ExtensionDefault(dict):
+        pass
+
+    shared_enum = ["brief", "full"]
+    extension_default = _ExtensionDefault(tags=["source"])
+    parameters = {
+        "type": "object",
+        "properties": {
+            "style": {"type": "string", "enum": shared_enum},
+            "fallback_style": {"type": "string", "enum": shared_enum},
+            "options": {
+                "type": "object",
+                "properties": {
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "default": extension_default,
+            },
+        },
+    }
+    contract = ToolContractV2(
+        name="clone_contract", model_description="Clone a contract.",
+        parameters=parameters)
+
+    provider = contract.provider_schema()
+    provider_properties = provider["function"]["parameters"]["properties"]
+    assert provider_properties["style"]["enum"] is provider_properties[
+        "fallback_style"]["enum"]
+    assert provider_properties["style"]["enum"] is not shared_enum
+    provider_default = provider_properties["options"]["default"]
+    assert isinstance(provider_default, _ExtensionDefault)
+    assert provider_default is not extension_default
+    provider_properties["style"]["enum"].append("provider-only")
+    assert shared_enum == ["brief", "full"]
+
+    search_document = contract.search_document()
+    assert "provider-only" not in search_document[
+        "arguments_schema"]["properties"]["style"]["enum"]
+    compiled = compile_execution_contract_documents(
+        [contract.provider_schema()],
+        authoritative_documents_by_name={contract.name: search_document})
+    compiled[contract.name]["arguments_schema"]["properties"][
+        "style"]["enum"].append("execution-only")
+    assert "execution-only" not in search_document[
+        "arguments_schema"]["properties"]["style"]["enum"]
+
+    first_default = contract.validate_arguments({})["options"]
+    second_default = contract.validate_arguments({})["options"]
+    assert type(first_default) is dict
+    first_default["tags"].append("first-request")
+    assert second_default == {"tags": ["source"]}
+    assert extension_default == {"tags": ["source"]}
+
 
 def test_tool_result_v2_artifactizes_structural_and_token_truncation(monkeypatch):
     import lib.tasks_pkg.compaction._budget as _budget
@@ -218,15 +301,394 @@ def test_tool_result_v2_artifactizes_structural_and_token_truncation(monkeypatch
     assert len(result["items"]) == 64
     assert result["artifactRef"] == "tool-result:" + "a" * 64
     assert stored == [raw]
-    encoded = json.dumps(result, ensure_ascii=False, sort_keys=True,
-                         separators=(",", ":"))
-    assert result["visibleBytes"] == len(encoded.encode("utf-8"))
+    assert result["visibleBytes"] == len(
+        model_text_from_tool_result(json.dumps(result)).encode("utf-8"))
 
     huge = "evidence line\n" * 20_000
     visible = _budget.budget_tool_result_v2(
         "read_files", huge, user_id=7, model="")
-    assert _budget._result_tokens(visible, "") <= 8_000
+    assert _budget._model_result_tokens(visible, "") <= 8_000
     assert json.loads(visible)["artifactRef"]
+
+
+def test_tool_result_v2_delivery_keeps_harness_fields_out_of_messages():
+    from lib.tools.result_envelope import (
+        ToolResultEnvelopeV2,
+        split_tool_result_delivery,
+        tool_result_observation,
+    )
+
+    raw = 'grep "needle" (*.py) — 1 match:\n\nfile.py:1:needle'
+    envelope = ToolResultEnvelopeV2.from_legacy(raw).to_envelope_text()
+    delivery = split_tool_result_delivery(envelope)
+
+    assert delivery.model_text == raw
+    assert delivery.evidence == {
+        "contractVersion": "tofu.tool-result-evidence/v1",
+        "resultContractVersion": "tofu.tool-result/v2",
+        "status": "ok",
+        "projectionKind": "text",
+        "truncated": False,
+        "rawBytes": len(raw.encode("utf-8")),
+        "visibleBytes": len(raw.encode("utf-8")),
+        "envelopeBytes": len(envelope.encode("utf-8")),
+        "evidenceId": json.loads(envelope)["evidenceId"],
+    }
+    assert "contractVersion" not in delivery.model_text
+    observation = tool_result_observation(
+        delivery.model_text, delivery.evidence)
+    assert observation is not None
+    assert observation["summary"] == raw
+    assert observation["evidenceId"] == delivery.evidence["evidenceId"]
+
+
+def test_tool_result_v2_partial_and_error_projections_are_sparse():
+    from lib.tools.result_envelope import (
+        ToolResultEnvelopeV2,
+        ToolResultRecoveryV2,
+        split_tool_result_delivery,
+        tool_result_error,
+        typed_tool_error,
+    )
+
+    partial = ToolResultEnvelopeV2(
+        status="partial",
+        summary="bounded grep preview",
+        truncated=True,
+        raw_bytes=20_000,
+        evidence_id="ev_partial",
+        recovery=ToolResultRecoveryV2(
+            kind="source", tool="grep_search",
+            arguments={"pattern": "needle", "max_results": 20}),
+    ).with_visible_bytes()
+    partial_delivery = split_tool_result_delivery(partial.to_envelope_text())
+    assert json.loads(partial_delivery.model_text) == {
+        "recovery": {
+            "arguments": {"max_results": 20, "pattern": "needle"},
+            "kind": "source",
+            "tool": "grep_search",
+        },
+        "status": "partial",
+        "summary": "bounded grep preview",
+        "truncated": True,
+    }
+    assert "freshness" not in partial_delivery.model_text
+    assert "rawBytes" not in partial_delivery.model_text
+
+    error_delivery = split_tool_result_delivery(typed_tool_error(
+        "permission_denied", retryable=False,
+        next_action="Choose an allowed tool.",
+        message="This action is unavailable.",
+    ).to_envelope_text())
+    assert json.loads(error_delivery.model_text) == {
+        "code": "permission_denied",
+        "message": "This action is unavailable.",
+        "nextAction": "Choose an allowed tool.",
+        "retryable": False,
+        "status": "error",
+    }
+    assert tool_result_error(error_delivery.model_text).code == \
+        "permission_denied"
+
+
+def test_grep_producer_truncation_becomes_partial_source_recovery(monkeypatch):
+    import lib.tasks_pkg.compaction._budget as _budget
+    from lib.tasks_pkg.handlers.project import _record_producer_result_metadata
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+
+    raw = (
+        'grep "needle" (*.py) — 40 matches:\n\nfile.py:1:needle\n'
+        '… (output truncated at 20000 chars or 40 matches)')
+    round_entry = {"query": "grep_search: needle", "llmRound": 2}
+    _record_producer_result_metadata("grep_search", raw, round_entry)
+    monkeypatch.setattr(
+        _budget, "_store_tool_result_artifact",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an already-truncated grep string is not a recovery artifact"))
+    monkeypatch.setattr(_pipeline, "append_event", lambda *_args, **_kwargs: None)
+    task = {
+        "id": "grep-partial-task",
+        "model": "",
+        "convId": "grep-partial-conv",
+        "config": {"tools": {"resultEnvelope": "v2"}},
+        "_userId": 7,
+    }
+    visible = _pipeline._settle_tool_result(
+        task, "grep_search", "grep_call", {"pattern": "needle"},
+        1, round_entry, raw, idempotent_tools=frozenset(), cache={},
+        tid="grep-par", round_num=2)
+
+    value = json.loads(visible)
+    assert value["status"] == "partial"
+    assert value["truncated"] is True
+    assert value["recovery"] == {
+        "arguments": {"pattern": "needle"},
+        "kind": "source",
+        "tool": "grep_search",
+    }
+    assert "artifactRef" not in value
+    assert round_entry["toolResultEvidence"]["truncated"] is True
+    assert round_entry["toolResultEvidence"]["status"] == "partial"
+
+
+def test_streaming_grep_truncation_sidecar_survives_prefetch_cache(
+        tmp_path, monkeypatch):
+    from concurrent.futures import Future
+    import time
+
+    import lib.project_mod.tools as project_tools
+    import lib.tasks_pkg.compaction._budget as _budget
+    from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+    from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
+
+    raw = (
+        'grep "needle" (*.py) — 40 matches:\n\nfile.py:1:needle\n'
+        '… (output truncated at 20000 chars or 40 matches)')
+    monkeypatch.setattr(
+        project_tools, "execute_tool", lambda *_args, **_kwargs: raw)
+    monkeypatch.setattr(
+        _budget, "_store_tool_result_artifact",
+        lambda *_args, **_kwargs: pytest.fail(
+            "prefetched producer truncation must recover from its source"))
+    arguments = {"pattern": "needle"}
+    task = {
+        "id": "grep-prefetch-task",
+        "convId": "grep-prefetch-conv",
+        "_userId": 7,
+        "messages": [],
+        "toolRounds": [],
+        "events": [],
+        "events_lock": threading.Lock(),
+        "status": "running",
+        "aborted": False,
+        "model": "test-model",
+        "config": {"tools": {"resultEnvelope": "v2"}},
+        "_tool_result_cache": {},
+    }
+    accumulator = StreamingToolAccumulator(
+        task, str(tmp_path), project_enabled=True)
+    try:
+        preexecuted = accumulator._execute_one("grep_search", arguments)
+        future = Future()
+        future.set_result(preexecuted)
+        accumulator._futures["grep-prefetch-call"] = (
+            future, "grep_search", arguments, time.time())
+        assert accumulator.inject_into_cache(task) == 1
+    finally:
+        accumulator._pool.shutdown(wait=False)
+
+    cache_key = _make_cache_key("grep_search", arguments)
+    cached = task["_tool_result_cache"][cache_key]
+    assert len(cached) == 9
+    assert cached[8] == {"status": "partial", "truncated": True}
+
+    round_entry = {
+        "roundNum": 1,
+        "toolCallId": "grep-prefetch-call",
+        "toolName": "grep_search",
+        "query": "grep_search",
+        "status": "searching",
+    }
+    parsed = [(
+        {"id": "grep-prefetch-call"}, "grep_search",
+        "grep-prefetch-call", arguments, 1, round_entry, None,
+    )]
+    messages: list[dict] = []
+    execute_tool_pipeline(
+        task, parsed, {}, str(tmp_path), True, None, messages, [], 1,
+        "test-model")
+
+    model_result = json.loads(next(
+        message["content"] for message in messages
+        if message.get("role") == "tool"))
+    assert model_result["status"] == "partial"
+    assert model_result["recovery"]["tool"] == "grep_search"
+    assert round_entry["toolResultEvidence"]["truncated"] is True
+    assert len(task["_tool_result_cache"][cache_key]) == 7
+
+
+def test_source_recovery_uses_idle_round_budget_without_artifact(monkeypatch):
+    """One replayable read may use 24k; the old universal 8k cap may not."""
+    import lib.tasks_pkg.compaction._budget as _budget
+
+    monkeypatch.setattr(
+        _budget, "_store_tool_result_artifact",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source-recoverable reads must not write artifacts"))
+    raw = ''.join(
+        f'line {index}: source evidence value\n' for index in range(1_600))
+    assert 8_000 < _budget._result_tokens(raw, "") < 23_000
+
+    visible = _budget.budget_tool_result_v2(
+        "read_files", raw, user_id=7, model="",
+        tool_arguments={"path": "demo.py"}, recovery_policy="source")
+    value = json.loads(visible)
+
+    assert 8_000 < _budget._model_result_tokens(visible, "") <= 24_000
+    assert value["status"] == "ok"
+    assert value["truncated"] is False
+    assert value["artifactRef"] == ""
+    assert "recovery" not in value
+
+
+def test_oversized_source_read_returns_narrow_replay_not_artifact(monkeypatch):
+    import lib.tasks_pkg.compaction._budget as _budget
+
+    monkeypatch.setattr(
+        _budget, "_store_tool_result_artifact",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source-recoverable reads must not write artifacts"))
+    arguments = {"reads": [
+        {"path": "one.py", "_base": "/private/worktree"},
+        {"path": "two.py", "start_line": 1_001, "end_line": 9_999},
+        {"path": "three.py"},
+    ]}
+    raw = ''.join(
+        f'line {index}: source evidence value\n' for index in range(4_000))
+    visible = _budget.budget_tool_result_v2(
+        "read_files", raw, user_id=7, model="", tool_arguments=arguments,
+        recovery_policy="source")
+    value = json.loads(visible)
+
+    assert _budget._model_result_tokens(visible, "") <= 24_000
+    assert value["status"] == "partial" and value["truncated"] is True
+    assert value["artifactRef"] == "" and value["cursor"] == ""
+    assert value["recovery"]["kind"] == "source"
+    assert value["recovery"]["tool"] == "read_files"
+    recovery_reads = value["recovery"]["arguments"]["reads"]
+    assert [read["path"] for read in recovery_reads] == [
+        "one.py", "two.py", "three.py"]
+    assert recovery_reads[0] == {
+        "path": "one.py", "start_line": 1, "end_line": 200}
+    assert recovery_reads[1] == {
+        "path": "two.py", "start_line": 1_001, "end_line": 1_200}
+    assert all("_base" not in read for read in recovery_reads)
+    assert [item["path"] for item in value["items"]] == [
+        "one.py", "two.py", "three.py"]
+
+
+def test_source_recovery_normalizes_reversed_line_range(monkeypatch):
+    """A reversed model range reads swapped; recovery must slice that window.
+
+    The read_files handler repairs start=2900,end=1010 into the 1010-2900
+    window it actually reads. The recovery builder used to discard end<start
+    and narrow to 2900-3499, pointing the model at lines it never received.
+    """
+    import lib.tasks_pkg.compaction._budget as _budget
+
+    monkeypatch.setattr(
+        _budget, "_store_tool_result_artifact",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source-recoverable reads must not write artifacts"))
+    raw = ''.join(
+        f'line {index}: source evidence value\n' for index in range(4_000))
+    visible = _budget.budget_tool_result_v2(
+        "read_files", raw, user_id=7, model="",
+        tool_arguments={"path": "zh.json", "start_line": 2900,
+                        "end_line": 1010},
+        recovery_policy="source")
+    value = json.loads(visible)
+
+    assert value["status"] == "partial" and value["truncated"] is True
+    assert value["recovery"]["kind"] == "source"
+    assert value["recovery"]["arguments"] == {
+        "path": "zh.json", "start_line": 1010, "end_line": 1609}
+
+
+def test_tool_result_v2_fits_final_serialized_envelope_across_tool_families(
+        monkeypatch):
+    """Raw JSON/source escaping must not collapse an 8k budget to ~677 tokens.
+
+    Incident mtcyxfbwqx03h0 observed the same conversation page at roughly
+    677 tokens in raw JSON mode and 8k in prose mode. The old first pass fit
+    the unescaped summary, then a fixed 512-token recursive fallback handled
+    the larger serialized JSON string. This pins the tool-neutral boundary:
+    every family gets a near-budget useful prefix plus an executable recovery
+    instruction.
+    """
+    import lib.tasks_pkg.compaction._budget as _budget
+
+    monkeypatch.setattr(
+        _budget, "_store_tool_result_artifact",
+        lambda *_args, **_kwargs: "tool-result:" + "e" * 64)
+    raw = ''.join(
+        f'row {index}: value = "quoted\\\\path_{index}"\n'
+        for index in range(12_000))
+    sentinel = 'SERIALIZED_PREFIX_SENTINEL'
+    raw = raw[:5_000] + sentinel + raw[5_000:]
+
+    for tool_name in (
+            'get_conversation', 'grep_search', 'fetch_url', 'run_command',
+            'read_files'):
+        visible = _budget.budget_tool_result_v2(
+            tool_name, raw, user_id=7, model='kimi-k3')
+        value = json.loads(visible)
+        tokens = _budget._model_result_tokens(visible, 'kimi-k3')
+        assert 6_000 <= tokens <= _budget.TOOL_RESULT_V2_MAX_TOKENS, (
+            tool_name, tokens)
+        assert sentinel in value['summary'], tool_name
+        assert value['artifactRef'] == 'tool-result:' + 'e' * 64
+        assert 'read_tool_artifact' in value['summary']
+        assert value['visibleBytes'] == len(
+            model_text_from_tool_result(visible).encode('utf-8'))
+
+
+def test_tool_result_v2_does_not_artifactize_internal_serialization_overhead(
+        monkeypatch):
+    """Server-only envelope escaping must not consume the model budget."""
+    import lib.tasks_pkg.compaction._budget as _budget
+
+    stored = []
+    monkeypatch.setattr(
+        _budget, '_store_tool_result_artifact',
+        lambda content, **_kwargs: (
+            stored.append(content) or 'tool-result:' + 's' * 64))
+    # Quotes/backslashes are cheap in the raw token stream but require another
+    # escaping layer inside ``summary``.
+    raw = ('{"path":"C:\\\\work\\\\file","value":"quoted"}\n' * 500)
+    assert _budget._result_tokens(raw, 'kimi-k3') <= 7_000
+
+    visible = _budget.budget_tool_result_v2(
+        'get_conversation', raw, user_id=7, model='kimi-k3')
+    value = json.loads(visible)
+    assert _budget._model_result_tokens(visible, 'kimi-k3') <= 8_000
+    assert value['status'] == 'ok' and value['truncated'] is False
+    assert value['artifactRef'] == ''
+    assert stored == []
+
+
+def test_tool_result_v2_does_not_truncate_structured_data_that_fits(
+        monkeypatch):
+    """Summary/item allocation is a fallback, never an artificial data cap."""
+    import lib.tasks_pkg.compaction._budget as _budget
+
+    stored = []
+    monkeypatch.setattr(
+        _budget, '_store_tool_result_artifact',
+        lambda content, **_kwargs: stored.append(content) or 'unexpected')
+    summary = 'alpha beta ' * 2_500
+    raw = json.dumps({
+        'summary': summary,
+        'items': [{'id': 1, 'value': 'small structured evidence'}],
+    })
+    visible = _budget.budget_tool_result_v2(
+        'generic_reader', raw, user_id=7, model='kimi-k3')
+    value = json.loads(visible)
+
+    assert _budget._model_result_tokens(visible, 'kimi-k3') <= 8_000
+    assert value['status'] == 'ok' and value['truncated'] is False
+    assert value['summary'] == summary
+    assert value['items'] == [{'id': 1, 'value': 'small structured evidence'}]
+    assert stored == []
+
+
+def test_tool_result_v2_rejects_ok_status_that_claims_truncation():
+    from lib.tools.result_envelope import ToolResultEnvelopeV2
+
+    with pytest.raises(ValueError, match='partial status'):
+        ToolResultEnvelopeV2(
+            status='ok', summary='not complete', truncated=True)
 
 
 def test_tool_result_v2_batch_read_preserves_every_file_before_preview(
@@ -258,7 +720,7 @@ def test_tool_result_v2_batch_read_preserves_every_file_before_preview(
         tool_arguments=arguments, projection_items=projection_items)
     value = json.loads(visible)
 
-    assert _budget._result_tokens(visible, "") <= 8_000
+    assert _budget._model_result_tokens(visible, "") <= 8_000
     assert value["status"] == "partial" and value["truncated"] is True
     assert value["artifactRef"] == "tool-result:" + "f" * 64
     assert stored == [raw]
@@ -309,10 +771,14 @@ def test_tool_pipeline_carries_batch_read_projection_to_model_context(
         "status": "running",
         "model": "test-model",
         "config": {"tools": {"resultEnvelope": "v2"}},
+        "_toolContractDocumentsByName": {
+            "read_files": {"resultRecovery": "source"},
+        },
     }
     monkeypatch.setattr(
         _budget, "_store_tool_result_artifact",
-        lambda *_args, **_kwargs: "tool-result:" + "p" * 64)
+        lambda *_args, **_kwargs: pytest.fail(
+            "the pipeline must honor read_files source recovery"))
     messages: list[dict] = []
 
     execute_tool_pipeline(
@@ -323,10 +789,13 @@ def test_tool_pipeline_carries_batch_read_projection_to_model_context(
                      if message.get("role") == "tool"]
     assert len(tool_messages) == 1
     value = json.loads(tool_messages[0]["content"])
+    assert "artifactRef" not in value
+    assert value["recovery"]["kind"] == "source"
     assert [item["path"] for item in value["items"]] == [
         "first.py", "second.py", "third.py"]
     assert "SECOND_PIPELINE_SENTINEL" in value["items"][1]["preview"]
     assert "THIRD_PIPELINE_SENTINEL" in value["items"][2]["preview"]
+    assert round_entry["toolResultEvidence"]["status"] == "partial"
     assert TOOL_RESULT_PROJECTION_ITEMS_KEY not in round_entry
 
 
@@ -412,7 +881,10 @@ def test_streaming_prefetch_carries_batch_read_projection_to_model_context(
     assert "THIRD_PREFETCH_SENTINEL" in value["items"][2]["preview"]
     settled_cache = task["_tool_result_cache"][cache_key]
     assert len(settled_cache) == 7
-    assert settled_cache[0] == tool_messages[0]["content"]
+    assert json.loads(settled_cache[0])["contractVersion"] == \
+        "tofu.tool-result/v2"
+    assert settled_cache[0] != tool_messages[0]["content"]
+    assert round_entry["toolResultEvidence"]["status"] == "partial"
 
 
 def test_tool_result_v2_round_budget_keeps_batch_file_identities(
@@ -479,6 +951,47 @@ def test_tool_result_v2_round_aggregate_is_bounded(monkeypatch):
     assert sum(_budget._result_tokens(value[0], "")
                for value in reduced.values()) <= 24_000
     assert any(json.loads(value[0])["truncated"] for value in reduced.values())
+
+
+def test_source_results_share_round_budget_without_artifact(monkeypatch):
+    import lib.tasks_pkg.compaction._budget as _budget
+
+    monkeypatch.setattr(
+        _budget, "_store_tool_result_artifact",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source-recoverable reads must not write artifacts"))
+    raw = ''.join(
+        f'line {index}: source evidence value\n' for index in range(1_600))
+    values = {
+        f"call_{index}": (
+            _budget.budget_tool_result_v2(
+                "read_files", raw, user_id=7, model="",
+                tool_arguments={"path": f"file_{index}.py"},
+                recovery_policy="source"),
+            "read_files", f"call_{index}")
+        for index in range(3)
+    }
+    reduced = _budget.enforce_round_aggregate_budget_v2(
+        values, user_id=7, model="",
+        recovery_by_call_id={
+            f"call_{index}": {
+                "policy": "source",
+                "arguments": {"path": f"file_{index}.py"},
+            }
+            for index in range(3)
+        })
+
+    assert sum(_budget._result_tokens(value[0], "")
+               for value in reduced.values()) <= 24_000
+    partial = [json.loads(value[0]) for value in reduced.values()
+               if json.loads(value[0])["status"] == "partial"]
+    assert partial
+    assert all(value["artifactRef"] == "" for value in partial)
+    assert all(value["recovery"]["kind"] == "source" for value in partial)
+    assert all(value["recovery"]["arguments"]["start_line"] == 1
+               for value in partial)
+    assert all(value["recovery"]["arguments"]["end_line"] == 600
+               for value in partial)
 
 
 def test_tool_result_envelope_reports_its_exact_visible_size():
@@ -620,7 +1133,7 @@ def test_kimi_tool_surface_and_gateway_contracts_are_bounded():
         schema_budget_tokens=4_000, model="kimi-k3")
 
     assert tool_schema_tokens(wire, model="kimi-k3") <= 4_000
-    assert tool_schema_tokens(gateway_tool_schemas(), model="kimi-k3") <= 500
+    assert tool_schema_tokens(gateway_tool_schemas(), model="kimi-k3") <= 522
     names = {tool["function"]["name"] for tool in wire}
     assert {"search_tools", "execute_tools"} <= names
 
@@ -1211,7 +1724,9 @@ def test_tool_result_v2_spill_registers_artifact_provenance(monkeypatch):
         task, "some_big_tool", "tc_1", {"query": "citadel"}, 1, round_entry,
         "raw " * 9_000, idempotent_tools=frozenset(), cache={}, tid="t1",
         round_num=10)
-    assert content == envelope
+    from lib.tools.result_envelope import model_text_from_tool_result
+    assert content == model_text_from_tool_result(envelope)
+    assert round_entry["toolResultEvidence"]["artifactRef"] == ref
     assert round_entry["compactionLayer"] == "L0"
     assert task["_artifactProvenance"] == {
         ref: {
@@ -1220,6 +1735,39 @@ def test_tool_result_v2_spill_registers_artifact_provenance(monkeypatch):
             "llmRound": 9,
         },
     }
+
+
+def test_tool_result_v2_complete_result_is_not_stamped_compacted():
+    """A complete V2 result must NOT claim L0 compaction.
+
+    The envelope lane re-serializes a small structured result with sorted
+    keys and tight separators; that can shrink the model text by a few chars
+    while withholding nothing. Stamping ``compactionLayer='L0'`` there
+    renders a false COMPACTED pill ("replaced with a placeholder") on a
+    result the model fully saw.
+    """
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+
+    payload = json.dumps({
+        "completed": [],
+        "mode": "any",
+        "note": "An identical await already timed out.",
+        "status": "ok",
+        "still_running": ["fdca8160"],
+        "timed_out": True,
+        "wait_suppressed": True,
+    }, ensure_ascii=False)
+    task = {"model": "", "convId": "c1", "config": {}, "_userId": 7}
+    round_entry = {"query": "await_agents", "llmRound": 3}
+    content = _pipeline._settle_tool_result(
+        task, "await_agents", "tc_1", {}, 1, round_entry, payload,
+        idempotent_tools=frozenset(), cache={}, tid="t1", round_num=3)
+    assert json.loads(content) == json.loads(payload), (
+        'the model-visible text must keep full semantic fidelity')
+    assert len(content) < len(payload), (
+        'this regression requires normalization to actually shrink chars')
+    assert 'compactionLayer' not in round_entry
+    assert 'compactedFromChars' not in round_entry
 
 
 def test_round_aggregate_spill_registers_artifact_provenance(monkeypatch):
@@ -1242,13 +1790,49 @@ def test_round_aggregate_spill_registers_artifact_provenance(monkeypatch):
     task = {"model": "", "convId": "c1", "config": {}, "_userId": 7}
     _pipeline._apply_round_aggregate_budget(
         task, parsed, [("call_1", "x" * 60_000, "read_files")], [message])
-    assert message["content"] == envelope
+    from lib.tools.result_envelope import model_text_from_tool_result
+    assert message["content"] == model_text_from_tool_result(envelope)
+    assert round_entry["toolResultEvidence"]["artifactRef"] == ref
     assert round_entry["compactionLayer"] == "L0"
     assert task["_artifactProvenance"][ref] == {
         "toolName": "read_files",
         "display": "read_files: big.log",
         "llmRound": 3,
     }
+
+
+def test_spill_provenance_ignores_malformed_input_but_not_programming_errors(
+    monkeypatch,
+):
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+
+    task: dict = {}
+    _pipeline._register_spilled_artifact_origin(
+        task,
+        {"query": "read_files: broken", "llmRound": 2},
+        "read_files",
+        '{"artifactRef":"tool-result:broken"',
+    )
+    assert "_artifactProvenance" not in task
+
+    def crash_parser(_content):
+        raise RuntimeError('synthetic parser defect')
+
+    monkeypatch.setattr(
+        _pipeline,
+        'json',
+        SimpleNamespace(
+            JSONDecodeError=json.JSONDecodeError,
+            loads=crash_parser,
+        ),
+    )
+    with pytest.raises(RuntimeError, match='synthetic parser defect'):
+        _pipeline._register_spilled_artifact_origin(
+            task,
+            {"query": "read_files: broken", "llmRound": 2},
+            "read_files",
+            '{"artifactRef":"tool-result:broken"}',
+        )
 
 
 def test_artifact_continuation_label_names_source_round():
@@ -1263,7 +1847,7 @@ def test_artifact_continuation_label_names_source_round():
         task, ref, tool_name="browser_research_page",
         display=("Research website → https://friday.internal.example.com/mcphub-api"
                  "/skill/list?keyword=citadel"),
-        llm_round=9)
+        llm_round=9, tool_call_id="source_tc_9")
 
     _, round_entry, event = _build_tool_round_entry(
         "read_tool_artifact", {"artifact_ref": ref, "cursor": 0},
@@ -1272,6 +1856,19 @@ def test_artifact_continuation_label_names_source_round():
         "Read compacted result of R10 · Research website → "
         "https://friday.internal.example.com/mcphub-api/skill/list?keyword=citadel")
     assert event["query"] == round_entry["query"]
+    # Structured twin of the flat label: the frontend renders an origin chip
+    # (kind + source round) before the source label, so the read-back action
+    # and the original call never stack two "Read" verbs.
+    assert round_entry["_artifactOrigin"] == {
+        "kind": "read",
+        "sourceRound": 10,
+        "sourceToolCallId": "source_tc_9",
+        "source": ("Research website → https://friday.internal.example.com/mcphub-api"
+                   "/skill/list?keyword=citadel"),
+    }
+    assert event["_artifactOrigin"] == round_entry["_artifactOrigin"]
+    assert round_entry["parentToolCallId"] == "source_tc_9"
+    assert event["parentToolCallId"] == "source_tc_9"
 
     _, search_entry, _ = _build_tool_round_entry(
         "search_tool_artifact",
@@ -1280,17 +1877,70 @@ def test_artifact_continuation_label_names_source_round():
     assert search_entry["query"].startswith(
         "Search compacted result of R10 ·")
     assert search_entry["query"].endswith(": download url")
+    assert search_entry["_artifactOrigin"] == {
+        "kind": "search",
+        "sourceRound": 10,
+        "sourceToolCallId": "source_tc_9",
+        "source": ("Research website → https://friday.internal.example.com/mcphub-api"
+                   "/skill/list?keyword=citadel"),
+        "query": "download url",
+        "queries": ["download url"],
+    }
+
+
+def test_artifact_continuation_batch_search_names_patterns():
+    """Batch searches carry no top-level artifact_ref/query: the row must
+    still resolve its origin from the first item's ref and show the actual
+    patterns being searched — otherwise a 4-pattern batch renders as the
+    opaque 'Search 4 saved tool results'."""
+    from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
+    from lib.tool_result_artifacts import register_artifact_provenance
+
+    ref = "tool-result:" + "e" * 64
+    task: dict = {}
+    register_artifact_provenance(
+        task, ref, tool_name="web_search",
+        display="2 searches: R2E-Gym Procedural Generation",
+        llm_round=4, tool_call_id="source_tc_5")
+
+    args = {"searches": [
+        {"artifact_ref": ref, "query": "  procedural   generation  "},
+        {"artifact_ref": ref, "query": "hybrid environments"},
+        {"artifact_ref": ref, "query": "procedural generation"},
+    ]}
+    _, entry, event = _build_tool_round_entry(
+        "search_tool_artifact", args, "tc_6", "{}", 0, False, task=task)
+    assert entry["query"] == (
+        "Search compacted result of R5 · 2 searches: R2E-Gym Procedural "
+        "Generation: procedural generation · hybrid environments")
+    assert entry["_artifactOrigin"] == {
+        "kind": "search",
+        "sourceRound": 5,
+        "sourceToolCallId": "source_tc_5",
+        "source": "2 searches: R2E-Gym Procedural Generation",
+        "query": "procedural generation",
+        "queries": ["procedural generation", "hybrid environments"],
+    }
+    assert event["_artifactOrigin"] == entry["_artifactOrigin"]
 
 
 def test_artifact_continuation_label_falls_back_without_provenance():
     """No registered origin (cross-turn read, evicted entry, secondary
-    surface with no task) keeps the legacy digest label."""
+    surface with no task) yields a generic label — the content-hash digest
+    and cursor offset are machine handles and are never rendered."""
     from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
 
-    args = {"artifact_ref": "tool-result:abcd1234ef"}
+    args = {"artifact_ref": "tool-result:abcd1234ef", "cursor": "25473"}
     _, entry, _ = _build_tool_round_entry(
         "read_tool_artifact", args, "tc_1", "{}", 0, False, task={})
-    assert entry["query"] == "Read tool result: tool-result:abcd"
+    assert entry["query"] == "Read saved tool result"
+    # No registered origin → no chip meta; the flat label stands alone.
+    assert "_artifactOrigin" not in entry
     _, entry2, _ = _build_tool_round_entry(
         "read_tool_artifact", args, "tc_2", "{}", 0, False)
-    assert entry2["query"] == "Read tool result: tool-result:abcd"
+    assert entry2["query"] == "Read saved tool result"
+    _, entry3, _ = _build_tool_round_entry(
+        "search_tool_artifact", {"artifact_ref": args["artifact_ref"],
+                                 "query": "download url"},
+        "tc_3", "{}", 0, False, task={})
+    assert entry3["query"] == "Search saved tool result: download url"

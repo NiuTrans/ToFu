@@ -115,7 +115,7 @@ class TestStartFlowBindFirst(unittest.TestCase):
                         return_value=fake_server) as bind, \
              mock.patch('lib.oauth.manager._flow._run_relay_server') as run, \
              mock.patch('threading.Thread') as th:
-            res = mgr.start_oauth_flow('claude')
+            res = mgr.start_oauth_flow('claude', owner_user_id=1)
 
         bind.assert_called_once()
         self.assertEqual(_redirect_in(res['auth_url']), _LOOPBACK)
@@ -138,7 +138,7 @@ class TestStartFlowBindFirst(unittest.TestCase):
              mock.patch('lib.oauth.manager._flow._bind_relay',
                         return_value=None), \
              mock.patch('threading.Thread') as th:
-            res = mgr.start_oauth_flow('claude')
+            res = mgr.start_oauth_flow('claude', owner_user_id=1)
 
         self.assertEqual(_redirect_in(res['auth_url']), _CONSOLE)
         self.assertEqual(mgr._active_flows['claude']['redirect_uri'], _CONSOLE)
@@ -149,7 +149,7 @@ class TestStartFlowBindFirst(unittest.TestCase):
                         return_value=False), \
              mock.patch('lib.oauth.manager._flow._bind_relay') as bind, \
              mock.patch('threading.Thread') as th:
-            res = mgr.start_oauth_flow('claude')
+            res = mgr.start_oauth_flow('claude', owner_user_id=1)
 
         bind.assert_not_called()  # no port touched on a shared server
         self.assertEqual(_redirect_in(res['auth_url']), _CONSOLE)
@@ -161,7 +161,7 @@ class TestStartFlowBindFirst(unittest.TestCase):
                         return_value=False), \
              mock.patch('lib.oauth.manager._flow._bind_relay') as bind, \
              mock.patch('threading.Thread') as th:
-            res = mgr.start_oauth_flow('codex')
+            res = mgr.start_oauth_flow('codex', owner_user_id=1)
         bind.assert_not_called()
         th.assert_not_called()
         self.assertEqual(res['redirect_mode'], 'manual')
@@ -177,7 +177,7 @@ class TestStartFlowBindFirst(unittest.TestCase):
                         return_value=fake_server) as bind, \
              mock.patch('lib.oauth.manager._flow._run_relay_server') as run, \
              mock.patch('threading.Thread') as th:
-            res = mgr.start_oauth_flow('codex')
+            res = mgr.start_oauth_flow('codex', owner_user_id=1)
         bind.assert_called_once_with(
             'codex', 1455, mgr._active_flows['codex']['state'])
         th.assert_called_once()
@@ -196,6 +196,7 @@ class TestExchangeEchoesAuthorizeRedirect(unittest.TestCase):
         mgr._active_flows['claude'] = {
             'pkce': {'code_verifier': 'v'}, 'state': 'st',
             'status': 'started', 'redirect_uri': redirect_uri,
+            'owner_user_id': 1, 'flow_id': 'test-claude',
         }
 
     def test_loopback_flow_exchanges_with_loopback(self):
@@ -204,7 +205,8 @@ class TestExchangeEchoesAuthorizeRedirect(unittest.TestCase):
                         return_value={'email': 'u@x.com'}) as ex, \
              mock.patch('lib.oauth.outbound.provision_oauth_provider',
                         return_value=True):
-            mgr.exchange_code('claude', 'code', state='st')
+            mgr.exchange_code(
+                'claude', 'code', state='st', owner_user_id=1)
         self.assertEqual(ex.call_args.kwargs['redirect_uri'], _LOOPBACK)
 
     def test_console_flow_exchanges_with_console(self):
@@ -213,7 +215,8 @@ class TestExchangeEchoesAuthorizeRedirect(unittest.TestCase):
                         return_value={'email': 'u@x.com'}) as ex, \
              mock.patch('lib.oauth.outbound.provision_oauth_provider',
                         return_value=True):
-            mgr.exchange_code('claude', 'code', state='st')
+            mgr.exchange_code(
+                'claude', 'code', state='st', owner_user_id=1)
         self.assertEqual(ex.call_args.kwargs['redirect_uri'], _CONSOLE)
 
     def test_legacy_flow_without_redirect_falls_back_to_console(self):
@@ -222,6 +225,7 @@ class TestExchangeEchoesAuthorizeRedirect(unittest.TestCase):
         # with — not crash and not silently switch to loopback.
         self._seed_legacy = mgr._active_flows['claude'] = {
             'pkce': {'code_verifier': 'v'}, 'state': 'st', 'status': 'started',
+            'owner_user_id': 1, 'flow_id': 'test-claude-legacy',
         }
         captured = {}
 
@@ -232,7 +236,8 @@ class TestExchangeEchoesAuthorizeRedirect(unittest.TestCase):
         with mock.patch('lib.oauth.claude.claude_exchange_code', _fake), \
              mock.patch('lib.oauth.outbound.provision_oauth_provider',
                         return_value=True):
-            res = mgr.exchange_code('claude', 'code', state='st')
+            res = mgr.exchange_code(
+                'claude', 'code', state='st', owner_user_id=1)
         self.assertTrue(res.get('ok'))
         # Empty → claude_exchange_code applies its console default.
         self.assertEqual(captured['redirect_uri'], '')
@@ -291,7 +296,8 @@ class TestPreferConsoleEscapeHatch(unittest.TestCase):
                         return_value=True), \
              mock.patch('lib.oauth.manager._flow._bind_relay') as bind, \
              mock.patch('threading.Thread') as th:
-            res = mgr.start_oauth_flow('claude', prefer_console=True)
+            res = mgr.start_oauth_flow(
+                'claude', owner_user_id=1, prefer_console=True)
 
         bind.assert_not_called()
         self.assertEqual(_redirect_in(res['auth_url']), _CONSOLE)
@@ -307,7 +313,7 @@ class TestPreferConsoleEscapeHatch(unittest.TestCase):
              mock.patch('lib.oauth.manager._flow._bind_relay',
                         return_value=fake_server), \
              mock.patch('threading.Thread'):
-            res = mgr.start_oauth_flow('claude')
+            res = mgr.start_oauth_flow('claude', owner_user_id=1)
         self.assertEqual(_redirect_in(res['auth_url']), _LOOPBACK)
         self.assertEqual(res['redirect_mode'], 'loopback')
 
@@ -316,7 +322,7 @@ class TestPreferConsoleEscapeHatch(unittest.TestCase):
         with mock.patch('lib.oauth.manager._flow._loopback_callback_ok',
                         return_value=False), \
              mock.patch('threading.Thread'):
-            res = mgr.start_oauth_flow('claude')
+            res = mgr.start_oauth_flow('claude', owner_user_id=1)
         self.assertEqual(res['redirect_mode'], 'console')
 
     def test_prefer_console_is_inert_for_codex(self):
@@ -327,7 +333,8 @@ class TestPreferConsoleEscapeHatch(unittest.TestCase):
              mock.patch('lib.oauth.manager._flow._bind_relay',
                         return_value=fake_server), \
              mock.patch('threading.Thread') as th:
-            res = mgr.start_oauth_flow('codex', prefer_console=True)
+            res = mgr.start_oauth_flow(
+                'codex', owner_user_id=1, prefer_console=True)
         th.assert_called_once()
         self.assertEqual(res['redirect_mode'], 'loopback')
 
@@ -352,7 +359,7 @@ class TestStatusProjectionFeedsTheReload(unittest.TestCase):
                         return_value=fake_server), \
              mock.patch('threading.Thread'), \
              mock.patch('lib.oauth.token_store.load_token', return_value=None):
-            res = mgr.start_oauth_flow('claude')
+            res = mgr.start_oauth_flow('claude', owner_user_id=1)
             st = mgr.get_oauth_status('claude')
         self.assertEqual(st['status'], 'started')
         self.assertEqual(st['redirect_mode'], 'loopback')
@@ -368,7 +375,8 @@ class TestStatusProjectionFeedsTheReload(unittest.TestCase):
                         return_value=True), \
              mock.patch('threading.Thread'), \
              mock.patch('lib.oauth.token_store.load_token', return_value=None):
-            mgr.start_oauth_flow('claude', prefer_console=True)
+            mgr.start_oauth_flow(
+                'claude', owner_user_id=1, prefer_console=True)
             st = mgr.get_oauth_status('claude')
         self.assertEqual(st['redirect_mode'], 'console')
         self.assertTrue(st['auth_url'])
@@ -395,8 +403,9 @@ class TestLoginRouteCarriesTheFlag(unittest.TestCase):
         app = server.app
         seen = {}
 
-        def _fake_start(provider, prefer_console=False):
+        def _fake_start(provider, *, owner_user_id, prefer_console=False):
             seen['provider'] = provider
+            seen['owner_user_id'] = owner_user_id
             seen['prefer_console'] = prefer_console
             return {'auth_url': 'https://x/', 'status': 'started',
                     'provider': provider, 'callback_port': 1,
@@ -426,7 +435,8 @@ class TestLoginRouteCarriesTheFlag(unittest.TestCase):
         app = server.app
         seen = {}
 
-        def _fake_start(provider, prefer_console=False):
+        def _fake_start(provider, *, owner_user_id, prefer_console=False):
+            seen['owner_user_id'] = owner_user_id
             seen['prefer_console'] = prefer_console
             return {'auth_url': 'https://x/', 'status': 'started',
                     'provider': provider, 'callback_port': 1,

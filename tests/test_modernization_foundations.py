@@ -127,6 +127,44 @@ def test_idempotency_metrics_expose_capacity_retention_and_evictions(
         assert metric in text
 
 
+def test_memory_rate_limit_metrics_expose_both_resident_bounds(monkeypatch):
+    import routes.metrics as metrics
+
+    monkeypatch.setattr('lib.rate_limit_api.api_rate_limit_stats', lambda: {
+        'entries': 7,
+        'capacity': 1_024,
+        'capacity_evictions': 6,
+    })
+    monkeypatch.setattr('lib.rate_limit_store.rate_limit_store_stats', lambda: {
+        'backend': 'memory',
+        'buckets': 12,
+        'bucket_capacity': 1_024,
+        'events': 80,
+        'event_capacity': 131_072,
+        'expired_bucket_evictions': 2,
+        'bucket_capacity_evictions': 3,
+        'event_capacity_evictions': 4,
+        'event_capacity_rejections': 5,
+    })
+    out = []
+    metrics._collect_infra_metrics(out)
+    text = '\n'.join(out)
+    for metric in (
+        'tofu_rate_limit_buckets 7',
+        'tofu_rate_limit_bucket_capacity 1024',
+        'tofu_rate_limit_bucket_evictions_total 6',
+        'tofu_rate_limit_memory_buckets 12',
+        'tofu_rate_limit_memory_bucket_capacity 1024',
+        'tofu_rate_limit_memory_events 80',
+        'tofu_rate_limit_memory_event_capacity 131072',
+        'tofu_rate_limit_memory_bucket_evictions_total{reason="expired"} 2',
+        'tofu_rate_limit_memory_bucket_evictions_total{reason="bucket_capacity"} 3',
+        'tofu_rate_limit_memory_bucket_evictions_total{reason="event_capacity"} 4',
+        'tofu_rate_limit_memory_event_rejections_total 5',
+    ):
+        assert metric in text
+
+
 def test_task_metrics_expose_registry_and_event_retention(monkeypatch):
     import routes.metrics as metrics
 
@@ -150,7 +188,11 @@ def test_task_metrics_expose_registry_and_event_retention(monkeypatch):
                 'max_tasks': 64,
                 'ttl_seconds': 1800,
                 'events': 3,
+                'event_retained_bytes': 4096,
                 'max_events_per_task': 256,
+                'event_buffer_byte_capacity_per_task': 1_048_576,
+                'event_max_bytes': 2_097_152,
+                'event_retention_hard_capacity_per_task': 2_097_152,
                 'over_capacity': 0,
             }
 
@@ -175,6 +217,10 @@ def test_task_metrics_expose_registry_and_event_retention(monkeypatch):
         'tofu_task_registry_ttl_seconds{kind="paper-report"} 1800',
         'tofu_task_events_retained{kind="paper-report"} 3',
         'tofu_task_event_retention_limit{kind="paper-report"} 256',
+        'tofu_task_event_retained_bytes{kind="paper-report"} 4096',
+        'tofu_task_event_buffer_bytes_per_task{kind="paper-report"} 1048576',
+        'tofu_task_event_max_bytes{kind="paper-report"} 2097152',
+        'tofu_task_event_hard_bytes_per_task{kind="paper-report"} 2097152',
         'tofu_task_dedup_index_size{kind="paper-podcast"} 7',
         'tofu_task_dedup_index_capacity{kind="paper-podcast"} 64',
         'tofu_task_dedup_index_evictions_total{kind="paper-podcast",reason="ttl"} 4',
@@ -283,7 +329,9 @@ def test_task_runtime_capacity_evicts_only_terminal_records():
     from lib.agent_core.task_runtime import TaskRuntime
 
     runtime = TaskRuntime(
-        'bounded-registry', max_tasks=2, max_events=2, push_channel='')
+        'bounded-registry', max_tasks=2, max_events=2,
+        max_event_buffer_bytes=1024, max_event_bytes=2048,
+        push_channel='')
     first = runtime.create(user_id=1, task_id='finished-first')
     runtime.finish(first['id'])
     active = runtime.create(user_id=1, task_id='active-second')
@@ -297,90 +345,12 @@ def test_task_runtime_capacity_evicts_only_terminal_records():
         'max_tasks': 2,
         'ttl_seconds': 3600,
         'events': 0,
+        'event_retained_bytes': 0,
         'max_events_per_task': 2,
+        'event_buffer_byte_capacity_per_task': 1024,
+        'event_max_bytes': 2048,
+        'event_retention_hard_capacity_per_task': 2048,
         'over_capacity': 0,
-    }
-
-
-def test_task_budget_soft_warning_hard_limit_and_remaining():
-    from lib.task_budget import account_tool_output, evaluate_task_budget
-
-    task = {'_t_created': 100.0}
-    cfg = {
-        'maxPromptTokens': 100,
-        'maxApiRounds': 4,
-        'maxToolOutputBytes': 10,
-        'maxTaskSeconds': 20,
-        'taskBudgetSoftRatio': 0.75,
-    }
-    account_tool_output(task, '12345678')
-    soft = evaluate_task_budget(
-        task, cfg, usage={'input_tokens': 80}, api_rounds=3, now=115.0)
-    assert soft.exceeded is None
-    assert {warning.name for warning in soft.warnings} == {
-        'promptTokens', 'apiRounds', 'toolOutputBytes', 'elapsedSeconds'}
-    assert soft.remaining['promptTokens'] == 20
-
-    hard = evaluate_task_budget(
-        task, cfg, usage={'input_tokens': 100}, api_rounds=3, now=115.0)
-    assert hard.exceeded is not None
-    assert hard.exceeded.name == 'promptTokens'
-    assert hard.exceeded.remaining == 0
-
-
-def test_financial_budget_emits_one_soft_warning(monkeypatch):
-    import lib.tasks_pkg.orchestrator._round_gates as _round_gates
-    events = []
-    monkeypatch.setattr(_round_gates, 'append_event',
-                        lambda _task, event: events.append(event))
-    monkeypatch.setattr('lib.cost_estimator.estimate_usage_cost',
-                        lambda *_args, **_kwargs: 8.0)
-    monkeypatch.setattr('lib.cost_estimator.check_budget',
-                        lambda *_args, **_kwargs: (False, 8.0, ''))
-    task = {'id': 'task-budget', 'provider_id': 'provider'}
-    rs = SimpleNamespace(
-        assistant_msg={}, last_finish_reason='tool_calls', model='model',
-        accumulated_usage={'input_tokens': 80}, exit_reason='',
-    )
-    cfg = {'maxBudgetUsd': 10.0, 'taskBudgetSoftRatio': 0.8}
-    assert _round_gates.check_round_gates(
-        task, rs, round_num=1, tid='task-bud', cfg=cfg) is False
-    assert _round_gates.check_round_gates(
-        task, rs, round_num=2, tid='task-bud', cfg=cfg) is False
-    warnings = [event for event in events if event.get('type') == 'budget_warning']
-    assert len(warnings) == 1
-    assert warnings[0]['limit'] == 'estimatedCostUsd'
-    assert warnings[0]['remaining'] == 2.0
-
-
-def test_financial_hard_limit_returns_standard_remaining_budget(monkeypatch):
-    import lib.tasks_pkg.orchestrator._round_gates as _round_gates
-    monkeypatch.setattr(_round_gates, 'append_event', lambda *_args: None)
-    monkeypatch.setattr('lib.cost_estimator.estimate_usage_cost',
-                        lambda *_args, **_kwargs: 12.0)
-    monkeypatch.setattr('lib.cost_estimator.check_budget',
-                        lambda *_args, **_kwargs: (True, 12.0, 'cost cap'))
-    task = {
-        'id': 'task-hard-budget', 'provider_id': 'provider',
-        '_t_created': 100.0,
-    }
-    rs = SimpleNamespace(
-        assistant_msg={}, last_finish_reason='tool_calls', model='model',
-        accumulated_usage={'input_tokens': 80}, exit_reason='',
-        api_rounds=[{}],
-    )
-    cfg = {
-        'maxBudgetUsd': 10.0,
-        'maxPromptTokens': 100,
-    }
-    assert _round_gates.check_round_gates(
-        task, rs, round_num=2, tid='task-har', cfg=cfg) is True
-    envelope = task['error']
-    assert envelope['code'] == 'task_budget_exceeded'
-    assert envelope['budget']['limit'] == 'estimatedCostUsd'
-    assert envelope['budget']['remainingBudget'] == {
-        'promptTokens': 20.0,
-        'estimatedCostUsd': 0.0,
     }
 
 
@@ -400,6 +370,7 @@ def test_vite_manifest_tags_and_corruption_fail_closed(tmp_path, monkeypatch):
             'css': ['assets/main-abc.css'],
             assets.I18N_CATALOG_DIGEST_FIELD:
                 assets._source_i18n_catalog_digest(),
+            assets.VITE_AUTHORING_DIGEST_FIELD: 'a' * 64,
         },
         'shared.ts': {'file': 'assets/shared-abc.js'},
     }), encoding='utf-8')

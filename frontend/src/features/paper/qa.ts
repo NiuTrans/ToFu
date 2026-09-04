@@ -1,5 +1,11 @@
-import { featureRegistry } from '../../feature-registry';
+import {
+  featureRegistry,
+  readLiveRuntimeBinding,
+  writeLiveRuntimeBinding,
+} from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
+import type { PaperSaveScope } from './library';
 import {
   paperAttachPush,
   paperDetachPush,
@@ -8,9 +14,14 @@ import {
   type PaperPushEvent,
   type PaperPushState,
 } from './push-transport';
+import {
+  canonicalPaperHash,
+  paperSourceRetryRequired,
+} from './source-start';
 
 type JsonObject = Record<string, unknown>;
 type QAStatus = 'running' | 'done' | 'error' | 'aborted';
+const PAPER_QA_SOURCE_MAX_CHARS = 1_000_000;
 
 interface QAToolRound extends JsonObject {
   roundNum?: unknown;
@@ -52,7 +63,6 @@ type PaperQAWindow = Window & {
   Api?: { paper?: PaperQAApi };
   Icon?: (name: string, size?: number) => string;
   t?: (key: string) => string;
-  escapeHtml?: (value: unknown) => string;
   renderMarkdown?: (text: string) => string;
   renderToolRoundsHTML?: (rounds: QAToolRound[], running: boolean) => string;
   errorEnvelopeMessage?: (error: unknown) => string;
@@ -69,7 +79,7 @@ type PaperQAWindow = Window & {
   _paperFileName?: string;
   _paperActiveTab?: string;
   _ensurePaperText?: () => Promise<boolean>;
-  _saveActivePaperState?: () => unknown;
+  _saveActivePaperState?: (scope?: PaperSaveScope) => unknown;
   _switchPaperTab?: (tab: string) => void;
   _setPaperMobileView?: (view: string) => void;
   _qaMsgInnerHtml?: typeof qaMsgInnerHtml;
@@ -99,12 +109,12 @@ function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (typeof helper === 'function') return helper(value);
-  const node = document.createElement('span');
-  node.textContent = value == null ? '' : String(value);
-  return node.innerHTML;
+function activePaperHash(): string {
+  return stringValue(readLiveRuntimeBinding('_paperHash')).trim();
+}
+
+function setActivePaperHash(value: unknown): void {
+  writeLiveRuntimeBinding('_paperHash', stringValue(value));
 }
 
 function translate(key: I18nKey, fallback: string = key): string {
@@ -131,6 +141,12 @@ function errorMessage(error: unknown, fallback: string): string {
   }
   if (error instanceof Error && error.message) return error.message;
   return stringValue(error) || fallback;
+}
+
+function qaStartIsCurrent(assistant: QAMessage, paperId: string): boolean {
+  return String(globals()._activePaperId || '') === paperId
+    && assistant.status === 'running'
+    && history().includes(assistant);
 }
 
 /** Build one Q&A bubble while preserving the classic rendering contract. */
@@ -218,6 +234,8 @@ export function applyQAEvent(
       query: event.query,
       toolCallId: event.toolCallId,
       toolArgs: event.toolArgs,
+      attentionKind: event.attentionKind,
+      parentToolCallId: event.parentToolCallId,
       status: 'searching',
       results: null,
     });
@@ -325,13 +343,14 @@ export async function pollQATask(
   }
 }
 
-/** Start a paper-grounded question without changing the existing wire contract. */
+/** Start a paper-grounded question through hash-first source resolution. */
 export async function sendPaperQuestion(): Promise<void> {
   const input = document.getElementById('paperQAInput') as HTMLTextAreaElement | null;
   const question = input?.value.trim() ?? '';
   const state = globals();
   if (!question || state._paperQAStreaming) return;
-  if (!state._paperParsedText) {
+  const paperHash = canonicalPaperHash(activePaperHash());
+  if (!paperHash && !state._paperParsedText) {
     const available = await state._ensurePaperText?.();
     if (!available) {
       state.debugLog?.(
@@ -341,6 +360,7 @@ export async function sendPaperQuestion(): Promise<void> {
       return;
     }
   }
+  let paperText = stringValue(state._paperParsedText);
 
   const messages = history();
   const recent = messages.slice(-10).map((message) => ({
@@ -359,18 +379,51 @@ export async function sendPaperQuestion(): Promise<void> {
 
   const startPaperId = state._activePaperId || '';
   try {
-    const data = await api().qaStart({
+    const startBody: JsonObject = {
       question,
-      paper_text: state._paperParsedText || '',
-      paper_hash: state._paperHash || '',
       lang: state._i18nLang === 'zh' ? 'zh' : 'en',
       history: recent,
       model: state._paperReportModel || undefined,
       title: state._paperFileName || '',
-    });
+    };
+    if (paperHash) startBody.paper_hash = paperHash;
+    else startBody.paper_text = paperText;
+
+    let data: JsonObject;
+    try {
+      data = await api().qaStart(startBody);
+    } catch (error: unknown) {
+      if (
+        !paperHash
+        || !paperSourceRetryRequired(error)
+        || !qaStartIsCurrent(assistant, startPaperId)
+      ) throw error;
+      if (!paperText) {
+        const available = await state._ensurePaperText?.();
+        if (!qaStartIsCurrent(assistant, startPaperId)) return;
+        if (!available) throw error;
+        paperText = stringValue(state._paperParsedText);
+      }
+      if (!paperText) throw error;
+      console.warn(
+        '[Paper:QA] Stored source unavailable — retrying start with paper text',
+      );
+      data = await api().qaStart({
+        ...startBody,
+        paper_text: paperText.slice(0, PAPER_QA_SOURCE_MAX_CHARS),
+      });
+    }
     const taskId = stringValue(data.task_id);
     if (data.ok !== true || !taskId) {
       throw new Error(stringValue(data.error) || 'Q&A start failed');
+    }
+    if (!qaStartIsCurrent(assistant, startPaperId)) {
+      await api().qaAbort?.(taskId);
+      return;
+    }
+    const resolvedHash = canonicalPaperHash(data.paper_hash);
+    if (resolvedHash) {
+      setActivePaperHash(resolvedHash);
     }
     await pollQATask(taskId, assistant, startPaperId);
   } catch (error: unknown) {
@@ -383,7 +436,7 @@ export async function sendPaperQuestion(): Promise<void> {
   } finally {
     state._paperQAStreaming = false;
     state._paperQAAbort = null;
-    state._saveActivePaperState?.();
+    state._saveActivePaperState?.('qa');
   }
 }
 

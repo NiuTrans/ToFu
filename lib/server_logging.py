@@ -90,11 +90,12 @@ class _AccessOnly(logging.Filter):
 
 class _QuietPollFilter(logging.Filter):
     # Successful liveness/poll traffic is an operational metric, not durable
-    # line-by-line evidence. Repeated browser-poll 4xx responses are likewise
-    # attacker/client-controlled; retain first + power-of-two + five-minute
-    # checkpoints while request metrics retain the exact aggregate count.
+    # line-by-line evidence. Repeated health failures and browser-poll 4xx
+    # responses retain first + power-of-two + five-minute checkpoints while
+    # request metrics retain the exact aggregate count.
     _NOISY_PATH_PREFIXES = (
-        '/api/health', '/api/v1/health', '/api/browser/commands', '/api/browser/poll',
+        '/api/health', '/api/live', '/api/ready', '/api/v1/health',
+        '/api/browser/commands', '/api/browser/poll',
         '/api/v1/push/poll', '/api/v1/conversations/sync',
         '/api/v3/conversations/',
         '/api/v1/project/brain/summary', '/api/v1/tasks/events',
@@ -106,22 +107,22 @@ class _QuietPollFilter(logging.Filter):
     def __init__(self):
         super().__init__()
         self._lock = threading.Lock()
-        self._browser_failure_counts: dict[str, int] = {}
-        self._browser_failure_last_emit: dict[str, float] = {}
+        self._poll_failure_counts: dict[str, int] = {}
+        self._poll_failure_last_emit: dict[str, float] = {}
 
-    def _allow_browser_failure_checkpoint(self, status: str) -> bool:
+    def _allow_poll_failure_checkpoint(self, key: str) -> bool:
         now = time.monotonic()
         with self._lock:
-            count = self._browser_failure_counts.get(status, 0) + 1
-            self._browser_failure_counts[status] = count
-            last = self._browser_failure_last_emit.get(status, 0.0)
+            count = self._poll_failure_counts.get(key, 0) + 1
+            self._poll_failure_counts[key] = count
+            last = self._poll_failure_last_emit.get(key, 0.0)
             allowed = (
                 count <= 2
                 or (count & (count - 1)) == 0
                 or now - last >= 300.0
             )
             if allowed:
-                self._browser_failure_last_emit[status] = now
+                self._poll_failure_last_emit[key] = now
             return allowed
 
     def filter(self, record):
@@ -137,7 +138,13 @@ class _QuietPollFilter(logging.Filter):
                 return False
             if (method == 'POST' and path == '/api/browser/poll'
                     and status.startswith('4')):
-                return self._allow_browser_failure_checkpoint(status)
+                return self._allow_poll_failure_checkpoint(
+                    f'{method}:{path}:{status}')
+            if (path in ('/api/health', '/api/live', '/api/ready',
+                         '/api/v1/health')
+                    and status.startswith(('4', '5'))):
+                return self._allow_poll_failure_checkpoint(
+                    f'{method}:{path}:{status}')
         return True
 
 

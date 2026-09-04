@@ -173,12 +173,40 @@ function _handleSwarmAgent(ev, c) {
       let _findOwningSwarmRound = () => {
         /* Strict ownership match: the panel must contain this agent_id.
            Returning a panel that does NOT own the agent would silently
-           graft the agent onto the wrong panel (B11). */
-        const inCurrent = (assistantProjection.toolRounds || []).find(
-          r => r._swarmActive || r._swarm,
+           graft the agent onto the wrong panel (B11). Scan ALL `_swarm`
+           rounds, not just the first: a multi-wave turn (spawn_agents
+           called again in the same assistant turn — e.g. after a continued
+           generation) has several swarm panels, and checking only the first
+           one failed ownership for every later-wave agent. tool_call and
+           progress events have no fallback below, so they were silently
+           dropped — the panel showed agent cards but never the tool
+           timeline. */
+        const rounds = assistantProjection.toolRounds || [];
+        const owner = rounds.find(
+          r => (r._swarmActive || r._swarm)
+            && (r._swarmAgents || []).some(a => a.id === ev.agentId),
         );
-        if (inCurrent && (inCurrent._swarmAgents || []).some(a => a.id === ev.agentId)) {
-          return inCurrent;
+        if (owner) return owner;
+        /* Post-reload hydration: `_swarmAgents` is live-only, so after a
+           page reload the durable spawn round has an empty roster while its
+           persisted `_swarmSnapshot` still names every agent. Rebuild the
+           missing cards from THIS round's own snapshot (never another
+           round's — that would be the B11 cross-panel graft) so live
+           tool_call/progress events reattach to real cards instead of
+           vanishing until the agent's next phase event. */
+        if (ev.agentId && typeof _recoverSwarmAgents === "function") {
+          for (const r of rounds) {
+            if (!r || !(r._swarmActive || r._swarm)) continue;
+            const snapAgents = r._swarmSnapshot && r._swarmSnapshot.agents;
+            if (!Array.isArray(snapAgents)
+                || !snapAgents.some(a => a && a.id === ev.agentId)) continue;
+            const recovered = _recoverSwarmAgents(r, rounds);
+            const have = new Set((r._swarmAgents || []).map(a => a.id));
+            const missing = recovered.filter(a => a.id && !have.has(a.id));
+            if (!missing.length) continue;
+            r._swarmAgents = (r._swarmAgents || []).concat(missing);
+            return r;
+          }
         }
         /* Genuinely new agent (e.g. its phase event raced ahead of the
            spawning event) — only the swarm_agent_phase handler creates new
@@ -199,7 +227,6 @@ function _handleSwarmAgent(ev, c) {
         if (_swarm_evtype === "swarm_agent_phase"
             || _swarm_evtype === "swarm_agent_complete"
             || _swarm_evtype === "swarm_agent_error") {
-          const rounds = assistantProjection.toolRounds || [];
           const active = rounds.find(r => r._swarm && (r._swarmActive || r._asyncRunning));
           if (active) return active;
           for (let i = rounds.length - 1; i >= 0; i--) {
@@ -242,7 +269,7 @@ function _handleSwarmAgent(ev, c) {
             agent = sr._swarmAgents.find(a =>
               a.id !== ev.agentId &&
               !a._idConfirmed &&
-              (a.status === "pending" || a.status === "running" || a.phase === "starting" || a.phase === "Queued" || !a.phase) &&
+              (a.status === "pending" || a.status === "running" || a.phase === "starting" || a.phase === "queued" || !a.phase) &&
               a.objective && (a.objective.trim().toLowerCase().startsWith(objNorm) || objNorm.startsWith(a.objective.trim().toLowerCase()))
             );
           }
@@ -368,13 +395,19 @@ function _handleSwarmAgent(ev, c) {
              * for long-running agents — older calls drop off the
              * timeline but the agent's own history is unaffected. */
             if (agent._toolCalls.length > 30) {
-              agent._toolCalls.splice(0, agent._toolCalls.length - 30);
+              const dropped = agent._toolCalls.length - 30;
+              agent._toolCalls.splice(0, dropped);
+              agent._toolCallsOmitted = (agent._toolCallsOmitted || 0) + dropped;
             }
           }
           if (ev.callStatus) entry.status = ev.callStatus;
           if (typeof ev.callElapsed === "number") entry.elapsed = ev.callElapsed;
           if (ev.preview) entry.preview = ev.preview;
           if (ev.error) entry.error = ev.error;
+          if (typeof ev.previewTruncated === "boolean") entry.previewTruncated = ev.previewTruncated;
+          if (typeof ev.previewFullChars === "number") entry.previewFullChars = ev.previewFullChars;
+          if (typeof ev.errorTruncated === "boolean") entry.errorTruncated = ev.errorTruncated;
+          if (typeof ev.errorFullChars === "number") entry.errorFullChars = ev.errorFullChars;
           if (ev.toolName) entry.toolName = ev.toolName;
           if (ev.argsBrief) entry.argsBrief = ev.argsBrief;
         }

@@ -152,6 +152,8 @@ def test_generator_emits_interpret_then_candidates_then_done():
     # interpret_done reports how many grounding attempts (for skeleton count).
     assert evs[0]['candidateCount'] == 2, f'candidateCount wrong: {evs[0]}'
     assert evs[0]['correctionPending'] is True
+    assert evs[0]['agentUsageV1']['stage'] == 'recommend'
+    assert evs[0]['agentUsageV1']['agent_dispatches'] == 1
     cand_evs = [e for e in evs if e['type'] == 'candidate']
     assert len(cand_evs) == 2, f'expected 2 candidate events: {types}'
     assert [c['index'] for c in cand_evs] == [0, 1], 'candidate indices not sequential'
@@ -162,6 +164,7 @@ def test_generator_emits_interpret_then_candidates_then_done():
     corr = [e for e in evs if e['type'] == 'correction'][0]
     assert corr['correction']['paper']['arxiv_id'].split('v')[0] == '2505.17638'
     assert evs[-1]['resultCount'] == 2 and evs[-1]['correctionPresent'] is True
+    assert evs[-1]['agentUsageV1'] == evs[0]['agentUsageV1']
     _ok('generator emits interpret_done → candidate(×2) → correction → done, in order')
 
 

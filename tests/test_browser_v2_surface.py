@@ -197,6 +197,24 @@ def test_work_tab_seeds_from_active_tab():
     assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) == 9
 
 
+def test_work_tab_seed_skips_client_tab():
+    """The Tofu client tab (flagged isClient by the extension) is never an
+    implicit action target — seeding falls through to the next tab even
+    when the client tab is the active one."""
+    from lib.browser._resolve import resolve_work_tab
+    send = _fake_send({'list_tabs': (
+        [{'id': 7, 'active': True, 'isClient': True},
+         {'id': 9, 'active': False}], None)})
+    assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) == 9
+
+
+def test_work_tab_seed_returns_none_when_only_client_tabs():
+    from lib.browser._resolve import resolve_work_tab
+    send = _fake_send({'list_tabs': (
+        [{'id': 7, 'active': True, 'isClient': True}], None)})
+    assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) is None
+
+
 def test_close_tab_forgets_work_tab():
     from lib.browser._resolve import forget_work_tab, resolve_work_tab
     send = _fake_send({'list_tabs': ([{'id': 5, 'active': True}], None)})
@@ -216,6 +234,64 @@ def test_work_tab_memory_is_isolated_by_owner_and_device():
     remember_work_tab(bob, 9)
     assert current_work_tab(alice) == 7
     assert current_work_tab(bob) == 9
+
+
+def test_work_tab_memory_is_lru_bounded(monkeypatch):
+    import lib.browser._resolve as _resolve
+
+    monkeypatch.setattr(_resolve, '_work_tab_capacity', lambda: 2)
+    now = [1.0]
+    monkeypatch.setattr(_resolve.time, 'monotonic', lambda: now[0])
+    first = ('101', 'first-browser')
+    second = ('101', 'second-browser')
+    third = ('202', 'third-browser')
+
+    _resolve.remember_work_tab(first, 1)
+    now[0] = 2.0
+    _resolve.remember_work_tab(second, 2)
+    now[0] = 3.0
+    assert _resolve.resolve_work_tab(
+        {}, route_key=first, send=_fake_send({})) == 1
+    now[0] = 4.0
+    _resolve.remember_work_tab(third, 3)
+
+    assert _resolve.current_work_tab(first) == 1
+    assert _resolve.current_work_tab(second) is None
+    assert _resolve.current_work_tab(third) == 3
+
+
+def test_work_tab_memory_expires_and_reseeds(monkeypatch):
+    import lib.browser._resolve as _resolve
+
+    now = [100.0]
+    monkeypatch.setattr(_resolve.time, 'monotonic', lambda: now[0])
+    _resolve.remember_work_tab(_ROUTE_KEY, 7)
+    now[0] += _resolve._WORK_TAB_TTL_S + 1
+    calls = []
+
+    def send(command, **_kwargs):
+        calls.append(command)
+        return [{'id': 9, 'active': True}], None
+
+    assert _resolve.resolve_work_tab(
+        {}, route_key=_ROUTE_KEY, send=send) == 9
+    assert calls == ['list_tabs']
+
+
+def test_actual_resolution_renews_work_tab_but_display_read_does_not(
+        monkeypatch):
+    import lib.browser._resolve as _resolve
+
+    now = [100.0]
+    monkeypatch.setattr(_resolve.time, 'monotonic', lambda: now[0])
+    _resolve.remember_work_tab(_ROUTE_KEY, 7)
+    now[0] += _resolve._WORK_TAB_TTL_S - 1
+    assert _resolve.resolve_work_tab(
+        {}, route_key=_ROUTE_KEY, send=_fake_send({})) == 7
+    now[0] += _resolve._WORK_TAB_TTL_S - 1
+    assert _resolve.current_work_tab(_ROUTE_KEY) == 7
+    now[0] += 2
+    assert _resolve.current_work_tab(_ROUTE_KEY) is None
 
 
 def test_runtime_binds_owner_and_device_on_every_bridge_send():
@@ -263,6 +339,26 @@ def test_list_tabs_seeds_work_tab_only_from_owner_allowed_rows(monkeypatch):
     assert 'Allowed' in rendered
     assert current_work_tab(_ROUTE_KEY) == 9
     assert [command for command, _params in calls] == ['list_tabs']
+
+
+def test_list_tabs_marks_client_tab_and_never_seeds_it():
+    from lib.browser._resolve import current_work_tab
+    from lib.browser.handlers import _handle_list_tabs
+
+    calls = []
+    runtime = _handler_runtime({
+        'list_tabs': ([
+            {'id': 3, 'url': 'http://127.0.0.1:8080/', 'title': 'Tofu',
+             'active': True, 'isClient': True},
+            {'id': 9, 'url': 'https://allowed.example/', 'title': 'Allowed',
+             'active': False},
+        ], None),
+    }, calls)
+
+    rendered = _handle_list_tabs({}, runtime)
+
+    assert 'never navigated' in rendered
+    assert current_work_tab(_ROUTE_KEY) == 9
 
 
 # ── 4. Action receipt ─────────────────────────────────────────────────
@@ -389,6 +485,24 @@ def test_navigate_new_tab_uses_create_tab_and_remembers(monkeypatch):
         {}, route_key=_ROUTE_KEY, send=_fake_send({})) == 77
 
 
+def test_navigate_client_tab_redirect_remembers_the_new_tab():
+    """The extension refuses to navigate the Tofu client tab and opens a new
+    tab instead — the handler must re-bind the working tab to the new id so
+    the next tab_id-less call lands on the new page, not back on the chat."""
+    calls = []
+    runtime = _handler_runtime({
+        'navigate': ({'id': 88, 'url': 'https://dev.example/',
+                      'status': 'complete', 'redirectedToNewTab': True,
+                      'protectedTabId': 3}, None),
+    }, calls)
+    from lib.browser.handlers import _handle_navigate
+    out = _handle_navigate({'tabId': 3, 'url': 'https://dev.example/'}, runtime)
+    assert 'never navigated' in out
+    assert '#88' in out
+    from lib.browser._resolve import current_work_tab
+    assert current_work_tab(_ROUTE_KEY) == 88
+
+
 def test_navigate_waits_for_load_by_default(monkeypatch):
     calls = []
     runtime = _handler_runtime({
@@ -469,9 +583,12 @@ def test_approval_enrichers_cover_new_write_tools():
         _APPROVAL_META_ENRICHERS[name]({}, {})
 
 
-def test_idempotent_partition_covers_read_page():
-    from lib.tasks_pkg.tool_dispatch._flags import _IDEMPOTENT_TOOLS
-    assert 'browser_read_page' in _IDEMPOTENT_TOOLS
+def test_live_browser_observers_are_not_result_cached():
+    from lib.tasks_pkg.tool_dispatch._flags import _CACHEABLE_TOOLS
+    assert 'browser_read_page' not in _CACHEABLE_TOOLS
+    assert 'browser_list_tabs' not in _CACHEABLE_TOOLS
+    assert 'browser_get_history' not in _CACHEABLE_TOOLS
+    assert 'browser_get_cookies' not in _CACHEABLE_TOOLS
 
 
 # ── 8. menu_click (advanced) ──────────────────────────────────────────

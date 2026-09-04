@@ -1,7 +1,5 @@
 """Public-export publication gate: only code/templates may reach Git."""
 
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip('export', reason='export.py is not shipped in opensource builds')
@@ -54,11 +52,12 @@ def test_runtime_data_and_real_configuration_are_blocked(tmp_path, rel):
 
 def test_opensource_skeleton_keeps_configuration_as_template(tmp_path, monkeypatch):
     import export
+    import export_pkg._export_core as export_core
 
-    monkeypatch.setattr(export, '_bundle_internal_mcp_repos', lambda *args: None)
-    monkeypatch.setattr(export, '_bundle_tofu_search_wheel', lambda *args: None)
-    monkeypatch.setattr(export, '_portablize_bundled_mcp_config', lambda *args: None)
-    monkeypatch.setattr(export, '_patch_install_sh_proxy', lambda *args: None)
+    monkeypatch.setattr(export_core, '_bundle_internal_mcp_repos', lambda *args: None)
+    monkeypatch.setattr(export_core, '_bundle_tofu_search_wheel', lambda *args: None)
+    monkeypatch.setattr(export_core, '_portablize_bundled_mcp_config', lambda *args: None)
+    monkeypatch.setattr(export_core, '_patch_install_sh_proxy', lambda *args: None)
 
     export._create_skeleton(tmp_path, 'opensource')
 
@@ -142,7 +141,9 @@ def test_secret_verification_is_fail_closed(tmp_path, monkeypatch):
     def unreadable(*args, **kwargs):
         raise OSError('synthetic candidate enumeration failure')
 
-    monkeypatch.setattr(export, '_publish_candidate_paths', unreadable)
+    import export_pkg._publish as publish
+
+    monkeypatch.setattr(publish, '_publish_candidate_paths', unreadable)
 
     with pytest.raises(export.ExportPublishSafetyError,
                        match='synthetic candidate enumeration failure'):
@@ -200,7 +201,9 @@ def test_git_push_runs_gate_before_git_add(tmp_path, monkeypatch):
         calls.append('subprocess')
         raise AssertionError('git must not run after a failed publication gate')
 
-    monkeypatch.setattr(export, '_verify_publish_tree', reject)
+    import export_pkg._publish as publish
+
+    monkeypatch.setattr(publish, '_verify_publish_tree', reject)
     monkeypatch.setattr(export.subprocess, 'run', must_not_run)
 
     with pytest.raises(export.ExportPublishSafetyError, match='blocked'):
@@ -211,9 +214,11 @@ def test_git_push_runs_gate_before_git_add(tmp_path, monkeypatch):
 def test_git_push_propagates_staged_gate_failure(tmp_path, monkeypatch):
     import export
 
-    monkeypatch.setattr(export, '_verify_publish_tree', lambda dest: None)
+    import export_pkg._publish as publish
+
+    monkeypatch.setattr(publish, '_verify_publish_tree', lambda dest: None)
     monkeypatch.setattr(
-        export, '_verify_staged_publish_snapshot',
+        publish, '_verify_staged_publish_snapshot',
         lambda dest: (_ for _ in ()).throw(export.ExportPublishSafetyError('blocked index')),
     )
     monkeypatch.setitem(
@@ -238,8 +243,10 @@ def test_git_push_blocks_commit_tree_race_before_push(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / 'README.md').write_text('safe\n', encoding='utf-8')
 
-    monkeypatch.setattr(export, '_verify_publish_tree', lambda dest: None)
-    monkeypatch.setattr(export, '_verify_staged_publish_snapshot', lambda dest: '0' * 40)
+    import export_pkg._publish as publish
+
+    monkeypatch.setattr(publish, '_verify_publish_tree', lambda dest: None)
+    monkeypatch.setattr(publish, '_verify_staged_publish_snapshot', lambda dest: '0' * 40)
     monkeypatch.setitem(
         export._GIT_REPOS, 'opensource',
         {'remotes': [{'name': 'origin', 'url': str(remote)}], 'branch': 'main'},
@@ -284,9 +291,11 @@ def test_staged_snapshot_blocks_symlink(tmp_path):
 
 
 def test_gate_is_wired_after_export_transforms_and_before_push():
+    import inspect
+
     import export
 
-    source = Path(export.__file__).read_text(encoding='utf-8')
+    source = inspect.getsource(export.export_project)
     anchor = source.index('# Post-export tasks: lint (opensource only), verify, push.')
     start = source.index("        if mode == 'opensource':", anchor)
     end = source.index('        return', start)
@@ -299,8 +308,7 @@ def test_gate_is_wired_after_export_transforms_and_before_push():
     assert window.index('_verify_publish_tree(dest)') < window.index(
         '_git_push(dest, mode')
 
-    push_start = source.index('def _git_push(')
-    push_window = source[push_start:]
+    push_window = inspect.getsource(export._git_push)
     assert push_window.index("_run(['git', 'add', '-A'])") < push_window.index(
         '_verify_staged_publish_snapshot(dest)')
     assert push_window.index('_verify_staged_publish_snapshot(dest)') < push_window.index(

@@ -205,7 +205,7 @@ class TestManagerDeviceFlow(unittest.TestCase):
              mock.patch('lib.oauth.outbound.provision_oauth_provider',
                         return_value=True) as prov, \
              mock.patch('lib.oauth.codex_catalog.trigger_codex_catalog_refresh'):
-            out = mgr.start_device_flow('codex')
+            out = mgr.start_device_flow('codex', owner_user_id=1)
             self.assertEqual(out['user_code'], 'CODE-1')
             self.assertEqual(out['verification_url'],
                              'https://auth.openai.com/codex/device')
@@ -216,12 +216,13 @@ class TestManagerDeviceFlow(unittest.TestCase):
             self.assertEqual(
                 ex.call_args.kwargs.get('redirect_uri'),
                 'https://auth.openai.com/deviceauth/callback')
+            self.assertEqual(ex.call_args.kwargs.get('user_id'), '1')
             # Flow status flips to 'success' BEFORE provisioning runs in the
             # poll thread — wait for the call itself, not just the status.
             deadline = time.time() + 5
             while not prov.called and time.time() < deadline:
                 time.sleep(0.02)
-            prov.assert_called_once_with('codex')
+            prov.assert_called_once_with('codex', owner_user_id=1)
 
         status = mgr.get_oauth_status('codex')
         self.assertEqual(status['status'], 'success')
@@ -233,7 +234,7 @@ class TestManagerDeviceFlow(unittest.TestCase):
                                       'interval': 30}), \
              mock.patch('lib.oauth.codex.codex_device_poll_token',
                         return_value=None):
-            mgr.start_device_flow('codex')
+            mgr.start_device_flow('codex', owner_user_id=1)
             status = mgr.get_oauth_status('codex')
         self.assertEqual(status['device']['user_code'], 'CODE-9')
         self.assertEqual(
@@ -248,7 +249,7 @@ class TestManagerDeviceFlow(unittest.TestCase):
                                       'interval': 30}), \
              mock.patch('lib.oauth.codex.codex_device_poll_token',
                         return_value=None):
-            mgr.start_device_flow('codex')
+            mgr.start_device_flow('codex', owner_user_id=1)
             mgr.stop_device_flow('codex')
             # Poll thread sleeps on cancel.wait — setting the event wakes it
             # immediately; the flow must NOT auto-complete afterwards.
@@ -276,7 +277,7 @@ class TestManagerDeviceFlow(unittest.TestCase):
         self.assertEqual(status['device']['user_code'], 'C')
 
     def test_unknown_provider_rejected(self):
-        out = mgr.start_device_flow('claude')
+        out = mgr.start_device_flow('claude', owner_user_id=1)
         self.assertIn('error', out)
 
     def test_new_loopback_flow_stops_device_flow(self):
@@ -285,7 +286,7 @@ class TestManagerDeviceFlow(unittest.TestCase):
                                       'interval': 30}), \
              mock.patch('lib.oauth.codex.codex_device_poll_token',
                         return_value=None):
-            mgr.start_device_flow('codex')
+            mgr.start_device_flow('codex', owner_user_id=1)
             with mgr._flows_lock:
                 ev = mgr._active_flows['codex']['cancel_event']
         with mock.patch('lib.oauth.codex.codex_build_auth_url',
@@ -296,8 +297,32 @@ class TestManagerDeviceFlow(unittest.TestCase):
             import lib.oauth.manager._flow as flow_mod
             with mock.patch.object(flow_mod.threading, 'Thread') as th:
                 th.return_value.start = lambda: None
-                mgr.start_oauth_flow('codex')
+                mgr.start_oauth_flow('codex', owner_user_id=1)
         self.assertTrue(ev.is_set())
+
+    def test_replaced_device_flow_cannot_redeem_late_poll_result(self):
+        from lib.oauth.manager._device import _device_poll_loop
+
+        with mgr._flows_lock:
+            mgr._active_flows['codex'] = {
+                'flow_id': 'new-generation',
+                'status': 'started',
+                'owner_user_id': 1,
+            }
+        late_result = {
+            'authorization_code': 'late-code',
+            'code_verifier': 'late-verifier',
+        }
+        with mock.patch('lib.oauth.codex.codex_device_poll_token',
+                        return_value=late_result), \
+             mock.patch('lib.oauth.codex.codex_exchange_code') as exchange:
+            _device_poll_loop(
+                'codex', 'old-device', 'OLD-CODE', 1,
+                threading.Event(), 'old-generation', user_id='1')
+        exchange.assert_not_called()
+        with mgr._flows_lock:
+            self.assertEqual(
+                mgr._active_flows['codex']['status'], 'started')
 
 
 class TestDeviceLoginRoute(unittest.TestCase):
@@ -331,7 +356,7 @@ class TestDeviceLoginRoute(unittest.TestCase):
 
         async def _run():
             with mock.patch('lib.oauth.manager.start_device_flow',
-                            return_value=fake):
+                            return_value=fake) as start:
                 client = app.test_client()
                 resp = await client.post('/api/v1/oauth/device-login',
                                          json={'provider': 'codex'})
@@ -343,6 +368,9 @@ class TestDeviceLoginRoute(unittest.TestCase):
                 resp2 = await client.get(
                     '/api/v1/oauth/device-login?provider=codex')
                 self.assertEqual(resp2.status_code, 200)
+                self.assertEqual(start.call_count, 2)
+                self.assertEqual(
+                    start.call_args.kwargs['owner_user_id'], 1)
 
         asyncio.run(_run())
 
@@ -369,6 +397,44 @@ class TestDeviceLoginRoute(unittest.TestCase):
             resp = await client.post('/api/v1/oauth/device-login',
                                      json={'provider': 'claude'})
             self.assertEqual(resp.status_code, 400)
+
+        asyncio.run(_run())
+
+    def test_route_rejects_malformed_body_before_start(self):
+        import asyncio
+        import quart as _quart
+        sys.modules.setdefault('flask', _quart)
+        from quart import Quart
+        if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
+            Quart.default_config = {**Quart.default_config,
+                                    'PROVIDE_AUTOMATIC_OPTIONS': True}
+        app = Quart(__name__)
+        from lib.http_error_handlers import register_http_error_handlers
+        from routes.api_v1.oauth import api_v1_oauth_bp
+        app.register_blueprint(api_v1_oauth_bp)
+        register_http_error_handlers(app)
+
+        @app.before_request
+        def _fake_auth():
+            from quart import g
+            from lib.api_keys import local_admin_context
+            g.auth_ctx = local_admin_context()
+
+        async def _run():
+            with mock.patch('lib.oauth.manager.start_device_flow') as start:
+                client = app.test_client()
+                malformed = await client.post(
+                    '/api/v1/oauth/device-login',
+                    data='{"provider":',
+                    headers={'Content-Type': 'application/json'},
+                )
+                self.assertEqual(malformed.status_code, 400)
+                wrong_type = await client.post(
+                    '/api/v1/oauth/device-login',
+                    json={'provider': ['codex']},
+                )
+                self.assertEqual(wrong_type.status_code, 400)
+                start.assert_not_called()
 
         asyncio.run(_run())
 

@@ -21,20 +21,24 @@ pytestmark = pytest.mark.unit
 def test_gate_service_preserves_inputs_and_projects_canonical_mutations():
     calls = []
     service = OrchestrationHumanGateService(
-        approval_resolver=lambda request_id, approved: (
-            calls.append(('approve', request_id, approved)) or approved
+        approval_resolver=lambda request_id, approved, owner_user_id: (
+            calls.append((
+                'approve', request_id, approved, owner_user_id)) or approved
         ),
-        guidance_resolver=lambda request_id, response: (
-            calls.append(('input', request_id, response)) or False
+        guidance_resolver=lambda request_id, response, owner_user_id: (
+            calls.append((
+                'input', request_id, response, owner_user_id)) or False
         ),
     )
 
-    approval = service.approve('opaque/approval', True)
-    guidance = service.input('opaque/input', 'continue verbatim')
+    approval = service.approve(
+        'opaque/approval', True, owner_user_id=82)
+    guidance = service.input(
+        'opaque/input', 'continue verbatim', owner_user_id=82)
 
     assert calls == [
-        ('approve', 'opaque/approval', True),
-        ('input', 'opaque/input', 'continue verbatim'),
+        ('approve', 'opaque/approval', True, 82),
+        ('input', 'opaque/input', 'continue verbatim', 82),
     ]
     assert approval.ok is True
     assert approval.action == MUTATION_ACTION_APPROVE_GATE
@@ -65,8 +69,8 @@ def test_gate_dependency_failures_use_shared_application_error_boundary(
 
     with pytest.raises(HumanGateServiceError, match=expected_message) as caught:
         if method == 'approve':
-            service.approve('gate-1', True)
+            service.approve('gate-1', True, owner_user_id=82)
         else:
-            service.input('gate-1', 'continue')
+            service.input('gate-1', 'continue', owner_user_id=82)
 
     assert caught.value.__cause__ is failure

@@ -7,6 +7,7 @@
  * feature registry so this module stays independently testable and lazy.
  */
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
 
 export interface ToolInventoryItem {
@@ -43,7 +44,6 @@ interface ToolsInventoryApi {
 type ToolsInventoryRuntime = Window & {
   Api?: { tools?: ToolsInventoryApi };
   t?: (key: string, values?: Record<string, unknown>) => string;
-  escapeHtml?: (value: unknown) => string;
   debugLog?: (message: string, level?: string) => void;
   populateToolsInventory?: () => Promise<void>;
   searchToolsInventory?: (query: unknown) => void;
@@ -71,17 +71,6 @@ function toolsApi(): ToolsInventoryApi {
 
 function translate(key: I18nKey, values?: Record<string, unknown>): string {
   return runtime().t?.(key, values) || key;
-}
-
-function escape(value: unknown): string {
-  const helper = runtime().escapeHtml;
-  if (helper) return helper(value);
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
 }
 
 function errorMessage(error: unknown): string {

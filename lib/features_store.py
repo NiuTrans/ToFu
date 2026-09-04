@@ -9,6 +9,7 @@ dependency — the ``POST /api/v1/features`` handler just parses the body,
 calls this, and ``jsonify``s the result.
 """
 
+import re
 import threading
 
 from lib.config_dir import config_path as _config_path
@@ -28,6 +29,46 @@ _BASE_BOOL_FLAGS = [
     ('optimizer_enabled', 'OPTIMIZER_ENABLED'),
 ]
 _APPLY_LOCK = threading.Lock()
+_PUBLIC_FLAG_KEY = re.compile(r'^[a-z][a-z0-9_]{0,79}$')
+_PUBLIC_FLAG_LIMIT = 256
+_PUBLIC_FLAG_RESERVED_KEYS = frozenset({'ok', 'request_id'})
+
+
+def feature_flags_snapshot() -> dict[str, bool]:
+    """Return the live deployment flags exposed to browser/API consumers."""
+    import lib as _lib
+
+    flags = {
+        'pptx_translate_enabled': bool(getattr(
+            _lib, 'PPTX_TRANSLATE_ENABLED', False)),
+        'cache_extended_ttl': bool(getattr(
+            _lib, 'CACHE_EXTENDED_TTL', False)),
+        'debug_mode': bool(getattr(_lib, 'DEBUG_MODE', False)),
+        'optimizer_enabled': bool(getattr(
+            _lib, 'OPTIMIZER_ENABLED', True)),
+        'artifacts_enabled': bool(getattr(
+            _lib, 'ARTIFACTS_ENABLED', True)),
+    }
+    try:
+        from lib.feature_registry import registered_flags
+        for feature in registered_flags():
+            if len(flags) >= _PUBLIC_FLAG_LIMIT:
+                logger.debug(
+                    '[Features] public flag projection capped at %d entries',
+                    _PUBLIC_FLAG_LIMIT)
+                break
+            if (not _PUBLIC_FLAG_KEY.fullmatch(feature.json_key)
+                    or feature.json_key in _PUBLIC_FLAG_RESERVED_KEYS
+                    or feature.json_key in flags):
+                logger.debug(
+                    '[Features] invalid/reserved plugin flag omitted: %r',
+                    feature.json_key)
+                continue
+            flags[feature.json_key] = bool(getattr(
+                _lib, feature.env_key, feature.default))
+    except Exception as exc:
+        logger.debug('[Features] plugin flag projection failed: %s', exc)
+    return flags
 
 
 def _managed_flags():
@@ -177,4 +218,6 @@ def _apply_feature_updates_locked(data: dict, *, owner_user_id: int):
     return {'saved': existing, 'needs_restart': needs_restart, 'changed': changed}
 
 
-__all__ = ['apply_feature_updates', 'read_features']
+__all__ = [
+    'apply_feature_updates', 'feature_flags_snapshot', 'read_features',
+]

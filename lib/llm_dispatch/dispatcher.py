@@ -1,9 +1,4 @@
-"""lib/llm_dispatch/dispatcher.py — LLMDispatcher: slot pool management and selection.
-
-Manages a pool of (key, model) Slots, builds them from environment config +
-benchmark data, and provides the slot-picking algorithms (best single, top-N,
-best-for-model, etc.).
-"""
+"""Materialize model-routing v2 candidates and select bounded runtime Slots."""
 
 import json
 import os
@@ -14,21 +9,13 @@ from dataclasses import dataclass
 from lib.log import get_logger
 from lib.model_info.capability_taxonomy import DISPATCHER_NON_CHAT_CAPS
 
-from .config import (
-    DEFAULT_SLOT_CONFIGS,
-    MANAGED_TIER_TAGS,
-    MODEL_ALIASES,
-    get_pricing_tiers,
-)
+from .config import MANAGED_TIER_TAGS, MODEL_ALIASES
 from .conv_affinity import (
     get_conv_affinity,
     get_preferred_key,
     record_conv_key,
     sticky_routing_enabled,
 )
-from .model_entry import resolve_request_ids, routing_group
-from .openai_provider import normalize_official_openai_provider
-from .provider_face import DEFAULT_FACE, dual_face_hosts, resolve_face
 from .slot import Slot
 
 logger = get_logger(__name__)
@@ -56,20 +43,6 @@ class _SharedContentionAdmission:
     admitted: bool
 
 
-def _oauth_wire_protocol(provider: dict) -> str:
-    """The wire protocol a subscription backend ACTUALLY speaks.
-
-    The Codex backend accepts ONLY the Responses API, so an oauth='codex'
-    provider's effective protocol is 'responses' regardless of what a
-    stored config says (entries written before  carry
-    'openai', a lie the old URL-sniff gate papered over). Returns '' for
-    non-codex providers — no coercion.
-    """
-    if isinstance(provider, dict) and (provider.get('oauth') or '') == 'codex':
-        return 'responses'
-    return ''
-
-
 class LLMDispatcher:
     """Manages a pool of (key, model) slots and picks the best one per request."""
 
@@ -89,14 +62,12 @@ class LLMDispatcher:
         self._contention_strikes: dict[
             tuple[str, str], _SharedContentionProbeState
         ] = {}
-        # Model entries REFUSED at slot-build time because their wire face
-        # could not be resolved safely (e.g. a Claude model on a dual-face
-        # gateway whose provider declares no anthropic face). Surfaced to the
-        # UI — a refusal the user cannot see is its own silent failure.
+        # Compatibility projection retained for the diagnostics endpoint.
+        # Explicit v2 Connections make protocol-face refusal unnecessary.
         self.face_refusals: list[dict] = []
 
     def initialize(self):
-        """Build slot pool from env vars + benchmark data. Idempotent."""
+        """Build the v2 slot pool and apply optional benchmark seeds."""
         if self._initialized:
             return
         with self._lock:
@@ -111,701 +82,155 @@ class LLMDispatcher:
                 logger.debug('  %s:%s rpm=%.0f '
                       'lat=%.0fms caps=[%s]', s.key_name, s.model, s.rpm_limit, s.latency_ema, caps)
 
-    # Legacy env-var model names are only useful when the base URL matches
-    # the default (i.e. no custom provider has been configured).
-    _DEFAULT_BASE_URL = 'https://api.openai.com/v1'
-
     def _build_slots(self):
-        """Create slots from configured keys × models.
-
-        Priority:
-          1. server_config.json providers (multi-provider model, Settings UI)
-          2. Auto-discovery via /v1/models (when endpoint is non-default)
-          3. Legacy env-var config (env-var model names, fallback)
-
-        Auto-discovery ensures that a friend deploying with their own endpoint
-        (e.g. YEYSAI, OpenRouter) gets working slots without running migrate.py.
-        """
+        """Create operator slots exclusively from model-routing v2."""
         # ── Benchmark / multi-tenant fail-loud mode ──
         # When set, build NO operator-curated slots at all. The only way to
-        # dispatch is then an inline `provider` block / @prov_xxx BYO
-        # endpoint (ephemeral slots, injected at request time). This is
+        # dispatch is then an owner-authorized model-routing v2 candidate
+        # group (ephemeral slots, injected at request time). This is
         # defense-in-depth on top of the per-task provider pin: with the
-        # operator's Keys/Providers store absent there is literally no key
+        # operator's configured slots absent there is literally no key
         # to leak onto, so an isolation bug fails LOUDLY (clean "no slot"
         # error) instead of silently consuming shared internal quota.
         if os.environ.get('TOFU_DISABLE_CONFIGURED_SLOTS', '').strip().lower() \
                 in ('1', 'true', 'yes', 'on'):
             logger.warning('[Dispatch] TOFU_DISABLE_CONFIGURED_SLOTS set — '
-                           'building 0 operator slots; only inline-provider / '
-                           'BYO ephemeral slots can serve requests')
+                           'building 0 operator slots; request-scoped v2 '
+                           'route groups remain available')
+            return
+        self._build_slots_from_model_routing()
+
+    def _build_slots_from_model_routing(self) -> None:
+        """Materialize the personal operator pool from the v2 repository.
+
+        Request handlers use owner-specific ephemeral route groups. The shared
+        pool exists for personal background tasks that have no HTTP request
+        boundary; distributed mode intentionally requires owner enumeration.
+        """
+        from lib.identity import PERSONAL_USER_ID
+        from lib.model_routing import (
+            ModelRef,
+            ModelRoutingError,
+            ModelRoutingRepository,
+            NativeModelSelection,
+            OwnerBoundary,
+            RoutePolicy,
+            RouteSnapshotBuilder,
+            compile_candidates,
+            decode_credential_secret,
+        )
+        from runtime_guards import load_deployment_configuration
+
+        deployment_configuration = load_deployment_configuration()
+        if deployment_configuration.mode != 'personal':
+            logger.info(
+                '[Dispatch] shared v2 slots disabled in %s mode; requests '
+                'must supply an authenticated owner route group',
+                deployment_configuration.mode,
+            )
+            return
+        repository = ModelRoutingRepository()
+        boundary = OwnerBoundary.create(PERSONAL_USER_ID)
+        try:
+            authority = repository.get(boundary)
+        except ModelRoutingError as exc:
+            # The shared dispatcher is also used by request-scoped ephemeral
+            # routes.  A temporarily unavailable durable authority must not
+            # make that in-memory capability impossible to initialise.  Only
+            # the typed authority outage degrades to an empty operator pool;
+            # malformed routing documents and programming errors still fail
+            # loudly instead of being hidden by this lean fallback.
+            if exc.kind != 'model_routing_storage_unavailable':
+                raise
+            logger.warning(
+                '[Dispatch] model-routing authority unavailable; starting '
+                'with 0 shared slots: %s', exc)
+            return
+        if not authority.revision:
+            logger.error('[Dispatch] model-routing v2 authority is not active')
             return
 
-        # Always re-read config from disk — the module-level
-        #   _SAVED_CONFIG is a stale snapshot from server startup that
-        #   misses providers added via the Settings UI.
-        from lib import _load_server_config
-        fresh_config = _load_server_config()
-
-        saved_providers = fresh_config.get('providers', [])
-        # Only use saved providers if they have nested models
-        has_saved = saved_providers and any(
-            p.get('models') for p in saved_providers if p.get('enabled', True)
-        )
-
-        if has_saved:
-            self._migrate_provider_extra_headers(saved_providers, fresh_config)
-            self._migrate_duplicate_account_faces(saved_providers)
-            self._build_slots_from_providers(saved_providers)
-        else:
-            # Non-default endpoint → auto-discover models from /v1/models
-            #   instead of using hardcoded model names that may not be available
-            from lib import LLM_API_KEY, LLM_BASE_URL
-            is_default = (LLM_BASE_URL == self._DEFAULT_BASE_URL)
-
-            if not is_default and LLM_API_KEY:
-                discovered = self._try_auto_discover(LLM_BASE_URL, LLM_API_KEY)
-                if discovered:
-                    self._build_slots_from_providers(discovered)
-                    self._persist_discovered_config(discovered)
-                    return
-
-            # Fallback: env-var model names
-            self._build_slots_from_env()
-
-    def _try_auto_discover(self, base_url: str, api_key: str) -> list:
-        """Attempt model auto-discovery from provider API.
-
-        Returns a providers list suitable for _build_slots_from_providers,
-        or [] on failure.
-        """
-        try:
-            from lib import LLM_API_KEYS
-            from lib.llm_dispatch.discovery import discover_models
-
-            models = discover_models(base_url, api_key)
-            if not models:
-                logger.warning('[Dispatch] Auto-discovery returned no models '
-                              'for %s — falling back to env config', base_url)
-                return []
-
-            # Build a single provider entry
-            provider = {
-                'id': 'default',
-                'name': 'Auto-discovered',
-                'base_url': base_url,
-                'api_keys': list(LLM_API_KEYS),
-                'enabled': True,
-                'models': models,
-            }
-
-            n_cheap = sum(1 for m in models if 'cheap' in m.get('capabilities', []))
-            logger.info('[Dispatch] Auto-discovered %d models (%d cheap) '
-                       'from %s', len(models), n_cheap, base_url)
-            return [provider]
-
-        except Exception as e:
-            logger.warning('[Dispatch] Auto-discovery failed for %s: %s',
-                          base_url, e, exc_info=True)
-            return []
-
-    def _persist_discovered_config(self, providers: list):
-        """Save auto-discovered provider config to server_config.json.
-
-        This ensures discovery only happens once — subsequent restarts
-        use the saved config (which the user can then edit in Settings).
-        """
-        try:
-            from lib import _SERVER_CONFIG_PATH
-            from lib.json_store import update_json_atomic
-
-            def _mutate(config):
-                if not isinstance(config, dict):
-                    config = {}
-                config['providers'] = providers
-                # Don't set presets — let the system use the first model
-                if 'presets' not in config:
-                    config['presets'] = {}
-                return config
-
-            update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-            logger.info('[Dispatch] Saved auto-discovered config to %s',
-                       _SERVER_CONFIG_PATH)
-        except Exception as e:
-            logger.warning('[Dispatch] Failed to persist discovered config: %s',
-                          e, exc_info=True)
-
-    # ── Known provider header migrations ──
-    # When custom headers were moved from hardcoded _headers() to per-provider
-    # extra_headers, existing saved providers need the headers injected.
-    # Populated from the EXTRA_HEADER_MIGRATIONS env var (JSON object
-    # mapping host-suffix → header dict) so internal infrastructure
-    # routing details never leak into open-source builds.
-    @staticmethod
-    def _load_header_migrations() -> dict:
-        raw = os.environ.get('EXTRA_HEADER_MIGRATIONS', '').strip()
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Dispatch] Invalid EXTRA_HEADER_MIGRATIONS JSON: %s', e)
-            return {}
-
-    _HEADER_MIGRATIONS = None  # lazy-loaded in _migrate_provider_extra_headers
-
-    def _migrate_duplicate_account_faces(self, providers):
-        """Fold pre-separation duplicate cards of ONE account into one card.
-
-        Before ``base_url``/``protocol`` became per-model, a gateway account
-        exposing two wire protocols had to be written as TWO provider entries
-        sharing one set of API keys (your-llm-gateway.example.com: ``/v1/openai/native``
-        + ``/v1/anthropic``). This collapses such a pair into a single card
-        whose alternate face lives under ``faces{}``.
-
-        Runs at load time for EVERY install rather than being a hand-edit of
-        one machine's config: otherwise other installs keep the duplicate
-        card AND, once the second template file is gone, that card can never
-        match a template again (``_findMatchingTemplate`` keys on exact
-        base_url), so "sync from template" silently dies for it.
-
-        Persists once, mirroring ``_migrate_provider_extra_headers``.
-        """
-        from lib.llm_dispatch.provider_face import merge_duplicate_account_faces
-
-        try:
-            changed = merge_duplicate_account_faces(providers)
-        except Exception as e:
-            logger.error('[Dispatch] account-face merge failed, leaving '
-                         'providers untouched: %s', e, exc_info=True)
-            return
-        if not changed:
-            return
-
-        try:
-            from lib import _SERVER_CONFIG_PATH
-            from lib.json_store import update_json_atomic
-
-            def _mutate(cfg):
-                if not isinstance(cfg, dict):
-                    cfg = {}
-                cfg['providers'] = providers
-                return cfg
-
-            update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-            logger.info('[Dispatch] Persisted account-face merge to %s',
-                        _SERVER_CONFIG_PATH)
-        except Exception as e:
-            logger.warning('[Dispatch] Failed to persist account-face merge '
-                           '(in-memory merge still applied): %s', e)
-
-    def _migrate_provider_extra_headers(self, providers, config):
-        """Auto-inject extra_headers for known providers missing them.
-
-        This is a one-time migration for providers saved before the
-        per-provider extra_headers feature was added. Persists the
-        updated config so migration only runs once.
-        """
-        migrations = type(self)._HEADER_MIGRATIONS
-        if migrations is None:
-            migrations = self._load_header_migrations()
-            type(self)._HEADER_MIGRATIONS = migrations
-        if not migrations:
-            return
-        migrated = False
-        for p in providers:
-            base_url = p.get('base_url', '')
-            existing_hdrs = p.get('extra_headers') or {}
-            if existing_hdrs:
-                continue  # already has headers — skip
-            for domain_suffix, headers in migrations.items():
-                if domain_suffix in base_url:
-                    p['extra_headers'] = dict(headers)
-                    migrated = True
-                    logger.info('[Dispatch] Auto-migrated extra_headers for '
-                               'provider %s (matched %s)',
-                               p.get('id', '?'), domain_suffix)
-                    break
-
-        if migrated:
-            # Persist so migration only runs once (locked RMW so a concurrent
-            # Settings save isn't clobbered).
-            try:
-                from lib import _SERVER_CONFIG_PATH
-                from lib.json_store import update_json_atomic
-
-                def _mutate(cfg):
-                    if not isinstance(cfg, dict):
-                        cfg = {}
-                    cfg['providers'] = providers
-                    return cfg
-
-                update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-                logger.info('[Dispatch] Persisted extra_headers migration '
-                           'to %s', _SERVER_CONFIG_PATH)
-            except Exception as e:
-                logger.warning('[Dispatch] Failed to persist extra_headers '
-                              'migration: %s', e)
-
-    def _build_slots_from_providers(self, providers):
-        """Build slots from saved multi-provider config (server_config.json).
-
-        Each provider has its own base_url, api_keys, and model list.
-        Slots = provider.api_keys × (provider.models + their aliases).
-
-        Local providers (``brand == 'local'``) may carry a list of endpoint
-        URLs in ``endpoints: [str, ...]`` instead of (or in addition to) the
-        single ``base_url``. We fan out slots across every endpoint × model ×
-        key combination so the dispatcher load-balances across the fleet.
-        """
-        self._direct_models = set()
-        entry_groups: list[tuple[str, set]] = []
-        # Derived ONCE per build: gateway hosts known to offer an
-        # Anthropic-native face (read from the shipped templates). Passed
-        # explicitly into resolve_face so the per-model call is a pure
-        # function of already-computed state.
-        _dual_face_hosts = dual_face_hosts()
-        self.face_refusals = []
-        from lib.llm_dispatch.discovery import normalize_base_url, should_bypass_proxy
-        from lib.model_registration import clear_provider_models
-        from lib.proxy import register_no_proxy_url
-
-        for raw_provider in providers:
-            provider = normalize_official_openai_provider(raw_provider)
-            prov_id = provider.get('id', 'default')
-            clear_provider_models(prov_id)
-            if not provider.get('enabled', True):
-                continue
-
-            base_url = provider.get('base_url', '')
-            api_keys = provider.get('api_keys', [])
-            prov_extra_headers = provider.get('extra_headers') or {}
-            prov_thinking_format = provider.get('thinking_format', '')
-            prov_oauth = provider.get('oauth', '')
-            # Subscription-adapter marker (CLIProxyAPI sidecar on the user's
-            # desktop agent). Mirrors lib.desktop.adapter.is_adapter_provider
-            # without importing the desktop layer here.
-            _raw_adapter = provider.get('adapter')
-            prov_adapter = dict(_raw_adapter) if isinstance(_raw_adapter, dict) else {}
-
-            # A subscription backend's wire protocol is a fact of the
-            # backend, not a user setting: the Codex backend speaks ONLY
-            # Responses. Stored configs from the URL-sniff era carry
-            # protocol:'openai' — coerce IN MEMORY (not persisted) so the
-            # single api_protocol gate in lib/llm/_sse_core.py is always
-            # fed the truth. New provisions write 'responses' outright
-            # (lib/oauth/outbound.py _MANAGED_SPECS).
-            _forced_proto = _oauth_wire_protocol(provider)
-            if _forced_proto and (provider.get('protocol') or '') != _forced_proto:
-                provider = dict(provider, protocol=_forced_proto)
-
-            # ── Multi-endpoint expansion for local providers ──
-            # Backwards-compatible: when 'endpoints' is absent we fall back
-            # to the single base_url (existing behavior).
-            raw_endpoints = provider.get('endpoints') or []
-            if isinstance(raw_endpoints, list) and raw_endpoints:
-                endpoint_urls = []
-                seen = set()
-                for url in raw_endpoints:
-                    if not isinstance(url, str):
-                        continue
-                    norm = normalize_base_url(url.strip())
-                    if not norm or norm in seen:
-                        continue
-                    seen.add(norm)
-                    endpoint_urls.append(norm)
-                if not endpoint_urls and base_url:
-                    endpoint_urls = [base_url]
-            else:
-                endpoint_urls = [base_url] if base_url else []
-
-            # ── Per-endpoint served-model binding ──
-            # ``endpoint_models: {url: [root_model_id, ...]}`` is written by
-            # the Settings probe and by the local health checker. Self-hosted
-            # engines (vLLM / SGLang) serve exactly ONE model per URL, so
-            # fanning every model out to every endpoint misroutes requests
-            # into upstream 404s. An endpoint ABSENT from the map (or mapped
-            # to a falsy list) has no probe data → legacy union fan-out; a
-            # non-empty entry NARROWS that endpoint to the listed root ids.
-            endpoint_binding = {}
-            raw_binding = provider.get('endpoint_models')
-            if isinstance(raw_binding, dict):
-                for bk, bv in raw_binding.items():
-                    if not isinstance(bk, str) or not isinstance(bv, list):
-                        continue
-                    bn = normalize_base_url(bk.strip())
-                    if bn:
-                        endpoint_binding[bn] = {x for x in bv
-                                                if isinstance(x, str) and x}
-
-            # Self-hosted endpoints sit on private (or pseudo-private) IPs
-            # that corp HTTP proxies can't reach. Pre-register them for
-            # proxy bypass so the very first request out of the gate goes
-            # direct. Covers brand=='local' AND any bare-IP endpoint (a
-            # raw-IP base URL is in practice always self-hosted, including
-            # internal-but-publicly-routable corp ranges like 33.x that
-            # is_local_endpoint can't classify). No-op for cloud providers.
-            for url in endpoint_urls:
-                if provider.get('brand') == 'local' or should_bypass_proxy(url):
-                    register_no_proxy_url(url)
-
-            # Local providers without keys are still valid (vLLM/SGLang/Ollama
-            # typically run without auth). Treat empty key as a single
-            # blank-key slot so the dispatcher still creates entries.
-            effective_keys = api_keys or ([''] if provider.get('brand') == 'local' else [])
-            if not effective_keys:
-                logger.warning('[Dispatch] Provider %s has no API keys, skipping', prov_id)
-                continue
-
-            keys = [(f'{prov_id}_key_{i}', k) for i, k in enumerate(effective_keys)]
-
-            # Collect models + their aliases for this provider
-            for raw_model_entry in provider.get('models', []):
-                # Every source (templates, Settings, discovery, BYO API) enters
-                # through one model contract. Keep the old blended `cost` only
-                # as an in-memory migration fallback; it is deliberately not
-                # copied into the canonical row or returned to the frontend.
-                legacy_cost = (raw_model_entry.get('cost')
-                               if isinstance(raw_model_entry, dict) else None)
-                try:
-                    from lib.model_registration import register_model
-                    model_entry = register_model(
-                        raw_model_entry, provider_id=prov_id)
-                except ValueError as exc:
-                    logger.error('[Dispatch] Invalid model registration in '
-                                 'provider %s: %s', prov_id, exc)
+        emitted: set[tuple[str, str]] = set()
+        entry_groups: list[tuple[str, set[str]]] = []
+        for model in authority.document['models']:
+            selection = NativeModelSelection(
+                ModelRef(model['creator_id'], model['model_id']), None, '')
+            # The shared personal pool serves non-chat subsystems too (speech,
+            # embedding, image generation). Chat selection applies its own
+            # capability gate later; requiring ``text`` here would silently
+            # erase a valid transcription-only Offering.
+            candidates = compile_candidates(
+                authority.document,
+                selection,
+                policy=RoutePolicy(required_capabilities=frozenset()),
+            )
+            entry_group = {model['model_id']}
+            for candidate in candidates:
+                unique = (
+                    candidate.deployment['deployment_id'],
+                    candidate.credential['credential_id'],
+                )
+                if unique in emitted:
                     continue
-                model_id = model_entry.get('model_id', '')
-                if not model_id:
-                    continue
-
-                # Skip user-disabled models (per-model toggle in Settings).
-                # The entry stays in server_config.json so re-enabling
-                # preserves aliases / RPM / pricing.
-                if model_entry.get('enabled') is False:
-                    logger.debug('[Dispatch] Skipping disabled model %s in provider %s',
-                                 model_id, prov_id)
-                    continue
-
-                # ── Identity for THIS entry ──
-                # ``entry_group`` = {logical model_id} ∪ every wire id
-                # (entry-level and per-cell) — see lib/llm_dispatch/model_entry.py.
-                # The logical id is a member even when it never goes on the
-                # wire, which is what lets a preset / picker name stay stable
-                # while the gateway renames its deployments underneath.
-                # Computed here because the endpoint-binding check below
-                # consumes it.
-                entry_group = routing_group(model_entry)
-
-                # ── Wire FACE for THIS model (account/face separation) ──
-                # base_url + protocol are per-MODEL, not per-provider: one
-                # gateway account can expose several wire faces (the YourProvider
-                # gateway speaks OpenAI on /v1/openai/native and Anthropic on
-                # /v1/anthropic with the SAME keys). resolve_face owns the
-                # decision — including the fail-loud refusal that stops a
-                # Claude model from silently dispatching over a wire that
-                # drops thinking-block signatures. See provider_face.py.
-                face = resolve_face(provider, model_entry,
-                                    dual_face_hosts=_dual_face_hosts)
-                if not face.ok:
-                    logger.error('[Dispatch] Model %s in provider %s NOT '
-                                 'registered: %s', model_id, prov_id, face.error)
-                    self.face_refusals.append({
-                        'provider_id': prov_id,
-                        'model_id': model_id,
-                        'error': face.error,
-                    })
-                    continue
-                if face.forced:
-                    logger.warning('[Dispatch] Model %s in provider %s is '
-                                   'pinned to face %r, overriding the family '
-                                   'default', model_id, prov_id, face.face_name)
-
-                # ── Endpoint pool for THIS model (wire-id binding check) ──
-                # A probe reports what ``/v1/models`` lists, i.e. WIRE ids. The
-                # logical ``model_id`` may not be one of them, so an endpoint
-                # qualifies when it serves ANY id in this entry's group. Keying
-                # this on the root id alone would drop every split-identity
-                # entry on a bound local fleet. An empty pool means no probed
-                # endpoint serves this model → honest absence (no slots) beats
-                # guaranteed 404s.
-                # A non-default face names exactly ONE URL, so it replaces the
-                # endpoint fan-out (which exists for local multi-endpoint
-                # fleets and is meaningless for a gateway's alternate face).
-                if face.face_name != DEFAULT_FACE:
-                    ep_pool = [face.base_url]
-                elif endpoint_binding:
-                    ep_pool = [u for u in (endpoint_urls or [face.base_url])
-                               if not endpoint_binding.get(u)
-                               or (entry_group & set(endpoint_binding[u]))]
-                else:
-                    ep_pool = endpoint_urls or [face.base_url]
-                if not ep_pool:
-                    logger.info('[Dispatch] Model %s skipped: no bound endpoint '
-                                'serves it in provider %s', model_id, prov_id)
-                    continue
-
-                self._direct_models.add(model_id)
-
-                # Parse capabilities
-                caps_raw = model_entry.get('capabilities', ['text'])
-                caps = set(caps_raw) if isinstance(caps_raw, list) else {'text'}
-                rpm = model_entry.get('rpm', 30)
-                latency = model_entry.get('latency', 2000)
-
-                # Merge with DEFAULT_SLOT_CONFIGS for any missing fields
-                default_cfg = DEFAULT_SLOT_CONFIGS.get(model_id, {})
-                # ``stream_only`` is part of the provider model-entry
-                # contract (managed Codex writes it on every model).  The old
-                # slot builder consulted only DEFAULT_SLOT_CONFIGS, silently
-                # dropping the persisted value and making each non-streaming
-                # summary learn the same fact again via an upstream HTTP 400.
-                model_stream_only = model_entry.get(
-                    'stream_only', default_cfg.get('stream_only', False))
-                from lib.model_registration import routing_cost_per_1k
-                cost = routing_cost_per_1k(
-                    model_entry, provider_id=prov_id,
-                    legacy_fallback=(legacy_cost if legacy_cost is not None
-                                     else default_cfg.get('cost')))
-                if not caps_raw or caps_raw == ['text']:
-                    caps = set(default_cfg.get('caps', caps))
-                if rpm == 30 and 'rpm' in default_cfg:
-                    rpm = default_cfg['rpm']
-
-                # ── Per-(key, model) capability matrix ──
-                # ``model_entry['key_access']`` maps a key index (as a string)
-                # to a partial override dict:
-                #   { "0": {"enabled": false},
-                #     "1": {"rpm": 10, "aliases": [...], "capabilities": [...]} }
-                # An absent index inherits the model-level defaults (the
-                # historical behavior — every key gets every model). A present
-                # entry overrides only the fields it names. Setting
-                # ``enabled: false`` disables just that (key, model) cell,
-                # leaving the model active for the other keys.
-                key_access = model_entry.get('key_access') or {}
-
-                # Publish this entry's identity set (logical model_id + its
-                # wire ids) so a stored/wire name resolves back to THIS
-                # entry's model_id. Intra-entry only — the index builder
-                # never unions across entries (owner directive 2026-08-06).
-                entry_groups.append((model_id, entry_group))
-
-                for key_idx, (key_name, api_key) in enumerate(keys):
-                    cell = key_access.get(str(key_idx)) or {}
-                    if cell.get('enabled') is False:
-                        logger.debug('[Dispatch] Model %s disabled for key #%d '
-                                     'in provider %s', model_id, key_idx, prov_id)
-                        continue
-
-                    cell_caps = cell.get('capabilities')
-                    cell_rpm = cell.get('rpm', rpm)
-                    cell_cost = cell.get('cost', cost)
-                    cell_stream_only = cell.get(
-                        'stream_only', model_stream_only)
-
-                    # ── Wire-id pool for this (entry, key) ──
-                    # The ids actually sent as the ``"model"`` field. One slot
-                    # per id, so the dispatcher rotates across interchangeable
-                    # gateway deployments. ``disabled_ids`` (applied inside the
-                    # resolver) subtracts concrete ids this key must not serve —
-                    # each id can be a genuinely different upstream model, so a
-                    # key may keep the root reachable while a dead deployment is
-                    # dropped, or vice-versa.
-                    all_ids = resolve_request_ids(model_entry, cell)
-                    if not all_ids:
-                        logger.debug('[Dispatch] Model %s has an empty wire pool '
-                                     'for key #%d in provider %s — no slots',
-                                     model_id, key_idx, prov_id)
-                        continue
-
-                    for mid in all_ids:
-                        # Check DEFAULT_SLOT_CONFIGS for alias-specific overrides.
-                        # Precedence: alias_cfg > cell override > model default.
-                        alias_cfg = DEFAULT_SLOT_CONFIGS.get(mid, {})
-                        if cell_caps is not None:
-                            # Explicit per-cell capability set wins outright.
-                            slot_caps = set(cell_caps)
-                        else:
-                            slot_caps = set(alias_cfg.get('caps', caps))
-                        slot_rpm = alias_cfg.get('rpm', cell_rpm)
-                        slot_cost = routing_cost_per_1k(
-                            model_entry, provider_id=prov_id,
-                            wire_model_id=mid,
-                            legacy_fallback=alias_cfg.get('cost', cell_cost))
-                        slot_lat = alias_cfg.get('latency', latency)
-
-                        # Auto-tag managed pricing tiers ('cheap' + any future
-                        # PRICING_TIERS rows) from real pricing data.
-                        # Skip non-chat models — tier tags don't apply, and a
-                        # spurious 'cheap' tag on a non-chat slot (e.g. a cheap
-                        # 'transcription' model) would make it chat-pickable
-                        # because {transcription,cheap} is no longer a subset of
-                        # _NON_CHAT_CAPS.
-                        if not (slot_caps & self._NON_CHAT_CAPS):
-                            tiers = get_pricing_tiers(mid, fallback_cost_per_1k=slot_cost)
-                            # Strip stale managed tags, then apply desired tier tags.
-                            slot_caps -= (MANAGED_TIER_TAGS - tiers)
-                            slot_caps |= tiers
-
-                        # Precedence mirrors every other per-slot field:
-                        # concrete wire alias > key/model cell > model entry >
-                        # shipped default.  This keeps an explicit provider
-                        # capability intact all the way to dispatch_chat's
-                        # pre-exclusion gate.
-                        slot_stream_only = alias_cfg.get(
-                            'stream_only', cell_stream_only)
-
-                        # One slot per (endpoint × key). For non-local providers
-                        #   ep_pool collapses to a single entry, preserving
-                        #   the historical N-key-only behavior.
-                        slot_endpoints = ep_pool
-                        for ep_idx, ep_url in enumerate(slot_endpoints):
-                            # Distinguish key_names per endpoint so the slot pool
-                            # has stable identifiers and per-key cooldowns don't
-                            # clobber each other across endpoints.
-                            ep_suffix = f'_ep{ep_idx}' if len(slot_endpoints) > 1 else ''
-                            slot = Slot(
-                                key_name=key_name + ep_suffix,
-                                api_key=api_key,
-                                model=mid,
-                                logical_model=model_id,
-                                capabilities=slot_caps,
-                                base_url=ep_url,
-                                provider_id=prov_id,
-                                extra_headers=dict(prov_extra_headers),
-                                thinking_format=prov_thinking_format,
-                                protocol=face.protocol,
-                                responses_profile=face.responses_profile,
-                                oauth=prov_oauth,
-                                adapter=dict(prov_adapter),
-                                rpm_limit=slot_rpm,
-                                latency_ema=slot_lat,
-                                cost_per_1k_tokens=slot_cost,
-                                stream_only=slot_stream_only,
-                            )
-                            self.slots.append(slot)
-
-        self._build_logical_index(entry_groups)
-
-        logger.info('[Dispatch] Built %d slots from %d saved providers '
-                    '(%d direct models)',
-                    len(self.slots),
-                    sum(1 for p in providers if p.get('enabled', True)),
-                    len(self._direct_models))
-
-    def _build_slots_from_env(self):
-        """Build slots from legacy env-var config (fallback when no server_config.json)."""
-        # Late-import to avoid circular-import NameError during early boot
-        # (lib/__init__.py may not have finished when dispatcher is first loaded)
-        from lib import (
-            CLAUDE_SONNET_MODEL as _claude_sonnet,
-        )
-        from lib import (
-            DOUBAO_MODEL as _doubao,
-        )
-        from lib import (
-            GEMINI_FLASH_PREVIEW_MODEL as _gemini_flash_prev,
-        )
-        from lib import (
-            GEMINI_MODEL as _gemini,
-        )
-        from lib import (
-            GEMINI_PRO_MODEL as _gemini_pro,
-        )
-        from lib import (
-            GEMINI_PRO_PREVIEW_MODEL as _gemini_pro_prev,
-        )
-        from lib import (
-            IMAGE_GEN_MODEL as _image_gen,
-        )
-        from lib import (
-            LLM_API_KEYS as _keys_list,
-        )
-        from lib import (
-            LLM_MODEL as _llm,
-        )
-        from lib import (
-            MINIMAX_MODEL as _minimax,
-        )
-        from lib import (
-            QWEN_MODEL as _qwen,
-        )
-        keys = [(f'key_{i}', k) for i, k in enumerate(_keys_list)]
-
-        # Collect all configured model names
-        configured_models = set()
-        for var_name, model_name in [
-            ('LLM_MODEL',           _llm),
-            ('QWEN_MODEL',          _qwen),
-            ('GEMINI_MODEL',        _gemini),
-            ('GEMINI_PRO_MODEL',    _gemini_pro),
-            ('GEMINI_PRO_PREVIEW_MODEL', _gemini_pro_prev),
-            ('GEMINI_FLASH_PREVIEW_MODEL', _gemini_flash_prev),
-            ('MINIMAX_MODEL',       _minimax),
-            ('DOUBAO_MODEL',        _doubao),
-            ('CLAUDE_SONNET_MODEL', _claude_sonnet),
-            ('IMAGE_GEN_MODEL',     _image_gen),
-        ]:
-            if model_name:
-                configured_models.add(model_name)
-
-        # Expand alias groups: if aws.claude-opus-4.6 is configured,
-        # also include aws.claude-opus-4.6-b and vertex.claude-opus-4.6
-        self._direct_models = set(configured_models)  # save before expansion
-        expanded = set()
-        logical_of = {}
-        for m in configured_models:
-            expanded.add(m)
-            logical_of.setdefault(m, m)
-            if m in MODEL_ALIASES:
-                # Static-group variants of a CONFIGURED name are that name's
-                # wire spellings: they slot under its logical model_id.
-                for _v in MODEL_ALIASES[m]:
-                    logical_of.setdefault(_v, m)
-                expanded |= MODEL_ALIASES[m]
-        configured_models = expanded
-
-        # All env-var models share LLM_BASE_URL
-        from lib import LLM_BASE_URL
-        base_url = LLM_BASE_URL
-
-        # Create one slot per (key, model) if the model is in our config
-        for key_name, api_key in keys:
-            for model in configured_models:
-                cfg = DEFAULT_SLOT_CONFIGS.get(model)
-                if not cfg:
-                    # Unknown model — create a basic text slot
-                    cfg = {'caps': {'text'}, 'rpm': 30, 'latency': 3000, 'cost': 0.01}
-
-                # Auto-tag managed pricing tiers ('cheap' + any future
-                # PRICING_TIERS rows) from real pricing data.
-                # Skip non-chat models — tier tags don't apply (see the
-                # provider-build site for why a stray 'cheap' tag on a non-chat
-                # slot is harmful).
-                slot_caps = set(cfg['caps'])
-                if not (slot_caps & self._NON_CHAT_CAPS):
-                    tiers = get_pricing_tiers(model, fallback_cost_per_1k=cfg.get('cost'))
-                    slot_caps -= (MANAGED_TIER_TAGS - tiers)
-                    slot_caps |= tiers
-
+                emitted.add(unique)
+                secret = repository.resolve_secret(
+                    boundary, candidate.credential['secret_reference']) \
+                    if candidate.credential['secret_reference'] else ''
+                api_key, oauth, secret_headers = decode_credential_secret(
+                    secret, kind=candidate.credential['kind'])
+                quota = candidate.credential.get('quota_policy') or {}
+                access_quota = candidate.provider_access.get('quota_policy') or {}
+                pricing = candidate.offering.get('actual_pricing') or {}
+                snapshot = RouteSnapshotBuilder(selection)
+                snapshot.record_transition(
+                    source=None,
+                    target=candidate,
+                    reason='computed_v2_route',
+                    kind='initial',
+                )
                 slot = Slot(
-                    key_name=key_name,
+                    key_name=(candidate.credential['credential_id'] + ':'
+                              + candidate.deployment['deployment_id']),
                     api_key=api_key,
-                    model=model,
-                    logical_model=logical_of.get(model, model),
-                    capabilities=slot_caps,
-                    base_url=base_url,
-                    provider_id='default',
-                    rpm_limit=cfg['rpm'],
-                    latency_ema=cfg.get('latency', 2000),
-                    cost_per_1k_tokens=cfg.get('cost', 0.01),
-                    stream_only=cfg.get('stream_only', False),
+                    model=candidate.deployment['wire_model_id'],
+                    logical_model=model['model_id'],
+                    capabilities=set(candidate.offering['capabilities']),
+                    base_url=candidate.connection['base_url'],
+                    provider_id=candidate.provider_id,
+                    routing_provider_id=candidate.provider_id,
+                    routing_owner_user_id=boundary.owner_user_id,
+                    route_offering_id=candidate.offering['offering_id'],
+                    route_deployment_id=candidate.deployment['deployment_id'],
+                    route_connection_id=candidate.connection['connection_id'],
+                    route_credential_id=candidate.credential['credential_id'],
+                    route_snapshot=snapshot.finalize(candidate),
+                    extra_headers={
+                        **(candidate.connection.get('extra_headers') or {}),
+                        **secret_headers,
+                    },
+                    thinking_format=str(
+                        candidate.connection.get('thinking_format') or ''),
+                    protocol=candidate.connection['protocol'],
+                    responses_profile=str(
+                        candidate.connection.get('responses_profile') or ''),
+                    oauth=oauth,
+                    adapter=dict(candidate.connection.get('adapter') or {}),
+                    rpm_limit=float(
+                        quota.get('rpm') or access_quota.get('rpm') or 30),
+                    latency_ema=float(
+                        candidate.deployment.get('latency_ms') or 3000),
+                    cost_per_1k_tokens=(
+                        float(pricing.get('input') or 0.0)
+                        + float(pricing.get('output') or 0.0)
+                    ) / 2000.0,
                 )
                 self.slots.append(slot)
-
-        env_groups = [(m, {mm for mm, lg in logical_of.items() if lg == m})
-                      for m in self._direct_models]
-        self._build_logical_index(env_groups)
+                entry_group.add(candidate.deployment['wire_model_id'])
+            entry_groups.append((model['model_id'], entry_group))
+        self._build_logical_index(entry_groups)
+        logger.info(
+            '[Dispatch] Built %d slots from model-routing v2 revision %d',
+            len(self.slots), authority.revision)
 
     def _load_benchmark_data(self):
         """Load benchmark_results.json to seed slot parameters and prune dead slots."""
@@ -984,14 +409,16 @@ class LLMDispatcher:
         resolves to nothing configured (unknown / removed entry), the
         predicate falls back to exact wire-id equality so a conversation
         persisted against such a spelling still lands on a slot literally
-        serving it — and never on a stranger.
+        serving it. Request-scoped v2 slots are injected after this index is
+        built, so their explicit ``logical_model`` is also an exact match.
         """
         if not prefer_model:
             return None
         logical = self._route_logical(prefer_model)
         if logical is not None:
             return lambda s: s.logical_model == logical
-        return lambda s: s.model == prefer_model
+        return lambda s: (
+            s.model == prefer_model or s.logical_model == prefer_model)
 
     def pick_slot(self, capability='text', prefer_model=None,
                   exclude_models=None, exclude_keys=None,
@@ -1039,9 +466,9 @@ class LLMDispatcher:
                           exclude_keys, exclude_pairs=exclude_pairs,
                           reserve=True, strict_model=strict_model)
 
-    # Capabilities that are NOT chat-compatible — a slot is treated as
-    # non-chat when ``slot.capabilities.issubset(_NON_CHAT_CAPS)`` (used
-    # below in ``_is_chat_compatible``). 'transcription' (audio → text via
+    # Capabilities that are NOT chat-compatible — after pricing-only tags are
+    # ignored, a slot is treated as non-chat when its remaining capabilities
+    # are a subset of ``_NON_CHAT_CAPS``. 'transcription' (audio → text via
     # /audio/transcriptions) is selected directly by lib/transcription.py
     # scanning the slot pool, never through the chat picker; 'audio_chat'
     # is here so a slot carrying ONLY {audio_chat} (no text) is excluded,
@@ -1052,8 +479,18 @@ class LLMDispatcher:
     _NON_CHAT_CAPS = DISPATCHER_NON_CHAT_CAPS
 
     def _is_chat_compatible(self, slot) -> bool:
-        """Return True if the slot is a chat-capable model (not embedding/image_gen only)."""
-        return not slot.capabilities.issubset(self._NON_CHAT_CAPS)
+        """Return whether operational capabilities expose a chat endpoint.
+
+        Pricing tiers such as ``cheap`` describe cost, not protocol support.
+        Ignoring them here prevents a stale ``{embedding, cheap}`` model from
+        escaping the non-chat guard and reaching ``/chat/completions``.
+        """
+        operational_capabilities = (
+            set(slot.capabilities) - set(MANAGED_TIER_TAGS)
+        )
+        return bool(operational_capabilities) and not (
+            operational_capabilities.issubset(self._NON_CHAT_CAPS)
+        )
 
     def _pick(self, capability, prefer_model, exclude_models,
               exclude_keys, *, exclude_pairs=None, reserve=False,
@@ -1086,19 +523,21 @@ class LLMDispatcher:
             if _key_enabled is None:
                 return True
             try:
-                return _key_enabled(s.provider_id, s.key_name, model=s.model)
+                return _key_enabled(
+                    s.key_stats_provider_id(),
+                    s.key_stats_key_name(),
+                    model=s.model)
             except Exception as e:
                 logger.debug('[Dispatch] is_key_enabled probe failed for %s/%s: %s',
                              s.provider_id, s.key_name, e)
                 return True
 
         # ── Hard provider pin (multi-tenant isolation) ──
-        # When the current task thread is bound to a provider (an inline
-        # `provider` block or a registered @prov_xxx BYO endpoint), the
-        # picker may ONLY select that provider's slot — for EVERY
+        # When the current task thread is bound to a request-scoped v2 route
+        # group, the picker may ONLY select that group's slots — for EVERY
         # capability, never silently falling back to an operator-curated
         # key. See lib/llm_dispatch/provider_pin.py for the full rationale
-        # (the 429 / no-fallback cross-tenant leak this prevents).
+        # (the cross-request credential leak this prevents).
         from lib.llm_dispatch.provider_pin import get_pinned_provider
         _pinned_provider = get_pinned_provider()
 
@@ -1175,6 +614,10 @@ class LLMDispatcher:
 
             def _select(pool):
                 """Pick the best slot in *pool*, honoring the sticky key when eligible."""
+                selection_now = time.monotonic()
+                self._expire_shared_contention_locked(selection_now)
+                pool = self._earliest_shared_contention_pool_locked(
+                    pool, selection_now)
                 if _sticky_key:
                     on_key = [s for s in pool if s.key_name == _sticky_key]
                     # Only honor the sticky key when it isn't in cooldown
@@ -1334,6 +777,37 @@ class LLMDispatcher:
                      key_name, model)
         return False
 
+    def mark_model_route_missing(
+            self, *, provider_id: str, model: str, error: str = '') -> int:
+        """Disable an unserved provider/wire-model route until pool rebuild.
+
+        The gateway's explicit route-missing verdict is model-scoped: trying
+        another key on the same provider repeats the same deterministic 400.
+        Disable every matching slot in this process so later LLM rounds do not
+        pay for the same failed probe.  Settings/catalog refresh calls
+        ``reset_dispatcher()``, which rebuilds the slots and is the explicit
+        recovery boundary if the upstream route later appears.
+
+        Returns the number of slots whose availability changed.
+        """
+        provider_id = str(provider_id or '')
+        model = str(model or '')
+        if not model:
+            return 0
+        changed = 0
+        with self._lock:
+            for slot in self.slots:
+                if slot.provider_id != provider_id or slot.model != model:
+                    continue
+                if slot.mark_route_missing(error):
+                    changed += 1
+        if changed:
+            logger.warning(
+                '[Dispatch] Disabled %d slot(s) for unserved route %s/%s '
+                'until the dispatcher is rebuilt',
+                changed, provider_id or '?', model)
+        return changed
+
     def pick_key_for_model(self, model: str) -> tuple:
         """Pick the best API key for a given model based on current load.
 
@@ -1341,18 +815,16 @@ class LLMDispatcher:
         model they want (e.g. orchestrator with user-selected preset) but need
         to spread load across keys.
 
-        Returns:
-            (api_key: str, key_name: str, slot: Slot)
-            Falls back to first available key if model has no slot.
+        Returns ``(api_key, key_name, slot)``. Unknown models fail closed as
+        ``('', '', None)``; a process-global key must never substitute for an
+        owner-authorized route.
         """
         self.initialize()
         with self._lock:
             candidates = [s for s in self.slots
                           if s.model == model and s.is_available]
             if not candidates:
-                # Model not in dispatch (maybe new) — return first available key
-                from lib import LLM_API_KEY
-                return LLM_API_KEY, 'key_0', None
+                return '', '', None
 
             best = min(candidates, key=lambda s: s.score())
             return best.api_key, best.key_name, best
@@ -1372,9 +844,12 @@ class LLMDispatcher:
           * no slot has the capability at all (or all are permanently
             excluded) → genuinely unservable, give up.
 
-        Only the durable disqualifiers (capability, hard exclusions,
-        chat-compatibility) are checked here; cooldown / inflight / rpm
-        are deliberately ignored.
+        Only durable disqualifiers (capability, hard exclusions,
+        chat-compatibility) are checked here; cooldown / inflight / rpm are
+        deliberately ignored. Inside ``strict_billing_stop_admission()``,
+        key-health rejection is durable for the optional request too: treating
+        a recorded 402/quota stop as cooldown would otherwise poll every 300ms
+        until the caller deadline despite having no admissible route.
 
         ``prefer_model`` (passed by the dispatch loops ONLY under
         ``strict_model``) narrows the answer to the preferred model's
@@ -1395,9 +870,29 @@ class LLMDispatcher:
         # recover instead of treating operator slots as a fallback.
         from lib.llm_dispatch.provider_pin import get_pinned_provider
         _pinned_provider = get_pinned_provider()
+        from lib.key_stats import (
+            is_key_enabled as _key_enabled,
+            is_strict_billing_stop_admission,
+        )
+        _strict_key_admission = is_strict_billing_stop_admission()
+
+        def _key_policy_admits(slot) -> bool:
+            if not _strict_key_admission:
+                return True
+            try:
+                return _key_enabled(
+                    slot.provider_id, slot.key_name, model=slot.model)
+            except Exception as exc:
+                logger.debug(
+                    '[Dispatch] strict key admission probe failed for %s/%s: %s',
+                    slot.provider_id, slot.key_name, exc)
+                return True
+
         with self._lock:
             for s in self.slots:
                 if capability not in s.capabilities:
+                    continue
+                if not s.is_available:
                     continue
                 if s.model in ex_models or s.key_name in ex_keys:
                     continue
@@ -1409,6 +904,8 @@ class LLMDispatcher:
                     continue
                 if matcher is not None and not matcher(s):
                     continue
+                if not _key_policy_admits(s):
+                    continue
                 return True
         return False
 
@@ -1417,20 +914,41 @@ class LLMDispatcher:
     # A 429 naming a PROJECT-level limit (RateLimitError.is_shared_contention)
     # means rotating our own API keys cannot create capacity. Never park slots
     # or feed health: serialize only request admission from this process. The
-    # first strike arms the existing 0.3s retry; later callers (including other
-    # tasks) reserve one provider/model probe per second before network I/O.
-    # A caller rechecks after bounded 3s wait slices, so a deep queue never
-    # collapses into a same-time probe herd. This replaces both the retired
-    # 2s→60s family parking and the 0.3s retry herd without reviving either.
-    _CONTENTION_RESET_GRACE_S = 30.0  # quiet window → streak resets
+    # first strike arms the existing 0.3s retry. Repeated rejections increase
+    # the provider/model probe interval 1→2→4→8→15s while every wait remains
+    # abortable in bounded 3s slices. This is admission timing, never slot
+    # parking or health. Automatic work also prefers the family whose probe is
+    # due first; explicit model/provider boundaries remain unchanged.
+    # A shared RPM/TPM window commonly survives 30 seconds. After that quiet
+    # period retain only a one-second serialization seed: the first recovery
+    # probe remains immediate, but concurrent arrivals cannot recreate a herd.
+    # Two full minute windows without another rejection retire the state.
+    _CONTENTION_DECAY_GRACE_S = 30.0
+    _CONTENTION_RESET_GRACE_S = 120.0
     _CONTENTION_BASE_RETRY_S = 0.3
     _CONTENTION_PROBE_SPACING_S = 1.0
+    _CONTENTION_MAX_PROBE_SPACING_S = 15.0
+    _CONTENTION_STRIKES_PER_SPACING_STEP = 2
     _CONTENTION_MAX_WAIT_SLICE_S = 3.0
     _CONTENTION_RECOVERY_SUCCESSES = 2
     _CONTENTION_MAX_FAMILIES = 256
 
+    @classmethod
+    def _contention_probe_spacing_s(cls, strikes: int) -> float:
+        """Return a bounded exponential interval for one rejection streak."""
+        normalized_strikes = max(1, int(strikes))
+        step = min(
+            16,
+            (normalized_strikes - 1)
+            // cls._CONTENTION_STRIKES_PER_SPACING_STEP,
+        )
+        return min(
+            cls._CONTENTION_MAX_PROBE_SPACING_S,
+            cls._CONTENTION_PROBE_SPACING_S * (2 ** step),
+        )
+
     def _expire_shared_contention_locked(self, now: float) -> None:
-        """Drop quiet family gates while ``self._lock`` is held."""
+        """Decay then drop quiet family gates while ``self._lock`` is held."""
         expired_keys = [
             family_key
             for family_key, state in self._contention_strikes.items()
@@ -1438,6 +956,45 @@ class LLMDispatcher:
         ]
         for expired_key in expired_keys:
             self._contention_strikes.pop(expired_key, None)
+        for family_key, state in tuple(self._contention_strikes.items()):
+            if (
+                state.strikes > 1
+                and now >= (
+                    state.last_strike_at + self._CONTENTION_DECAY_GRACE_S
+                )
+            ):
+                self._contention_strikes[family_key] = (
+                    _SharedContentionProbeState(
+                        strikes=1,
+                        last_strike_at=state.last_strike_at,
+                        next_probe_at=min(state.next_probe_at, now),
+                        recovery_successes=state.recovery_successes,
+                    )
+                )
+
+    def _earliest_shared_contention_pool_locked(
+        self,
+        slots: list[Slot],
+        now: float,
+    ) -> list[Slot]:
+        """Prefer a ready family without crossing the caller's candidate set."""
+        if len(slots) < 2:
+            return slots
+        delays = [
+            max(
+                0.0,
+                self._contention_strikes.get(
+                    (slot.provider_id, slot.model),
+                    _SharedContentionProbeState(0, 0.0, now),
+                ).next_probe_at - now,
+            )
+            for slot in slots
+        ]
+        earliest_delay = min(delays)
+        return [
+            slot for slot, delay in zip(slots, delays)
+            if delay <= earliest_delay + 1e-6
+        ]
 
     def note_shared_contention(self, slot) -> float:
         """Arm a pre-request family gate; never park or penalize slots."""
@@ -1459,28 +1016,34 @@ class LLMDispatcher:
                 next_probe_at = now + self._CONTENTION_BASE_RETRY_S
             else:
                 strikes = previous.strikes + 1
+                probe_spacing = self._contention_probe_spacing_s(strikes)
                 next_probe_at = max(
-                    now + self._CONTENTION_BASE_RETRY_S,
+                    now + probe_spacing,
                     previous.next_probe_at,
                 )
+            next_probe_delay = max(
+                self._CONTENTION_BASE_RETRY_S, next_probe_at - now)
             retry_delay = min(
-                self._CONTENTION_MAX_WAIT_SLICE_S,
-                max(self._CONTENTION_BASE_RETRY_S, next_probe_at - now),
-            )
+                self._CONTENTION_MAX_WAIT_SLICE_S, next_probe_delay)
             self._contention_strikes[key] = _SharedContentionProbeState(
                 strikes=strikes,
                 last_strike_at=now,
                 next_probe_at=next_probe_at,
                 recovery_successes=0,
             )
-        if strikes <= 3 or strikes % 100 == 0:
+        spacing_changed = (
+            strikes > 1
+            and self._contention_probe_spacing_s(strikes)
+            != self._contention_probe_spacing_s(strikes - 1)
+        )
+        if strikes <= 3 or spacing_changed or strikes % 100 == 0:
             logger.info('[Dispatch] shared-project contention on %s:%s — '
                         'next probe no sooner than %.2fs (streak %d)',
-                        slot.provider_id, slot.model, retry_delay, strikes)
+                        slot.provider_id, slot.model, next_probe_delay, strikes)
         else:
             logger.debug('[Dispatch] shared-project contention on %s:%s '
                          '(next probe %.2fs, streak %d)',
-                         slot.provider_id, slot.model, retry_delay, strikes)
+                         slot.provider_id, slot.model, next_probe_delay, strikes)
         return retry_delay
 
     def reserve_shared_contention_probe(
@@ -1509,12 +1072,51 @@ class LLMDispatcher:
                 strikes=previous.strikes,
                 last_strike_at=previous.last_strike_at,
                 next_probe_at=(
-                    probe_at + self._CONTENTION_PROBE_SPACING_S
+                    probe_at
+                    + self._contention_probe_spacing_s(previous.strikes)
                 ),
                 recovery_successes=previous.recovery_successes,
             )
             return _SharedContentionAdmission(
                 delay_s=delay_s,
+                admitted=True,
+            )
+
+    def reserve_shared_contention_probe_now(
+            self, slot) -> _SharedContentionAdmission:
+        """Reserve a probe only when it can start now; otherwise do not mutate.
+
+        Reconstructible background work uses this atomic admission form to
+        yield instead of joining an already-known provider/model wait. A due
+        probe is still reserved so concurrent optional arrivals cannot all
+        observe the same zero-delay window and form a new request herd.
+        """
+        key = (slot.provider_id, slot.model)
+        now = time.monotonic()
+        with self._lock:
+            self._expire_shared_contention_locked(now)
+            previous = self._contention_strikes.get(key)
+            if previous is None:
+                return _SharedContentionAdmission(
+                    delay_s=0.0,
+                    admitted=True,
+                )
+            delay_s = max(0.0, previous.next_probe_at - now)
+            if delay_s > 0:
+                return _SharedContentionAdmission(
+                    delay_s=delay_s,
+                    admitted=False,
+                )
+            self._contention_strikes[key] = _SharedContentionProbeState(
+                strikes=previous.strikes,
+                last_strike_at=previous.last_strike_at,
+                next_probe_at=(
+                    now + self._contention_probe_spacing_s(previous.strikes)
+                ),
+                recovery_successes=previous.recovery_successes,
+            )
+            return _SharedContentionAdmission(
+                delay_s=0.0,
                 admitted=True,
             )
 
@@ -1533,8 +1135,9 @@ class LLMDispatcher:
             if previous is None:
                 return False
             recovery_successes = previous.recovery_successes + 1
+            probe_spacing = self._contention_probe_spacing_s(previous.strikes)
             reservations_drained = now >= (
-                previous.next_probe_at - self._CONTENTION_PROBE_SPACING_S
+                previous.next_probe_at - probe_spacing
             )
             if (recovery_successes >= self._CONTENTION_RECOVERY_SUCCESSES
                     and reservations_drained):
@@ -1550,6 +1153,27 @@ class LLMDispatcher:
                 ),
             )
             return False
+
+    def get_shared_contention_info(self) -> list[dict]:
+        """Return the bounded live family-gate state for diagnostics."""
+        self.initialize()
+        now = time.monotonic()
+        with self._lock:
+            self._expire_shared_contention_locked(now)
+            return [
+                {
+                    'provider_id': provider_id,
+                    'model': model,
+                    'strikes': state.strikes,
+                    'probe_spacing_s': self._contention_probe_spacing_s(
+                        state.strikes),
+                    'next_probe_in_s': round(
+                        max(0.0, state.next_probe_at - now), 3),
+                    'recovery_successes': state.recovery_successes,
+                }
+                for (provider_id, model), state in sorted(
+                    self._contention_strikes.items())
+            ]
 
     def cooling_cause_summary(self, capability: str = 'text',
                               exclude_models=None, exclude_keys=None,

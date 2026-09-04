@@ -7,13 +7,22 @@ and patched ping settings for stability.
 import threading
 import time
 
-from lib.feishu._state import APP_ID, APP_SECRET, ENABLED
+import lib.feishu._state as _st
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['start_bot']
+__all__ = ['is_bot_running', 'start_bot', 'start_bot_from_saved_config']
+
+# The daemon thread running the WebSocket loop (None until first start).
+_bot_thread = None
+
+
+def is_bot_running() -> bool:
+    """True when the Feishu bot daemon thread is alive."""
+    t = _bot_thread
+    return t is not None and t.is_alive()
 
 
 def _patch_websockets_ping_settings():
@@ -56,8 +65,14 @@ def start_bot() -> bool:
 
     Returns True if the bot was started, False if disabled/missing credentials.
     """
-    if not ENABLED:
-        logger.info('[FeishuBot] Disabled — FEISHU_APP_ID / FEISHU_APP_SECRET not set')
+    global _bot_thread
+    if is_bot_running():
+        logger.info('[FeishuBot] Already running — not starting a second connection')
+        return True
+    # Live read: GUI-saved credentials applied via _state.apply_config must
+    # be honoured when the bot first starts after boot.
+    if not _st.ENABLED:
+        logger.info('[FeishuBot] Disabled — app_id / app_secret not configured')
         return False
 
     def _run():
@@ -76,7 +91,7 @@ def start_bot() -> bool:
             handle_menu_event
         ).build()
 
-        ws_client = WebSocket.builder(APP_ID, APP_SECRET) \
+        ws_client = WebSocket.builder(_st.APP_ID, _st.APP_SECRET) \
             .event_handler(event_handler) \
             .log_level(lark.LogLevel.INFO) \
             .build()
@@ -115,5 +130,24 @@ def start_bot() -> bool:
 
     t = threading.Thread(target=_run, daemon=True, name='feishu-bot')
     t.start()
+    _bot_thread = t
     logger.info('[FeishuBot] Bot thread started (lark_oapi loading in background...)')
     return True
+
+
+def start_bot_from_saved_config() -> bool:
+    """Apply ``server_config.json``'s ``feishu`` block, then start when enabled.
+
+    Boot counterpart of the settings-UI save path: credentials entered
+    graphically (no environment variables) must start the bot on the next
+    server launch exactly like env-configured ones.
+    """
+    from lib import _SERVER_CONFIG_PATH
+    from lib.json_store import read_json
+    saved = read_json(_SERVER_CONFIG_PATH, default={})
+    block = saved.get('feishu') if isinstance(saved, dict) else None
+    if isinstance(block, dict) and block:
+        changed = _st.apply_config(block)
+        logger.info('[FeishuBot] Applied saved server_config feishu block '
+                    '(creds_changed=%s, enabled=%s)', changed, _st.ENABLED)
+    return start_bot()

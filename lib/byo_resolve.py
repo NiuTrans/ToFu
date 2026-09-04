@@ -1,26 +1,10 @@
-"""lib/byo_resolve.py — Shared BYO (Bring-Your-Own) model resolution.
+"""Retired v1 BYO resolver retained as a migration compatibility shim.
 
-Every HTTP completion surface that accepts a caller-supplied model —
-``/api/v1/agent/run``, ``/api/v1/chat/completions``, and the
-OpenAI/Anthropic compat adapters (``/v1/chat/completions``,
-``/v1/messages``) — needs the same two-step dance:
-
-1. **Resolve** a model reference into a concrete ``(model_id, slot)``:
-     * ``"name@prov_xxx"``  → look up the caller's registered BYO
-       provider and mint an ephemeral slot for it;
-     * an inline ``provider={base_url, api_key, extra_headers}`` block
-       paired with a plain ``"name"`` → mint a one-shot slot;
-     * a plain ``"name"``   → no slot; falls through to the global pool.
-
-2. **Dispose** the ephemeral slot once the task reaches a terminal
-   state (done / error / aborted), bounded by a 1-hour ceiling so a
-   wedged task can't leak the slot forever.
-
-This used to be duplicated (subtly divergently) across
-``routes/api_v1/agent_run.py`` and ``routes/api_v1/chat.py``; the compat
-adapters had no resolution at all, so a BYO model that ``/v1/models``
-advertised as ``name@prov_xxx`` could not actually be invoked through
-them. Centralising here fixes that gap and the divergence in one place.
+Before model-routing v2, native HTTP routes accepted ``model@provider`` and
+inline secret-bearing provider blocks. No production route calls this module
+now; it remains bounded and tested only so old state can be inspected during
+the one-way migration window. New code uses :mod:`lib.model_routing` and
+``routes.model_routing_adapter``.
 """
 
 from __future__ import annotations

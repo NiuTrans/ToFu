@@ -1,8 +1,9 @@
-"""Storage-only projections for durable task events.
+"""Defense-in-depth storage projections for durable task events.
 
-The live SSE object must retain cache-debugging diagnostics while the durable
-``round_usage`` copy omits backend-only ``_wire_*`` bulk.  This is deliberately
-tested both as a pure non-mutation contract and through the real batch lane.
+Normal round emitters now remove consumed ``_wire_*`` evidence before live
+retention. Legacy/imported/raw callers may still hand this boundary an
+unprojected object, so persistence must remove the private bulk without
+mutating its caller. Both the pure copy contract and real batch lane are pinned.
 """
 
 from __future__ import annotations
@@ -124,3 +125,44 @@ def test_persisted_round_usage_omits_wire_bulk_but_keeps_inspector_fields(
     assert not any(k.startswith('_wire_') for k in stored['usage'])
     # The object subsequently sent to live subscribers was not changed.
     assert '_wire_fp' in live_event['usage']
+
+
+def test_sidecar_authority_projects_raw_event_append_with_byte_budget(
+        chat_sidecar):
+    """Generic producers cannot bypass the canonical durable projection."""
+    from lib.storage import get_storage_client
+
+    tid = f'wire-authority-{uuid.uuid4().hex[:10]}'
+    raw_event = {
+        'type': 'round_usage', 'roundNum': 2, 'model': 'm-authority',
+        'usage': {
+            'trace_id': 'trace-authority', 'stream_elapsed_ms': 654,
+            '_future_public_field': {'keep': True},
+            '_wire_fp': [
+                {'role': 'user', 'content': 'x' * 12_000},
+            ],
+            '_wire_field_bytes': [
+                {'messages': index * 10} for index in range(400)
+            ],
+            '_wire_bytes': list(range(1_000)),
+        },
+    }
+    raw_bytes = len(json.dumps(
+        raw_event, ensure_ascii=False, separators=(',', ':')).encode())
+    client = get_storage_client(write=True)
+    client.command('event.append', {
+        'task_id': tid, 'sequence': 1, 'event': raw_event,
+    }, None, priority='event')
+
+    rows = client.query(
+        'event.list', {'task_id': tid, 'after_sequence': -1, 'limit': 10})
+    stored = _payload(rows[0])
+    stored_bytes = len(json.dumps(
+        stored, ensure_ascii=False, separators=(',', ':')).encode())
+    assert stored['usage']['trace_id'] == 'trace-authority'
+    assert stored['usage']['stream_elapsed_ms'] == 654
+    assert stored['usage']['_future_public_field'] == {'keep': True}
+    assert not any(key.startswith('_wire_') for key in stored['usage'])
+    assert stored_bytes <= raw_bytes * 0.05
+    # The storage authority's defense remains copy-on-write.
+    assert '_wire_fp' in raw_event['usage']

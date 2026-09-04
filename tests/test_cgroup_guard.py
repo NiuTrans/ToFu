@@ -23,8 +23,13 @@ _GIB = 1 << 30
 
 
 @pytest.fixture()
-def guard(monkeypatch):
+def guard(monkeypatch, tmp_path):
     import lib.cgroup_guard as cg
+    from lib.observability import reset_for_tests
+    reset_for_tests()
+    # Monitor tests drive synthetic 40%/80%/99% snapshots. Never append those
+    # fixtures to the live incident journal in a concurrently running checkout.
+    monkeypatch.setattr(cg, '_JOURNAL_PATH', str(tmp_path / 'pressure.log'))
     # Neutralise env so defaults apply unless a test sets them.
     for k in ('TOFU_CGROUP_WARN_PCT', 'TOFU_CGROUP_RELIEF_PCT',
               'TOFU_CGROUP_REQUEST_PCT', 'TOFU_CGROUP_POLL_SEC',
@@ -40,7 +45,9 @@ def guard(monkeypatch):
     monkeypatch.setattr(cg, '_ineffective_reliefs', 0)
     monkeypatch.setattr(cg, '_ineffective_escalated', False)
     monkeypatch.setattr(cg, '_relief_suppressed_until', 0.0)
-    return cg
+    monkeypatch.setattr(cg, '_ineffective_backoff_exponent', 0)
+    yield cg
+    reset_for_tests()
 
 
 def _set_pressure(cg, monkeypatch, pct, swap=0):
@@ -148,6 +155,64 @@ def test_ineffective_probe_renews_cooldown_after_the_first_escalation(
     assert guard._relief_suppressed_until > 0
 
 
+def test_ineffective_probes_back_off_exponentially_to_one_hour(
+        guard, monkeypatch):
+    """A shared-cgroup squeeze must not flush hot caches every ten minutes."""
+    import time
+
+    _set_pressure(guard, monkeypatch, pct=99.0, swap=0)
+    monkeypatch.setenv('TOFU_CGROUP_RELIEF_COOLDOWN_SEC', '600')
+    monkeypatch.setattr(guard, '_ineffective_reliefs', guard._INEFFECTIVE_LIMIT)
+    monkeypatch.setattr(guard, '_ineffective_escalated', True)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: False)
+    monkeypatch.setattr(guard, 'drop_logs_cache', lambda: {
+        'files': 0, 'bytes': 0, 'skipped': 0})
+    now = [1000.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: now[0])
+
+    observed = []
+    for _ in range(5):
+        guard.relieve_memory('adaptive probe')
+        observed.append(guard._relief_suppressed_until - now[0])
+        now[0] += observed[-1]
+
+    assert observed == [600.0, 1200.0, 2400.0, 3600.0, 3600.0]
+
+
+def test_monitor_rearms_backoff_after_pressure_episode_ends(
+        guard, monkeypatch):
+    _set_pressure(guard, monkeypatch, pct=80.0, swap=0)
+    monkeypatch.setattr(guard, '_ineffective_reliefs', 8)
+    monkeypatch.setattr(guard, '_ineffective_escalated', True)
+    monkeypatch.setattr(guard, '_relief_suppressed_until', float('inf'))
+    monkeypatch.setattr(guard, '_ineffective_backoff_exponent', 3)
+
+    assert guard.run_monitor_once() is None
+    assert guard._ineffective_reliefs == 0
+    assert guard._ineffective_escalated is False
+    assert guard._relief_suppressed_until == 0.0
+    assert guard._ineffective_backoff_exponent == 0
+
+
+def test_process_rss_relief_bypasses_aggregate_backoff(guard, monkeypatch):
+    """External pressure backoff must not disable process-owned RSS relief."""
+    _set_pressure(guard, monkeypatch, pct=99.0, swap=0)
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
+    monkeypatch.setattr(guard, '_relief_suppressed_until', float('inf'))
+    rss = iter([5 * _GIB, 2 * _GIB])
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: next(rss))
+    monkeypatch.setattr(guard, 'write_pressure_journal', lambda _snap: True)
+    monkeypatch.setattr(guard, 'check_oom_kill_count', lambda: False)
+    monkeypatch.setattr(
+        guard, 'relieve_memory', lambda reason: {'reason': reason})
+
+    result = guard.run_monitor_once()
+
+    assert result['process_rss_before'] == 5 * _GIB
+    assert result['process_rss_after'] == 2 * _GIB
+    assert result['process_rss_reclaimed_bytes'] == 3 * _GIB
+
+
 def test_monitor_relieves_process_rss_even_when_cgroup_is_roomy(
         guard, monkeypatch):
     """A large Tofu process must not hide behind a roomy shared cgroup."""
@@ -236,15 +301,42 @@ def test_explicit_process_rss_thresholds_override_cgroup_fraction(
 
 def test_relieve_clears_caches_and_trims(guard, monkeypatch):
     """relieve_memory drops registered TTLCaches and calls malloc_trim."""
+    from lib.browser import _resolve
+    from lib.mcp import tool_search
     from lib.ttl_cache import TTLCache, clear_all_caches  # noqa: F401
+    from lib.token_counter import usage_cache
+
     c = TTLCache(ttl=60, name='cg_relief_probe')
     c.set('a', 1)
     c.set('b', 2)
+    usage_cache._reset_usage_cache_for_tests()
+    usage_cache.record_usage(
+        'pressure-a', prompt_tokens=1, model='gpt-5.6-sol',
+        message_count=1, messages=[{'role': 'user', 'content': 'a'}])
+    usage_cache.record_usage(
+        'pressure-b', prompt_tokens=1, model='gpt-5.6-sol',
+        message_count=1, messages=[{'role': 'user', 'content': 'b'}])
+    _resolve.remember_work_tab(('41', 'pressure-a'), 7)
+    _resolve.remember_work_tab(('42', 'pressure-b'), 9)
+    tool_search.clear_tool_search_caches()
+    tool_search.build_catalog_index([])
+    tool_search.record_mcp_tool_used(
+        'pressure-tool-search', 'mcp__docs__read')
     _set_pressure(guard, monkeypatch, pct=93.0, swap=0)
     monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
-    stats = guard.relieve_memory('test')
-    assert stats['dropped'] >= 2  # our two entries were cleared
-    assert len(c) == 0
+    try:
+        stats = guard.relieve_memory('test')
+        assert stats['dropped'] >= 8
+        assert len(c) == 0
+        assert usage_cache.usage_cache_snapshot()['entries'] == 0
+        assert _resolve.current_work_tab(('41', 'pressure-a')) is None
+        assert _resolve.current_work_tab(('42', 'pressure-b')) is None
+        assert tool_search.catalog_cache_stats()['indexes'] == 0
+        assert tool_search.catalog_cache_stats()['tasks'] == 0
+    finally:
+        _resolve.clear_work_tab_cache()
+        tool_search.clear_tool_search_caches()
+        usage_cache._reset_usage_cache_for_tests()
 
 
 # ── ③ large-request headroom guard ──
@@ -264,6 +356,44 @@ def test_request_guard_passes_small_body_even_when_full(guard, monkeypatch):
     _set_pressure(guard, monkeypatch, pct=99.9, swap=0)
     ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=1000)
     assert ok is True and reason is None
+
+
+def test_request_guard_enforces_process_soft_rss_without_cgroup_pressure(
+        guard, monkeypatch):
+    monkeypatch.setattr(
+        guard, '_process_rss_relief_limit_bytes',
+        lambda: 128 * 1024 * 1024)
+    monkeypatch.setattr(
+        guard, '_self_rss_bytes', lambda: 100 * 1024 * 1024)
+    monkeypatch.setattr(guard, '_maybe_relieve_process_rss', lambda: None)
+    monkeypatch.setattr(
+        guard, 'pressure',
+        lambda: pytest.fail(
+            'process-local refusal must not need cgroup pressure'))
+
+    ok, reason = guard.check_request_headroom(
+        'conv=local-rss', approx_bytes=1000)
+
+    assert ok is False
+    assert 'process RSS' in reason
+    assert 'soft ceiling' in reason
+
+
+def test_process_rss_admission_reserves_one_declared_task_envelope(
+        guard, monkeypatch):
+    monkeypatch.setenv('TOFU_TASK_RSS_RESERVE_MB', '1024')
+    monkeypatch.setattr(
+        guard, '_process_rss_recycle_limit_bytes',
+        lambda: 6 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(
+        guard, '_self_rss_bytes',
+        lambda: int(5.25 * 1024 * 1024 * 1024))
+
+    snapshot = guard.process_rss_admission_snapshot()
+
+    assert snapshot is not None
+    assert snapshot['allowed'] is False
+    assert snapshot['reserve_bytes'] == 1024 * 1024 * 1024
 
 
 def test_request_guard_passes_when_roomy(guard, monkeypatch):
@@ -438,7 +568,11 @@ def test_relieve_reports_real_reclaim_when_usage_actually_drops(guard, monkeypat
     would swap one lie for another.
     """
     limit = 200 * _GIB
-    seq = iter([int(limit * 0.93), int(limit * 0.90)])
+    seq = iter([
+        int(limit * 0.93),  # before
+        int(limit * 0.92),  # after heap window
+        int(limit * 0.90),  # after log window
+    ])
     monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
     monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: next(seq))
     monkeypatch.setattr(guard, 'swap_total_bytes', lambda: 0)
@@ -449,6 +583,48 @@ def test_relieve_reports_real_reclaim_when_usage_actually_drops(guard, monkeypat
     stats = guard.relieve_memory('test')
     expected = int(limit * 0.93) - int(limit * 0.90)
     assert stats['reclaimed_bytes'] == expected
+
+
+def test_relief_attributes_process_and_shared_windows_in_metrics(
+        guard, monkeypatch):
+    """Expose ownership evidence without pretending shared deltas are causal."""
+    from lib import observability
+    from lib import ttl_cache
+
+    observability.reset_for_tests()
+    before = {'limit': 1000, 'usage': 1000, 'pct': 100.0, 'swap': 0}
+    after = {'limit': 1000, 'usage': 800, 'pct': 80.0, 'swap': 0}
+    snapshots = iter([before, after])
+    rss = iter([500, 350, 340])
+    memory_stats = iter([
+        {'cache': 600}, {'cache': 550}, {'cache': 400},
+    ])
+    monkeypatch.setattr(guard, 'pressure', lambda: next(snapshots))
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: 850)
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: next(rss))
+    monkeypatch.setattr(guard, '_read_memory_stat', lambda: next(memory_stats))
+    monkeypatch.setattr(ttl_cache, 'clear_all_caches', lambda: 3)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache', lambda: {
+        'files': 2, 'bytes': 400, 'skipped': 1})
+
+    stats = guard.relieve_memory('attribution test')
+
+    assert stats['reclaimed_bytes'] == 200
+    assert stats['heap_window_reclaimed_bytes'] == 150
+    assert stats['log_window_reclaimed_bytes'] == 50
+    assert stats['process_rss_reclaimed_bytes'] == 160
+    assert stats['cgroup_cache_reclaimed_bytes'] == 200
+    rendered = '\n'.join(observability.prometheus_lines())
+    assert 'tofu_cgroup_relief_attempts_total 1.0' in rendered
+    assert ('tofu_cgroup_relief_reclaimed_bytes_latest{source="process_rss"} '
+            '160.0') in rendered
+    assert ('tofu_cgroup_relief_reclaimed_bytes_latest{source="heap_window"} '
+            '150.0') in rendered
+    assert 'tofu_cgroup_relief_cache_entries_dropped_total 3.0' in rendered
+    assert 'tofu_cgroup_relief_log_files_advised_total 2.0' in rendered
+    assert 'tofu_cgroup_relief_duration_seconds_count 1' in rendered
+    observability.reset_for_tests()
 
 
 def test_relieve_still_invokes_the_log_page_drop(guard, monkeypatch):
@@ -509,7 +685,7 @@ def test_effective_relief_never_escalates(guard, monkeypatch):
     while crying wolf on a perfectly healthy system.
     """
     limit = 200 * _GIB
-    pcts = iter([93.0, 90.0] * 40)
+    pcts = iter([93.0, 92.0, 90.0] * 40)
     monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
     monkeypatch.setattr(guard, 'mem_usage_bytes',
                         lambda: int(limit * next(pcts) / 100.0))
@@ -529,6 +705,7 @@ def test_effective_relief_never_escalates(guard, monkeypatch):
     assert last is not None and last['reclaimed_bytes'] > 0
     assert guard._ineffective_reliefs == 0
     assert guard._ineffective_escalated is False
+    assert guard._ineffective_backoff_exponent == 0
 
 
 def test_noise_sized_reclaim_does_not_rearm_the_escalation(guard, monkeypatch):
@@ -550,6 +727,7 @@ def test_noise_sized_reclaim_does_not_rearm_the_escalation(guard, monkeypatch):
     usages = []
     for i in range(guard._INEFFECTIVE_LIMIT * 2):
         base = int(limit * 0.99)
+        usages.append(base)
         usages.append(base)
         usages.append(base - (crumb if i % 2 else 0))
     seq = iter(usages)
@@ -592,7 +770,11 @@ def test_a_single_effective_relief_rearms_the_escalation(guard, monkeypatch):
     assert len(fired) == 1
 
     # One genuinely effective relief: usage drops during the call.
-    seq = iter([int(limit * 0.999), int(limit * 0.80)])
+    seq = iter([
+        int(limit * 0.999),
+        int(limit * 0.999),
+        int(limit * 0.80),
+    ])
     monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: next(seq))
     guard.relieve_memory('monitor')
 

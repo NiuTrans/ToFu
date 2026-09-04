@@ -80,6 +80,14 @@ for regression prevention, it gets migrated to `tests/` with proper mocking.
 4. Verify: `make test-unit` passes
 5. Ensure `make ci` passes before submitting a PR
 
+Frontend tests for migrated TypeScript owners should load the smallest real
+owner graph through `tests._runtime_sections.native_module_path` or
+`native_module_graph`. Give every materialized bundle a unique name below
+`.native/`; graph placeholders intentionally share one temporary directory and
+generic legacy filenames can otherwise overwrite an unrelated fixture. Inject
+ports at public constructors, assert observable DOM/state/Promise behavior,
+and do not reconstruct deleted `static/js` paths or inspect source strings.
+
 Markers are declared in `pyproject.toml` under `[tool.pytest.ini_options]`,
 which now sets `--strict-markers` (an unknown/misspelled marker errors at
 collection). A test with NO tier marker is auto-tagged `unit` by a

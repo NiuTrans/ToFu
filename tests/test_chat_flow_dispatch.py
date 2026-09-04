@@ -1,16 +1,13 @@
 """tests/test_chat_flow_dispatch.py — chat → FlowExecutor dispatch.
 
 Covers the final convergence wiring added in routes/chat.py:
-  * resolve_chat_flow_entry — precedence + flag gating (autopilot /
-    user-selected flow).
+  * resolve_chat_flow_entry — one Flow owner for goal mode and selected flows.
   * resolve_chat_flow_definition — inline / builtin / stored resolution.
-  * autopilot_via_flow_enabled — symmetric flag (default OFF).
   * run_autopilot_via_flow — end-to-end with the SubAgent runner stubbed
     (no real LLM), asserting worker→assistant / virtual_user→user turns and
     [VU: TASK_DONE] termination.
 """
 
-import os
 import threading
 import unittest
 
@@ -20,45 +17,16 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-class FlagGateTest(unittest.TestCase):
-    def setUp(self):
-        os.environ.pop('TOFU_AUTOPILOT_VIA_FLOW', None)
-
-    def tearDown(self):
-        os.environ.pop('TOFU_AUTOPILOT_VIA_FLOW', None)
-
-    def test_autopilot_flag_default_off(self):
-        from lib.orchestration_chat_flow_runner import autopilot_via_flow_enabled
-        self.assertFalse(autopilot_via_flow_enabled())
-
-    def test_autopilot_flag_explicit(self):
-        from lib.orchestration_chat_flow_runner import autopilot_via_flow_enabled
-        for v in ('1', 'true', 'YES', 'on'):
-            os.environ['TOFU_AUTOPILOT_VIA_FLOW'] = v
-            self.assertTrue(autopilot_via_flow_enabled(), v)
-        for v in ('0', 'false', '', 'nope'):
-            os.environ['TOFU_AUTOPILOT_VIA_FLOW'] = v
-            self.assertFalse(autopilot_via_flow_enabled(), v)
-
-
 class ResolveEntryTest(unittest.TestCase):
-    def setUp(self):
-        os.environ.pop('TOFU_AUTOPILOT_VIA_FLOW', None)
-
-    def tearDown(self):
-        os.environ.pop('TOFU_AUTOPILOT_VIA_FLOW', None)
-
     def _resolve(self, cfg):
         from lib.orchestration_chat_flow_runner import resolve_chat_flow_entry
         return resolve_chat_flow_entry(cfg)
 
-    def test_no_selection_no_flags_returns_none(self):
+    def test_standard_mode_returns_none(self):
         self.assertIsNone(self._resolve({}))
-        self.assertIsNone(self._resolve({'autopilot': True}))      # flag off
 
-    def test_autopilot_flag_routes_to_autopilot_runner(self):
+    def test_goal_mode_always_routes_to_autopilot_runner(self):
         from lib.orchestration_chat_flow_runner import run_autopilot_via_flow
-        os.environ['TOFU_AUTOPILOT_VIA_FLOW'] = '1'
         self.assertIs(self._resolve({'autopilot': True}), run_autopilot_via_flow)
 
     def test_selected_flow_always_wins_no_flag_needed(self):
@@ -76,8 +44,8 @@ class ResolveEntryTest(unittest.TestCase):
 
     def test_builtin_autopilot_routes_to_engine(self):
         # The "编排流程 → 目标模式" dropdown (flowBuiltin='autopilot') routes to
-        # the FlowExecutor engine path (run_flow_via_chat), flag-INDEPENDENT —
-        # the selection is the opt-in. There is NO Option-C rewrite: cfg is NOT
+        # the FlowExecutor engine path (run_flow_via_chat). There is no config
+        # rewrite: cfg is NOT
         # mutated to autopilot=True, and flowBuiltin is preserved so the engine
         # runs the autopilot graph.
         from lib.orchestration_chat_flow_runner import run_flow_via_chat
@@ -86,16 +54,11 @@ class ResolveEntryTest(unittest.TestCase):
         self.assertNotIn('autopilot', cfg)         # NO live-path rewrite
         self.assertEqual(cfg.get('flowBuiltin'), 'autopilot')  # selection preserved
 
-    def test_builtin_autopilot_engine_route_independent_of_flag(self):
-        # The TOFU_AUTOPILOT_VIA_FLOW flag governs the "模式" TOGGLE path
-        # (config['autopilot']), NOT a dropdown flow selection. A dropdown
-        # builtin:autopilot goes to the engine whether the flag is on or off.
+    def test_builtin_autopilot_engine_route_is_unconditional(self):
         from lib.orchestration_chat_flow_runner import run_flow_via_chat
-        for flag in ('0', '1'):
-            os.environ['TOFU_AUTOPILOT_VIA_FLOW'] = flag
-            cfg = {'flowBuiltin': 'autopilot'}
-            self.assertIs(self._resolve(cfg), run_flow_via_chat, flag)
-            self.assertNotIn('autopilot', cfg)
+        cfg = {'flowBuiltin': 'autopilot'}
+        self.assertIs(self._resolve(cfg), run_flow_via_chat)
+        self.assertNotIn('autopilot', cfg)
 
 
 def test_chat_flow_selection_policy_has_one_physical_owner():
@@ -108,26 +71,21 @@ def test_chat_flow_selection_policy_has_one_physical_owner():
     policy_source = Path(
         'lib/orchestration_chat_flow_selection.py').read_text()
 
-    assert runner.autopilot_via_flow_enabled is selection.autopilot_via_flow_enabled
     assert selection.CHAT_FLOW_BUILTINS == frozenset({'autopilot'})
-    assert "os.environ.get(name, '0')" in policy_source
+    assert 'TOFU_AUTOPILOT_VIA_FLOW' not in policy_source
+    assert 'TOFU_AUTOPILOT_VIA_FLOW' not in runner_source
     assert 'DefinitionServiceError' in policy_source
-    assert 'os.environ.get' not in runner_source
     assert 'DefinitionServiceError' not in runner_source
 
 
-def test_explicit_chat_flow_selection_does_not_evaluate_rollout_flags():
+def test_explicit_chat_flow_selection_wins_over_goal_mode():
     from lib.orchestration_chat_flow_selection import (
         CHAT_FLOW_ENTRY_SELECTED,
         select_chat_flow_entry,
     )
 
-    def unexpected_flag_read():
-        raise AssertionError('explicit selections must bypass rollout flags')
-
     assert select_chat_flow_entry(
-        {'flowId': 'orch_selected'},
-        autopilot_enabled=unexpected_flag_read,
+        {'flowId': 'orch_selected', 'autopilot': True},
     ) == CHAT_FLOW_ENTRY_SELECTED
 
 
@@ -390,13 +348,17 @@ class AutopilotE2ETest(unittest.TestCase):
             role = node.get('role')
             if role == 'virtual_user':
                 vu['n'] += 1
-                out = '[VU: TASK_DONE]' if vu['n'] >= 2 else 'keep going'
+                out = (
+                    '[VU: TASK_DONE]\n[PROGRESS: resolved=1 remaining=0]'
+                    if vu['n'] >= 2 else 'keep going'
+                )
                 return {'output': out, 'status': 'completed', 'error': ''}
             return {'output': f'work{iteration}', 'status': 'completed',
                     'error': '', 'tool_names': ['write_file']}
 
         orig_tools = runner_mod._build_tools_for_task
-        runner_mod._build_tools_for_task = lambda task: ([], '', '')
+        runner_mod._build_tools_for_task = lambda task: (
+            [], 'kimi-k3', '')
 
         captured = []
         import lib.tasks_pkg.manager as mgr
@@ -412,6 +374,24 @@ class AutopilotE2ETest(unittest.TestCase):
 
         orig_default = eng.FlowExecutor._default_runner
         eng.FlowExecutor._default_runner = fake_runner
+        import lib.goal_runs.service as goal_service_module
+        original_goal_service = goal_service_module.GoalRunService
+
+        class _MemoryGoalService:
+            def start(self, task, _definition):
+                task['_goalRunId'] = 'goal-' + task['id']
+                task['_goalRunStatus'] = 'active'
+                return {'runId': task['_goalRunId'], 'status': 'active'}
+
+            def complete(self, task, _terminal):
+                task['_goalRunStatus'] = 'completed'
+                return {
+                    'runId': task['_goalRunId'], 'status': 'completed'}
+
+            def fail(self, _task, *, reason='runtime_failure'):
+                return {'status': 'failed', 'reason': reason}
+
+        goal_service_module.GoalRunService = _MemoryGoalService
         captured_turns = []
         adapter_cls = None
         try:
@@ -434,19 +414,24 @@ class AutopilotE2ETest(unittest.TestCase):
                 ad_mod.FlowEventAdapter = orig_adapter
         finally:
             eng.FlowExecutor._default_runner = orig_default
+            goal_service_module.GoalRunService = original_goal_service
             runner_mod._build_tools_for_task = orig_tools
             mgr.append_event, mgr.persist_task_result = orig_append, orig_persist
             (turn_sync.store_flow_turns_on_task,
              turn_sync.sync_flow_turns_to_conversation) = saved
 
-        # VU stopped the loop after the 2nd reply.
-        self.assertEqual(vu['n'], 2)
-        # Turns alternate worker(assistant) → vu(user) → worker. The
-        # terminal VU sentinel is control-plane only, matching standalone
-        # Autopilot: it stops the graph and cancels the eager live placeholder
-        # without becoming a visible/persisted user message.
+        # The worker claims write_file edits, so the stop-acceptance gate
+        # CHALLENGES the VU's first well-formed TASK_DONE (0 VU tool rounds
+        # = no independent verification) and accepts the re-issued claim on
+        # the 3rd reply (one bounded challenge, then fail-open).
+        self.assertEqual(vu['n'], 3)
+        # Turns alternate worker(assistant) → vu(user) → worker. Both the
+        # challenged and the accepted VU sentinel are control-plane only,
+        # matching standalone Autopilot: they never become visible/persisted
+        # user messages; the challenge rides the next worker's context.
         self.assertEqual(captured_turns,
                          [('assistant', False, False), ('user', False, True),
+                          ('assistant', False, False),
                           ('assistant', False, False)])
         types = [e.get('type') for e in captured]
         self.assertIn('flow_iteration', types)   # worker (assistant) turns
@@ -455,7 +440,8 @@ class AutopilotE2ETest(unittest.TestCase):
                        if e.get('type') == 'flow_critic_msg'
                        and e.get('turnRole') == 'virtual_user'
                        and e.get('next_phase') == 'stop']
-        self.assertEqual(len(terminal_vu), 1)
+        # Challenged stop + accepted stop, both discarded control-plane.
+        self.assertEqual(len(terminal_vu), 2)
         self.assertTrue(terminal_vu[0].get('discard'))
         self.assertIn('done', types)
         self.assertEqual(task['status'], 'done')

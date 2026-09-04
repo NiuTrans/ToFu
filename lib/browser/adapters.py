@@ -549,6 +549,52 @@ def _model_plaza_detail(page: BrowserPage, params: dict) -> dict:
             'content': result.get('text') or result.get('html') or ''}
 
 
+_MODEL_PLAZA_COMPARE_JS = r"""
+(async () => {
+  const names = (Array.isArray(args.names) ? args.names : [])
+    .map(n => String(n || '').trim()).filter(Boolean).slice(0, 64);
+  const qs = names.map(n => 'names=' + encodeURIComponent(n)).join('&');
+  const resp = await fetch(
+    '/api/friday/ml/v1/model/type/information/compareModels?' + qs,
+    {credentials: 'same-origin', headers: {accept: 'application/json'}});
+  const body = await resp.json().catch(() => null);
+  if (!resp.ok || !body || typeof body !== 'object') {
+    return {ok: false, status: resp.status};
+  }
+  return {ok: true, code: body.code, message: String(body.message || ''),
+          data: Array.isArray(body.data) ? body.data : []};
+})()
+"""
+
+
+def _model_plaza_model_info(page: BrowserPage, params: dict) -> dict:
+    cleaned = [str(name or '').strip()[:128]
+               for name in params.get('names') or []]
+    cleaned = [name for name in cleaned if name][:64]
+    if not cleaned:
+        raise AdapterValidationError(
+            'model-info requires at least one non-empty model name')
+    page.new_tab(_MODEL_PLAZA_URL)
+    _ensure_site_page(
+        page, ('your-llm-gateway.example.com',), site='ModelPlaza',
+        login_url=_MODEL_PLAZA_URL)
+    # The plaza's data API lives on the same origin as the page, so a fetch
+    # from page context carries the SSO session. The server never resolves
+    # or connects to this private hostname; chrome.scripting awaits the
+    # returned promise, so the async IIFE is safe here.
+    raw = _extract_result(page.execute(
+        _MODEL_PLAZA_COMPARE_JS, args={'names': cleaned}, trusted_read=True))
+    payload = raw if isinstance(raw, dict) else {}
+    if not payload.get('ok'):
+        raise AdapterExecutionError(
+            'fetch_failed',
+            'ModelPlaza compareModels returned HTTP %s'
+            % (payload.get('status') or 'unknown'),
+            retryable=True)
+    return payload
+
+
+_MODEL_INFO_CAPS = (BrowserCapability.TABS.value, BrowserCapability.EXECUTE.value)
 _DETAIL_CAPS = (BrowserCapability.TABS.value, BrowserCapability.READ.value,
                 BrowserCapability.SNAPSHOT.value)
 _XHS_DETAIL_CAPS = _DETAIL_CAPS + (BrowserCapability.EXECUTE.value,)
@@ -611,6 +657,14 @@ def _register_builtins() -> None:
                            output_schema=_DETAIL_RESULT_SCHEMA,
                            required_capabilities=_DETAIL_CAPS, timeout=35,
                            handler=_model_plaza_detail),
+            AdapterCommand('model-info',
+                           '批量查询模型的定价/上下文/请求 ID/能力标签（compareModels API）',
+                           input_schema={'type': 'object', 'properties': {
+                               'names': {'type': 'array',
+                                         'items': {'type': 'string'}}},
+                               'required': ['names']},
+                           required_capabilities=_MODEL_INFO_CAPS, timeout=35,
+                           handler=_model_plaza_model_info),
         )))
     register_adapter(SiteAdapter(
         id='friday', name='Friday Skills Market',

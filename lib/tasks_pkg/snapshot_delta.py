@@ -1,7 +1,8 @@
 """Delta projection + rebuild for ``messages_snapshot`` rows.
 
-Design: ``docs/FRONTEND_ARCHITECTURE.md`` §10 (format FROZEN by the owner
-2026-07-25). Measured on a real task (``efb479f6``): full-payload storage
+Design: ``docs/FRONTEND_ARCHITECTURE.md`` §10. The unversioned v1 format is
+frozen and remains readable; new rows use a backward-compatible v2 scope.
+Measured on a real task (``efb479f6``): full-payload storage
 was 123.2 MB across 167 rounds; the same rounds in delta form are 1.9 MB
 (65.7x). Two redundancies dominate and BOTH must be removed:
 
@@ -27,6 +28,12 @@ Wire/contract invariants
 The shared-prefix semantics mirror the frontend's ``_riSharedPrefix``
 (canonical-JSON positional compare) so there is exactly ONE definition of
 "shared prefix" in the system.
+
+V1 kept separate request/state baselines. In real execution those frames
+interleave, and the request following a post-tool state often has the exact
+same messages, so v1 stored the new tool tail twice. V2 stamps a private
+version and shares one chronological baseline per ``(task, turn)``. Rebuild
+selects the key from each row's version, preserving mixed v1/v2 histories.
 """
 
 from __future__ import annotations
@@ -45,6 +52,8 @@ TOOLS_DICT = 'tools_dict'
 # (full payload) never carry it, which is what makes the migration and the
 # rebuild path idempotent.
 DELTA_MARKER = 'prefixLen'
+SNAPSHOT_DELTA_VERSION_MARKER = 'snapshotDeltaVersion'
+SNAPSHOT_DELTA_VERSION = 2
 
 
 def _canon(obj) -> str:
@@ -79,26 +88,70 @@ def prefix_hash(messages: list, k: int) -> str:
 
 
 class SnapshotProjector:
-    """Per-task projection state: previous messages + last tools hash.
+    """Per-task projection state: message fingerprints + known tools hashes.
 
     One instance per task id. ``project`` turns a FULL snapshot payload into
     its delta form and (when the tool set is new) the ``tools_dict`` row that
     must be persisted alongside it.
 
-    Memory: holds the previous round's message list for the task, which is
-    the same order of magnitude as one snapshot and is released by
-    :meth:`forget` at terminal state.
+    Memory: retains one content-free full SHA-256 digest per prior message,
+    never another prompt copy. It is released by :meth:`forget` at terminal
+    state. The stored row's canonical prefix hash remains the replay authority;
+    a hypothetical fingerprint collision therefore degrades at rebuild rather
+    than silently authorizing a different prefix.
     """
 
     def __init__(self):
-        self._prev_messages: dict[tuple, list] = {}
+        self._prev_message_fingerprints: dict[tuple, list[bytes]] = {}
         self._known_tools: dict[str, set] = {}
+
+    @staticmethod
+    def _scan_message_prefix(
+        messages: list,
+        previous_fingerprints: list[bytes] | None,
+    ) -> tuple[int, str, list[bytes]]:
+        """Fingerprint each current message once and hash its shared prefix.
+
+        ``shared_prefix_len`` plus ``prefix_hash`` previously canonicalized
+        the unchanged history about three times per snapshot. This fused scan
+        preserves the exact canonical-list hash while retaining only digests
+        for the next comparison.
+        """
+        current_fingerprints: list[bytes] = []
+        shared_prefix = 0
+        prefix_is_open = previous_fingerprints is not None
+        prefix_hasher = hashlib.sha256()
+        prefix_hasher.update(b'[')
+        for index, message in enumerate(messages):
+            canonical_message = _canon(message).encode('utf-8')
+            fingerprint = hashlib.sha256(canonical_message).digest()
+            current_fingerprints.append(fingerprint)
+            if (prefix_is_open
+                    and index < len(previous_fingerprints)
+                    and fingerprint == previous_fingerprints[index]):
+                if shared_prefix:
+                    prefix_hasher.update(b',')
+                prefix_hasher.update(canonical_message)
+                shared_prefix += 1
+            else:
+                prefix_is_open = False
+        prefix_hasher.update(b']')
+        return (
+            shared_prefix,
+            prefix_hasher.hexdigest()[:16],
+            current_fingerprints,
+        )
 
     @staticmethod
     def _key(task_id: str, payload: dict) -> tuple:
         # Flow node turns re-number rounds from 1, so the baseline chain is
-        # per (task, turn) — mixing nodes would produce a bogus prefix.
-        return (task_id, payload.get('turn') or '', payload.get('kind') or 'request')
+        # per (task, turn) — mixing nodes would produce a bogus prefix. Frozen
+        # v1 rows additionally split request/state; v2 follows their actual
+        # chronological order and avoids storing the same post-tool tail twice.
+        base = (task_id, payload.get('turn') or '')
+        if payload.get(SNAPSHOT_DELTA_VERSION_MARKER) == SNAPSHOT_DELTA_VERSION:
+            return base
+        return base + (payload.get('kind') or 'request',)
 
     def project(self, task_id: str, payload: dict) -> dict:
         """Return the delta-form payload. The input is NOT mutated.
@@ -116,7 +169,8 @@ class SnapshotProjector:
             return payload
 
         out = {k: v for k, v in payload.items() if k not in ('messages', 'tools')}
-        key = self._key(task_id, payload)
+        out[SNAPSHOT_DELTA_VERSION_MARKER] = SNAPSHOT_DELTA_VERSION
+        key = self._key(task_id, out)
 
         # ── tools: content-hash dedup (§10.2 item 1) ──
         # The FIRST row carrying a given hash keeps the array inline; every
@@ -137,10 +191,14 @@ class SnapshotProjector:
             out['toolsCount'] = 0
 
         # ── messages: shared-prefix delta (§10.2 item 2) ──
-        prev = self._prev_messages.get(key)
-        k = shared_prefix_len(prev, messages) if prev is not None else 0
+        k, canonical_prefix_hash, current_fingerprints = (
+            self._scan_message_prefix(
+                messages,
+                self._prev_message_fingerprints.get(key),
+            )
+        )
         out['prefixLen'] = k
-        out['prefixHash'] = prefix_hash(messages, k)
+        out['prefixHash'] = canonical_prefix_hash
         out['messageCount'] = len(messages)
         new_tail = messages[k:]
         # §10.2 item 3: a repeat emission of the same round (nothing new)
@@ -148,13 +206,16 @@ class SnapshotProjector:
         if new_tail:
             out['newMessages'] = new_tail
 
-        self._prev_messages[key] = list(messages)
+        self._prev_message_fingerprints[key] = current_fingerprints
         return out
 
     def forget(self, task_id: str) -> None:
         """Drop per-task projection state (call at terminal state)."""
-        for key in [k for k in self._prev_messages if k[0] == task_id]:
-            self._prev_messages.pop(key, None)
+        for key in [
+            key for key in self._prev_message_fingerprints
+            if key[0] == task_id
+        ]:
+            self._prev_message_fingerprints.pop(key, None)
         self._known_tools.pop(task_id, None)
 
 
@@ -194,7 +255,12 @@ def rebuild_snapshots(rows: list) -> list:
             # Legacy full row — it also (re)establishes the baseline.
             full = dict(payload)
             key = SnapshotProjector._key('', payload)
-            baselines[key] = list(full.get('messages') or [])
+            messages = list(full.get('messages') or [])
+            baselines[key] = messages
+            # A partially migrated history may place a v2 delta after this
+            # self-contained legacy row. The exact full messages are also a
+            # valid chronological v2 baseline; v1 keeps its separate key.
+            baselines[('', payload.get('turn') or '')] = messages
             out.append(full)
             continue
 
@@ -203,10 +269,15 @@ def rebuild_snapshots(rows: list) -> list:
         k = int(payload.get('prefixLen') or 0)
         full = {kk: vv for kk, vv in payload.items()
                 if kk not in ('prefixLen', 'prefixHash', 'newMessages',
-                              'toolsHash', 'messageCount', 'tools')}
+                              'toolsHash', 'messageCount', 'tools',
+                              SNAPSHOT_DELTA_VERSION_MARKER)}
 
         degraded_reason = ''
-        if k > len(base):
+        version = payload.get(SNAPSHOT_DELTA_VERSION_MARKER)
+        if version is not None and version != SNAPSHOT_DELTA_VERSION:
+            degraded_reason = (
+                f'unsupported snapshot delta version {version!r}')
+        elif k > len(base):
             degraded_reason = (
                 f'baseline has {len(base)} message(s) but this round claims a '
                 f'{k}-message shared prefix (baseline row missing or pruned)')
@@ -240,6 +311,10 @@ def rebuild_snapshots(rows: list) -> list:
             logger.warning('[SnapshotDelta] round=%s degraded: %s',
                            payload.get('roundNum'), degraded_reason)
         baselines[key] = messages
+        if version is None:
+            # Advance the shared migration baseline only after a v1 row was
+            # itself rebuilt. V2 rows never overwrite v1's kind-scoped state.
+            baselines[('', payload.get('turn') or '')] = messages
         out.append(full)
     return out
 
@@ -253,7 +328,7 @@ def rebuild_snapshots(rows: list) -> list:
 # means the next round stores a full baseline (correct, merely larger).
 
 _MAX_TASKS = 64
-_projector_lock = __import__('threading').Lock()
+_projector_lock = __import__('threading').RLock()
 _projector: SnapshotProjector | None = None
 
 
@@ -274,20 +349,32 @@ class _BoundedProjector(SnapshotProjector):
             return super().project(task_id, payload)
 
     def forget(self, task_id: str) -> None:
-        super().forget(task_id)
-        if task_id in self._task_order:
-            self._task_order.remove(task_id)
+        with _projector_lock:
+            super().forget(task_id)
+            if task_id in self._task_order:
+                self._task_order.remove(task_id)
 
 
 def get_projector() -> SnapshotProjector:
     """Return the process-wide projector (lazily created)."""
     global _projector
-    if _projector is None:
-        _projector = _BoundedProjector()
-    return _projector
+    with _projector_lock:
+        if _projector is None:
+            _projector = _BoundedProjector()
+        return _projector
+
+
+def forget_projector_task(task_id: str) -> None:
+    """Release one task baseline without instantiating an unused projector."""
+    with _projector_lock:
+        projector = _projector
+        if projector is not None and task_id:
+            projector.forget(str(task_id))
 
 __all__ = [
     'SNAPSHOT', 'TOOLS_DICT', 'DELTA_MARKER',
+    'SNAPSHOT_DELTA_VERSION', 'SNAPSHOT_DELTA_VERSION_MARKER',
     'SnapshotProjector', 'rebuild_snapshots', 'get_projector',
+    'forget_projector_task',
     'shared_prefix_len', 'prefix_hash', 'content_hash',
 ]

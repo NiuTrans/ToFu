@@ -2,126 +2,12 @@
 /* ═══════════════════════════════════════════════════════════════════
    core/debug_panel.js — extracted from core.js (split 2026-05-28)
 
-   Debug panel: debugLog ring buffer, error reporting, toggleDebug, restoreDebugForConv, showMessagesInDebug (393-LOC HTML renderer).
+   Demand-loaded debug message renderer and Request Inspector adapter.
 
    This file is concatenated by Vite's module graph AFTER the slim
    core.js shell — symbols share `window` scope so no exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-function debugLog(msg, type = "") {
-  /* Normalize level aliases: many callers pass 'warning', but the server
-   * forwarding gate below only matches 'warn'/'error' exactly — so 'warning'
-   * messages were silently kept client-side. Map it (and any case variant)
-   * to 'warn' so the intended reports actually reach the server. */
-  if (typeof type === "string") {
-    const t = type.toLowerCase();
-    if (t === "warning") type = "warn";
-  }
-  console.log(`[${type || "info"}]`, msg);
-  /* Bounded in-memory ring of recent log lines so the one-click diagnostics
-   * collector (diag_collect.js → runtimeScope.__tofuCollectDiagnostics) can attach
-   * the last N events even when the SPA is otherwise wedged. Kept here (not in
-   * diag_collect) because debugLog is the single choke point every log passes
-   * through. Never throws. */
-  try {
-    const ring = (runtimeScope.__tofuDiagRing = runtimeScope.__tofuDiagRing || []);
-    ring.push(Date.now() + " [" + (type || "info") + "] " + String(msg).slice(0, 300));
-    if (ring.length > 80) ring.splice(0, ring.length - 80);
-  } catch (_) { /* ring is best-effort */ }
-  /* Auto-report error/warn level messages to server logs */
-  if (type === "error" || type === "warn") {
-    _reportClientError(`[debugLog][${type}] ${msg}`);
-  }
-}
-
-/* ── Frontend → Server error reporting ──
- * Fire-and-forget: sends client-side errors to server log files so they
- * appear in logs/app.log alongside backend errors.  Never throws. */
-const _reportedErrors = new Set();          /* dedupe within session */
-function _reportClientError(message, extra) {
-  try {
-    /* Deduplicate: don't flood the server with the same error */
-    const key = message.slice(0, 200);
-    if (_reportedErrors.has(key)) return;
-    _reportedErrors.add(key);
-    /* Cap the set so it doesn't grow unbounded */
-    if (_reportedErrors.size > 200) _reportedErrors.clear();
-
-    const payload = {
-      message,
-      url: location.href,
-      userAgent: navigator.userAgent,
-      timestamp: new Date().toISOString(),
-      conversationCount: conversations?.length || 0,
-    };
-    if (extra) payload.extra = extra;
-    Api.clientError.report(payload);   /* silently ignore network failures */
-  } catch (_) {}          /* never let reporting itself crash */
-}
-
-/* ── Global error handler: catch ALL uncaught errors ── */
-window.addEventListener("error", (evt) => {
-  _reportClientError(`[uncaught] ${evt.message}`, {
-    source: evt.filename,
-    line: evt.lineno,
-    col: evt.colno,
-    stack: evt.error?.stack?.slice(0, 1000),
-  });
-});
-window.addEventListener("unhandledrejection", (evt) => {
-  const msg = evt.reason?.message || evt.reason || "unknown";
-  _reportClientError(`[unhandledRejection] ${msg}`, {
-    stack: evt.reason?.stack?.slice(0, 1000),
-  });
-});
-// Per-conversation debug message cache: { convId: { messages, label } }
-const _debugCache = {};
-/* ── Request Inspector data plane (P1, docs/FRONTEND_ARCHITECTURE.md §4) ──
- * Per-TASK per-round snapshot log: { taskId: { rounds, roundOrder, states } }.
- * SSE `messages_snapshot` events APPEND here (never overwrite) — the old
- * _debugCache keeps only the latest snapshot for the legacy panel render and
- * is untouched. kind='state' snapshots (post-tool / final / fallback) are NOT
- * LLM requests and land in .states; a missing kind (legacy event) is treated
- * as 'request' for back-compat. */
-const _debugRequests = {};
-function _debugRecordSnapshot(taskId, rec) {
-  if (!taskId || !rec) return;
-  const t = (_debugRequests[taskId] = _debugRequests[taskId] ||
-    { rounds: {}, roundOrder: [], states: [] });
-  if (rec.kind === "state") {
-    t.states.push(rec);
-  } else {
-    /* Flow node turns re-number rounds from 1 — key by turn|roundNum so a
-     * planner R1 and a worker R1 never overwrite each other (P4). */
-    const key = rec.turn ? rec.turn + '|' + rec.roundNum : String(rec.roundNum);
-    if (!(key in t.rounds)) t.roundOrder.push(key);
-    t.rounds[key] = rec;
-  }
-  /* Memory cap (owner P2 constraint): full payloads only for the CURRENT
-   * task — every OTHER task degrades to metadata-only (messages/tools
-   * stripped, counts kept, `_stripped` flag set), and the log is capped at
-   * 20 tasks. Request payloads stay re-fetchable on demand from
-   * /api/v1/tasks/<id>/requests/<round> (the server-authoritative source). */
-  for (const id of Object.keys(_debugRequests)) {
-    if (id === taskId) continue;
-    const o = _debugRequests[id];
-    for (const k of Object.keys(o.rounds)) {
-      const r = o.rounds[k];
-      if (r.messages) {
-        r.messages = null; r.tools = null; r.contextManifest = null;
-        r._stripped = true;
-      }
-    }
-    for (const s of o.states) {
-      if (s.messages) {
-        s.messages = null; s.tools = null; s.contextManifest = null;
-        s._stripped = true;
-      }
-    }
-  }
-  const ids = Object.keys(_debugRequests);
-  if (ids.length > 20) delete _debugRequests[ids[0]];
-}
 function clearDebug() {
   document.getElementById("debugContent").innerHTML = "";
   document.getElementById("debugTitle").innerHTML = Icon('inbox', 14) + ' Messages';
@@ -257,36 +143,14 @@ function _debugMsgIdentity(msg) {
   return "r:" + role + ":" + text.length + ":" + (h >>> 0).toString(36);
 }
 function toggleDebug() {
-  /* P2: the global floating box is retired — the debug entry now opens the
-   * Request Inspector drawer (right-side, conversation-scoped). Falls back
-   * to the legacy floating panel only if the inspector failed to load. */
-  if (typeof toggleRequestInspector === "function") {
-    toggleRequestInspector();
-    return;
-  }
-  debugVisible = !debugVisible;
-  document
-    .getElementById("debugPanel")
-    .classList.toggle("visible", debugVisible);
-  // Single source of truth: whenever the panel is opened, (re)load the
-  //   active conversation's diagnostics from the backend. Loading on open
-  //   guarantees fresh backend-built content after a cold page refresh.
-  if (debugVisible
-      && typeof activeConvId !== "undefined" && activeConvId
-      && typeof restoreDebugForConv === "function") {
-    restoreDebugForConv(activeConvId);
-  }
+  /* The floating fallback is retired. Both functions arrive in the same
+   * required feature chunk, so a partial diagnostics owner cannot exist. */
+  toggleRequestInspector();
 }
 // Close the debug panel (top-right ✕). Distinct from clearDebug(), which only
 // wipes content — the ✕ must actually hide the panel.
 function closeDebug() {
-  if (typeof closeRequestInspector === "function") {
-    closeRequestInspector();
-    return;
-  }
-  debugVisible = false;
-  const panel = document.getElementById("debugPanel");
-  if (panel) panel.classList.remove("visible");
+  closeRequestInspector();
 }
 // Called on conversation switch: restore cached debug for this conv.
 //
@@ -302,10 +166,12 @@ function closeDebug() {
 // — newly switched-to old conversations showed an empty debug panel until
 // the user sent a message and the streaming pipeline emitted a snapshot.
 function restoreDebugForConv(convId) {
-  /* P2 hook: refresh the Request Inspector's task list on conv switch
-   * (no-op while the drawer is closed). */
-  if (typeof _riOnConvSwitch === "function") _riOnConvSwitch(convId);
-  const cached = _debugCache[convId];
+  /* Conversation navigation never loads this feature. Once loaded, a closed
+   * inspector stays API-idle; a visible drawer refreshes its task list and
+   * legacy message detail together. */
+  _riOnConvSwitch(convId);
+  if (!DebugShellState.visible) return;
+  const cached = DebugShellState.cache[convId];
   if (cached && cached.messages && cached.messages.length > 0) {
     showMessagesInDebug(
       cached.messages, cached.label, false, undefined, cached.tools,
@@ -313,7 +179,7 @@ function restoreDebugForConv(convId) {
       { contextManifest: cached.contextManifest || [] });
     return;
   }
-  const conv = conversations.find((c) => c.id === convId);
+  const conv = DebugShellState.conversations.find((c) => c.id === convId);
   // Decide if there's anything worth fetching. For shell convs this is
   // _serverTurnCount > 0 even before the Turn snapshot lands.
   const _hasServerMsgs = conv && (
@@ -331,11 +197,11 @@ function restoreDebugForConv(convId) {
   const _title = document.getElementById("debugTitle");
   if (_ph) _ph.innerHTML = '<div class="debug-loading">Loading messages from server…</div>';
   if (_title) _title.innerHTML = Icon('inbox', 14) + ' Messages (loading…)';
-  const _sp = (typeof config !== 'undefined' && config.systemPrompt) || '';
+  const _sp = DebugShellState.config?.systemPrompt || '';
   Api.conversations.getDebugMessages(convId, _sp)
     .then(data => {
       // The user may have switched away while the fetch was in flight.
-      if (typeof activeConvId !== "undefined" && convId !== activeConvId) return;
+      if (convId !== DebugShellState.activeConversationId) return;
       if (data && data.messages && data.messages.length > 0) {
         showMessagesInDebug(
           data.messages,
@@ -353,8 +219,9 @@ function restoreDebugForConv(convId) {
     })
     .catch((e) => {
       console.warn("[debug-panel] /debug-messages fetch failed:", e);
-      _reportClientError(`[debug-panel] fetch failed: ${e && e.message || e}`);
-      if (typeof activeConvId !== "undefined" && convId === activeConvId) clearDebug();
+      DebugShellState.reportError(
+        `[debug-panel] fetch failed: ${e && e.message || e}`);
+      if (convId === DebugShellState.activeConversationId) clearDebug();
     });
 }
 /* ── Message-block render helpers (module scope) ─────────────────────
@@ -860,7 +727,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
    * overwrite). The legacy cold path (/debug-messages) passes no meta and is
    * not recorded — it is an approximation, not a specific round. */
   if (meta && typeof meta === "object") {
-    _debugRecordSnapshot(meta.taskId, {
+    DebugShellState.recordSnapshot(meta.taskId, {
       kind: meta.kind || "request",
       roundNum: meta.roundNum,
       turn: meta.turn || "",
@@ -875,22 +742,20 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
       contextManifest: contextManifest,
     });
   }
-  const cid =
-    forConvId || (typeof activeConvId !== "undefined" ? activeConvId : null);
+  const cid = forConvId || DebugShellState.activeConversationId;
   // Cache for conversation switching
   if (cid) {
-    _debugCache[cid] = { messages, label };
-    if (tools) _debugCache[cid].tools = tools;
-    _debugCache[cid].approx = !!approx;
-    _debugCache[cid].contextManifest =
+    DebugShellState.cache[cid] = { messages, label };
+    if (tools) DebugShellState.cache[cid].tools = tools;
+    DebugShellState.cache[cid].approx = !!approx;
+    DebugShellState.cache[cid].contextManifest =
       (meta && meta.contextManifest) ||
       (opts && opts.contextManifest) || [];
   }
   // Only render if this conv is currently active (or no conv specified)
   if (
     forConvId &&
-    typeof activeConvId !== "undefined" &&
-    forConvId !== activeConvId
+    forConvId !== DebugShellState.activeConversationId
   )
     return;
   const p = document.getElementById("debugContent");
@@ -1172,25 +1037,6 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
   p._rawMessages = messages;
   p._rawTools = tools || null;
 }
-/* ── Safe clipboard helper: works on HTTP (non-secure) contexts ── */
-function _safeClipboardWrite(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  // Fallback for non-HTTPS (navigator.clipboard is undefined)
-  return new Promise((resolve, reject) => {
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.cssText = 'position:fixed;opacity:0;left:-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      resolve();
-    } catch (e) { reject(e); }
-  });
-}
 function copyDebugContent() {
   const p = document.getElementById("debugContent");
   if (!p) return;
@@ -1208,3 +1054,11 @@ function copyDebugContent() {
     });
   }
 }
+
+/* Optional lifecycle port. Retained conversation navigation consults it only
+ * after this owner has loaded, so ordinary navigation never imports the chunk
+ * or starts a diagnostics request. */
+const DebugPresentationState = Object.freeze({
+  clear: clearDebug,
+  onConversationSwitch: restoreDebugForConv,
+});

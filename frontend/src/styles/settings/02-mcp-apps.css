@@ -781,7 +781,6 @@
 .skills-scope-tab.active{background:var(--s-ink);color:var(--s-white);border-color:var(--s-ink);box-shadow:2px 2px 0 var(--s-gold)}
 /* Cross-link to memory creation — a quiet secondary action, visually
  * separated from the scope control it used to masquerade as. */
-.skills-newmem-btn{display:inline-flex;align-items:center;gap:5px;flex-shrink:0}
 .skills-intro{margin:2px 0 10px}
 /* Local .zip install drop zone — dashed ink hairline on white, cream hover
  * lift, gold fill while a file is held over it. */

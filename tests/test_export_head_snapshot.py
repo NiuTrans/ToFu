@@ -105,7 +105,7 @@ def test_opted_in_linear_repo_exports_stable_not_development_head(repo):
         assert (snap / 'lib' / 'core.py').read_text(encoding='utf-8') == \
             'VALUE = "committed"\n'
         assert not (snap / 'lib' / 'wip_module.py').exists()
-        assert exp._EXPORT_SOURCE_SHA == stable
+        assert exp._state._EXPORT_SOURCE_SHA == stable
     finally:
         import shutil
         shutil.rmtree(snap, ignore_errors=True)
@@ -128,7 +128,7 @@ def test_unactivated_linear_setting_does_not_export_an_old_stable(repo):
         assert (snap / 'lib' / 'core.py').read_text(encoding='utf-8') == \
             'VALUE = "wip"\nimport lib.wip_module\n'
         assert (snap / 'lib' / 'wip_module.py').exists()
-        assert exp._EXPORT_SOURCE_SHA == current_head
+        assert exp._state._EXPORT_SOURCE_SHA == current_head
     finally:
         import shutil
         shutil.rmtree(snap, ignore_errors=True)
@@ -162,11 +162,11 @@ def test_activated_linear_repo_without_stable_fails_closed(repo):
 
 def test_snapshot_pins_the_archived_sha(repo, monkeypatch):
     import export as exp
-    monkeypatch.setattr(exp, '_EXPORT_SOURCE_SHA', None)
+    monkeypatch.setattr(exp._state, '_EXPORT_SOURCE_SHA', None)
     snap = exp._stage_head_snapshot(repo)
     try:
         want = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-        assert exp._EXPORT_SOURCE_SHA == want, (
+        assert exp._state._EXPORT_SOURCE_SHA == want, (
             'the integrity check must compare against the SAME commit the '
             'archive was taken from — a mid-export sibling commit otherwise '
             'flags files the snapshot legitimately predates')
@@ -178,23 +178,25 @@ def test_snapshot_pins_the_archived_sha(repo, monkeypatch):
 def test_integrity_check_lists_from_the_snapshot_sha():
     """Source-anchored: _verify_exported_py_integrity must ls-tree the
     recorded snapshot sha, not live HEAD."""
-    text = (Path(__file__).resolve().parent.parent
-            / 'export.py').read_text(encoding='utf-8')
-    idx = text.find('def _verify_exported_py_integrity')
-    assert idx > 0
-    window = text[idx:idx + 2000]
-    assert "_EXPORT_SOURCE_SHA or 'HEAD'" in window, (
+    import inspect
+
+    import export as exp
+    text = inspect.getsource(exp._verify_exported_py_integrity)
+    assert "_EXPORT_SOURCE_SHA or 'HEAD'" in text, (
         'integrity check regressed to live HEAD — mid-export commits will '
         'false-flag the tree again')
 
 
 def test_worktree_flag_preserves_the_legacy_path():
     """--worktree must still copy the worktree (intentional WIP publish)."""
-    text = (Path(__file__).resolve().parent.parent
-            / 'export.py').read_text(encoding='utf-8')
-    assert "'--worktree'" in text, 'the --worktree escape hatch is gone'
-    fn = text.find('def _export_via_tar_with_sanitize')
-    assert fn > 0 and 'worktree' in text[fn:fn + 3000], (
+    import inspect
+
+    import export as exp
+    facade = (Path(__file__).resolve().parent.parent
+              / 'export.py').read_text(encoding='utf-8')
+    assert "'--worktree'" in facade, 'the --worktree escape hatch is gone'
+    fn_src = inspect.getsource(exp._export_via_tar_with_sanitize)
+    assert 'worktree' in fn_src, (
         '_export_via_tar_with_sanitize no longer takes the worktree switch')
 
 

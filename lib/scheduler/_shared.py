@@ -344,6 +344,13 @@ def build_task_config(tools_config: dict, conv_settings: dict) -> dict:
         'memoryEnabled': tools_config.get('memoryEnabled', conv_settings.get('memoryEnabled', True)),
         'imageGenEnabled': tools_config.get('imageGenEnabled', conv_settings.get('imageGenEnabled', False)),
         'schedulerEnabled': True,
+        # Translation settings must ride the task config: the incremental
+        # gate, terminal coordinator, and input-path translator all resolve
+        # ``resolve_auto_translate(task['config'])`` / ``uiLang`` from THIS
+        # dict — a scheduled turn built without them silently never
+        # translates even when the conversation has auto-translate on.
+        'autoTranslate': tools_config.get('autoTranslate', conv_settings.get('autoTranslate', False)),
+        'uiLang': tools_config.get('uiLang', conv_settings.get('uiLang', '')),
     }
 
 

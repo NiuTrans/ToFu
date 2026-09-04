@@ -1158,7 +1158,7 @@ jobs:
           set -euo pipefail
           cd release-assets
           shopt -s nullglob
-          files=( *.exe *.dmg *.zip *.tar.gz *.deb )
+          files=( *.exe *.dmg *.tar.gz *.deb )
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::No release assets found to checksum — build jobs produced nothing."
             exit 1
@@ -1316,10 +1316,36 @@ jobs:
           # pre-1.0 version string.
           make_latest: "true"
           generate_release_notes: true
+          body: |
+            ## Downloads
+
+            | OS | File | Notes |
+            | --- | --- | --- |
+            | Windows (x64) | `Tofu-Setup-${{ needs.version.outputs.version }}-win64.exe` | Recommended |
+            | macOS (Apple Silicon) | `Tofu-${{ needs.version.outputs.version }}-macos-arm64.dmg` | |
+            | macOS (Intel) | `Tofu-${{ needs.version.outputs.version }}-macos-x86_64.dmg` | |
+            | Linux (x64) | `Tofu-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz` | Portable archive; run `install.sh` inside for desktop integration |
+
+            ## Tofu Remote Endpoint (Agent)
+
+            For IT/ops headless machines — this is the relay agent, **not** the full Tofu app.
+
+            | OS | File |
+            | --- | --- |
+            | Windows (x64) | `TofuAgent-Setup-${{ needs.version.outputs.version }}-win64.exe` |
+            | macOS (Apple Silicon) | `TofuAgent-${{ needs.version.outputs.version }}-macos-arm64.dmg` |
+            | macOS (Intel) | `TofuAgent-${{ needs.version.outputs.version }}-macos-x86_64.dmg` |
+            | Linux (x64) | `TofuAgent-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz` |
+
+            ## First-run notes — binaries are unsigned
+
+            The installers are not code-signed yet. If the OS blocks first launch:
+
+            - **Windows**: SmartScreen shows "Windows protected your PC" — choose **More info → Run anyway**.
+            - **macOS**: Gatekeeper may block the app — **right-click → Open**, or run `xattr -cr /Applications/Tofu.app` if "damaged" appears.
           files: |
             release-assets/**/*.exe
             release-assets/**/*.dmg
-            release-assets/**/*.zip
             release-assets/**/*.tar.gz
             release-assets/**/*.tar.gz.sha256
             release-assets/**/*.deb

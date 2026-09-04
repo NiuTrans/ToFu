@@ -17,95 +17,27 @@ const _myday = {
   cache: {},           // { 'YYYY-MM-DD': { tasks, _full } }
   loading: false,
   _pollTimers: {},     // { 'YYYY-MM-DD': intervalId } — active poll loops
-  _collapsedCats: {},  // { 'category-name': true } — collapsed state persists during session
   _convDays: {},       // { dayNum: convCount } — server-side conversation counts per day
   _costDays: {},       // { dayNum: {cost, conversations} } — server-side cost data per day
 };
 
-/* ═══════ Persistent per-day report cache (IndexedDB) ═══════
-   The server is the SOURCE OF TRUTH; this is a local READ cache only, so a
-   reopen / day-click paints INSTANTLY from cache and then revalidates against
-   the server in the background.  Mirrors the idb-cache.js pattern (read-through
-   + write-after-server-confirms).  Falls back gracefully when IDB is
-   unavailable — callers just get null and hit the network as before. */
-const _mydayIDB = (function () {
-  const DB_NAME = 'tofu_myday_cache';
-  const STORE = 'reports';
-  const STORE_MONTHS = 'months';   // month overview (cost_days/conv_days) cache
-  const VER = 2;
-  let _dbp = null;
-  function _open() {
-    if (_dbp) return _dbp;
-    _dbp = new Promise((resolve) => {
-      try {
-        if (typeof indexedDB === 'undefined') { resolve(null); return; }
-        const rq = indexedDB.open(DB_NAME, VER);
-        rq.onupgradeneeded = (e) => {
-          const db = e.target.result;
-          if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'date' });
-          if (!db.objectStoreNames.contains(STORE_MONTHS)) db.createObjectStore(STORE_MONTHS, { keyPath: 'month' });
-        };
-        rq.onsuccess = (e) => resolve(e.target.result);
-        rq.onerror = () => { console.warn('[MyDay] report cache open failed'); resolve(null); };
-      } catch (e) { console.warn('[MyDay] report cache init error:', e && e.message); resolve(null); }
-    });
-    return _dbp;
-  }
-  function get(date) {
-    return _open().then((db) => {
-      if (!db) return null;
-      return new Promise((resolve) => {
-        try {
-          const rq = db.transaction(STORE, 'readonly').objectStore(STORE).get(date);
-          rq.onsuccess = () => resolve(rq.result ? rq.result.report : null);
-          rq.onerror = () => resolve(null);
-        } catch (e) { resolve(null); }
-      });
-    });
-  }
-  function put(date, report) {
-    return _open().then((db) => {
-      if (!db) return;
-      return new Promise((resolve) => {
-        try {
-          const tx = db.transaction(STORE, 'readwrite');
-          tx.objectStore(STORE).put({ date: date, report: report, cachedAt: Date.now() });
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => resolve();
-        } catch (e) { resolve(); }
-      });
-    });
-  }
-  // Month overview cache (cost_days + conv_days), keyed by 'YYYY-MM'. Lets the
-  // calendar paint historical ¥ balances INSTANTLY on reopen/reload before the
-  // (multi-second, cache-cold) calendar fetch returns; the fetch then reconciles.
-  function getMonth(monthKey) {
-    return _open().then((db) => {
-      if (!db) return null;
-      return new Promise((resolve) => {
-        try {
-          const rq = db.transaction(STORE_MONTHS, 'readonly').objectStore(STORE_MONTHS).get(monthKey);
-          rq.onsuccess = () => resolve(rq.result ? rq.result.data : null);
-          rq.onerror = () => resolve(null);
-        } catch (e) { resolve(null); }
-      });
-    });
-  }
-  function putMonth(monthKey, data) {
-    return _open().then((db) => {
-      if (!db) return;
-      return new Promise((resolve) => {
-        try {
-          const tx = db.transaction(STORE_MONTHS, 'readwrite');
-          tx.objectStore(STORE_MONTHS).put({ month: monthKey, data: data, cachedAt: Date.now() });
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => resolve();
-        } catch (e) { resolve(); }
-      });
-    });
-  }
-  return { get: get, put: put, getMonth: getMonth, putMonth: putMonth };
-})();
+/* The owner-scoped, bounded IndexedDB cache is composed by the typed My Day
+   feature before this panel can be invoked. Missing identity/storage degrades
+   to a cache miss; the server remains authoritative. */
+function _mydayReportRepository() {
+  if (typeof runtimeScope === 'undefined') return null;
+  const repository = runtimeScope.MyDayReportRepository;
+  return repository && typeof repository === 'object' ? repository : null;
+}
+
+function _mydayPersistReport(dateStr, report) {
+  const repository = _mydayReportRepository();
+  if (!repository || typeof repository.storeReport !== 'function') return;
+  try {
+    const pending = repository.storeReport(dateStr, report);
+    if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+  } catch (_error) { /* reconstructible cache is optional */ }
+}
 
 /* Set both the in-memory + persistent cache from an authoritative server
    report.  Every place that receives a fresh full report routes through here
@@ -114,82 +46,7 @@ function _mydaySetCache(dateStr, report) {
   if (!report) return;
   report._full = true;
   _myday.cache[dateStr] = report;
-  try { _mydayIDB.put(dateStr, report); } catch (e) { /* cache is optional */ }
-  // The pet's day-awareness rides on THIS single cache choke: every place a
-  // fresh full report lands routes through here, so both opening My Day and the
-  // boot digest fetch emit `tofu:day` from one path (no second source).
-  if (dateStr === _mydayTodayStr()) _mydayEmitDay(report);
-}
-
-/* ═══════ Pet day-awareness: derive the digest + emit `tofu:day` ═══════
-   The BACKEND report is the single source of truth. We do NOT recompute day
-   logic — we read the counts the report already carries and hand the pet a
-   compact digest {todos:{done,total}, streams:{done,blocked,total}, convCount}.
-   The pet only maps that → expression/mood. A missing/empty report is a silent
-   no-op, so a session that never opens My Day simply never fires it (until the
-   boot fetch below succeeds).                                                */
-function _mydayTodayStr() {
-  const n = new Date();
-  return _mydayDateStr(n.getFullYear(), n.getMonth(), n.getDate());
-}
-function _mydayBuildDigest(report) {
-  if (!report || typeof report !== 'object') return null;
-  const streams = Array.isArray(report.streams) ? report.streams : [];
-  const todos = Array.isArray(report.today_todos) ? report.today_todos : [];
-  return {
-    streams: {
-      total: streams.length,
-      done: streams.filter(s => s && s.status === 'done').length,
-      blocked: streams.filter(s => s && s.status === 'blocked').length,
-    },
-    todos: {
-      total: todos.length,
-      done: todos.filter(x => x && x.done).length,
-    },
-    convCount: ((report.stats || {}).totalConversations) || 0,
-  };
-}
-function _mydayEmitDay(report) {
-  try {
-    const digest = _mydayBuildDigest(report);
-    if (!digest) return;
-    document.dispatchEvent(new CustomEvent('tofu:day', { detail: digest }));
-  } catch (e) { /* the pet is decorative — a digest failure must never break it */ }
-}
-
-/* Fetch-once-on-boot of TODAY's digest so the pet is day-aware even when the
-   user never opens My Day. Reuses the instant-paint IDB cache first (no cold
-   blocking network on load) and the SAME Api.daily.status + _mydaySetCache path
-   My Day uses — no second fetcher. Deduped: if My Day already loaded today
-   (in-memory _full report) we emit from that and skip the network; the reminder
-   already runs a lightweight conv-count probe, so this is the only added call
-   and it degrades to a silent no-op when the report isn't ready. */
-async function _mydayBootDayDigest() {
-  if (_myday._bootDigestDone) return;
-  _myday._bootDigestDone = true;
-  const today = _mydayTodayStr();
-  try {
-    // 1) My Day already has today's full report cached in memory → emit, no fetch.
-    const mem = _myday.cache[today];
-    if (mem && mem._full) { _mydayEmitDay(mem); return; }
-    // 2) Instant paint from the persistent IDB cache (survives reload) if present.
-    let hadCache = false;
-    try {
-      const cached = await _mydayIDB.get(today);
-      if (cached) { _mydayEmitDay(cached); hadCache = true; }
-    } catch (e) { /* cache optional */ }
-    // 3) Background revalidate through the shared status path. Only a ready
-    //    report emits (via _mydaySetCache); idle/generating/error → no-op.
-    const data = await Api.daily.status(today);
-    if (data && data.status === 'done' && data.report) {
-      _mydaySetCache(today, data.report);   // emits tofu:day through the choke
-    }
-    // idle / generating / error / not-ready → leave the pet on its cached or
-    // generic behavior; never force a blank digest.
-    void hadCache;
-  } catch (e) {
-    console.warn('[MyDay] boot day-digest failed (pet stays generic):', e && e.message);
-  }
+  _mydayPersistReport(dateStr, report);
 }
 
 function openDailyReport() {
@@ -207,13 +64,6 @@ function closeDailyReport() {
   // DON'T stop polls — let background generation continue
 }
 
-/* Status: 3-state for streams */
-const _STATUS_ICONS = {
-  done:        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#34d399" opacity="0.18" stroke="#34d399" stroke-width="1.5"/><path d="M8 12l3 3 5-5" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  in_progress: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#fbbf24" opacity="0.15" stroke="#fbbf24" stroke-width="1.5"/><path d="M12 7v5l3 3" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  blocked:     '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#f87171" opacity="0.15" stroke="#f87171" stroke-width="1.5"/><line x1="8" y1="8" x2="16" y2="16" stroke="#f87171" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="8" x2="8" y2="16" stroke="#f87171" stroke-width="2" stroke-linecap="round"/></svg>',
-  incomplete:  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" opacity="0.25"/></svg>',
-};
 /* The status cycle order (in_progress → done → blocked → …) is owned by the
  * backend (routes/api_v1/daily_report.py::_STATUS_CYCLE). We POST action:'cycle'
  * and render whatever status the server returns — no client-side next-status math. */
@@ -352,7 +202,9 @@ async function _mydayFetchMonthOverview(year, month) {
   // month (a fresh reopen / reload). The server fetch below still runs and
   // reconciles, so a stale cache is only ever shown for a few hundred ms.
   try {
-    const cachedMonth = await _mydayIDB.getMonth(monthKey);
+    const repository = _mydayReportRepository();
+    const cachedMonth = repository && typeof repository.readMonth === 'function'
+      ? await repository.readMonth(monthKey) : null;
     // Guard: user may have navigated to a different month while IDB read was in flight.
     if (cachedMonth && _myday.year === year && _myday.month === month) {
       if (cachedMonth.cost_days) _myday._costDays = cachedMonth.cost_days;
@@ -391,7 +243,15 @@ async function _mydayFetchMonthOverview(year, month) {
     }
     // Persist the authoritative month overview so the next reopen/reload paints
     // historical balances instantly (server stays the source of truth).
-    try { _mydayIDB.putMonth(monthKey, { cost_days: data.cost_days || {}, conv_days: data.conv_days || {} }); } catch (e) { /* cache optional */ }
+    try {
+      const repository = _mydayReportRepository();
+      if (repository && typeof repository.storeMonth === 'function') {
+        const pending = repository.storeMonth(monthKey, {
+          cost_days: data.cost_days || {}, conv_days: data.conv_days || {},
+        });
+        if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+      }
+    } catch (_error) { /* reconstructible cache is optional */ }
     _myday._overviewCache = { key: `${year}-${month}`, ts: Date.now() };
     if (changed) {
       _mydayRenderCalendar();
@@ -444,7 +304,9 @@ async function _mydaySelectDay(day) {
     painted = true;
   } else {
     try {
-      const cachedReport = await _mydayIDB.get(dateStr);
+      const repository = _mydayReportRepository();
+      const cachedReport = repository && typeof repository.readReport === 'function'
+        ? await repository.readReport(dateStr) : null;
       // Guard: the user may have clicked another day while IDB read was in flight.
       if (cachedReport && _myday.selectedDateStr === dateStr) {
         cachedReport._full = true;
@@ -671,20 +533,10 @@ async function _mydayRenderWaiting(dateStr) {
   const container = document.getElementById('mydayTasks');
   if (!container) return;
 
-  const tofuSvg = `<svg class="myday-empty-tofu" width="56" height="56" viewBox="0 0 32 32" fill="none">
-    <path d="M15.3 4.6 L6.4 9.6 L16.3 16 L26.2 10.5Z" fill="currentColor" opacity=".12"/>
-    <path d="M6.4 9.6 L6.1 21.1 L17.2 27.2 L16.3 16Z" fill="currentColor" opacity=".08"/>
-    <path d="M16.3 16 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" fill="currentColor" opacity=".05"/>
-    <path d="M15.3 4.6 L6.4 9.6 L6.1 21.1 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" stroke="currentColor" stroke-width=".6" stroke-linejoin="round" fill="none"/>
-    <rect x="7.8" y="14.2" width="2.6" height="3.3" rx=".3" fill="currentColor"/>
-    <rect x="13.1" y="16.5" width="2.6" height="3.8" rx=".3" fill="currentColor"/>
-    <path d="M10.1 20.1 Q12 21.6 13.9 20.1" stroke="currentColor" stroke-width=".5" fill="none" stroke-linecap="round"/>
-  </svg>`;
-
   // Show initial waiting state immediately
   container.innerHTML = `
     <div class="myday-empty">
-      ${tofuSvg}
+      ${MYDAY_PRESENTATION_ASSETS.emptyIllustration}
       <div class="myday-empty-title">${t('myday.reportNotGenerated')}</div>
       <div class="myday-empty-hint">${t('myday.checkingConvs')}</div>
     </div>`;
@@ -711,7 +563,7 @@ async function _mydayRenderWaiting(dateStr) {
 
   container.innerHTML = `
     <div class="myday-empty">
-      ${tofuSvg}
+      ${MYDAY_PRESENTATION_ASSETS.emptyIllustration}
       <div class="myday-empty-title">${t('myday.reportNotGenerated')}</div>
       <div class="myday-empty-hint">${hint}</div>
       ${convCount > 0 ? `
@@ -767,35 +619,6 @@ async function _mydayTriggerGenerate() {
     _mydayRenderCalendar();
   } catch (e) {
     console.warn('[MyDay] Generate failed:', e);
-    if (_myday.selectedDateStr === dateStr) _mydayRenderEmpty(t('myday.genFailRetry'));
-    if (refreshBtn) refreshBtn.classList.remove('spinning');
-  }
-}
-
-async function _mydayTriggerGenerateForDate(dateStr, force) {
-  if (_myday._pollTimers[dateStr]) return; // already running
-
-  _mydayShowProgressUI(dateStr, { stage: 'starting' });
-  const refreshBtn = document.getElementById('mydayRefreshBtn');
-  if (refreshBtn) refreshBtn.classList.add('spinning');
-
-  try {
-    const resp = await Api.daily.generate(dateStr, !!force);
-    if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
-    const data = await resp.json();
-
-    if (data.status === 'done' && data.report) {
-      _mydaySetCache(dateStr, data.report);
-      if (_myday.selectedDateStr === dateStr) _mydayRenderTasks(data.report);
-      if (refreshBtn) refreshBtn.classList.remove('spinning');
-      _mydayRenderCalendar();
-      return;
-    }
-
-    _mydayStartPolling(dateStr);
-    _mydayRenderCalendar();
-  } catch (e) {
-    console.warn('[MyDay] Generate failed for', dateStr, e);
     if (_myday.selectedDateStr === dateStr) _mydayRenderEmpty(t('myday.genFailRetry'));
     if (refreshBtn) refreshBtn.classList.remove('spinning');
   }
@@ -948,25 +771,22 @@ function _mydayTodoRow(item) {
   const isCarried = !!item._carried;
   const hasAction = !!item.quick_action;
   const qa_prefill = hasAction ? (item.quick_action.prefill || '') : '';
-  const checkSvg = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7"/></svg>`;
-  const delSvg = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"><path d="M1 1l6 6M7 1l-6 6"/></svg>`;
-  const launchSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
   const carriedBadge = isCarried ? `<span class="myday-inherited-badge" style="background:rgba(245,158,11,0.12);color:#f59e0b">${t('myday.badgeCarried')}</span>` : '';
   const launchBtn = hasAction ? `
       <button class="myday-todo-launch"
         data-tofu-action="event.stopPropagation();_mydayStartTodoConv('${escapeHtml(item.id)}')"
-        title="${t('myday.startConv')}">${launchSvg}</button>` : '';
+        title="${t('myday.startConv')}">${MYDAY_PRESENTATION_ASSETS.todoLaunchIcon}</button>` : '';
   return `
     <div class="myday-todo-item${isDone ? ' done' : ''}">
       <button class="myday-todo-check${isDone ? ' checked' : ''}"
         data-tofu-action="_mydayToggleTodo('${escapeHtml(item.id)}')"
-        title="${isDone ? t('myday.markUndone') : t('myday.markDone')}">${checkSvg}</button>
+        title="${isDone ? t('myday.markUndone') : t('myday.markDone')}">${MYDAY_PRESENTATION_ASSETS.todoCheckIcon}</button>
       <span class="myday-todo-text"${qa_prefill ? ` title="${escapeHtml(qa_prefill)}"` : ''}>${escapeHtml(item.text)}</span>
       ${carriedBadge}
       ${launchBtn}
       <button class="myday-todo-del"
         data-tofu-action="event.stopPropagation();_mydayDeleteTodo('${escapeHtml(item.id)}')"
-        title="${t('myday.deleteTodo')}">${delSvg}</button>
+        title="${t('myday.deleteTodo')}">${MYDAY_PRESENTATION_ASSETS.todoDeleteIcon}</button>
     </div>`;
 }
 
@@ -976,41 +796,34 @@ function _mydayInheritedTodoRow(item) {
   const originDate = item._origin_date || '';
   const hasAction = !!item.quick_action;
   const qa_prefill = hasAction ? (item.quick_action.prefill || '') : '';
-  const checkSvg = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7"/></svg>`;
-  const delSvg = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"><path d="M1 1l6 6M7 1l-6 6"/></svg>`;
-  const launchSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
   const launchBtn = hasAction ? `
       <button class="myday-todo-launch"
         data-tofu-action="event.stopPropagation();_mydayStartTodoConvInherited('${escapeHtml(item.id)}', '${escapeHtml(originDate)}')"
-        title="${t('myday.startConv')}">${launchSvg}</button>` : '';
+        title="${t('myday.startConv')}">${MYDAY_PRESENTATION_ASSETS.todoLaunchIcon}</button>` : '';
   return `
     <div class="myday-todo-item inherited${isDone ? ' done' : ''}">
       <button class="myday-todo-check${isDone ? ' checked' : ''}"
         data-tofu-action="_mydayToggleInheritedTodo('${escapeHtml(item.id)}', '${escapeHtml(originDate)}')"
-        title="${isDone ? t('myday.markUndone') : t('myday.markDone')}">${checkSvg}</button>
+        title="${isDone ? t('myday.markUndone') : t('myday.markDone')}">${MYDAY_PRESENTATION_ASSETS.todoCheckIcon}</button>
       <span class="myday-todo-text"${qa_prefill ? ` title="${escapeHtml(qa_prefill)}"` : ''}>${escapeHtml(item.text)}</span>
       <span class="myday-inherited-badge">${t('myday.badgeYesterday')}</span>
       ${launchBtn}
       <button class="myday-todo-del"
         data-tofu-action="event.stopPropagation();_mydayDeleteInheritedTodo('${escapeHtml(item.id)}', '${escapeHtml(originDate)}')"
-        title="${t('myday.deleteTodo')}">${delSvg}</button>
+        title="${t('myday.deleteTodo')}">${MYDAY_PRESENTATION_ASSETS.todoDeleteIcon}</button>
     </div>`;
 }
 
 /* ═══════ Unfinished TODO row (read-only, from yesterday's expired plan) ═══════ */
 function _mydayUnfinishedRow(item, idx) {
   const hasAction = !!item.quick_action;
-  const dashCircle = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-    <circle cx="12" cy="12" r="9" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3" fill="#f59e0b" fill-opacity="0.06"/>
-  </svg>`;
-  const launchSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
   const launchBtn = hasAction ? `
       <button class="myday-todo-launch"
         data-tofu-action="event.stopPropagation();_mydayStartTodoConvUnfinished(${idx})"
-        title="${t('myday.startConv')}">${launchSvg}</button>` : '';
+        title="${t('myday.startConv')}">${MYDAY_PRESENTATION_ASSETS.todoLaunchIcon}</button>` : '';
   return `
     <div class="myday-todo-item unfinished" style="opacity:0.55">
-      <span style="display:inline-flex;align-items:center;width:22px;justify-content:center;flex-shrink:0">${dashCircle}</span>
+      <span style="display:inline-flex;align-items:center;width:22px;justify-content:center;flex-shrink:0">${MYDAY_PRESENTATION_ASSETS.unfinishedIcon}</span>
       <span class="myday-todo-text">${escapeHtml(item.text)}</span>
       ${launchBtn}
     </div>`;
@@ -1049,16 +862,6 @@ function _mydayRenderEmpty(msg) {
   const container = document.getElementById('mydayTasks');
   if (!container) return;
 
-  const tofuSvg = `<svg class="myday-empty-tofu" width="56" height="56" viewBox="0 0 32 32" fill="none">
-    <path d="M15.3 4.6 L6.4 9.6 L16.3 16 L26.2 10.5Z" fill="currentColor" opacity=".12"/>
-    <path d="M6.4 9.6 L6.1 21.1 L17.2 27.2 L16.3 16Z" fill="currentColor" opacity=".08"/>
-    <path d="M16.3 16 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" fill="currentColor" opacity=".05"/>
-    <path d="M15.3 4.6 L6.4 9.6 L6.1 21.1 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" stroke="currentColor" stroke-width=".6" stroke-linejoin="round" fill="none"/>
-    <rect x="7.8" y="14.2" width="2.6" height="3.3" rx=".3" fill="currentColor"/>
-    <rect x="13.1" y="16.5" width="2.6" height="3.8" rx=".3" fill="currentColor"/>
-    <path d="M10.1 20.1 Q12 21.6 13.9 20.1" stroke="currentColor" stroke-width=".5" fill="none" stroke-linecap="round"/>
-  </svg>`;
-
   // Check if there are inherited today_todos even for empty report
   const dateStr = _myday.selectedDateStr;
   const cached = _myday.cache[dateStr];
@@ -1075,7 +878,7 @@ function _mydayRenderEmpty(msg) {
   container.innerHTML = `
     ${todayHtml}
     <div class="myday-empty">
-      ${tofuSvg}
+      ${MYDAY_PRESENTATION_ASSETS.emptyIllustration}
       <div class="myday-empty-title">${msg || t('myday.quietDay')}</div>
       <div class="myday-empty-hint">${t('myday.noConvsFound')}</div>
     </div>
@@ -1090,158 +893,42 @@ function _mydayRenderEmpty(msg) {
   if (stats) stats.innerHTML = '';
 }
 
-/* ═══════ Launch a TODO item as a new conversation ═══════ */
-function _mydayStartTodoConv(todoId) {
-  if (!todoId) return;
-  const dateStr = _myday.selectedDateStr;
-  const cached = _myday.cache[dateStr];
-  if (!cached) return;
-  // Search in tomorrow list
-  const item = (cached.tomorrow || []).find(t => t.id === todoId);
-  if (!item || !item.quick_action) return;
-  _mydayLaunchConvFromAction(item);
-}
-
-function _mydayStartTodoConvInherited(todoId, originDate) {
-  if (!todoId) return;
-  const dateStr = _myday.selectedDateStr;
-  const cached = _myday.cache[dateStr];
-  if (!cached) return;
-  // Search in today_todos (inherited) list
-  const item = (cached.today_todos || []).find(t => t.id === todoId);
-  if (!item || !item.quick_action) return;
-  _mydayLaunchConvFromAction(item);
-}
-
-function _mydayStartTodoConvUnfinished(idx) {
-  const dateStr = _myday.selectedDateStr;
-  const cached = _myday.cache[dateStr];
-  if (!cached) return;
-  const unfinished = cached.unfinished || [];
-  const item = unfinished[idx];
-  if (!item || !item.quick_action) return;
-  _mydayLaunchConvFromAction(item);
-}
-
-function _mydayLaunchConvFromAction(item) {
-  const qa = item.quick_action;
-  if (!qa) return;
-
-  // 1) Close the daily report modal
-  closeDailyReport();
-
-  // 2) Pre-fill the composer BEFORE newChat() — ORDER IS LOAD-BEARING.
-  //    newChat() measures hasInput from the composer and, finding it EMPTY,
-  //    clears the project attachment + tool config (_clearProjectStateLocal /
-  //    _resetToolsToDefaults in main_conv_lifecycle.js). Pre-filling first
-  //    engages newChat's own "pending input keeps the project armed" rule, so
-  //    a quick action fired while a project is active (qa.projectEnabled)
-  //    stays IN that project. The old order prefilled AFTER newChat, so the
-  //    project was always cleared — and the comment that used to sit here
-  //    ("project is already active — keep it") described the OPPOSITE of what
-  //    newChat had just done. (Same fix as the project-brain createConv
-  //    launcher, 2026-08-01.)
-  const input = document.getElementById('userInput');
-  if (input) {
-    input.value = qa.prefill || item.text || '';
-  }
-
-  // 3) Create the new conversation — with the composer non-empty, newChat
-  //    keeps the project attachment and tool config.
-  newChat();
-
-  // 4) Apply tool configuration from quick_action
-  if (qa.searchMode && qa.searchMode !== 'off') {
-    if (typeof _applySearchModeUI === 'function') _applySearchModeUI(qa.searchMode);
-  } else {
-    if (typeof _applySearchModeUI === 'function') _applySearchModeUI('off');
-  }
-  if (typeof _applyFetchEnabledUI === 'function')
-    _applyFetchEnabledUI(!!qa.fetchEnabled);
-  if (typeof _applyCodeExecUI === 'function')
-    _applyCodeExecUI(!!qa.codeExecEnabled);
-  if (typeof _applyBrowserUI === 'function')
-    _applyBrowserUI(!!qa.browserEnabled);
-
-  // 5) Autosize + focus the composer
-  if (input) {
-    input.style.height = 'auto';
-    input.style.height = input.scrollHeight + 'px';
-    input.focus();
-  }
-
-  // 6) Update send button state
-  if (typeof updateSendButton === 'function') updateSendButton();
-}
-
-
-/* ═══════ Daily Reminder — gentle toast to check daily report ═══════ */
-
-/**
- * _mydayScheduleReminder — schedule a daily toast reminder.
- *
- * Shows a toast once per day (afternoon, after enough conversations)
- * nudging the user to check their daily report.
- * Respects a localStorage flag so it only shows once per calendar day.
- */
-function _mydayScheduleReminder() {
-  const REMINDER_DELAY_MS = 3 * 60 * 60 * 1000; // 3 hours after page load
-  const MIN_HOUR = 14; // Don't remind before 2 PM
-
-  setTimeout(async () => {
-    try {
-      const now = new Date();
-      if (now.getHours() < MIN_HOUR) return; // too early
-
-      // Check if already reminded today
-      const todayStr = _mydayDateStr(now.getFullYear(), now.getMonth(), now.getDate());
-      const lastReminder = localStorage.getItem('tofu_myday_last_reminder');
-      if (lastReminder === todayStr) return; // already shown today
-
-      // Check if modal is already open
-      const modal = document.getElementById('dailyReportModal');
-      if (modal && modal.classList.contains('open')) return;
-
-      // Check if there are conversations today (quick API check)
-      let convCount = 0;
-      try {
-        const data = await Api.daily.convCount(todayStr);
-        if (data) convCount = data.count || 0;
-      } catch (e) { /* ignore */ }
-
-      if (convCount < 3) return; // not enough activity to warrant a reminder
-
-      // Mark as reminded
-      localStorage.setItem('tofu_myday_last_reminder', todayStr);
-
-      // Show a gentle toast
-      if (typeof showToast === 'function') {
-        const title = t('myday.reminderTitle');
-        const body = convCount > 0
-          ? t('myday.reminderBody', { n: convCount })
-          : t('myday.reminderBodyGeneric');
-        showToast('📋', title, body, 8000);
-      }
-    } catch (e) {
-      console.warn('[MyDay] Reminder check failed:', e);
-    }
-  }, REMINDER_DELAY_MS);
-}
-
-// Auto-schedule reminder on page load
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', _mydayScheduleReminder);
-} else {
-  _mydayScheduleReminder();
-}
-
-// Fetch-once today's digest so the project-bar pet is day-aware without the
-// user opening My Day. Deferred a beat so it never competes with first paint;
-// it paints from the IDB cache first and degrades to a silent no-op when the
-// report isn't ready. Runs once per session (guarded by _bootDigestDone).
-function _mydayBootDayDigestSoon() { setTimeout(_mydayBootDayDigest, 2500); }
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', _mydayBootDayDigestSoon);
-} else {
-  _mydayBootDayDigestSoon();
+// Task mutation policy lives in the typed lazy My Day owner. This retained
+// panel exposes only its selected report plus cache/render presentation ports.
+if (typeof runtimeScope !== 'undefined') {
+  runtimeScope.MyDayTaskPresentation = Object.freeze({
+    selectedReport: function () {
+      const date = _myday.selectedDateStr;
+      return { date: date, report: date ? (_myday.cache[date] || null) : null };
+    },
+    acceptAuthoritativeReport: _mydaySetCache,
+    persistReport: _mydayPersistReport,
+    renderReport: _mydayRenderTasks,
+    renderCalendar: _mydayRenderCalendar,
+    taskInput: function () {
+      return document.getElementById('mydayTodoInput');
+    },
+    composerInput: function () {
+      return document.getElementById('userInput');
+    },
+    closeReport: closeDailyReport,
+    createConversation: function () {
+      if (typeof newChat === 'function') newChat();
+    },
+    applySearchMode: function (mode) {
+      if (typeof _applySearchModeUI === 'function') _applySearchModeUI(mode);
+    },
+    applyFetchEnabled: function (enabled) {
+      if (typeof _applyFetchEnabledUI === 'function') _applyFetchEnabledUI(enabled);
+    },
+    applyCodeExecEnabled: function (enabled) {
+      if (typeof _applyCodeExecUI === 'function') _applyCodeExecUI(enabled);
+    },
+    applyBrowserEnabled: function (enabled) {
+      if (typeof _applyBrowserUI === 'function') _applyBrowserUI(enabled);
+    },
+    updateSendButton: function () {
+      if (typeof updateSendButton === 'function') updateSendButton();
+    },
+  });
 }

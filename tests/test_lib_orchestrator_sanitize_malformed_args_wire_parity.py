@@ -7,7 +7,8 @@ lib.tasks_pkg.orchestrator._sanitize_tool_call_args
 The cluster runs RIGHT AFTER ``parse_tool_calls`` returns. For any
 ``parsed_tcs`` entry whose ``args_parse_err`` is non-None, the cluster:
 
-    * Finds the matching ``tool_calls[i]`` on ``messages[-1]`` by tc_id.
+    * Finds the matching ``tool_calls[i]`` on ``messages[-1]`` by object
+      identity, with an occurrence queue for compatibility adapters.
     * Rewrites its ``function.arguments`` to ``'{}'`` — the error
       tool_result already teaches the model what went wrong, and the
       gateway now sees valid JSON on the next round instead of a HTTP
@@ -162,13 +163,12 @@ def test_leaf_carries_arguments_write():
         "fn['arguments'] = '{}'")
 
 
-def test_leaf_matches_tool_call_by_tc_id():
-    """The leaf must find the matching live tool_call by tc_id — a
-    naive positional match would silently corrupt a round with
-    multiple parallel tool_calls where only one had bad args."""
+def test_leaf_carries_occurrence_queue_pairing():
+    """Duplicate provider ids must not collapse onto the first live call."""
     src = LEAF_PY.read_text()
-    assert "'id') != tc_id" in src or "'id') == tc_id" in src, (
-        'sanitize_malformed_tool_call_args must match by tc_id')
+    assert 'live_by_id' in src and 'popleft()' in src, (
+        'sanitize_malformed_tool_call_args must pair duplicate ids by '
+        'occurrence queue')
 
 
 def test_leaf_carries_raw_args_log():
@@ -273,6 +273,36 @@ def test_helper_matches_by_tc_id_not_position():
     assert messages[-1]['tool_calls'][1]['function']['arguments'] == '{}'
 
 
+def test_helper_pairs_recycled_id_by_occurrence_not_first_match():
+    """The second malformed twin must never sanitize the first good call."""
+    from lib.tasks_pkg.orchestrator._sanitize_tool_call_args import (
+        sanitize_malformed_tool_call_args)
+
+    good_args = '{"path":"safe.py"}'
+    bad_args = r'{"pattern":"\d"}'
+    messages = [{
+        'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'recycled', 'function': {
+                'name': 'read_files', 'arguments': good_args}},
+            {'id': 'recycled', 'function': {
+                'name': 'grep_search', 'arguments': bad_args}},
+        ],
+    }]
+    parsed = [
+        _make_parsed_tc(
+            tc_id='recycled', fn_name='read_files', args_parse_err=None),
+        _make_parsed_tc(
+            tc_id='recycled', fn_name='grep_search',
+            args_parse_err='Invalid \\ escape'),
+    ]
+
+    sanitize_malformed_tool_call_args(
+        parsed, messages, tid='abcd1234', conv_id='conv-x', model='model-x')
+
+    assert messages[-1]['tool_calls'][0]['function']['arguments'] == good_args
+    assert messages[-1]['tool_calls'][1]['function']['arguments'] == '{}'
+
+
 def test_helper_is_no_op_on_empty_parsed_tcs():
     """No parsed tcs → no work → no mutation, no exception."""
     from lib.tasks_pkg.orchestrator._sanitize_tool_call_args import (
@@ -324,3 +354,58 @@ def test_helper_emits_info_log_with_raw_args(caplog):
     text = ' '.join(rec.getMessage() for rec in caplog.records)
     assert 'raw malformed args' in text.lower() or 'raw' in text.lower(), (
         'sanitize helper must INFO-log the raw bad args')
+
+
+def test_helper_preserves_valid_json_args_rejected_at_contract_level():
+    """A contract/shape rejection sets args_parse_err even though the
+    arguments PARSED fine (conv mtdqz4bkuyitzj: todo_write failed
+    minLength at $.todos[0].id). Rewriting that payload to '{}' hid the
+    exact arguments the fed-back schema error refers to, so the recovery
+    round could not self-correct. Valid-JSON object args must survive."""
+    from lib.tasks_pkg.orchestrator._sanitize_tool_call_args import (
+        sanitize_malformed_tool_call_args)
+    contract_rejected = (
+        '{"todos": [{"todos": [], "operation": "sync", "id": ""}]}')
+    messages = [{
+        'role': 'assistant',
+        'content': '',
+        'tool_calls': [{
+            'id': 'tc_contract',
+            'function': {
+                'name': 'todo_write', 'arguments': contract_rejected},
+        }],
+    }]
+    parsed = [_make_parsed_tc(
+        tc_id='tc_contract', fn_name='todo_write',
+        args_parse_err=(
+            'ERROR: Tool call `todo_write` was NOT executed. '
+            '[invalid_argument_length] Invalid length at $.todos[0].id. '
+            'Path: $.todos[0].id. Match arguments_schema and retry.'))]
+    sanitize_malformed_tool_call_args(
+        parsed, messages, tid='abcd1234', conv_id='conv-x',
+        model='claude-x')
+    assert (messages[-1]['tool_calls'][0]['function']['arguments']
+            == contract_rejected)
+
+
+def test_helper_still_rewrites_valid_json_non_object_args():
+    """Valid JSON that decodes to a NON-object (array/scalar) still trips
+    the gateway's arguments-object gate on the next round — rewritten."""
+    from lib.tasks_pkg.orchestrator._sanitize_tool_call_args import (
+        sanitize_malformed_tool_call_args)
+    array_args = '[1, 2, 3]'
+    messages = [{
+        'role': 'assistant',
+        'content': '',
+        'tool_calls': [{
+            'id': 'tc_arr',
+            'function': {'name': 'grep', 'arguments': array_args},
+        }],
+    }]
+    parsed = [_make_parsed_tc(
+        tc_id='tc_arr', fn_name='grep',
+        args_parse_err='arguments must decode to an object')]
+    sanitize_malformed_tool_call_args(
+        parsed, messages, tid='abcd1234', conv_id='conv-x',
+        model='claude-x')
+    assert messages[-1]['tool_calls'][0]['function']['arguments'] == '{}'

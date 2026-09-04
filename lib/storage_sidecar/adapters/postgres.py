@@ -7,7 +7,7 @@ platform; application startup validates but never migrates the schema.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import time
 from typing import Any
 
@@ -22,7 +22,9 @@ from lib.storage_sidecar.adapters.base import Backend, Operation, receipt_cachea
 from lib.storage_sidecar.config import SidecarConfig
 from lib.storage_sidecar.preflight import run_filesystem_preflight
 from lib.storage_sidecar.receipt_codec import (
-    decode_receipt_response,
+    COMMAND_RECEIPT_LOOKUP_SQL,
+    command_receipt_identity_v2,
+    decode_command_receipt_lookup,
     encode_receipt_response,
 )
 from lib.storage_sidecar.schema import (
@@ -31,6 +33,7 @@ from lib.storage_sidecar.schema import (
     initialize_schema,
     validate_schema_version,
 )
+from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
 
 
 logger = get_logger('tofu.storage.sidecar.postgres')
@@ -39,8 +42,13 @@ logger = get_logger('tofu.storage.sidecar.postgres')
 class PostgresSession:
     backend = 'postgres'
 
-    def __init__(self, connection: psycopg.Connection[DictRow]) -> None:
+    def __init__(
+        self,
+        connection: psycopg.Connection[DictRow],
+        turn_projection_cache: TurnProjectionCache | None = None,
+    ) -> None:
         self.connection = connection
+        self.turn_projection_cache = turn_projection_cache
 
     def lock_key(self, namespace: str, key: str) -> None:
         # Two-key advisory locks serialize one semantic bucket without
@@ -70,6 +78,22 @@ class PostgresSession:
         with self.connection.cursor() as cursor:
             cursor.execute(self._sql(sql), params)
             return max(0, int(cursor.rowcount))
+
+    def execute_many_exact(
+        self, sql: str, params: Sequence[tuple[Any, ...]],
+    ) -> int:
+        """Pipeline a bounded DML batch that must match every input row."""
+        if not params:
+            return 0
+        with self.connection.cursor() as cursor:
+            cursor.executemany(self._sql(sql), params)
+            affected = max(0, int(cursor.rowcount))
+        if affected != len(params):
+            raise StorageError(
+                'database_conflict',
+                'Bulk mutation did not affect every expected row',
+            )
+        return affected
 
     def fetch_one(
         self, sql: str, params: tuple[Any, ...] = (),
@@ -193,6 +217,8 @@ class PostgresBackend(Backend):
         self._closed = False
         self._preflight: dict[str, Any] = {}
         self._metrics = {'queries': 0, 'commands': 0, 'retries': 0, 'failures': 0}
+        self._turn_projection_cache = TurnProjectionCache(
+            config.turn_projection_cache_mib * 1024 * 1024)
         self._turn_search_projection: Any = None
         self._turn_search_projection_error = ''
 
@@ -204,7 +230,15 @@ class PostgresBackend(Backend):
         *,
         readonly: bool,
         retries: int,
+        transaction_timeout_s: float | None = None,
     ) -> Any:
+        if transaction_timeout_s is not None and not (
+            0.05 <= float(transaction_timeout_s) <= 300.0
+        ):
+            raise StorageError(
+                'database_protocol_error',
+                'Invalid storage transaction timeout override',
+            )
         attempt = 0
         while True:
             connection = pool.acquire(deadline_at)
@@ -212,7 +246,11 @@ class PostgresBackend(Backend):
             retrying = False
             try:
                 remaining_ms = max(1, int(min(
-                    self.config.transaction_timeout_s,
+                    (
+                        self.config.transaction_timeout_s
+                        if transaction_timeout_s is None
+                        else float(transaction_timeout_s)
+                    ),
                     deadline_at - time.monotonic(),
                 ) * 1000))
                 with connection.cursor() as cursor:
@@ -235,7 +273,8 @@ class PostgresBackend(Backend):
                         "SELECT set_config('lock_timeout', %s, true)",
                         (str(min(2000, remaining_ms)),),
                     )
-                result = operation(PostgresSession(connection))
+                result = operation(PostgresSession(
+                    connection, self._turn_projection_cache))
                 if readonly:
                     connection.rollback()
                 else:
@@ -411,6 +450,7 @@ class PostgresBackend(Backend):
         deadline_at: float,
         *,
         receipt_required: bool,
+        transaction_timeout_s: float | None = None,
     ) -> Any:
         del priority  # PostgreSQL uses its isolated write pool, not SQLite lanes.
         if receipt_required and (
@@ -419,6 +459,11 @@ class PostgresBackend(Backend):
                 or len(command_id) > 200):
             raise StorageError(
                 'database_protocol_error', 'A valid command_id is required')
+        receipt_identity = (
+            command_receipt_identity_v2(
+                command_id, operation_name, payload_digest)
+            if receipt_required else None
+        )
         if self._write_pool is None:
             raise StorageError('database_unavailable', 'PostgreSQL write pool is not ready')
 
@@ -432,33 +477,44 @@ class PostgresBackend(Backend):
                     'SELECT pg_advisory_xact_lock(hashtext(?)) AS locked',
                     (command_id,),
                 )
-                receipt = session.fetch_one(
-                    'SELECT operation, request_digest, response_json '
-                    'FROM storage_command_receipts WHERE command_id = ? FOR UPDATE',
-                    (command_id,),
+                assert receipt_identity is not None
+                command_key, request_digest = receipt_identity
+                found, replay = decode_command_receipt_lookup(
+                    session.fetch_all(
+                        COMMAND_RECEIPT_LOOKUP_SQL,
+                        (
+                            operation_name, payload_digest, command_id,
+                            operation_name, request_digest, command_key,
+                        ),
+                    )
                 )
-                if receipt is not None:
-                    if (receipt['operation'] != operation_name
-                            or receipt['request_digest'] != payload_digest):
-                        raise StorageError(
-                            'database_conflict', 'command_id was reused for a different request')
-                    return decode_receipt_response(receipt['response_json'])
+                if found:
+                    return replay
             response = operation(session)
             # Clean refusals (ok=False) mutate nothing — memoizing them as
             # receipts would freeze a stale verdict (see base.receipt_cacheable).
             if receipt_required and receipt_cacheable(response):
+                assert receipt_identity is not None
+                command_key, request_digest = receipt_identity
                 encoded = encode_receipt_response(response)
                 session.execute(
-                    'INSERT INTO storage_command_receipts('
-                    'command_id, operation, request_digest, response_json, committed_at_ms) '
+                    'INSERT INTO storage_command_receipts_v2('
+                    'command_key, operation, request_digest, response_json, '
+                    'committed_at_ms) '
                     'VALUES (?, ?, ?, ?, ?)',
-                    (command_id, operation_name, payload_digest, encoded,
+                    (command_key, operation_name, request_digest, encoded,
                      int(time.time() * 1000)),
                 )
             return response
 
         result = self._transaction(
-            self._write_pool, transactional, deadline_at, readonly=False, retries=3)
+            self._write_pool,
+            transactional,
+            deadline_at,
+            readonly=False,
+            retries=3,
+            transaction_timeout_s=transaction_timeout_s,
+        )
         self._metrics['commands'] += 1
         if self._turn_search_projection is not None:
             self._turn_search_projection.wake()
@@ -502,6 +558,7 @@ class PostgresBackend(Backend):
             ),
             'read_pool': read_pool,
             'write_pool': write_pool,
+            'turn_projection_cache': self._turn_projection_cache.stats(),
             'turn_search_projection': (
                 self._turn_search_projection.status()
                 if self._turn_search_projection is not None else {
@@ -564,6 +621,7 @@ class PostgresBackend(Backend):
         if self._turn_search_projection is not None:
             self._turn_search_projection.close()
             self._turn_search_projection = None
+        self._turn_projection_cache.clear()
         if self._read_pool:
             self._read_pool.close()
             self._read_pool = None

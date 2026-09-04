@@ -204,7 +204,7 @@ def test_the_single_template_declares_both_wire_faces():
 @_INTERNAL_TEMPLATE
 def test_brand_is_the_gateway_not_a_model_family():
     """The template brands the ACCOUNT. Branding it 'claude' would drop the
-    whole card into the Claude group in the picker (core/model_group.js keys
+    whole card into the Claude group in the picker (core/model-group.ts keys
     grouping on brand), splitting one gateway across two sections."""
     assert _load(MEITUAN_TEMPLATE).get('brand') == 'yourprovider'
 

@@ -10,7 +10,7 @@ __all__ = [
     'GEMINI_FLASH_PREVIEW_MODEL',
     'MINIMAX_MODEL',
     'DOUBAO_MODEL', 'CLAUDE_SONNET_MODEL',
-    'IMAGE_GEN_MODEL', 'EMBEDDING_MODELS',
+    'IMAGE_GEN_MODEL',
     'PPTX_TRANSLATE_ENABLED',
     'DEBUG_MODE',
     'OPTIMIZER_ENABLED',
@@ -29,9 +29,9 @@ __all__ = [
 # ══════════════════════════════════════════════════════════
 #  Server Config Persistence
 # ══════════════════════════════════════════════════════════
-# On startup, this module reads data/config/server_config.json FIRST.
-# Values saved there override env-var defaults so that models/providers
-# added via the Settings UI survive a server restart.
+# On startup, this module reads data/config/server_config.json once for
+# miscellaneous non-provider settings and legacy model-default projections.
+# Provider access and credentials live exclusively in model-routing v2.
 # Each project copy has its own isolated config — no cross-contamination.
 #
 # Priority chain:  ENV VAR (explicit)  >  server_config.json  >  hardcoded default
@@ -79,28 +79,18 @@ def _cfg(env_key, saved_key, default, *, empty_env_is_unset=False):
         return saved_models[saved_key]
     return default
 
-# ── API Keys: flat list, all keys are equal ──
+# ── Legacy process-wide API environment ──
+# These values support explicit headless/direct-library callers only. HTTP
+# requests and Settings-managed providers route through owner-scoped v2.
 # Preferred: LLM_API_KEYS=key1,key2,key3  (comma-separated, any number)
 # Legacy single-var: LLM_API_KEY still works (for 1 key only)
-_DEFAULT_KEYS = []  # No hardcoded keys — set LLM_API_KEYS env var or configure via Settings UI
+_DEFAULT_KEYS = []  # No hardcoded or persisted-provider fallback.
 
 def _parse_api_keys():
-    """Build a flat list of API keys from environment variables and saved config.
-
-    Priority: LLM_API_KEYS env var > saved provider keys > LLM_API_KEY env var > defaults.
-    """
+    """Build legacy direct-call keys strictly from explicit environment."""
     keys_env = os.environ.get('LLM_API_KEYS', '')
     if keys_env:
         return [k.strip() for k in keys_env.split(',') if k.strip()]
-    # Check saved providers for keys
-    saved_providers = _SAVED_CONFIG.get('providers', [])
-    if saved_providers:
-        all_keys = []
-        for p in saved_providers:
-            if p.get('enabled', True):
-                all_keys.extend(p.get('api_keys', []))
-        if all_keys:
-            return all_keys
     # Legacy: single env var
     single = os.environ.get('LLM_API_KEY', '')
     if single:
@@ -112,16 +102,13 @@ LLM_API_KEYS = _parse_api_keys()
 LLM_API_KEY  = LLM_API_KEYS[0] if LLM_API_KEYS else ''  # backward compat alias
 
 def _resolve_base_url():
-    """Resolve LLM_BASE_URL: env var > first saved provider > default."""
+    """Resolve the legacy direct-call base URL from environment only."""
     env_val = os.environ.get('LLM_BASE_URL')
-    # An empty URL is never usable. Compose renders an absent optional
-    # interpolation as '', so treating it as authority would hide a provider
-    # saved through Settings and produce requests to `/chat/completions`.
+    # Compose renders an absent optional interpolation as ''. Treat it as
+    # unset, but never consult old persisted provider rows: doing so would
+    # collapse every authenticated owner into one process-global credential.
     if env_val:
         return env_val
-    for p in _SAVED_CONFIG.get('providers', []):
-        if p.get('enabled', True) and p.get('base_url'):
-            return p['base_url']
     return 'https://api.openai.com/v1'
 
 LLM_BASE_URL    = _resolve_base_url()
@@ -142,15 +129,6 @@ CLAUDE_SONNET_MODEL = os.environ.get('CLAUDE_SONNET_MODEL', '')
 
 # ── Image generation model ──
 IMAGE_GEN_MODEL = _cfg('IMAGE_GEN_MODEL', 'IMAGE_GEN_MODEL', '')
-
-# ── Embedding models ──
-# Benchmarked: all three work. v4 is fastest/recommended.
-_saved_embed = _SAVED_CONFIG.get('models', {}).get('EMBEDDING_MODELS')
-EMBEDDING_MODELS = _saved_embed if isinstance(_saved_embed, list) and _saved_embed else [
-    'text-embedding-3-small',     # 1536d — works on OpenAI and most compatible APIs
-    'text-embedding-3-large',     # 3072d — highest quality
-]
-
 
 # ── Machine Translation Provider (optional, for faster/cheaper translation) ──
 # When configured, translation uses a dedicated MT API (e.g. NiuTrans) instead
@@ -341,8 +319,7 @@ def reload_config():
 
     This makes Settings UI changes take effect immediately for:
       - Model names (LLM_MODEL, QWEN_MODEL, GEMINI_MODEL, etc.)
-      - API keys (LLM_API_KEYS, LLM_API_KEY)
-      - Base URL (LLM_BASE_URL)
+      - Explicit environment API keys/base URL for direct-library callers
       - Fetch settings (FETCH_TOP_N, FETCH_TIMEOUT, FETCH_MAX_CHARS_*, etc.)
       - Feature flags (TRADING_ENABLED)
 
@@ -371,13 +348,6 @@ def reload_config():
     _mod.DOUBAO_MODEL = _cfg('DOUBAO_MODEL', 'doubao', '')
     _mod.CLAUDE_SONNET_MODEL = os.environ.get('CLAUDE_SONNET_MODEL', '')
     _mod.IMAGE_GEN_MODEL = _cfg('IMAGE_GEN_MODEL', 'IMAGE_GEN_MODEL', '')
-
-    # Embedding models
-    _saved_embed = _SAVED_CONFIG.get('models', {}).get('EMBEDDING_MODELS')
-    _mod.EMBEDDING_MODELS = _saved_embed if isinstance(_saved_embed, list) and _saved_embed else [
-        'text-embedding-3-small',
-        'text-embedding-3-large',
-    ]
 
     # Fetch settings — same priority chain as module init: ENV > saved > default
     _search_raw = _SAVED_CONFIG.get('search', {})

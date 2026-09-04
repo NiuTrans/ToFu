@@ -1,8 +1,6 @@
 # Infrastructure and process runtime
 
-This map describes the production process that runs now. It intentionally
-contains no migration timeline, incident transcript, line-count snapshot or
-alternate import path.
+This map describes the production process that runs now. It intentionally contains no migration timeline, incident transcript, line-count snapshot or alternate import path.
 
 ## Entry points and owners
 
@@ -17,12 +15,12 @@ alternate import path.
 | Storage-free developer composition | `tofu_agent/runtime.py` | `AgentRuntime`, `AgentExecution` |
 | Lightweight sidecar and CLI | `tofu_agent/server.py`, `tofu_agent/cli.py` | `create_app()`, `tofu-agent serve` |
 | Agent public surface | `lib/agent_core/`, `lib/agent_core_manifest.py` | `lib.agent_core` |
-| Push delivery | `lib/agent_core/push.py`, `lib/agent_core/push_bus.py` | `push_event()`, `PushHub` |
+| Push delivery and residency policy | `lib/agent_core/push.py`, `lib/agent_core/push_bus.py`, `lib/agent_core/push_policy.py` | `push_event()`, `PushHub`, `resolve_push_budget()` |
 | Background task lifecycle | `lib/agent_core/task_runtime.py` | `TaskRuntime` |
 | Cross-process leases and counters | `lib/runtime_state_store.py` | `get_store()` |
 | Adaptive direct/proxy egress | `lib/netpath.py` | `note_url()`, `decide()`, `report_outcome()` |
 | Production teardown | `lib/server_shutdown.py` | `shutdown_production_runtime()` |
-| In-place restart handoff | `lib/server_reexec.py` | `begin_server_reexec()`, `execute_pending_server_reexec()` |
+| Restart handoff and managed lifecycle generation | `lib/server_reexec.py`, `supervisor_protocol.py`, `supervisor.py` | `begin_server_reexec()`, `execute_pending_server_reexec()`, `refresh_supervisor()`, `/reload`, `/restart-deferred` |
 
 `lib.agent_core.push` and `lib.agent_core.task_runtime` are the only module
 paths for their capabilities. `scripts/check_architecture.py` rejects retired
@@ -30,15 +28,9 @@ facades and imports.
 
 ## Assembly and lifecycle
 
-`create_app()` builds an independent application suitable for tests and schema
-tools. It owns only application-local resources: middleware, blueprints, auth,
-static delivery, error mapping and logging hooks. Importing it must not start a
-storage process, worker or network integration.
+`create_app()` builds an independent application suitable for tests and schema tools. It owns only application-local resources: middleware, blueprints, auth, static delivery, error mapping and logging hooks. Importing it must not start a storage process, worker or network integration.
 
-`create_production_app()` adds the two process lifecycles. Quart's native
-lifespan is the authority for startup rollback and shutdown. Startup handlers
-run in registration order; shutdown handlers run in reverse order and all get
-a cleanup attempt even if one fails.
+`create_production_app()` adds the two process lifecycles. Quart's native lifespan is the authority for startup rollback and shutdown. Startup handlers run in registration order; shutdown handlers run in reverse order and all get a cleanup attempt even if one fails.
 
 The required production sequence is:
 
@@ -58,33 +50,44 @@ do not create a second readiness or storage authority. A startup exception
 immediately runs the registered shutdown stack because Quart does not call
 `after_serving` when `before_serving` fails.
 
-An approved or idle-HEAD restart arms the deadline and releases producers and
-transports. The exec gate requires a storage-release certificate or exits for
-new-PID recovery. One existing Sidecar watcher uses close-on-exec pipe EOF to
-bind its lease to one process image; no child, live FD, or thread crosses exec.
+An approved or idle-HEAD restart arms the deadline and releases producers and transports; the exec gate requires a storage-release certificate or exits for new-PID recovery.
+One existing Sidecar watcher uses close-on-exec pipe EOF to bind its lease to one process image; no child, live FD, or thread crosses exec. A Supervisor-owned replacement first verifies a SHA-256 generation over the standard-library manager dependency closure; a stale Supervisor re-execs itself without stopping the independent worker, then acknowledges a deferred worker restart before signalling that worker. This prevents a long-lived parent from injecting pre-update concurrency/RSS defaults into every new child; unmanaged processes retain the in-place exec path.
+Every materialized resource budget records a policy version and the exact automatically generated knob names. A later policy generation may replace only those attributed values; operator/.env values are never inferred from their numbers or overwritten. Runtime resolution validates and clamps a present positive value before consulting the adaptive default, so launch-materialized/operator budgets never trigger an unused filesystem/cgroup probe; missing, malformed, zero, or negative values still derive from the one cached launch observation and remain bounded.
+Manager status exposes a credential-free live subset, and `serverctl.py doctor` compares the loaded Supervisor generation and worker budget with the next launch before recommending a restart.
+For a non-test checkout, the lifecycle manager rejects pytest process markers
+and pytest-owned data locations at request admission, persisted-state loading,
+worker adoption, and spawn. A contaminated persisted launch envelope is
+quarantined as a unit and replaced only by the project's clean declared
+environment; an unsafe project `.env` stops desired state until it is corrected.
+The legacy restart compatibility script has no boolean-only test bypass: a test
+copy must declare a private root beneath `TOFU_PYTEST_RUN_ROOT`, keep its script,
+project, and data directory below that root, and use an explicit non-15000 port.
+Before either signal, the copy also revalidates that the sole listener is its
+declared child PID with the same process start identity and a cwd below the test
+root; a no-listener recovery test disables the production `pgrep` fallback.
+Durable Supervisors intentionally outlive their launcher. Ephemeral test/dev
+launches may explicitly set `TOFU_SUPERVISOR_OWNER_PID`; disappearance of that
+owner stops any owned worker, releases its port, retires the Python Supervisor,
+and prevents the self-healing watchdog from restarting it.
 
 The ASGI lifespan and request path consume prebuilt frontend artifacts and
 never invoke Node. Both validate the atomic published graph (entries, recursive
 references, safe paths, files, and manifest digest); the manifest is the commit
 point, so later source edits cannot withdraw it during recovery or hard refresh.
 Before a source-checkout `start`, approved `restart`, or cold manager launch,
-`serverctl.py` validates authoring freshness and may rebuild once only for the
-owning frontend role with local Vite. Release installs remain fail-closed
-without a valid graph and never acquire a production Node dependency.
-For network/userspace checkouts, the stdlib manager routes CPython bytecode to a
-verified host-local private namespace keyed by project and interpreter. Its
-adaptive 16..64 MiB personal budget, 100,000 entries, 64 namespaces, seven-day
-TTL, 256 MiB reserve and manager-held lease make it disposable and race-safe;
-explicit Python policy wins and setup failure falls back to normal imports.
+`serverctl.py` validates the manifest's SHA-256 over every authoring input and
+may rebuild once only for the owning frontend role with local Vite. Content
+rather than timestamps distinguishes drift, so a valid prebuilt release needs
+no Node; a mismatched or corrupt graph fails before a live worker is stopped.
+The stdlib manager invokes the same isolated `prepare-frontend` command before
+every worker spawn, including automatic crash recovery, so a long-lived manager
+cannot bypass the gate after source files change.
+For network/userspace checkouts, the stdlib manager routes CPython bytecode to a verified host-local private namespace keyed by project and interpreter.
+Its adaptive 16..64 MiB personal budget, 100,000 entries, 64 namespaces, seven-day TTL, 256 MiB reserve and manager-held lease make it disposable and race-safe; explicit Python policy wins and setup failure falls back to normal imports.
 
-HTTP assembly compresses eligible whole responses outside the serving loop.
-Static artifacts may use their content-addressed 48-entry/8 MiB cache ceiling;
-dynamic user responses are never cached. For dynamic bodies below 1 MiB and
-for every distributed response, Brotli quality 4 / gzip level 6 preserve the
-bandwidth profile. Personal-mode dynamic bodies at or above 1 MiB use Brotli
-quality 2 / gzip level 1 to bound CPU and executor occupancy on the reference
-computer. This topology decision has no per-request inference or unbounded
-queue; the application default executor remains the execution boundary.
+HTTP assembly compresses eligible whole responses outside the serving loop. Static artifacts may use their content-addressed 48-entry/8 MiB cache ceiling; dynamic user responses are never cached.
+For dynamic bodies below 1 MiB and every distributed response, Brotli quality 4 / gzip level 6 preserve bandwidth; personal-mode bodies at or above 1 MiB use Brotli quality 2 / gzip level 1 to bound reference-computer CPU and executor occupancy.
+This topology decision has no per-request inference or unbounded queue; the application default executor remains the execution boundary.
 
 `lib/process_roles.py` is the sole role-to-capability table. API replicas own
 frontend/catalog/request services, workers own task recovery/execution, and
@@ -105,11 +108,16 @@ The public orchestrator probes are `/health/live`, `/health/ready`, and
 project only lifecycle state, process role, and a storage-ready boolean;
 detailed diagnostics remain authenticated. `/api/health` is the
 application-facing identity/liveness projection and `/api/ready` is the
-dependency-readiness projection used by the personal UI. The lifecycle manager
-requires the locked worker PID from `/api/health` and a passing `/api/ready`
-response before it reports startup complete. A live-but-unready worker is
-degraded, but dependency failure alone never enters the manager's wedge-kill
-policy.
+dependency-readiness projection used by the personal UI. Readiness carries the
+serving PID, so the lifecycle manager normally proves locked-worker identity
+and dependency readiness in one lightweight request; workers from an older
+generation fall back to `/api/health` without weakening the identity check. A
+live-but-unready worker is degraded, but dependency failure alone never enters
+the manager's wedge-kill policy.
+Successful high-frequency `/api/live` and `/api/ready` probes are filtered from
+the durable access log. Repeated failures retain their first two,
+power-of-two, and five-minute checkpoints while request metrics keep the exact
+count; probe cadence and fault detection are unchanged.
 
 The lightweight sidecar owns a separate, intentionally smaller ASGI assembly.
 It imports `tofu_agent.runtime`, not `server.py`, and exposes only health,
@@ -149,23 +157,15 @@ enforces two dependency rules:
   `lib.agent_core.store`, never by importing `lib.storage`,
   `lib.storage_sidecar`, or `lib.conversations`.
 
-The lazy `lib.agent_core` facade maps discoverable public symbols to their
-defining modules without importing the orchestration graph at package import
-time.
+The lazy `lib.agent_core` facade avoids orchestration imports at package import. `worker_executor.py` owns root Agent capacity: launch-probed workers, a finite FIFO (eight entries per worker, 8..512), and a separate bounded replacement budget for reaper-proven wedges.
+Queue residency is `pending`; callable entry is `running`; cancellation removes only queued work, while a quarantined call retires if it returns and never reads another item.
+`tofu_executor_{workers,active,queued,abandoned}` plus queue-wait, rejection, abandonment, resident-thread, and retirement metrics expose this boundary without task payloads.
 
 ## Push and shared runtime state
 
-`PushHub` owns subscriptions and local delivery. `push_bus.py` transports a
-frame between replicas; the in-process backend is the one-process transport
-and the Redis backend is the shared transport. Both feed the same local
-delivery function.
-
-`runtime_state_store.py` is the single lease/counter/heartbeat substrate for
-admission, SSE limits and cross-replica subscription state. Callers depend on
-its interface, never Redis directly. Backend degradation is observable and
-must preserve process availability; authorization and owner filtering remain
-fail-closed independently of transport availability.
-
+`PushHub` owns subscriptions/local delivery; `push_bus.py` feeds its one delivery function from the in-process or Redis transport. Process-local and per-owner admission keeps identity explicit. Each socket has item+compact-byte bounded lossy events plus bounded control/RPC lanes: 8 GiB reference 64 sockets / 12 per owner / 1,000 events / 4 MiB / 2 MiB per frame; distributed 256 / 64 / 1,000 / 16 MiB / 8 MiB. Local fan-out serializes once for every target. The browser's first, five-minute, and visibility-resume liveness pings may set literal `buildProbe: true`; the existing priority pong then carries the optional `buildId` from the startup-validated in-memory snapshot owned by `lib.vite_assets`. Ordinary four-second pings remain pure echoes. A build probe may submit one single-flight manifest refresh to the serving executor; filesystem validation never delays the pong or `/api/health`, and a wedged network mount occupies at most one refresh worker while the last valid snapshot remains authoritative. This handshake owns no second socket, queue, task, browser timer, visibility listener, or `/api/health` request, and an old peer that omits either optional field remains fail-quiet.
+Transient saturation drops oldest; after 15 seconds and 256 drops it disconnects for durable reconciliation, while half-drain or five quiet seconds resets grace. One oversized/unencodable frame disconnects immediately. Episode logs expose channel/type/task/socket and byte counters, never payload.
+`runtime_state_store.py` is the sole lease/counter/heartbeat substrate for admission, SSE limits and cross-replica subscription state. Callers never depend on Redis directly; degradation preserves process availability while authorization and owner filtering remain fail-closed.
 Every SSE route shares the launch-probed `TOFU_MAX_SSE_PER_PRINCIPAL` budget
 (8..24 personal, 12 on the 8 GiB reference/fallback profile, 64 distributed,
 hard ceiling 128). Conversation Sync additionally keeps one bounded

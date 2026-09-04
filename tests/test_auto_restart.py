@@ -221,7 +221,30 @@ def test_deferred_reexec_delegates_to_shared_primitive(monkeypatch):
     delegate to _perform_server_reexec('update')."""
     from routes.api_v1 import update as upd
     calls = []
+    monkeypatch.delenv('TOFU_MANAGED_BY', raising=False)
     monkeypatch.setattr(upd, '_perform_server_reexec',
                         lambda reason: calls.append(reason) or True)
     upd._deferred_reexec(delay=0)
     assert calls == ['update']
+
+
+@pytest.mark.unit
+def test_managed_reexec_refreshes_supervisor_then_replaces_worker(monkeypatch):
+    from routes.api_v1 import update as upd
+    calls = []
+    monkeypatch.setenv('TOFU_MANAGED_BY', 'supervisor')
+    monkeypatch.setenv('TOFU_PROJECT_PATH', '/project')
+    monkeypatch.setattr(upd, '_prepare_server_reexec_frontend', lambda: '')
+    monkeypatch.setattr(
+        'supervisor_protocol.request_deferred_worker_restart',
+        lambda project, **kwargs: calls.append((project, kwargs)) or {
+            'ok': True,
+            'supervisorRefresh': {'managerPid': 42},
+        },
+    )
+
+    assert upd._perform_server_reexec('update') is True
+    assert calls == [('/project', {
+        'source': 'application-update',
+        'environment': upd.os.environ,
+    })]

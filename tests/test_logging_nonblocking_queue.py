@@ -107,6 +107,14 @@ class TestNonBlockingLogging:
             return filt.filter(record)
 
         assert allowed('/api/health', 200) is False
+        assert allowed('/api/live', 200) is False
+        assert allowed('/api/ready', 200) is False
+        readiness_checkpoints = [
+            allowed('/api/ready', 503)
+            for _ in range(8)
+        ]
+        assert readiness_checkpoints == [
+            True, True, False, True, False, False, False, True]
         assert allowed('/api/browser/poll?cursor=200', 204) is False
         assert allowed('/api/v3/conversations/conv-a/events', 304) is False
         assert allowed('/api/v3/conversations/conv-a/turns', 200, 'POST') is True

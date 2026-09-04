@@ -5,13 +5,14 @@ from __future__ import annotations
 from lib.orchestration._definition_contract import MAX_NAME_LEN, MAX_NODES
 from lib.orchestration.contract_schema import contract_snapshot_schema
 from lib.orchestration._subflow_contract import MAX_SUBFLOW_DEPTH
+from lib.human_gate_contract import MAX_HUMAN_GATE_RESPONSE_LENGTH
 
 
 MAX_COMPOSE_REQUIREMENT_LENGTH = 4000
 MAX_COMPOSE_HISTORY_ITEMS = 8
 MAX_COMPOSE_HISTORY_CONTENT_LENGTH = 4000
 MAX_RUN_INPUT_LENGTH = 8000
-MAX_HUMAN_INPUT_LENGTH = 8000
+MAX_HUMAN_INPUT_LENGTH = MAX_HUMAN_GATE_RESPONSE_LENGTH
 
 
 def request_limits_contract() -> dict:

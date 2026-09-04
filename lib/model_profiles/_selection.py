@@ -10,13 +10,6 @@ logger = get_logger(__name__)
 _TIER_TARGET = {'light': 100, 'standard': 200, 'heavy': 300}
 
 
-def _role_fit(profile: dict, role: str) -> int:
-    roles = set(profile.get('roles') or ())
-    if role and role in roles:
-        return 2
-    return 1 if not role else 0
-
-
 def _candidate_key(profile: dict, *, tier: str, role: str,
                    parent_model: str) -> tuple:
     quality = int(profile.get('qualityScore') or 0)
@@ -36,7 +29,10 @@ def _candidate_key(profile: dict, *, tier: str, role: str,
 
 def select_model_for_tier(tier: str, *, parent_model: str = '',
                           role: str = '', provider_id: str = '',
-                          providers: list | None = None) -> str:
+                          providers: list | None = None,
+                          owner_user_id: int | None = None,
+                          tenant_id: str | None = None,
+                          repository=None) -> str:
     """Select a configured model; return parent/empty when evidence is weak.
 
     Provider pins are a hard isolation boundary: when ``provider_id`` is set,
@@ -46,7 +42,12 @@ def select_model_for_tier(tier: str, *, parent_model: str = '',
     if tier not in _TIER_TARGET:
         return parent_model or ''
     profiles = configured_model_profiles(
-        providers=providers, provider_id=provider_id)
+        providers=providers,
+        provider_id=provider_id,
+        owner_user_id=owner_user_id,
+        tenant_id=tenant_id,
+        repository=repository,
+    )
     target = _TIER_TARGET[tier]
     eligible = [
         p for p in profiles

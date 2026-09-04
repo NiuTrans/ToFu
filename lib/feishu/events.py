@@ -6,7 +6,7 @@ dispatcher, routing them to the appropriate command or pipeline handler.
 
 import json
 
-from lib.feishu._state import ALLOWED_USERS, get_user_lock
+from lib.feishu._state import ALLOWED_USERS, get_user_lock, pin_user_session
 from lib.feishu.commands import MENU_MAP, dispatch_command
 from lib.feishu.conversation import clear_pending, get_pending
 from lib.feishu.messaging import send_text
@@ -112,21 +112,27 @@ def handle_message_event(event_data) -> None:
             return
 
         try:
-            # Check pending state (e.g., project selection awaiting input)
-            pending = get_pending(open_id)
-            if pending:
-                clear_pending(open_id)
+            # Keep this reconstructible session resident for the entire
+            # message. Capacity eviction may reclaim only idle users.
+            with pin_user_session(open_id):
+                # Check pending state (e.g., project selection awaiting input)
+                pending = get_pending(open_id)
+                if pending:
+                    clear_pending(open_id)
 
-            # Try slash command first
-            cmd_response = dispatch_command(open_id, text)
-            if cmd_response is not None:
-                send_text(message_id, cmd_response, chat_id=chat_id, open_id=open_id)
-                return
+                # Try slash command first
+                cmd_response = dispatch_command(open_id, text)
+                if cmd_response is not None:
+                    send_text(
+                        message_id, cmd_response,
+                        chat_id=chat_id, open_id=open_id)
+                    return
 
-            # Regular message → run LLM pipeline
-            response = run_task_pipeline(
-                open_id, text, source_message_id=message_id)
-            send_text(message_id, response, chat_id=chat_id, open_id=open_id)
+                # Regular message → run LLM pipeline
+                response = run_task_pipeline(
+                    open_id, text, source_message_id=message_id)
+                send_text(
+                    message_id, response, chat_id=chat_id, open_id=open_id)
 
         finally:
             user_lock.release()
@@ -134,9 +140,18 @@ def handle_message_event(event_data) -> None:
     except Exception as e:
         logger.error('[FeishuBot] handle_message_event failed: %s', e, exc_info=True)
         try:
-            send_text(message_id, f'❌ 内部错误: {e}', chat_id=chat_id, open_id=open_id)
-        except Exception as e:
-            logger.debug('[FeishuBot] Failed to send error notification back to user: %s', e, exc_info=True)
+            send_text(
+                message_id,
+                '❌ 请求处理失败，请稍后重试',
+                chat_id=chat_id,
+                open_id=open_id,
+            )
+        except Exception as notify_error:
+            logger.debug(
+                '[FeishuBot] Failed to send error notification back to user: %s',
+                notify_error,
+                exc_info=True,
+            )
 
 
 def handle_menu_event(event_data) -> None:

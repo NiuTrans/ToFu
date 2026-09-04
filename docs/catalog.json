@@ -51,13 +51,21 @@
     }
 ,
     {
-      "path": "contracts/model_catalog_v1.schema.json",
-      "guard": "tests/test_model_catalog_contract.py"
+      "path": "contracts/model_routing_v2.schema.json",
+      "guard": "tests/test_model_routing_contract.py"
     },
     {
       "path": "contracts/provider_offering_recipe_v1.schema.json",
       "guard": "tests/test_provider_template_recipes.py"
-    }
+    },
+  {
+    "path": "contracts/project_brain_v1.schema.json",
+    "guard": "tests/test_project_brain_signal_driven.py"
+  },
+  {
+    "path": "contracts/research_program_v1.schema.json",
+    "guard": "tests/test_research_program_v1.py"
+  }
   ],
   "authority": [
     "docs/README.md",
@@ -85,6 +93,7 @@
     "docs/modules/conversations_project_brain.md",
     "docs/modules/data_tier.md",
     "docs/modules/experiments.md",
+    "docs/modules/file_history.md",
     "docs/modules/infra_runtime.md",
     "docs/modules/ingest_media.md",
     "docs/modules/integrations_api.md",
@@ -102,10 +111,17 @@
     "docs/AGENTS.md",
     "docs/AGENT_CAPABILITY_GUIDE.md",
     "docs/api_client.md",
+    "docs/CODEX_ACCOUNT_USAGE.md",
+    "docs/CONTEXT_COMPACTION.md",
     "docs/CUSTOM_TOOLS.md",
     "docs/LLM_COST_OPTIMIZATION.md",
+    "docs/LLM_RUNTIME_PROFILES.md",
     "docs/LOCAL_KNOWLEDGE.md",
     "docs/OPENAI_RESPONSES_FEATURES.md",
+    "docs/ORCHESTRATION_PRODUCT_SURFACES.md",
+    "docs/MONOREPO.md",
+    "docs/TASK_EXECUTION_MODES.md",
+    "docs/TOOL_EXECUTION_POLICY.md",
     "docs/TOOL_PLUGINS.md",
     "docs/TOOL_SEARCH_EXECUTION_GATEWAY.md",
     "docs/TURN_TRACE_CONTRACT.md"

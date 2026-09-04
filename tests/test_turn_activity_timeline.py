@@ -87,6 +87,107 @@ def test_schema_isolation_model_failure_and_fallback_keep_exact_order():
     )
 
 
+def test_aborted_model_request_localizes_detail_and_drops_constant_kind():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task(_activeModelRequestSpan='model:attempt-a:1')
+    timeline = None
+    for event in (
+        {
+            'type': EventType.MODEL_REQUEST_START,
+            'seq': 1,
+            'emittedAt': 1_000,
+            'spanId': 'model:attempt-a:1',
+            'model': 'kimi-k3',
+            'roundNum': 1,
+        },
+        {
+            'type': EventType.MODEL_REQUEST_COMPLETE,
+            'seq': 2,
+            'emittedAt': 2_000,
+            'spanId': 'model:attempt-a:1',
+            'model': 'kimi-k3',
+            'status': 'aborted',
+            'errorKind': 'AbortedError',
+            'errorDetail': 'User aborted while waiting on https://x/v1/chat',
+            'errorUrl': 'https://x/v1/chat',
+        },
+        {
+            'type': EventType.MODEL_REQUEST_COMPLETE,
+            'seq': 3,
+            'emittedAt': 3_000,
+            'spanId': 'model:attempt-a:2',
+            'model': 'kimi-k3',
+            'status': 'failed',
+            'errorKind': 'BadRequestError',
+            'errorDetail': 'HTTP 400',
+        },
+        {
+            'type': EventType.MODEL_REQUEST_COMPLETE,
+            'seq': 4,
+            'emittedAt': 4_000,
+            'spanId': 'model:attempt-a:3',
+            'model': 'kimi-k3',
+            'status': 'aborted',
+            'errorKind': 'AbortedError',
+            'errorDetail': 'User aborted while awaiting response headers',
+        },
+    ):
+        timeline = fold_activity_timeline(timeline, event, task)
+
+    aborted, failed, headers_abort = timeline['entries']
+    assert aborted['status'] == 'aborted'
+    assert aborted['summaryKey'] == 'activity.model.requestAborted'
+    assert aborted['detailKey'] == 'activity.model.abortedWaiting'
+    assert aborted['detailArgs'] == {'url': 'https://x/v1/chat'}
+    # The constant class name adds nothing next to status=aborted; the
+    # normalizer drops the empty field entirely.
+    assert 'reasonCode' not in aborted
+    # The raw English detail stays as the untranslated fallback.
+    assert aborted['detail'].startswith('User aborted')
+    assert failed['reasonCode'] == 'BadRequestError'
+    assert 'detailKey' not in failed
+    assert headers_abort['detailKey'] == 'activity.model.aborted'
+    assert 'detailArgs' not in headers_abort
+
+
+def test_request_complete_fields_carry_abort_error_url():
+    from lib.llm_errors import AbortedError
+    from lib.tasks_pkg.manager._stream import _model_request_complete_fields
+
+    fields = _model_request_complete_fields(
+        {'provider_id': 'sankuai'},
+        status='aborted',
+        finish_reason='',
+        error=AbortedError(
+            'User aborted while waiting on https://x/v1/chat',
+            url='https://x/v1/chat',
+        ),
+        usage_value={},
+        span_id='model:attempt-a:1',
+        model='kimi-k3',
+        started_ms=0,
+        tag='R1',
+        round_num=1,
+    )
+    assert fields['errorKind'] == 'AbortedError'
+    assert fields['errorUrl'] == 'https://x/v1/chat'
+    # An abort without a bound URL emits no errorUrl at all.
+    no_url = _model_request_complete_fields(
+        {'provider_id': 'sankuai'},
+        status='aborted',
+        finish_reason='',
+        error=AbortedError('VLM PDF transcription aborted'),
+        usage_value={},
+        span_id='model:attempt-a:1',
+        model='kimi-k3',
+        started_ms=0,
+        tag='R1',
+        round_num=1,
+    )
+    assert 'errorUrl' not in no_url
+
+
 def test_llm_round_stamps_from_request_tag_and_inherits_across_folds():
     from lib.turn_activity_timeline import fold_activity_timeline
 
@@ -398,6 +499,79 @@ def test_tool_progress_and_failure_update_one_correlated_row():
     assert entry['durationMs'] == 50
 
 
+def test_recycled_tool_call_id_stays_occurrence_local_across_rounds():
+    """A provider correlation token is not a task-global span identity."""
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    timeline = None
+    for event in (
+        {
+            'type': EventType.TOOL_START,
+            'seq': 1,
+            'toolCallId': 'read_files_0',
+            'toolName': 'read_files',
+            'roundNum': 1,
+            'tStart': 2_000,
+        },
+        {
+            'type': EventType.TOOL_COMPLETE,
+            'seq': 2,
+            'toolCallId': 'read_files_0',
+            'toolName': 'read_files',
+            'roundNum': 1,
+            'tEnd': 2_010,
+        },
+        {
+            'type': EventType.TOOL_START,
+            'seq': 3,
+            'toolCallId': 'read_files_0',
+            'toolName': 'read_files',
+            'roundNum': 2,
+            'tStart': 2_020,
+        },
+    ):
+        timeline = fold_activity_timeline(timeline, event, task)
+
+    assert timeline is not None
+    assert len(timeline['entries']) == 2
+    assert [entry['roundNum'] for entry in timeline['entries']] == [1, 2]
+    assert [entry['status'] for entry in timeline['entries']] == [
+        'succeeded', 'running']
+    assert len({entry['spanId'] for entry in timeline['entries']}) == 2
+
+
+def test_reminted_terminal_settles_the_provisional_start_in_same_round():
+    """Dispatch-time ID repair must not create a phantom running tool."""
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    timeline = fold_activity_timeline(None, {
+        'type': EventType.TOOL_START,
+        'seq': 1,
+        'toolCallId': 'read_files_0',
+        'toolName': 'read_files',
+        'roundNum': 7,
+        'tStart': 3_000,
+    }, task)
+    timeline = fold_activity_timeline(timeline, {
+        'type': EventType.TOOL_COMPLETE,
+        'seq': 2,
+        'toolCallId': 'read_files_0#r3#fresh',
+        'toolName': 'read_files',
+        'roundNum': 7,
+        'tEnd': 3_025,
+    }, task)
+
+    assert timeline is not None
+    assert len(timeline['entries']) == 1
+    entry = timeline['entries'][0]
+    assert entry['status'] == 'succeeded'
+    assert entry['toolCallId'] == 'read_files_0#r3#fresh'
+    assert entry['startedAt'] == 3_000
+    assert entry['endedAt'] == 3_025
+
+
 def test_tool_content_v2_error_keeps_code_message_and_next_action():
     from lib.tools.result_envelope import typed_tool_error
     from lib.turn_activity_timeline import fold_activity_timeline
@@ -434,7 +608,7 @@ def test_tool_content_v2_error_keeps_code_message_and_next_action():
     assert 'contractVersion' not in entry['detail']
 
 
-def test_execute_tools_validation_failure_projects_child_as_skipped():
+def test_execute_tools_validation_failure_projects_child_as_validation_rejected():
     from lib.turn_activity_timeline import fold_activity_timeline
 
     task = _task()
@@ -477,6 +651,7 @@ def test_execute_tools_validation_failure_projects_child_as_skipped():
     assert entry['toolName'] == 'read_tool_artifact'
     assert entry['status'] == 'skipped'
     assert entry['severity'] == 'warning'
+    assert entry['summaryKey'] == 'activity.tool.validationRejected'
     assert entry['reasonCode'] == 'missing_required_arguments'
     assert 'Provide artifact_ref and retry' in entry['detail']
     assert all(row.get('toolName') != 'execute_tools'
@@ -520,6 +695,40 @@ def test_execute_tools_child_failure_is_not_duplicated_by_gateway_shell():
     assert [(entry['toolName'], entry['reasonCode'])
             for entry in timeline['entries']] == [
         ('browser_execute_js', 'browser_write_authorization_required')]
+
+
+def test_recycled_gateway_child_id_does_not_overwrite_later_occurrence():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    outer = json.dumps({
+        'contractVersion': 'tofu.tool-result/v2',
+        'status': 'ok',
+        'items': [{'status': 'partial_failure', 'results': [{
+            'call_id': 'recycled-child',
+            'name': 'read_tool_artifact',
+            'status': 'rejected',
+            'error': 'child rejected',
+        }]}],
+    })
+    timeline = None
+    for sequence, round_num in enumerate((1, 2), 1):
+        timeline = fold_activity_timeline(timeline, {
+            'type': EventType.TOOL_COMPLETE,
+            'seq': sequence,
+            'roundNum': round_num,
+            'toolCallId': f'gateway-{round_num}',
+            'toolName': 'execute_tools',
+            'status': 'error',
+            'toolContent': outer,
+        }, task, now_ms=5_000 + sequence)
+
+    assert timeline is not None
+    assert len(timeline['entries']) == 2
+    assert [entry['toolCallId'] for entry in timeline['entries']] == [
+        'recycled-child', 'recycled-child',
+    ]
+    assert len({entry['spanId'] for entry in timeline['entries']}) == 2
 
 
 def test_policy_rejection_projects_as_blocked_with_its_reason():

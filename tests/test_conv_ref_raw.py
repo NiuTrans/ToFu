@@ -156,11 +156,8 @@ class TestGetConversationRaw:
             assert 'finishReason' not in row
             assert 'turnId' not in row
 
-    def _capture_post_build_meta(self, fn_args):
-        """Drive the REAL _handle_conv_ref_tool _post_build closure without a
-        live executor. Stubs ``simple_call`` in the _brain module to capture the
-        ``post_build`` callback (mirrors test_mcp_tool_links.PostBuildTitleTest),
-        then invokes it against a fresh ``meta`` dict and returns that meta."""
+    def _capture_post_build(self, fn_args):
+        """Return any handler post-build hook without executing the tool."""
         import lib.tasks_pkg.handlers.misc._brain as brain
 
         captured = {}
@@ -179,40 +176,20 @@ class TestGetConversationRaw:
                 'get_conversation', 't', fn_args,
                 1, {}, {}, '/tmp/x', False,
             )
-            meta = {}
-            captured['post_build'](meta, 'RAW JSON DUMP', fn_args)
-            return meta
+            return captured.get('post_build')
         finally:
             brain.simple_call = orig
 
-    def test_handler_attaches_digest_in_raw_mode(self):
-        # THE RAW-MODE FIX (2026-07-23): a get_conversation(raw=True) read used
-        # to SKIP the digest card (the `_fn_args.get('raw')` short-circuit), so
-        # the human saw the ugly 78KB JSON blob truncated by L0. The handler
-        # must now attach `convDigest` for raw reads too (rebuilt off the DB).
-        meta_raw = self._capture_post_build_meta(
-            {'conversation_id': self.cid, 'raw': True})
-        assert 'convDigest' in meta_raw, 'raw-mode read must still attach the card'
-        assert meta_raw['convDigest']['convId'] == self.cid
-        assert meta_raw['convDigest']['msgCount'] == 2
-        # …and the raw flag propagates through the handler so the card renders
-        # the RAW badge + per-message metadata (the fix this turn).
-        assert meta_raw['convDigest'].get('raw') is True
-        # …and the TOOL-SURFACE DEFAULT is now raw too (owner-directed
-        # 2026-07-28): a bare call reads like a DB query, so its card carries
-        # the RAW badge. Pinned in tests/test_conv_ref_raw_default.py.
-        meta_bare = self._capture_post_build_meta(
-            {'conversation_id': self.cid})
-        assert 'convDigest' in meta_bare
-        assert meta_bare['convDigest'].get('raw') is True
-        # …and an EXPLICIT opt-out still attaches a plain, non-raw card — the
-        # protection this assertion has always carried: the badge must not
-        # claim a debug read that did not happen.
-        meta_default = self._capture_post_build_meta(
-            {'conversation_id': self.cid, 'raw': False})
-        assert 'convDigest' in meta_default
-        assert meta_default['convDigest']['convId'] == self.cid
-        assert 'raw' not in meta_default['convDigest']
+    @pytest.mark.parametrize('fn_args', [
+        {'conversation_id': 'c1'},
+        {'conversation_id': 'c1', 'raw': True},
+        {'conversation_id': 'c1', 'raw': False},
+    ])
+    def test_handler_has_no_second_read_result_projection(self, fn_args):
+        # The settled toolContent is the only result authority. A post-build
+        # digest used to re-read the DB after execution and could therefore
+        # describe another page/revision than the result returned to the model.
+        assert self._capture_post_build(fn_args) is None
 
     def test_build_digest_self_reference_is_none(self):
         # Digesting the CURRENT conversation is a no-op (caller falls back).

@@ -15,6 +15,7 @@ def test_swarm_discovery_uses_bounded_sidecar_summaries():
 
     src = inspect.getsource(ri.list_conv_tasks)
     assert "LIKE '%#agent:%'" not in src
+    assert "'turn.timing_trace.list'" in src
     assert "'task_results.summary_list'" in src
     assert "'scan_limit': 10_000" in src
     assert "'event.inspector_summary'" in src

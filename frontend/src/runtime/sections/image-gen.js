@@ -5,22 +5,14 @@
 /* ═══════════════════════════════════════════
    Image Generation — Creative Mode
    ═══════════════════════════════════════════ */
-var _igSelectedModel = 'gemini-3.1-flash-image-preview';
-var _igSelectedAspect = '1:1';
-var _igSelectedResolution = '1K';   // 1K | 2K
-var _igSelectedCount = 1;           // 1 | 2 | 4 — batch count
 let _igGenerating = false;
 let _igAbortController = null;       // AbortController for single request
 let _igAbortControllers = [];        // AbortControllers for batch requests
 
-// All available image gen models (order matches dropdown)
-const _IG_ALL_MODELS = [
-  'gemini-3.1-flash-image-preview',
-  'gemini-3-pro-image-preview',
-  'gemini-2.5-flash-image',
-  'gpt-image-1.5',
-  'gpt-image-2',
-];
+// Owner-scoped model/provider routes loaded from model-routing v2.  Static
+// markup is presentation-only and must never become a routing fallback.
+const _IG_ALL_MODELS = [];
+const _IG_ALL_ROUTES = [];
 var _IG_MODEL_SHORT = {
   'gemini-3.1-flash-image-preview': 'Gemini 3.1 Flash',
   'gemini-3-pro-image-preview': 'Gemini 3 Pro',
@@ -205,18 +197,21 @@ function _igToast(message, type) {
 }
 
 function enterImageGenMode() {
-  if (imageGenMode) { exitImageGenMode(); return; }
+  if (ImageGenerationComposerState.imageGenMode) { exitImageGenMode(); return; }
   // Exit paper mode if active (mutually exclusive)
-  if (typeof paperMode !== 'undefined' && paperMode && typeof exitPaperMode === 'function') exitPaperMode();
+  if (runtimeScope.paperMode && typeof runtimeScope.exitPaperMode === 'function') {
+    runtimeScope.exitPaperMode();
+  }
   // Research mode is mutually exclusive too; its exit is a no-op when inactive.
-  if (typeof exitResearchMode === 'function') exitResearchMode();
-  if (typeof setAgentMode === 'function'
-      && (planMode || autopilotEnabled || activeFlow)) {
-    if (setAgentMode('standard') !== true) return false;
+  if (typeof runtimeScope.exitResearchMode === 'function') runtimeScope.exitResearchMode();
+  if (typeof runtimeScope.setAgentMode === 'function'
+      && (ImageGenerationComposerState.planMode || ImageGenerationComposerState.autopilotEnabled || ImageGenerationComposerState.activeFlow)) {
+    if (runtimeScope.setAgentMode('standard') !== true) return false;
   }
   _applyImageGenUI(true);
   captureActiveConversationSettings();
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
+  if (!_igModelsLoaded) void _loadIgModels();
   debugLog('Image Gen Mode: ENTER', 'success');
   // Focus the textarea
   document.getElementById('userInput')?.focus();
@@ -246,22 +241,25 @@ function toggleIgModelDropdown(e) {
   }
 }
 function selectIgModel(el) {
-  _igSelectedModel = el.dataset.model;
-  // Update active state — highlight all instances of the same model (may appear under multiple providers)
+  ImageGenerationComposerState.selectedModel = el.dataset.model;
+  ImageGenerationComposerState.selectedProviderId = el.dataset.provider || '';
+  // Provider + model is the identity of a selectable v2 Offering.
   el.closest('.ig-preset-dropdown').querySelectorAll('.ig-model-option').forEach(o => {
-    o.classList.toggle('active', o.dataset.model === _igSelectedModel);
+    o.classList.toggle('active',
+      o.dataset.model === ImageGenerationComposerState.selectedModel
+      && (o.dataset.provider || '') === ImageGenerationComposerState.selectedProviderId);
   });
   // Update toggle label + brand icon (same pattern as preset toggle)
   const label = document.getElementById('igModelLabel');
   const iconEl = document.getElementById('igModelIcon');
   const toggle = document.querySelector('.ig-preset');
-  if (_igSelectedModel === '__all__') {
+  if (ImageGenerationComposerState.selectedModel === '__all__') {
     if (label) label.textContent = 'All Models';
     if (iconEl) iconEl.innerHTML = '';
     if (toggle) toggle.setAttribute('data-brand', 'generic');
     // Auto-set count to 4 (one per model) when switching to All Models
-    if (_igSelectedCount < 2) {
-      _igSelectedCount = 4;
+    if (ImageGenerationComposerState.selectedCount < 2) {
+      ImageGenerationComposerState.selectedCount = 4;
       document.querySelectorAll('#igCountBar .ig-pill').forEach(b => {
         b.classList.toggle('active', b.dataset.count === '4');
       });
@@ -269,10 +267,10 @@ function selectIgModel(el) {
       if (genText) genText.textContent = '4连抽!';
     }
   } else {
-    const name = el.querySelector('.ig-model-name')?.textContent || _igSelectedModel;
+    const name = el.querySelector('.ig-model-name')?.textContent || ImageGenerationComposerState.selectedModel;
     if (label) label.textContent = name;
     // Update brand icon + color on the toggle
-    const brand = typeof _detectBrand === 'function' ? _detectBrand(_igSelectedModel) : 'generic';
+    const brand = typeof _detectBrand === 'function' ? _detectBrand(ImageGenerationComposerState.selectedModel) : 'generic';
     if (iconEl && typeof _brandSvg === 'function') iconEl.innerHTML = _brandSvg(brand, 14);
     if (toggle) toggle.setAttribute('data-brand', brand);
   }
@@ -283,22 +281,23 @@ function selectIgModel(el) {
   if (typeof _scheduleReflow === 'function') _scheduleReflow();
 }
 function selectIgAspect(el) {
-  _igSelectedAspect = el.dataset.ar;
+  ImageGenerationComposerState.selectedAspect = el.dataset.ar;
   document.querySelectorAll('#igAspectBar .ig-pill').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
 }
 function selectIgResolution(el) {
-  _igSelectedResolution = el.dataset.res;
+  ImageGenerationComposerState.selectedResolution = el.dataset.res;
   document.querySelectorAll('#igResolutionBar .ig-pill').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
 }
 function selectIgCount(el) {
-  _igSelectedCount = parseInt(el.dataset.count, 10) || 1;
+  ImageGenerationComposerState.selectedCount = parseInt(el.dataset.count, 10) || 1;
   document.querySelectorAll('#igCountBar .ig-pill').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
   // Update generate button label — gacha style
   const genText = document.querySelector('.ig-gen-text');
-  if (genText) genText.textContent = _igSelectedCount > 1 ? `${_igSelectedCount}连抽!` : '生成';
+  if (genText) genText.textContent = ImageGenerationComposerState.selectedCount > 1
+    ? `${ImageGenerationComposerState.selectedCount}连抽!` : '生成';
 }
 
 // Outside-click is now handled inside toggleIgModelDropdown() (same pattern as preset toggle).
@@ -313,19 +312,28 @@ async function generateImageDirect() {
     return;
   }
 
+  // Wait for the owner-scoped v2 catalogue before choosing a route.  This
+  // closes the click-before-load race and prevents hard-coded markup models
+  // from escaping the repository authority.
+  await _loadIgModels();
+  if (_IG_ALL_ROUTES.length === 0) {
+    _igToast('No image generation model is available for this account.', 'warning');
+    return;
+  }
+
   // ── Wait for any still-compressing/uploading source images (mobile) so an
   //    edit never fires with an entry whose base64 isn't ready yet. ──
   await _waitForImageProcessing();
 
   // ── Collect source images for editing ──
-  const sourceImages = [...pendingImages].filter(im => im && (im.base64 || im.url));
+  const sourceImages = [...ImageGenerationComposerState.pendingImages].filter(im => im && (im.base64 || im.url));
   const isEdit = sourceImages.length > 0;
 
   // ── Route to batch generation when count > 1 or All Models selected ──
   // (batch mode not supported with editing — single only)
-  const effectiveCount = _igSelectedModel === '__all__'
-    ? Math.max(_igSelectedCount, _IG_ALL_MODELS.length)
-    : _igSelectedCount;
+  const effectiveCount = ImageGenerationComposerState.selectedModel === '__all__'
+    ? Math.max(ImageGenerationComposerState.selectedCount, _IG_ALL_MODELS.length)
+    : ImageGenerationComposerState.selectedCount;
   if (effectiveCount > 1 && !isEdit) {
     return _igGenerateBatch(prompt, effectiveCount);
   }
@@ -342,8 +350,8 @@ async function generateImageDirect() {
       conv = { id: 'conv-' + now + '-' + Math.random().toString(36).slice(2,8),
                title: 'New Chat', createdAt: now, updatedAt: now,
                _localOnly: true };
-      conversations.unshift(conv);
-      activeConvId = conv.id;
+      ImageGenerationComposerState.conversations.unshift(conv);
+      ImageGenerationComposerState.activeConversationId = conv.id;
       sessionStorage.setItem('tofu_activeConvId', conv.id);
       captureActiveConversationSettings();
     }
@@ -373,15 +381,15 @@ async function generateImageDirect() {
 
     textarea.value = '';
     textarea.style.height = 'auto';
-    pendingImages = [];
+    ImageGenerationComposerState.pendingImages = [];
     renderImagePreviews();
 
     const pendingResult = {
       ok: false,
       prompt,
-      model: _igSelectedModel,
-      aspectRatio: _igSelectedAspect,
-      resolution: _igSelectedResolution,
+      model: ImageGenerationComposerState.selectedModel,
+      aspectRatio: ImageGenerationComposerState.selectedAspect,
+      resolution: ImageGenerationComposerState.selectedResolution,
       error: 'pending',
     };
     const transient = _igTransientTurn(
@@ -395,10 +403,13 @@ async function generateImageDirect() {
     const t0 = Date.now();
     const reqBody = {
       prompt,
-      aspect_ratio: _igSelectedAspect,
-      resolution: _igSelectedResolution,
-      model: _igSelectedModel,
+      aspect_ratio: ImageGenerationComposerState.selectedAspect,
+      resolution: ImageGenerationComposerState.selectedResolution,
+      model: ImageGenerationComposerState.selectedModel,
     };
+    if (ImageGenerationComposerState.selectedProviderId) {
+      reqBody.provider_id = ImageGenerationComposerState.selectedProviderId;
+    }
     if (igHistory.length > 0) reqBody.history = igHistory;
 
     // ── Add source images for editing ──
@@ -426,8 +437,8 @@ async function generateImageDirect() {
           : (data.image_b64
             ? `data:${data.mime_type || 'image/png'};base64,${data.image_b64}` : '');
         result = _igTypedResult(data, {
-          prompt, model: _igSelectedModel, aspectRatio: _igSelectedAspect,
-          resolution: _igSelectedResolution, imageUrl,
+          prompt, model: ImageGenerationComposerState.selectedModel, aspectRatio: ImageGenerationComposerState.selectedAspect,
+          resolution: ImageGenerationComposerState.selectedResolution, imageUrl,
           elapsedSeconds: (Date.now() - t0) / 1000,
         });
         content = data.text || '';
@@ -436,8 +447,8 @@ async function generateImageDirect() {
         generationStatus = 'failed';
         content = `Image generation failed: ${error.text}`;
         result = _igTypedResult(data, {
-          prompt, model: _igSelectedModel, aspectRatio: _igSelectedAspect,
-          resolution: _igSelectedResolution,
+          prompt, model: ImageGenerationComposerState.selectedModel, aspectRatio: ImageGenerationComposerState.selectedAspect,
+          resolution: ImageGenerationComposerState.selectedResolution,
           elapsedSeconds: (Date.now() - t0) / 1000,
           error: error.text, errorType: error.errorType,
         });
@@ -451,8 +462,8 @@ async function generateImageDirect() {
         : (error?.message || 'Failed to connect to server');
       content = `${cancelled ? 'Image generation cancelled' : 'Image generation network error'}: ${detail}`;
       result = _igTypedResult({}, {
-        prompt, model: _igSelectedModel, aspectRatio: _igSelectedAspect,
-        resolution: _igSelectedResolution,
+        prompt, model: ImageGenerationComposerState.selectedModel, aspectRatio: ImageGenerationComposerState.selectedAspect,
+        resolution: ImageGenerationComposerState.selectedResolution,
         elapsedSeconds: (Date.now() - t0) / 1000,
         error: detail, errorType: cancelled ? 'cancelled' : 'network',
       });
@@ -495,7 +506,7 @@ async function generateImageDirect() {
     _igGenerating = false;
     _igAbortController = null;
     if (genBtn) genBtn.disabled = false;
-    if (conv?.id === activeConvId && typeof scrollToBottom === 'function') scrollToBottom();
+    if (conv?.id === ImageGenerationComposerState.activeConversationId && typeof scrollToBottom === 'function') scrollToBottom();
   }
 }
 
@@ -503,9 +514,9 @@ async function generateImageDirect() {
 function _igUpdateGenButton() {
   const genText = document.querySelector('.ig-gen-text');
   if (!genText) return;
-  const isEdit = pendingImages.length > 0;
+  const isEdit = ImageGenerationComposerState.pendingImages.length > 0;
   // Only update if not in batch/all-models mode
-  if (_igSelectedCount <= 1 && _igSelectedModel !== '__all__') {
+  if (ImageGenerationComposerState.selectedCount <= 1 && ImageGenerationComposerState.selectedModel !== '__all__') {
     genText.textContent = isEdit ? '编辑' : '生成';
   }
 }
@@ -520,26 +531,6 @@ function _igCancelGeneration() {
     _igAbortControllers = [];
   }
   debugLog('Image generation cancelled', 'info');
-}
-
-/** Retry the last image gen prompt from the current conversation */
-function _igRetryLastPrompt() {
-  const conv = getActiveConv();
-  if (!conv) return;
-  // Find the last turn-native image-generation prompt.
-  const turns = runtimeScope.ConversationTurnRead?.ordered?.(conv) || [];
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const turn = turns[i];
-    if (turn.actor === 'human' && (
-      turn.kind === 'image_generation_prompt'
-      || turn.kind === 'image_edit_prompt'
-    )) {
-      const prompt = turn.projection?.content?.trim() || '';
-      const textarea = document.getElementById('userInput');
-      if (textarea) { textarea.value = prompt; textarea.focus(); }
-      return;
-    }
-  }
 }
 
 /**
@@ -576,10 +567,13 @@ async function _igRetryGenerationTurn(conv, turnId, slotIdx) {
     const igHistory = _igCollectHistory(conv);
     const body = {
       prompt: previous.prompt,
-      model: previous.model || _igSelectedModel,
-      aspect_ratio: previous.aspectRatio || _igSelectedAspect,
-      resolution: previous.resolution || _igSelectedResolution,
+      model: previous.model || ImageGenerationComposerState.selectedModel,
+      aspect_ratio: previous.aspectRatio || ImageGenerationComposerState.selectedAspect,
+      resolution: previous.resolution || ImageGenerationComposerState.selectedResolution,
     };
+    const retryProviderId = previous.providerId
+      || ImageGenerationComposerState.selectedProviderId;
+    if (retryProviderId) body.provider_id = retryProviderId;
     if (igHistory.length > 0) body.history = igHistory;
     const data = await Api.images.generate(body, {
       signal: _igAbortController.signal,
@@ -661,14 +655,24 @@ const _escapeHtmlBasic = escapeHtml;
 
 /* ── Dynamic model dropdown population ── */
 
-async function _loadIgModels() {
+let _igModelsLoaded = false;
+let _igModelsRequest = null;
+
+async function _requestIgModels() {
   try {
     const data = await Api.images.models();
     const models = (data && data.models) || [];
-    if (models.length === 0) return;
 
     const dropdown = document.getElementById('igModelDropdown');
     if (!dropdown) return;
+
+    _IG_ALL_MODELS.length = 0;
+    _IG_ALL_ROUTES.length = 0;
+    if (models.length === 0) {
+      dropdown.innerHTML = '<div class="ig-model-option" style="opacity:.5;pointer-events:none"><span class="ig-model-name">No image models available</span></div>';
+      _igModelsLoaded = true;
+      return;
+    }
 
     // Brand-specific SVG icons (detect from model name)
     function _igIcon(model) {
@@ -677,7 +681,7 @@ async function _loadIgModels() {
     }
 
     // Filter out hidden image gen models
-    const visible = models.filter(m => !_hiddenIgModels.has(m.model));
+    const visible = models.filter(m => !ImageGenerationComposerState.hiddenModels.has(m.model));
     if (visible.length === 0) {
       dropdown.innerHTML = '<div class="ig-model-option" style="opacity:.5;pointer-events:none"><span class="ig-model-name">No models visible</span></div>';
       return;
@@ -691,12 +695,14 @@ async function _loadIgModels() {
       grouped[pid].models.push(m);
     }
 
-    // Update the global model list from API data
-    _IG_ALL_MODELS.length = 0;
-    for (const m of visible) _IG_ALL_MODELS.push(m.model);
+    // Update the owner-scoped route list from API data.
+    for (const m of visible) {
+      _IG_ALL_MODELS.push(m.model);
+      _IG_ALL_ROUTES.push({ model: m.model, providerId: m.provider_id || '' });
+    }
 
     // ── Always start with "All Models" option ──
-    const isAllActive = _igSelectedModel === '__all__';
+    const isAllActive = ImageGenerationComposerState.selectedModel === '__all__';
     let html = `<div class="ig-model-option ${isAllActive ? 'active' : ''}" data-model="__all__" data-tofu-action="selectIgModel(this)">
       <span class="ig-model-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="#f472b6"><rect x="2" y="2" width="9" height="9" rx="2"/><rect x="13" y="2" width="9" height="9" rx="2"/><rect x="2" y="13" width="9" height="9" rx="2"/><rect x="13" y="13" width="9" height="9" rx="2"/></svg></span>
       <span class="ig-model-info"><span class="ig-model-name">All Models</span></span>
@@ -713,9 +719,17 @@ async function _loadIgModels() {
       }
       for (const m of group.models) {
         const friendlyName = typeof _modelShortName === 'function' ? _modelShortName(m.model) : m.model;
-        const isActive = !isAllActive && (m.model === _igSelectedModel || (idx === 0 && !visible.find(v => v.model === _igSelectedModel)));
+        const exactSelection = m.model === ImageGenerationComposerState.selectedModel
+          && (!ImageGenerationComposerState.selectedProviderId
+            || m.provider_id === ImageGenerationComposerState.selectedProviderId);
+        const hasSelectedRoute = visible.some(v =>
+          v.model === ImageGenerationComposerState.selectedModel
+          && (!ImageGenerationComposerState.selectedProviderId
+            || v.provider_id === ImageGenerationComposerState.selectedProviderId));
+        const isActive = !isAllActive && (exactSelection || (idx === 0 && !hasSelectedRoute));
         if (isActive) {
-          _igSelectedModel = m.model;
+          ImageGenerationComposerState.selectedModel = m.model;
+          ImageGenerationComposerState.selectedProviderId = m.provider_id || '';
           const label = document.getElementById('igModelLabel');
           if (label) label.textContent = friendlyName;
           // Set brand icon + color on the toggle (same as preset-toggle)
@@ -727,7 +741,7 @@ async function _loadIgModels() {
         }
         // Update short name map
         _IG_MODEL_SHORT[m.model] = friendlyName;
-        html += `<div class="ig-model-option ${isActive ? 'active' : ''}" data-model="${_escapeHtmlBasic(m.model)}" data-tofu-action="selectIgModel(this)">
+        html += `<div class="ig-model-option ${isActive ? 'active' : ''}" data-model="${_escapeHtmlBasic(m.model)}" data-provider="${_escapeHtmlBasic(m.provider_id || '')}" data-tofu-action="selectIgModel(this)">
           <span class="ig-model-icon">${_igIcon(m.model)}</span>
           <span class="ig-model-info"><span class="ig-model-name">${_escapeHtmlBasic(friendlyName)}</span></span>
           <span class="ig-model-check">${Icon('check', 14)}</span>
@@ -736,6 +750,7 @@ async function _loadIgModels() {
       }
     }
     dropdown.innerHTML = html;
+    _igModelsLoaded = true;
     /* Reflow toolbar after models loaded (toolbar width may have changed) */
     if (typeof _scheduleReflow === 'function') _scheduleReflow();
   } catch (e) {
@@ -743,12 +758,17 @@ async function _loadIgModels() {
   }
 }
 
-// Load models on startup — called from _loadServerConfigAndPopulate() after
-// _hiddenIgModels is populated, to avoid the race condition where models load
-// before the hidden-set is ready.
-// Fallback: if server config hasn't triggered it within 5s, load anyway.
-var _igModelsLoaded = false;
-setTimeout(function() { if (!_igModelsLoaded) _loadIgModels(); }, 5000);
+function _loadIgModels() {
+  if (_igModelsRequest) return _igModelsRequest;
+  _igModelsRequest = _requestIgModels().finally(function () {
+    _igModelsRequest = null;
+  });
+  return _igModelsRequest;
+}
+
+// No ambient startup request: enterImageGenMode owns first demand. If the
+// server-config response arrives after this chunk, it calls the exported live
+// port once more so hidden-model changes are reconciled without a race.
 
 // ── Image Generation — Utility functions for displaying
 //    images generated via the generate_image tool ──

@@ -55,7 +55,8 @@ class ProductionRuntime:
     def __init__(self, kind: str, *, id_prefix: str, ttl: int = 3600,
                  push_channel: Optional[str] = None, error_source: str = '',
                  log_label: str = '', stall_timeout: float = 0,
-                 max_tasks: int = 1024, max_events: int = 2048,
+                 max_tasks: Optional[int] = None,
+                 max_events: Optional[int] = None,
                  max_dedup_keys: Optional[int] = None):
         self.runtime = TaskRuntime(kind, ttl=ttl, push_channel=push_channel,
                                    error_source=error_source,
@@ -64,8 +65,14 @@ class ProductionRuntime:
         self.id_prefix = id_prefix
         self.log_label = log_label or kind
         self._dedup: dict[tuple, str] = {}
+        try:
+            requested_dedup_keys = int(
+                max_dedup_keys if max_dedup_keys is not None
+                else self.runtime.max_tasks)
+        except (TypeError, ValueError, OverflowError):
+            requested_dedup_keys = self.runtime.max_tasks
         self.max_dedup_keys = max(
-            1, int(max_dedup_keys if max_dedup_keys is not None else max_tasks))
+            1, min(self.runtime.max_tasks, requested_dedup_keys))
         self._dedup_evictions = {
             'terminal': 0,
             'orphan': 0,

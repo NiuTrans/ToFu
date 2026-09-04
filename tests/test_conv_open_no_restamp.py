@@ -47,6 +47,7 @@ class TestSettingsPatchNeverRestampsRecency:
                 {'role': 'user', 'content': 'hi', 'timestamp': _OLD_TS},
                 {'role': 'assistant', 'content': 'done', 'timestamp': _OLD_TS + 1},
             ],
+            settings={'serverOwned': 'preserve-me'},
             created_at=_OLD_TS,
             updated_at=_OLD_TS,
         )
@@ -87,6 +88,32 @@ class TestSettingsPatchNeverRestampsRecency:
                                   json={'pinned': True})
         assert resp.status_code == 200, resp.data
         assert self._updated_at(flask_client, old_conv) == before
+
+    def test_resolved_settings_patch_is_one_request_and_keeps_recency(
+        self, flask_client, old_conv,
+    ):
+        before = self._updated_at(flask_client, old_conv)
+        resp = flask_client.patch(
+            f'/api/v1/conversations/{old_conv}/settings/resolve',
+            json={
+                'conv_settings': {
+                    'model': 'max', 'folderId': 'folder-a',
+                    'memoryEnabled': True,
+                },
+                'overrides': {'searchMode': 'single'},
+            },
+            headers={'Idempotency-Key': 'resolved-settings-one-request'},
+        )
+        assert resp.status_code == 200, resp.data
+        assert self._updated_at(flask_client, old_conv) == before
+        settings = flask_client.get(
+            f'/api/v1/conversations/{old_conv}'
+        ).get_json()['settings']
+        assert settings['model'] == 'aws.claude-opus-4.7'
+        assert settings['thinkingDepth'] == 'max'
+        assert settings['folderId'] == 'folder-a'
+        assert settings['searchMode'] == 'single'
+        assert settings['serverOwned'] == 'preserve-me'
 
 
 @pytest.mark.unit

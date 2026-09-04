@@ -1,7 +1,8 @@
 """Route tests for POST /api/v1/logs/client — the browser-console relay sink
 (epic pt_cfdfd30c8699407b, 2026-08-05).
 
-The frontend relay (static/js/core/client_log_relay.js) batch-POSTs the
+The frontend relay (frontend/src/runtime/sections/core/client_log_relay.js)
+batch-POSTs the
 patched console stream here so live-view diagnostics land in
 logs/frontend.log instead of dying in the user's devtools. These tests pin
 the envelope, the level mapping, the log-injection guard (newline

@@ -30,10 +30,11 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_JS = os.path.join(_ROOT, 'static', 'js', 'project-brain-status.js')
+_JS = runtime_section_path('project-brain-status.js')
 
 _HARNESS = r"""
 // ── Minimal DOM good enough for the builders under test ──────────────

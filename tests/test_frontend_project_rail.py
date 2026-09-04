@@ -37,15 +37,22 @@ import shutil
 import subprocess
 
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._runtime_sections import (
+    native_module_path,
+    orchestration_legacy_test_root as _legacy_test_root,
+)
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.normpath(os.path.join(HERE, '..'))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _CONV = os.path.join(JS_DIR, 'ui', 'conversation_list.js')
 _FOLDERS = os.path.join(JS_DIR, 'main', 'main_folders_mobile.js')
+_SHELL = native_module_path(
+    '.native/shell-localization.js',
+    os.path.join(REPO_ROOT, 'frontend/src/conversation/presentation/shell-localization.ts'))
 
 
 def _node_deps_available() -> bool:
@@ -60,6 +67,7 @@ const path = require('path');
 const CONV = process.argv[2];
 const ROOT = process.argv[3];
 const FOLDERS = process.argv[4];
+const SHELL = process.argv[5];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 
 const dom = new JSDOM(`<!DOCTYPE html><body>
@@ -127,7 +135,11 @@ global.requestAnimationFrame = window.requestAnimationFrame = (fn) => 0;
 
 function renderConversationListWrap() { return _rcl(); }
 
-// ── Eval the two REAL source files (indirect eval → globals). ──
+// ── Eval the typed shell-localization owner, then the two REAL sections. ──
+(0, eval)(fs.readFileSync(SHELL, 'utf8'));
+global._conversationDisplayTitle = conversationDisplayTitle;
+global.conversationTimestampLabels = conversationTimestampLabels;
+global.stripNoTranslateTags = stripNoTranslateTags;
 let _rcl = () => {};
 (0, eval)(fs.readFileSync(CONV, 'utf8'));
 (0, eval)(fs.readFileSync(FOLDERS, 'utf8'));
@@ -262,7 +274,7 @@ def _run(conv_path, folders_path):
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, conv_path, ROOT, folders_path],
+            ['node', harness, conv_path, ROOT, folders_path, _SHELL],
             capture_output=True, text=True, timeout=60)
     finally:
         try:

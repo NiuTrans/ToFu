@@ -24,8 +24,11 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MICRO_HOT_TAIL = 40
-"""Number of most-recent tool results to keep uncompressed.
-Everything older is archived to DB and replaced with a placeholder.
+"""Maximum number of most-recent tool results to keep uncompressed.
+
+The default L1 policy now intersects this count ceiling with
+``MICRO_HOT_TAIL_TOKENS`` while always retaining the newest tool-call batch.
+Everything colder is archived to DB and replaced with a placeholder.
 
 2026-04-19: Raised 30 → 60 to reduce compaction aggressiveness. Most
 SWE-bench-style tasks complete in 20-40 tool calls; doubling the hot
@@ -38,22 +41,22 @@ regression vs the 60-keep `tofu` arm. Keeping the count-based hot tail
 (not token-based) but tightening it to 40 captures most of that saving
 while still covering the 20-40-tool-call body of typical SWE-bench runs.
 
-2026-07 (single-giant-turn review): DELIBERATELY KEPT count-based (40), NOT
-switched to the token-budget ``adaptive_hot_tail``. The accumulation vector
-that motivated a token cap — a burst of L0-exempt ``read_files`` (each ~50–65k
-tokens) sitting inside the 40-count hot tail growing past the window before a
-turn ends — is now closed STRUCTURALLY at L2/L3, not by retuning L1:
-  • L2 ``execute_compact_tool`` folds cold tool-call ROUNDS out of the
-    preserved (in-flight) turn (``_fold_recent_intra_turn``), and its trigger
-    (``_should_force_compact``) is TOKEN-based — so a hot tail that is large in
-    BYTES still trips L2 and gets folded regardless of the L1 count.
-  • L3 ``_head_truncate`` is now tool-pairing-safe, the bounded last resort.
-So the count-based L1 tail is a cheap, cache-stable, well-understood default
-whose worst case is now bounded by the token-aware layers above it. Switching
-L1's default to ``adaptive_hot_tail`` is a hyperparameter change (§10.1)
-gated on a fresh A/B — it remains available as an opt-in arm
-(``compaction.steps=['adaptive_hot_tail']``) but is NOT the default, because
-the overflow risk it targeted no longer depends on the L1 count."""
+2026-09-01: A long tool loop showed that waiting for L2 still caused frequent
+whole-prefix rewrites: forty individually large results could fill a 128K
+working set in only a few rounds. The default therefore gained the token
+ceiling below. This is narrower than switching methods: the existing durable
+placeholder/cache-prefix rules remain the authority, and the newest batch is
+never compacted before the model can consume it."""
+
+MICRO_HOT_TAIL_TOKENS = 48_000
+"""Maximum estimated tokens in the default uncompressed tool-result tail.
+
+The count and token ceilings are both enforced. The newest complete tool-call
+batch is protected even when it alone exceeds 48K; earlier results become cold
+instead. This bounds growth without dropping the evidence the next model call
+must see. Per-call experiment overrides use the same ``constant_overrides``
+seam as ``MICRO_HOT_TAIL``.
+"""
 
 MICRO_COMPACT_THRESHOLD = 2000
 """Minimum character count before a tool result is worth compacting.
@@ -120,7 +123,7 @@ Keeps the retained block scannable; the newest N instructions are the ones
 most likely to still bind the current work."""
 
 _DEFAULT_WORKING_SET_TOKENS = 128_000
-"""Economic ceiling for the repeatedly replayed prompt working set.
+"""Fallback economic ceiling for the repeatedly replayed prompt working set.
 
 The context-window trigger above is a correctness guard: on a 1M model it
 does not compact until roughly 778K input tokens.  That is safe but extremely
@@ -130,9 +133,12 @@ second, lower trigger whose purpose is cost and latency rather than avoiding a
 hard context overflow.
 
 128K is deliberately large enough for a coding hot tail plus structured
-summary, while bounding a 1M-capable model's repeated input.  User sign-off is
-the 2026-08-08 request to maximize context-cache efficiency and reduce cost;
-the read site emits a one-time ``audit_log('config_change', approved_by='user')``.
+summary, while bounding a 1M-capable model's repeated input. Since 2026-09-01,
+an active provider/model rate card with a proven price increase replaces this
+fallback with 90% of the preceding cheaper tier; no model name is hard-coded.
+User sign-off is the 2026-08-08 request to maximize context-cache efficiency
+and the 2026-09-01 request for the general tier/cadence repair; the read site
+emits a one-time ``audit_log('config_change', approved_by='user')``.
 Override per request with ``compaction.workingSetTokens`` or process-wide with
 ``TOFU_WORKING_CONTEXT_TOKENS``.  Set either to ``0`` to restore the former
 context-window-only behavior.
@@ -147,14 +153,15 @@ model from rebuilding another large context block.
 """
 
 _AUTO_COMPACT_MIN_PAYBACK_ROUNDS = 1.0
-"""Maximum cache-read rounds allowed for proactive L2 to break even.
+"""Minimum fixed-policy horizon for proactive L2 to break even.
 
 Automatic L2 rewrites the request prefix, so the following request may pay a
-fresh cache write for the compacted prefix.  Admit it only when the token cost
-of that rewrite is recovered by the smaller prompt within one future round.
-This is evaluated from the active model's cache write/read multipliers and the
-current warm-cache observation.  Manual/reactive compaction remains governed
-by user intent or context-window correctness and bypasses the economic gate.
+fresh cache write for the compacted prefix. A task begins with this one-round
+horizon, then may use a bounded conservative horizon derived from observed
+successful rewrite gaps—not total task age. This is evaluated from the active
+before/after pricing tiers and current warm-cache observation.
+Manual/reactive compaction remains governed by user intent or context-window
+correctness and bypasses the economic gate.
 """
 
 _AUTO_COMPACT_MIN_REDUCTION_RATIO = 0.05

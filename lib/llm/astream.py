@@ -83,6 +83,12 @@ def _httpx_proxy_url(url: str):
 def _close_abandoned_raw_dumper(plan, log_prefix: str, reason: str) -> None:
     """Close a prepared plan that will not enter the async transport."""
     try:
+        if plan.raw_archive_capture is not None:
+            plan.raw_archive_capture.discard()
+    except Exception as error:
+        logger.debug('%s raw archive discard before %s raised: %s',
+                     log_prefix, reason, error)
+    try:
         if plan.raw_dumper.enabled and plan.raw_dumper._fh is not None:
             plan.raw_dumper.finish(error=True)
     except Exception as error:
@@ -175,12 +181,14 @@ async def _open_server_stream(plan, log_prefix: str = ''):
 
 async def async_stream_chat(body, *, on_thinking=None, on_content=None,
                             on_tool_call_ready=None,
+                            on_attempt_restart=None,
                             abort_check=None, log_prefix='', api_key=None,
                             base_url=None, extra_headers=None,
                             api_protocol='openai', oauth='',
                             adapter=None,
                             on_first_byte_wait=None,
-                            on_stream_wait=None) -> ProviderStreamResult:
+                            on_stream_wait=None,
+                            owner_user_id=None) -> ProviderStreamResult:
     """Async streaming chat completion with callbacks.
 
     Same signature and semantics as stream_chat() but fully async.
@@ -192,6 +200,16 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
     """
     last_err = None
     _limit_learned = None
+
+    def _restart(reason: str) -> None:
+        if on_attempt_restart is None:
+            return
+        try:
+            on_attempt_restart(reason=reason)
+        except Exception as error:
+            logger.debug('%s async on_attempt_restart raised: %s',
+                         log_prefix, error, exc_info=True)
+
     for attempt in range(1 + MAX_STREAM_RETRIES):
         try:
             stream_result = ensure_provider_stream_result(
@@ -203,7 +221,8 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
                 extra_headers=extra_headers, api_protocol=api_protocol,
                 oauth=oauth, adapter=adapter,
                 on_first_byte_wait=on_first_byte_wait,
-                on_stream_wait=on_stream_wait))
+                on_stream_wait=on_stream_wait,
+                owner_user_id=owner_user_id))
             usage = attach_limit_learned(stream_result.usage, _limit_learned)
             return stream_result.with_usage(usage)
         except (RateLimitError, PermissionError_, AbortedError,
@@ -216,10 +235,12 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
         except ModelLimitError as e:
             logger.debug('async stream chat: ModelLimitError (%s)', e)
             _limit_learned = apply_model_limit_retry(body, e, log_prefix)
+            _restart('model output limit learned — retrying')
             continue
         except _RETRYABLE as e:
             last_err = e
             wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix)
+            _restart('retryable transport failure — retrying')
             await async_abortable_sleep(wait, abort_check)
     raise last_err
 
@@ -231,8 +252,11 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                                   extra_headers=None, api_protocol='openai',
                                   oauth='', adapter=None,
                                   on_first_byte_wait=None,
-                                  on_stream_wait=None):
+                                  on_stream_wait=None,
+                                  owner_user_id=None):
     """Single async attempt at a streaming chat completion (httpx transport)."""
+    from lib.llm._transport import transport_owner_scope
+    _owner_scope = transport_owner_scope(owner_user_id)
     if adapter:
         # ── Subscription-adapter branch (E4) ──
         # The relay helpers are BLOCKING bridge calls — a loopback RTT to
@@ -250,7 +274,8 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
             api_key=api_key, base_url=base_url, extra_headers=extra_headers,
             api_protocol=api_protocol, oauth=oauth, adapter=adapter,
             on_first_byte_wait=on_first_byte_wait,
-            on_stream_wait=on_stream_wait)
+            on_stream_wait=on_stream_wait,
+            owner_user_id=owner_user_id)
     # prepare_request is sync and CAN block for seconds: a subscription
     # OAuth slot may refresh its token inside resolve_oauth_request, and
     # under desktop-egress routing that refresh waits an agent RTT (design
@@ -260,7 +285,8 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
         prepare_request,
         body, attempt=attempt, log_prefix=log_prefix,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
-        api_protocol=api_protocol, oauth=oauth)
+        api_protocol=api_protocol, oauth=oauth,
+        owner_user_id=_owner_scope)
     # Read the operator value at attempt time so tests and long-lived servers
     # can retune it without creating a second async timeout definition.
     import lib.llm._transport as _tp
@@ -277,7 +303,7 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
     from lib.desktop import egress as _eg
     try:
         egress_route = await asyncio.to_thread(
-            _eg.route_request, plan.url, user_id='')
+            _eg.route_request, plan.url, user_id=_owner_scope)
     except _eg.EgressUnavailable as e:
         _close_abandoned_raw_dumper(plan, log_prefix, 'egress failure')
         raise EndpointUnreachableError(str(e), base_url=plan.url) from e
@@ -294,7 +320,8 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
             api_key=api_key, base_url=base_url, extra_headers=extra_headers,
             api_protocol=api_protocol, oauth=oauth, adapter=adapter,
             on_first_byte_wait=on_first_byte_wait,
-            on_stream_wait=on_stream_wait)
+            on_stream_wait=on_stream_wait,
+            owner_user_id=owner_user_id)
 
     _conn_t0 = time.monotonic()
     _network_route = {
@@ -359,6 +386,11 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                 # UTF-8), so a correct UTF-8 decode still yields mojibake.
                 err_body = repair_mojibake(
                     (await resp.aread()).decode('utf-8', errors='replace'))
+                if plan.raw_archive_capture is not None:
+                    plan.raw_archive_capture.append_response(
+                        err_body.encode('utf-8', errors='replace'))
+                    plan.raw_archive_capture.commit(
+                        response_complete=True, status_code=resp.status_code)
                 if activate_native_tool_search_fallback(
                         resp.status_code, err_body, plan=plan,
                         canonical_body=body):
@@ -378,7 +410,8 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                 try:
                     classify_status_error(
                         resp.status_code, err_body, body=plan.body,
-                        log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
+                        log_prefix=log_prefix, raw_dumper=plan.raw_dumper,
+                        credential_present=plan.credential_present)
                 except Exception as error:
                     _annotate_network_error(error, 'provider_response')
                     raise
@@ -480,6 +513,8 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
             framer = SSEFramer()
             try:
                 async for raw_chunk in _aiter_response_bytes(resp):
+                    if plan.raw_archive_capture is not None:
+                        plan.raw_archive_capture.append_response(raw_chunk)
                     if _fb['idle_timed_out']:
                         break
                     _progress.mark_transport_bytes(len(raw_chunk))
@@ -515,7 +550,8 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                     pass
                 elif _fb['aborted']:
                     raise AbortedError(
-                        'User aborted while waiting on %s' % plan.url) from _iter_e
+                        'User aborted while waiting on %s' % plan.url,
+                        url=plan.url) from _iter_e
                 elif isinstance(_iter_e, asyncio.CancelledError):
                     # Event-loop/task cancellation is caller control flow, not
                     # evidence that the selected network path is unhealthy.
@@ -545,7 +581,9 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                 # A close() can surface as a CLEAN end of iteration — without
                 # this check an aborted attempt would finalize as a silent
                 # empty/partial "success".
-                raise AbortedError('User aborted while waiting on %s' % plan.url)
+                raise AbortedError(
+                    'User aborted while waiting on %s' % plan.url,
+                    url=plan.url)
             acc.fire_final_tool_callback()
             stream_result = ensure_provider_stream_result(
                 acc.finalize(resp_trace=resp_trace))
@@ -582,6 +620,9 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
             else:
                 usage.pop('_failure_stage', None)
                 _report_network_outcome(True)
+            if plan.raw_archive_capture is not None:
+                plan.raw_archive_capture.commit(
+                    response_complete=True, status_code=200)
             return stream_result.with_usage(usage)
 
     except httpx.ConnectTimeout as e:
@@ -621,6 +662,9 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
         error = RetryableAPIError(f'httpx protocol error: {e}')
         raise _annotate_network_error(error, 'midstream_protocol') from e
     finally:
+        if plan.raw_archive_capture is not None:
+            plan.raw_archive_capture.commit(
+                response_complete=False, status_code=None)
         try:
             if plan.raw_dumper.enabled and plan.raw_dumper._fh is not None:
                 plan.raw_dumper.finish(error=True)

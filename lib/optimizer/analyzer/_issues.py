@@ -1,21 +1,23 @@
-"""lib/optimizer/analyzer/_issues.py — error-signature clustering.
+"""lib/optimizer/analyzer/_issues.py — error-log excerpts and clustering.
 
 The ``_ERROR_SIGNATURES`` table (mirrors debug/triage_errors.py) plus the
-fingerprint-clustering ``_collect_recurring_issues`` that merges structured
-``tool_error`` audit events with coarse ``error.log`` signature matches.
-Mutable log paths are read via the facade package for test monkeypatching.
+single-pass error-log projector and ``_collect_recurring_issues`` merger for
+structured ``tool_error`` audit events and coarse signatures. Mutable log paths
+are read via the facade package for test monkeypatching.
 """
 
 from __future__ import annotations
 
 import re
+from collections import deque
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from lib.log import get_logger
 
 from lib.optimizer import analyzer as _facade
 from ._logs import _safe_tail_lines, _parse_app_log_ts
-from ._audit import _audit_ts_aware, _entry_matches_owner, _parse_audit_line
+from ._audit import _collect_audit_tool_error_clusters
 
 logger = get_logger(__name__)
 
@@ -45,12 +47,95 @@ def _classify_error_signature(line: str) -> str:
     return ''
 
 
+def _scan_error_log(
+    cutoff_local: datetime,
+    *,
+    log_lines: Sequence[str] | None,
+    collect_excerpts: bool,
+    collect_clusters: bool,
+    max_excerpt_lines: int = 40,
+) -> tuple[list[str], dict[str, dict]]:
+    """Parse one error tail into excerpts and/or recurring-issue clusters."""
+    excerpt_limit = max(1, max_excerpt_lines)
+    excerpts: deque[str] = deque(maxlen=excerpt_limit)
+    clusters: dict[str, dict] = {}
+    lines = log_lines
+    if lines is None:
+        lines = _safe_tail_lines(
+            _facade.ERROR_LOG, max_bytes=2 * 1024 * 1024)
+    for line in lines:
+        timestamp = _parse_app_log_ts(line)
+        is_recent = timestamp is not None and timestamp >= cutoff_local
+        if collect_excerpts and is_recent:
+            excerpts.append(line[:300])
+        if not collect_clusters or (timestamp is not None and not is_recent):
+            continue
+        label = _classify_error_signature(line)
+        if not label:
+            continue
+        key = f'errorlog::{label}'
+        cluster = clusters.get(key)
+        if cluster is None:
+            cluster = {
+                'fingerprint': key,
+                'source': 'error_log',
+                'count': 0,
+                'first_seen': timestamp,
+                'last_seen': timestamp,
+                'example': line[:240],
+            }
+            clusters[key] = cluster
+        cluster['count'] += 1
+        if timestamp is not None:
+            if cluster['first_seen'] is None or timestamp < cluster['first_seen']:
+                cluster['first_seen'] = timestamp
+            if cluster['last_seen'] is None or timestamp > cluster['last_seen']:
+                cluster['last_seen'] = timestamp
+    return list(excerpts), clusters
+
+
+def _collect_error_log_evidence(
+    cutoff_local: datetime,
+    *,
+    log_lines: Sequence[str] | None = None,
+    max_excerpt_lines: int = 40,
+) -> tuple[list[str], dict[str, dict]]:
+    return _scan_error_log(
+        cutoff_local,
+        log_lines=log_lines,
+        collect_excerpts=True,
+        collect_clusters=True,
+        max_excerpt_lines=max_excerpt_lines,
+    )
+
+
+def _collect_error_log_excerpts(
+    cutoff_local: datetime,
+    max_lines: int = 40,
+    *,
+    log_lines: Sequence[str] | None = None,
+) -> list[str]:
+    excerpts, _clusters = _scan_error_log(
+        cutoff_local,
+        log_lines=log_lines,
+        collect_excerpts=True,
+        collect_clusters=False,
+        max_excerpt_lines=max_lines,
+    )
+    return excerpts
+
+
 def _collect_recurring_issues(cutoff_local: datetime,
                               cutoff_utc: datetime,
                               min_count: int = 2,
                               *,
                               owner_user_id: int,
-                              allow_unowned: bool) -> list[dict]:
+                              allow_unowned: bool,
+                              audit_log_lines: Sequence[str] | None = None,
+                              error_log_lines: Sequence[str] | None = None,
+                              audit_issue_clusters: Mapping[str, dict] | None = None,
+                              error_issue_clusters: Mapping[str, dict] | None = None,
+                              ) -> list[dict]:
     """Cluster failures into recurring-issue groups.
 
     Two independent sources are merged into one fingerprint → stats map:
@@ -68,53 +153,32 @@ def _collect_recurring_issues(cutoff_local: datetime,
     first/last-seen timestamps and a representative example — exactly the
     recurring/unresolved-issue view the loop previously lacked.
     """
-    clusters: dict[str, dict] = {}
-
-    def _bump(key: str, *, source: str, ts: datetime | None,
-              example: str, **extra) -> None:
-        c = clusters.get(key)
-        if c is None:
-            c = {'fingerprint': key, 'source': source, 'count': 0,
-                 'first_seen': None, 'last_seen': None, 'example': example[:240]}
-            c.update(extra)
-            clusters[key] = c
-        c['count'] += 1
-        if ts is not None:
-            if c['first_seen'] is None or ts < c['first_seen']:
-                c['first_seen'] = ts
-            if c['last_seen'] is None or ts > c['last_seen']:
-                c['last_seen'] = ts
-
     # ── Source 1: structured tool_error audit events ──
-    for line in _safe_tail_lines(_facade.AUDIT_LOG_FILE):
-        entry = _parse_audit_line(line)
-        if not entry or entry.get('event') != 'tool_error':
-            continue
-        if not _entry_matches_owner(
-                entry,
-                owner_user_id=owner_user_id,
-                allow_unowned=allow_unowned):
-            continue
-        ts = _audit_ts_aware(entry)
-        if ts is None or ts < cutoff_utc:
-            continue
-        fp = str(entry.get('fingerprint') or entry.get('detail') or 'unknown')
-        _bump(f'tool_error::{fp}', source='tool_error',
-              ts=ts, example=str(entry.get('detail') or fp),
-              tool=entry.get('tool', '?'), exc_type=entry.get('exc_type', ''))
+    if audit_issue_clusters is None:
+        audit_issue_clusters = _collect_audit_tool_error_clusters(
+            cutoff_utc,
+            owner_user_id=owner_user_id,
+            allow_unowned=allow_unowned,
+            log_lines=audit_log_lines,
+        )
+    clusters = {
+        key: dict(cluster)
+        for key, cluster in audit_issue_clusters.items()
+    }
 
     # ── Source 2: error.log signature clustering ──
     if allow_unowned:
-        for line in _safe_tail_lines(
-                _facade.ERROR_LOG, max_bytes=2 * 1024 * 1024):
-            ts = _parse_app_log_ts(line)
-            if ts is not None and ts < cutoff_local:
-                continue
-            label = _classify_error_signature(line)
-            if not label:
-                continue
-            _bump(
-                f'errorlog::{label}', source='error_log', ts=ts, example=line)
+        if error_issue_clusters is None:
+            _excerpts, error_issue_clusters = _scan_error_log(
+                cutoff_local,
+                log_lines=error_log_lines,
+                collect_excerpts=False,
+                collect_clusters=True,
+            )
+        clusters.update(
+            (key, dict(cluster))
+            for key, cluster in error_issue_clusters.items()
+        )
 
     recurring = [c for c in clusters.values() if c['count'] >= min_count]
     recurring.sort(key=lambda c: c['count'], reverse=True)

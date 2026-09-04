@@ -22,6 +22,7 @@ replay a fixed list of SSE lines.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -72,11 +73,42 @@ EMPTY_ARGS_TOOL_CALL = [
     'data: [DONE]',
 ]
 
-# Two same-named calls: one with real args, one empty → the empty one is a
-# phantom duplicate and must be DROPPED entirely (not normalized to '{}').
+# Two distinct same-named calls: one with real args, one empty. Distinct ids
+# are authoritative occurrence evidence; the empty call is normalized and the
+# request-owned schema later decides whether it is executable.
 PHANTOM_DUP_TOOL_CALL = [
     'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc_0","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"foo\\"}"}}]}}]}',
     'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"tc_1","function":{"name":"grep_search","arguments":""}}]}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
+# Some OpenAI-compatible gateways omit ``index`` and retransmit a complete
+# function-call frame.  The transport duplicate is one semantic call, not two.
+UNINDEXED_RETRANSMITTED_TOOL_CALL = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"id":"tc_same","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"foo\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"id":"tc_same","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"foo\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
+# A differing id remains authoritative evidence for two distinct same-named
+# calls even when the gateway omits indexes.
+UNINDEXED_DISTINCT_TOOL_CALLS = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"id":"tc_a","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"a\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"id":"tc_b","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"b\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
+# A compatibility gateway can announce the second call's id separately from
+# its name/arguments while still omitting ``index``. The id-only frame is the
+# only moment where the second identity is observable; it must split the slot
+# immediately instead of overwriting the first call's id.
+UNINDEXED_ID_THEN_SAME_NAME = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"id":"tc_a","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"a\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"id":"tc_b","function":{}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"b\\"}"}}]}}]}',
     'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
     'data: [DONE]',
 ]
@@ -347,13 +379,171 @@ def test_empty_args_tool_call_normalized_to_empty_object():
     assert msg_a['tool_calls'][0]['function']['arguments'] == '{}'
 
 
-def test_phantom_duplicate_still_dropped_not_normalized():
-    """Empty-args duplicate of a real same-named call is dropped, not kept as '{}'."""
+def test_distinct_same_name_empty_args_call_is_not_inferred_away():
     msg, fr, usage = _run_sync(PHANTOM_DUP_TOOL_CALL)
     assert fr == 'tool_calls'
-    # The empty phantom must be filtered out — only the real call survives.
-    assert len(msg['tool_calls']) == 1
+    assert len(msg['tool_calls']) == 2
     assert msg['tool_calls'][0]['function']['arguments'] == '{"pattern":"foo"}'
+    assert msg['tool_calls'][1]['function']['arguments'] == '{}'
+
+
+def test_unindexed_retransmitted_frame_cannot_mint_duplicate_calls():
+    msg, finish, _usage = _run_sync(UNINDEXED_RETRANSMITTED_TOOL_CALL)
+
+    assert finish == 'tool_calls'
+    assert len(msg['tool_calls']) == 1
+    assert msg['tool_calls'][0]['id'] == 'tc_same'
+    assert msg['tool_calls'][0]['function']['arguments'] == '{"pattern":"foo"}'
+
+
+def test_unindexed_distinct_ids_still_create_distinct_calls():
+    msg, finish, _usage = _run_sync(UNINDEXED_DISTINCT_TOOL_CALLS)
+
+    assert finish == 'tool_calls'
+    assert [call['id'] for call in msg['tool_calls']] == ['tc_a', 'tc_b']
+    assert [call['function']['arguments'] for call in msg['tool_calls']] == [
+        '{"pattern":"a"}', '{"pattern":"b"}',
+    ]
+
+
+def test_unindexed_id_only_frame_claims_a_new_same_name_call_immediately():
+    msg, finish, _usage = _run_sync(UNINDEXED_ID_THEN_SAME_NAME)
+
+    assert finish == 'tool_calls'
+    assert [call['id'] for call in msg['tool_calls']] == ['tc_a', 'tc_b']
+    assert [call['function']['arguments'] for call in msg['tool_calls']] == [
+        '{"pattern":"a"}', '{"pattern":"b"}',
+    ]
+
+
+def test_non_numeric_tool_index_is_typed_malformed_instead_of_crashing():
+    result = _run_sync([
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":[],"id":"tc_bad_index","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"a\\"}"}}]}}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        'data: [DONE]',
+    ])
+
+    assert result.state is ProviderStreamState.MALFORMED_STREAM
+    assert result.evidence.malformed_frame_count == 1
+    assert result.message['tool_calls'][0]['id'] == 'tc_bad_index'
+
+
+def test_huge_numeric_string_tool_index_is_bounded_without_int_parse_crash():
+    huge_index = '9' * 10_000
+    frame = json.dumps({
+        'choices': [{'delta': {'tool_calls': [{
+            'index': huge_index,
+            'id': 'tc_huge_index',
+            'function': {
+                'name': 'grep_search',
+                'arguments': '{"pattern":"a"}',
+            },
+        }]}}],
+    }, separators=(',', ':'))
+    transcript = [
+        f'data: {frame}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        'data: [DONE]',
+    ]
+
+    for result in (_run_sync(transcript), _run_async(transcript)):
+        assert result.state is ProviderStreamState.MALFORMED_STREAM
+        assert result.evidence.malformed_frame_count == 1
+        assert result.message['tool_calls'][0]['id'] == 'tc_huge_index'
+
+
+def test_oversized_tool_id_is_not_retained_as_progress_or_history_identity():
+    oversized_id = 'x' * 10_000
+    frame = json.dumps({
+        'choices': [{'delta': {'tool_calls': [{
+            'index': 0,
+            'id': oversized_id,
+            'function': {'name': 'grep_search', 'arguments': '{}'},
+        }]}}],
+    }, separators=(',', ':'))
+    transcript = [
+        f'data: {frame}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        'data: [DONE]',
+    ]
+
+    for result in (_run_sync(transcript), _run_async(transcript)):
+        assert result.state is ProviderStreamState.MALFORMED_STREAM
+        assert result.evidence.malformed_frame_count == 1
+        assert result.message['tool_calls'][0]['id'] == ''
+
+
+@pytest.mark.parametrize('tool_delta, expected_name', [
+    ({'index': 0, 'id': 'bad-function', 'function': []}, ''),
+    ({'index': 0, 'id': 'bad-name',
+      'function': {'name': {'nested': 'name'}, 'arguments': '{}'}}, ''),
+    ({'index': 0, 'id': 'bad-arguments',
+      'function': {'name': 'grep_search', 'arguments': ['not', 'text']}},
+     'grep_search'),
+    ({'index': 0, 'id': {'nested': 'id'},
+      'function': {'name': 'grep_search', 'arguments': '{}'}},
+     'grep_search'),
+    ({'index': 0, 'id': 'bad-caller', 'caller': ['root'],
+      'function': {'name': 'grep_search', 'arguments': '{}'}},
+     'grep_search'),
+])
+def test_malformed_tool_delta_fields_are_typed_not_exceptions(
+        tool_delta, expected_name):
+    frame = json.dumps({
+        'choices': [{'delta': {'tool_calls': [tool_delta]}}],
+    }, separators=(',', ':'))
+    transcript = [
+        f'data: {frame}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        'data: [DONE]',
+    ]
+
+    sync_result = _run_sync(transcript)
+    async_result = _run_async(transcript)
+
+    for result in (sync_result, async_result):
+        assert result.state is ProviderStreamState.MALFORMED_STREAM
+        assert result.evidence.malformed_frame_count == 1
+        assert result.message['tool_calls'][0]['function']['name'] == expected_name
+        if tool_delta.get('id') == 'bad-caller':
+            assert result.message['tool_calls'][0]['caller'] == ['root']
+
+
+@pytest.mark.parametrize('malformed_chunk', [
+    {'choices': {'not': 'an array'}},
+    {'choices': [['not', 'an', 'object']]},
+    {'choices': [{'delta': ['not', 'an', 'object']}]},
+    {'choices': [{'delta': {'content': {'not': 'text'}}}]},
+    {'choices': [{'delta': {'thinking': ['not', 'text']}}]},
+    {'choices': [{'delta': {'thinking_signature': ['not', 'text']}}]},
+    {'choices': [{'delta': {'reasoning_details': {'not': 'an array'}}}]},
+    {'choices': [{'delta': {'tool_calls': {'not': 'an array'}}}]},
+])
+def test_malformed_stream_envelopes_are_typed_not_runtime_exceptions(
+        malformed_chunk):
+    frame = json.dumps(malformed_chunk, separators=(',', ':'))
+    transcript = [
+        f'data: {frame}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        'data: [DONE]',
+    ]
+
+    for result in (_run_sync(transcript), _run_async(transcript)):
+        assert result.state is ProviderStreamState.MALFORMED_STREAM
+        assert result.evidence.malformed_frame_count >= 1
+
+
+def test_numeric_string_tool_index_is_normalized_without_mixed_key_types():
+    msg, finish, _usage = _run_sync([
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":"0","id":"tc_string_index","function":{"name":"grep_search","arguments":""}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"pattern\\":\\"a\\"}"}}]}}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        'data: [DONE]',
+    ])
+
+    assert finish == 'tool_calls'
+    assert len(msg['tool_calls']) == 1
+    assert msg['tool_calls'][0]['function']['arguments'] == '{"pattern":"a"}'
 
 
 def test_minimax_think_demux():

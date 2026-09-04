@@ -125,3 +125,31 @@ def test_owner_inventory_requires_restricted_system_principal():
             client_factory=factory,
         )
     assert client.calls == []
+
+
+def test_owner_inventory_passes_a_bounded_storage_limit():
+    from lib.knowledge.repository import visual_enrichment_owner_ids
+
+    class InventoryClient(_Client):
+        def query(self, operation, payload):
+            self.calls.append(("query", operation, payload))
+            return [7, 9]
+
+    client = InventoryClient()
+    principal = PrincipalContext.system(
+        subject_id="knowledge-maintainer", scopes={"knowledge:maintain"})
+
+    assert visual_enrichment_owner_ids(
+        principal=principal,
+        limit=11,
+        client_factory=lambda *, write=False: client,
+    ) == [7, 9]
+    assert client.calls == [
+        ("query", "knowledge.enrichment.owners", {"limit": 11})]
+
+    with pytest.raises(ValueError, match="1..512"):
+        visual_enrichment_owner_ids(
+            principal=principal,
+            limit=513,
+            client_factory=lambda *, write=False: client,
+        )

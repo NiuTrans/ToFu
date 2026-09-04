@@ -8,12 +8,14 @@ Quick start
     client = Tofu(base_url="https://your-tofu", api_key="tofu_live_…")
 
     # Sync chat
-    resp = client.chat(model="claude-opus-4-7",
+    resp = client.chat(model={"creator_id": "anthropic",
+                              "model_id": "claude-opus-4-7"},
                        messages=[{"role":"user","content":"Hi"}])
     print(resp["choices"][0]["message"]["content"])
 
     # Streaming
-    for ev in client.stream(model="claude-opus-4-7",
+    for ev in client.stream(model={"creator_id": "anthropic",
+                                   "model_id": "claude-opus-4-7"},
                              messages=[{"role":"user","content":"Hi"}]):
         if ev.get("choices", [{}])[0].get("delta", {}).get("content"):
             print(ev["choices"][0]["delta"]["content"], end="", flush=True)
@@ -32,6 +34,7 @@ it calls.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 import time
 import uuid
@@ -65,6 +68,71 @@ class TofuError(RuntimeError):
                 payload.get('retry_after') or 0) or None
         except (TypeError, ValueError):
             self.retry_after = None
+
+
+def _native_model_payload(model: Mapping[str, str]) -> dict[str, str]:
+    """Copy and shape-check the two native v2 selection forms."""
+    if not isinstance(model, Mapping):
+        raise TypeError(
+            'model must be {creator_id, model_id} or '
+            '{provider_id, offering_id}')
+    payload = {str(key): str(value).strip() for key, value in model.items()}
+    if set(payload) not in (
+        {'creator_id', 'model_id'},
+        {'provider_id', 'offering_id'},
+    ) or not all(payload.values()):
+        raise ValueError(
+            'model must contain exactly non-empty creator_id+model_id or '
+            'provider_id+offering_id')
+    return payload
+
+
+def _native_agent_payload(
+    *,
+    messages: list,
+    model: Mapping[str, str] | None = None,
+    routing: Optional[Mapping[str, Any]] = None,
+    model_routing: Optional[Mapping[str, Any]] = None,
+    config: Optional[dict] = None,
+    capabilities: Optional[dict] = None,
+    tools: Optional[list] = None,
+    trajectory: str = '',
+    timeout_s: float = 600.0,
+    request_id: str = '',
+    **extra,
+) -> dict:
+    """Build the shared sync/async native agent payload without legacy BYO.
+
+    A standalone runtime may own a configured default and omit ``model``;
+    full ChatUI callers provide a structured identity. Secret-bearing inline
+    ``provider`` blocks fail locally instead of being silently ignored by a
+    newer server.
+    """
+    if 'provider' in extra:
+        raise ValueError(
+            'inline provider blocks were removed; configure model_routing v2')
+    body = dict(extra)
+    body.update({'messages': messages, 'timeout_s': timeout_s})
+    if model is not None:
+        body['model'] = _native_model_payload(model)
+    if routing is not None:
+        if not isinstance(routing, Mapping):
+            raise TypeError('routing must be an object')
+        body['routing'] = dict(routing)
+    if model_routing is not None:
+        if not isinstance(model_routing, Mapping):
+            raise TypeError('model_routing must be an object')
+        body['model_routing'] = dict(model_routing)
+    for key, value in (
+        ('config', config),
+        ('capabilities', capabilities),
+        ('tools', tools),
+        ('trajectory', trajectory),
+        ('id', request_id),
+    ):
+        if value:
+            body[key] = value
+    return body
 
 
 class Tofu:
@@ -161,12 +229,13 @@ class Tofu:
 
     # ── Chat ─────────────────────────────────────────────────────
 
-    def chat(self, *, messages: list, model: str = '',
+    def chat(self, *, messages: list, model: Mapping[str, str],
+              routing: Optional[dict] = None,
               config: Optional[dict] = None, **kwargs) -> dict:
         """Sync chat completion via ``POST /api/v1/chat/completions``."""
-        body = {'messages': messages}
-        if model:
-            body['model'] = model
+        body = {'messages': messages, 'model': _native_model_payload(model)}
+        if routing:
+            body['routing'] = routing
         if config:
             body['config'] = config
         for k in ('temperature', 'max_tokens', 'top_p', 'stop',
@@ -176,13 +245,18 @@ class Tofu:
                 body[k] = kwargs[k]
         return self._json('POST', '/api/v1/chat/completions', json_body=body)
 
-    def stream(self, *, messages: list, model: str = '',
+    def stream(self, *, messages: list, model: Mapping[str, str],
+                routing: Optional[dict] = None,
                 config: Optional[dict] = None, **kwargs
                 ) -> Iterator[dict]:
         """Streaming chat completion. Yields parsed SSE event payloads."""
-        body = {'messages': messages, 'stream': True}
-        if model:
-            body['model'] = model
+        body = {
+            'messages': messages,
+            'model': _native_model_payload(model),
+            'stream': True,
+        }
+        if routing:
+            body['routing'] = routing
         if config:
             body['config'] = config
         for k in ('temperature', 'max_tokens', 'top_p', 'stop',
@@ -369,37 +443,12 @@ class _AgentsAPI:
     def __init__(self, client: Tofu):
         self._c = client
 
-    @staticmethod
-    def _run_body(*, messages: list, model: str = '',
-                  provider: Optional[dict] = None,
-                  config: Optional[dict] = None,
-                  capabilities: Optional[dict] = None,
-                  tools: Optional[list] = None,
-                  trajectory: str = '', timeout_s: float = 600.0,
-                  request_id: str = '', **extra) -> dict:
-        body: dict = {
-            'messages': messages,
-            'timeout_s': timeout_s,
-        }
-        if model:
-            body['model'] = model
-        if provider:
-            body['provider'] = provider
-        if config:
-            body['config'] = config
-        if capabilities:
-            body['capabilities'] = capabilities
-        if tools:
-            body['tools'] = tools
-        if trajectory:
-            body['trajectory'] = trajectory
-        if request_id:
-            body['id'] = request_id
-        body.update(extra)
-        return body
+    _run_body = staticmethod(_native_agent_payload)
 
-    def run(self, *, messages: list, model: str = '',
-            provider: Optional[dict] = None,
+    def run(self, *, messages: list,
+            model: Mapping[str, str] | None = None,
+            routing: Optional[Mapping[str, Any]] = None,
+            model_routing: Optional[Mapping[str, Any]] = None,
             config: Optional[dict] = None,
             capabilities: Optional[dict] = None,
             tools: Optional[list] = None,
@@ -408,12 +457,13 @@ class _AgentsAPI:
             **extra) -> dict:
         """Run ``POST /api/v1/agent/run`` with safe automatic retries.
 
-        ``model`` may be omitted when the server has a managed default. An
-        inline provider only needs ``base_url``/``api_key``/``model``. The
+        ``model`` may be omitted only when a standalone runtime advertises a
+        configured default. Otherwise pass one structured v2 identity. The
         generated Idempotency-Key stays stable across ambiguous network retries.
         """
         body = self._run_body(
-            messages=messages, model=model, provider=provider, config=config,
+            messages=messages, model=model, routing=routing,
+            model_routing=model_routing, config=config,
             capabilities=capabilities, tools=tools, trajectory=trajectory,
             timeout_s=timeout_s, request_id=request_id, stream=False, **extra)
         key = idempotency_key or uuid.uuid4().hex
@@ -423,8 +473,10 @@ class _AgentsAPI:
             timeout=max(self._c.timeout, timeout_s + 10),
         )
 
-    def start(self, *, messages: list, model: str = '',
-              provider: Optional[dict] = None,
+    def start(self, *, messages: list,
+              model: Mapping[str, str] | None = None,
+              routing: Optional[Mapping[str, Any]] = None,
+              model_routing: Optional[Mapping[str, Any]] = None,
               config: Optional[dict] = None,
               capabilities: Optional[dict] = None,
               tools: Optional[list] = None,
@@ -433,7 +485,8 @@ class _AgentsAPI:
               **extra) -> dict:
         """Start an agent run and return its task handle (HTTP 202)."""
         body = self._run_body(
-            messages=messages, model=model, provider=provider, config=config,
+            messages=messages, model=model, routing=routing,
+            model_routing=model_routing, config=config,
             capabilities=capabilities, tools=tools, trajectory=trajectory,
             timeout_s=timeout_s, request_id=request_id, **extra)
         body['async'] = True

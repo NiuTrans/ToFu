@@ -12,6 +12,8 @@ import pytest
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'frontend/src/core/project-browse-coordinator.ts'
+DIRECTORY_BROWSER_SOURCE = (
+    ROOT / 'frontend/src/features/project/directory-browser.ts')
 
 
 def test_browse_coordinator_caches_canonical_aliases_and_cancels_stale_reads():
@@ -80,6 +82,87 @@ const {{ createProjectBrowseCoordinator }} = modulePort.exports;
 """
     result = subprocess.run(
         ['node', '-e', script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == 'ok'
+
+
+def test_directory_browser_owns_bounded_filter_and_escaped_actions(tmp_path):
+    compiled = tmp_path / 'directory-browser.cjs'
+    build = subprocess.run(
+        [
+            str(ROOT / 'node_modules/.bin/esbuild'),
+            str(DIRECTORY_BROWSER_SOURCE),
+            '--bundle',
+            '--platform=node',
+            '--format=cjs',
+            f'--outfile={compiled}',
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+    script = r"""
+const assert = require('assert');
+const { createProjectDirectoryBrowser } = require(process.argv[1]);
+const escapeHtml = (value) => String(value)
+  .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;');
+const translate = (key, values = {}) => `${key}:${values.q || values.n || ''}`;
+const browser = createProjectDirectoryBrowser({
+  escapeHtml,
+  translate,
+  assets: {
+    codeFolder: '<code-icon>', plainFolder: '<folder-icon>',
+    deleteFolder: '<delete-icon>', addFolder: '<add-icon>',
+    folderChevron: '<chevron-icon>',
+  },
+});
+const dangerousPath = '/root/quote\'"<&';
+const data = {
+  filesCount: 1,
+  truncated: true,
+  dirs: [
+    {path:'/root/Alpha', name:'Alpha', hasCode:true, hidden:false, itemCount:101},
+    {path:dangerousPath, name:'quote\'"<&', hasCode:false, hidden:true, itemCount:1},
+  ],
+};
+
+assert.strictEqual(browser.setFilter('  ALPHA  '), '  ALPHA  ');
+let html = browser.render(data, ['/root/Alpha']);
+assert.ok(html.includes('folder-added'));
+assert.ok(html.includes('100+'));
+assert.ok(!html.includes('pm.showingFirst'));
+assert.strictEqual(browser.resetForNavigation('/root', '/root'), false);
+assert.strictEqual(browser.filterValue(), '  ALPHA  ');
+assert.strictEqual(browser.resetForNavigation('/root', '/next'), true);
+assert.strictEqual(browser.filterValue(), '');
+
+html = browser.render(data, []);
+assert.ok(html.includes('&quot;'));
+assert.ok(html.includes('&amp;'));
+assert.ok(html.includes('pm.showingFirst:2'));
+assert.ok(!html.includes('data-tofu-action="browseDirectory("/root'));
+browser.setFilter('x'.repeat(300));
+assert.strictEqual(browser.filterValue().length, 256);
+browser.setFilter('absent');
+assert.ok(browser.render(data, []).includes('pm.browseNoMatches:absent'));
+browser.clearFilter();
+assert.ok(browser.render({dirs:[], filesCount:3, truncated:false}, [])
+  .includes('pm.filesCount:3'));
+process.stdout.write('ok');
+"""
+    result = subprocess.run(
+        ['node', '-e', script, str(compiled)],
         cwd=ROOT,
         text=True,
         capture_output=True,

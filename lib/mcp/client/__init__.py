@@ -43,6 +43,8 @@ from lib.mcp.client._errors import (  # noqa: E402,F401
 from lib.mcp.client._coerce import (  # noqa: E402,F401
     _coerce_one,
     _coerce_args_to_schema,
+    _extract_annotations,
+    _extract_output_schema,
     _extract_read_only_hint,
 )
 
@@ -124,6 +126,8 @@ __all__ = [
     'reconcile_for_connect',
     '_reconcile_npx_cache',
     '_coerce_args_to_schema',
+    '_extract_annotations',
+    '_extract_output_schema',
     '_extract_read_only_hint',
     '_install_jobs',
     '_bridge_singleton',

@@ -171,7 +171,10 @@ def _run(js_path: str):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+        with compiled_typescript(
+            REPORT_RUNTIME_TS,
+            expose_feature_registry_to_window=True,
+        ) as runtime_js:
             proc = subprocess.run(
                 ['node', harness, js_path, ROOT, runtime_js],
                 capture_output=True, text=True, timeout=60,

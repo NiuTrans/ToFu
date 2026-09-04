@@ -55,7 +55,6 @@ class TestImportValidation:
     _TOP_LEVEL_MODULES = [
         "lib.browser",
         "lib.conv_ref",
-        "lib.embeddings",
         "lib.image_gen",
         "lib.llm",
         "lib.log",

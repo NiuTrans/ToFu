@@ -53,6 +53,7 @@ from lib.llm.stream_result import (
     require_verified_provider_stream_result,
 )
 from lib.log import get_logger
+from lib.tool_call_identity import ensure_unique_tool_call_ids
 
 logger = get_logger(__name__)
 
@@ -445,6 +446,10 @@ def run_agent_loop(
     # semantic breakers, or caller-supplied guards may stop it earlier.
     bonus = 0
     rnd = -1
+    # Provider ids are correlation tokens, not durable execution identity.
+    # Keep one source-level claim set across this loop so positional-id models
+    # cannot make later assistant/tool pairs ambiguous inside caller history.
+    claimed_tool_call_ids: set[str] = set()
     progress_ledger = None
     if (max_consecutive_no_progress_rounds > 0
             or max_consecutive_nonretryable_failure_rounds > 0):
@@ -508,6 +513,39 @@ def run_agent_loop(
             outcome.completed = True
             outcome.exit_reason = 'completed'
             break
+
+        if execute_tools is None:
+            # Each provider item is an execution occurrence. Equal name/args
+            # under different response positions remain independent; content
+            # equality is not evidence of a transport replay. Remove only
+            # malformed non-object carriers before history is persisted.
+            normalized_calls = [
+                tool_call for tool_call in tool_calls
+                if isinstance(tool_call, dict)
+            ]
+            malformed_entry_count = len(tool_calls) - len(normalized_calls)
+            msg['tool_calls'] = normalized_calls
+            tool_calls = normalized_calls
+            if malformed_entry_count:
+                logger.warning(
+                    '[AgentLoop] round %d: discarded %d non-object tool-call '
+                    'entr%s before history append',
+                    rnd + 1, malformed_entry_count,
+                    'y' if malformed_entry_count == 1 else 'ies')
+            if not tool_calls:
+                outcome.halted = True
+                outcome.exit_reason = 'malformed_tool_batch'
+                break
+            repaired_id_count = ensure_unique_tool_call_ids(
+                tool_calls,
+                claimed_tool_call_ids,
+                id_prefix=f'agent_r{rnd}',
+            )
+            if repaired_id_count:
+                logger.warning(
+                    '[AgentLoop] round %d: repaired %d blank/recycled '
+                    'tool call id(s) before history append',
+                    rnd + 1, repaired_id_count)
 
         if on_tool_round is not None:
             on_tool_round(rnd, msg)

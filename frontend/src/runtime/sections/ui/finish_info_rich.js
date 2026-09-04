@@ -23,8 +23,14 @@ function _buildCostPopover(ctx) {
   let html = '';
 
   // ── Per-round breakdown table ──
-  if (numRounds > 1) {
-    html += `<div class="cp-section-title">${escapeHtml(t('finishInfo.apiRoundsTitle', { n: numRounds }))}</div>`;
+  if (numRounds > 0) {
+    const _mainCalls = rounds.filter((rd) => rd?.kind !== 'compaction').length;
+    const _compactionCalls = rounds.filter((rd) => rd?.kind === 'compaction').length;
+    const _titleKey = _compactionCalls
+      ? 'finishInfo.apiCallsWithCompactionTitle' : 'finishInfo.apiRoundsTitle';
+    html += `<div class="cp-section-title">${escapeHtml(t(_titleKey, {
+      n: numRounds, main: _mainCalls, compaction: _compactionCalls,
+    }))}</div>`;
     html += `<div class="cp-rounds">`;
     // Per-round tool names. The backend stamps `rd.toolCalls` (authoritative,
     //   exactly the tool_calls the model emitted), but it's absent on every
@@ -77,14 +83,17 @@ function _buildCostPopover(ctx) {
       const _body = _parts.join(t('finishInfo.listSepDot'));
       return _sum > 0 ? `${_body}${t('finishInfo.metaSum', { v: fmt(_sum) })}` : _body;
     };
+    let _compactionCallIndex = 0;
     rounds.forEach((rd, i) => {
       const ru = rd.usage || {};
-      const ri = ru.prompt_tokens || ru.input_tokens || 0;
+      const _rawInput = ru.prompt_tokens || ru.input_tokens || 0;
       const ro = ru.completion_tokens || ru.output_tokens || 0;
       const rt = ru.reasoning_tokens || ru.thinking_tokens || 0;
       const rcw = ru.cache_write_tokens || ru.cache_creation_input_tokens || 0;
       const rcr = ru.cache_read_tokens || ru.cache_read_input_tokens || 0;
       const rdCost = rd.cost || calcCostCny(ru, mid, rd.provider_id || rd.providerId || pid);
+      const ri = rdCost ? (Number(rdCost.totalInputTokens) || 0) : 0;
+      const rUncached = rdCost ? (Number(rdCost.inputTokens) || 0) : 0;
       // Honest cost label. calcCostCny returns null for BOTH "genuinely no
       // charge" AND "couldn't obtain the server number" (fetch pending or
       // failed). Only print ¥0 in the FIRST case — when the round consumed no
@@ -95,10 +104,18 @@ function _buildCostPopover(ctx) {
       if (rdCost) {
         rdCnyStr = fCny(rdCost.costCny);
       } else {
-        const _billable = (ri + ro + rt + rcw + rcr) > 0;
+        const _billable = (_rawInput + ro + rt + rcw + rcr) > 0;
         rdCnyStr = _billable ? "…" : "¥0";
       }
-      let rdLabel = t("toolPanel.roundTag", { n: i + 1 });
+      let rdLabel;
+      if (rd.kind === 'compaction') {
+        _compactionCallIndex += 1;
+        rdLabel = t('finishInfo.compactionCallLabel', {
+          n: _compactionCallIndex,
+        });
+      } else {
+        rdLabel = t("toolPanel.roundTag", { n: i + 1 - _compactionCallIndex });
+      }
       if (rd.tag && rd.tag.includes("FALLBACK")) rdLabel += t('finishInfo.fallbackSuffix');
       // API key that served this round (from dispatch metadata).
       const _disp = ru._dispatch || {};
@@ -118,11 +135,28 @@ function _buildCostPopover(ctx) {
       html += `<span class="cp-round-cost">${escapeHtml(rdCnyStr)}</span>`;
       html += `</div>`;
       html += `<div class="cp-round-tokens">`;
-      html += `<span>${escapeHtml(fmt(ri))} → ${escapeHtml(fmt(ro))}</span>`;
+      html += `<span>${escapeHtml(t('finishInfo.inputSplit', {
+        total: rdCost ? fmt(ri) : t('finishInfo.pendingValue'),
+        uncached: rdCost ? fmt(rUncached) : t('finishInfo.pendingValue'),
+        cache: fmt(rcr), output: fmt(ro),
+      }))}</span>`;
       if (rt > 0) html += `<span class="cp-think">${Icon('brain', 11)}${escapeHtml(fmt(rt))}</span>`;
       if (rcr > 0) html += `<span class="cp-hit">cache ${escapeHtml(fmt(rcr))}</span>`;
       if (rcw > 0) html += `<span class="cp-write">write ${escapeHtml(fmt(rcw))}</span>`;
       html += `</div>`;
+
+      const _admission = rd.promptAdmission;
+      if (_admission && Number(_admission.totalTokens) > 0) {
+        const _admissionKey = _admission.action === 'compact_then_admit'
+          ? 'finishInfo.promptAdmissionCompacted'
+          : 'finishInfo.promptAdmissionAdmitted';
+        html += `<div class="cp-round-meta"><span>${escapeHtml(t(_admissionKey, {
+          total: fmt(Number(_admission.totalTokens) || 0),
+          messages: fmt(Number(_admission.messageTokens) || 0),
+          tools: fmt(Number(_admission.toolSchemaTokens) || 0),
+          target: fmt(Number(_admission.targetTokens) || 0),
+        }))}</span></div>`;
+      }
       // Inflow line: the tool RESULTS that flowed INTO this round's
       //   context (= the PREVIOUS round's tool calls, fed back). This is ONE
       //   component of this round's `write` — NOT the whole thing. The write
@@ -258,7 +292,7 @@ function _buildCostPopover(ctx) {
         // node it becomes an anonymous flex item whose CJK min-content is ONE
         // character, so a long state badge (e.g. 'upstream') squeezes it to a
         // 1-char-per-line column (2026-07-24 overflow bug).
-        html += `<div class="cp-round-break${_stCls}">${_CP_WARN_SVG}${_stLabel}<span class="cp-break-text">${t('finishInfo.cacheBreakLabel', { reason: cbReason })}</span></div>`; 
+        html += `<div class="cp-round-break${_stCls}">${_CP_WARN_SVG}${_stLabel}<span class="cp-break-text">${t('finishInfo.cacheBreakLabel', { reason: cbReason })}</span></div>`;
         // The named culprit — WHICH message(s) broke cache — surfaced on its
         // own line so the user can act on it, not hunt error.log.
         if (cbCulprits) {

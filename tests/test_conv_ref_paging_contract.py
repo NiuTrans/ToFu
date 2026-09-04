@@ -104,7 +104,7 @@ def big_conv(monkeypatch):
     })
     monkeypatch.setattr(
         _detail, '_read_conversation_snapshot',
-        lambda conversation_id, *, user_id: row)
+        lambda conversation_id, *, user_id, **projection: row)
     return msgs
 
 
@@ -180,7 +180,7 @@ class TestPagingArgumentsAreReallyWired:
         stringy = _record(_run(before='40'))
         assert typed['messageIndices'] == stringy['messageIndices']
 
-    @pytest.mark.parametrize('bad', ['abc', 0, -5])
+    @pytest.mark.parametrize('bad', ['abc', -5, False, 1.5])
     def test_unusable_paging_args_report_instead_of_being_ignored(
             self, big_conv, bad):
         """Silently ignoring a bad cursor recreates the original defect: the
@@ -188,6 +188,16 @@ class TestPagingArgumentsAreReallyWired:
         out = _run(before=bad)
         assert out.lstrip().startswith('Error:'), (
             f'before={bad!r} was silently ignored instead of reported')
+
+    def test_zero_before_is_the_default_window_compatibility_sentinel(
+            self, big_conv):
+        """A common model-produced zero cannot denote a valid older page."""
+        default_indices = _record(_run())['messageIndices']
+        for zero in (0, '0', 0.0):
+            assert _record(_run(before=zero))['messageIndices'] == default_indices
+
+    def test_zero_limit_remains_an_error(self, big_conv):
+        assert _run(limit=0).lstrip().startswith('Error:')
 
 
 class TestTheHeaderStatesWhatWasDelivered:
@@ -207,6 +217,12 @@ class TestTheHeaderStatesWhatWasDelivered:
         assert 'before' in head and 'limit' in head, (
             'a windowed read gave no way to reach the rest — a dead end')
 
+    def test_requested_page_precedes_large_settings_in_raw_record(self, big_conv):
+        """A bounded downstream prefix must expose page evidence, not settings."""
+        dump = _run(before=40, limit=1).split('```json', 1)[1]
+        assert dump.index('"messageIndices"') < dump.index('"settings"')
+        assert dump.index('"messages"') < dump.index('"settings"')
+
     def test_clamping_is_disclosed_in_the_header(self, monkeypatch):
         """A field-clamped read must not look like a faithful one.
 
@@ -223,7 +239,7 @@ class TestTheHeaderStatesWhatWasDelivered:
         })
         monkeypatch.setattr(
             _detail, '_read_conversation_snapshot',
-            lambda conversation_id, *, user_id: row)
+            lambda conversation_id, *, user_id, **projection: row)
         out = _run()
         rec = _record(out)
         head = out.split('```json', 1)[0]
@@ -349,6 +365,13 @@ class TestDescriptionMatchesTheSchema:
             f'the description promises parameter(s) {sorted(missing)} that the '
             f'schema does not expose — a model that follows the instruction '
             f'has its argument silently dropped. Exposed: {sorted(props)}')
+
+    def test_paging_schema_excludes_zero_before_provider_generation(self):
+        fn = self._fn()
+        props = fn['parameters']['properties']
+        assert props['before']['minimum'] == 1
+        assert props['limit']['minimum'] == 1
+        assert 'never pass 0' in props['before']['description'].lower()
 
     def test_the_executor_forwards_every_exposed_parameter(self, big_conv):
         """Schema presence is not enough — an exposed-but-ignored parameter is

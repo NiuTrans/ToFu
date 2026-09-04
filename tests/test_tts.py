@@ -100,12 +100,12 @@ def test_js_fallback_parity():
     """The migrated model-cap owner must contain every excluded cap."""
     from lib.model_info.capability_taxonomy import CHAT_EXCLUDED_CAPS
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        'frontend', 'src', 'runtime', 'app-runtime.js')
+                        'frontend', 'src', 'core', 'model-capability-taxonomy.ts')
     with open(path, encoding='utf-8') as f:
         src = f.read()
     for cap in CHAT_EXCLUDED_CAPS:
         assert f"'{cap}'" in src, f'migrated model_caps fallback missing {cap!r}'
-    _ok('parity: model_caps.js fallback covers every CHAT_EXCLUDED_CAPS entry')
+    _ok('parity: model-capability-taxonomy fallback covers every CHAT_EXCLUDED_CAPS entry')
 
 
 def test_slot_config_reference_entries():
@@ -144,6 +144,19 @@ def test_config_file_wins():
     finally:
         restore()
     _ok('config: tts.json values win over fallbacks (voice/format/speed/chunk)')
+
+
+def test_chunk_size_is_hard_bounded():
+    import lib.tts as T
+    cfg = {'max_input_chars': 1}
+    restore = _install(cfg=cfg)
+    try:
+        assert T.max_input_chars() == 200
+        cfg['max_input_chars'] = 99_999
+        assert T.max_input_chars() == 4096
+    finally:
+        restore()
+    _ok('config: synthesis chunks clamp to 200..4096 characters')
 
 
 def test_availability_and_model_listing():
@@ -223,6 +236,116 @@ def test_synthesize_no_slot_503():
     finally:
         restore()
     _ok('synthesize: no tts slot → TTSError 503 (degrade path trigger)')
+
+
+def test_owner_synthesis_pins_one_bounded_route_and_disposes():
+    """An owner call cannot escape its v2 group and never leaks the pin."""
+    from types import SimpleNamespace
+
+    import lib.model_routing as routing
+    import lib.tts as T
+    from lib.llm_dispatch.provider_pin import get_pinned_provider, provider_pin
+
+    group = SimpleNamespace(pin_id='owner-tts-group')
+    observed = {'mint': [], 'pins': [], 'disposed': []}
+    original_mint = routing.mint_capability_slot_group
+    original_dispose = routing.dispose_routed_slot_group
+
+    def _mint(*args, **kwargs):
+        observed['mint'].append((args, kwargs))
+        return 'logical-tts', group
+
+    slot = _FakeSlot(model='wire-tts')
+    slot.logical_model = 'logical-tts'
+    slot.routing_provider_id = 'provider-public'
+
+    def _post(_slot, _text, *, voice, fmt, speed):
+        observed['pins'].append(get_pinned_provider())
+        return _tiny_wav()
+
+    routing.mint_capability_slot_group = _mint
+    routing.dispose_routed_slot_group = observed['disposed'].append
+    restore = _install(slot_list=[slot], post_fn=_post, cfg={})
+    try:
+        with provider_pin('outer-group'):
+            result = T.synthesize(
+                'owner text', owner_user_id=73, tenant_id='tenant-a')
+            assert get_pinned_provider() == 'outer-group'
+        assert get_pinned_provider() is None
+        assert result.model == 'logical-tts'
+        assert result.provider_id == 'provider-public'
+        assert observed['pins'] == ['owner-tts-group']
+        assert observed['disposed'] == [group]
+        kwargs = observed['mint'][0][1]
+        assert kwargs['required_protocols'] == frozenset({'openai', 'local'})
+        assert kwargs['max_candidates'] == 8
+
+        mint_count = len(observed['mint'])
+        try:
+            T.synthesize(' ', owner_user_id=73)
+            raise AssertionError('empty input must fail')
+        except T.TTSError as exc:
+            assert exc.status == 400
+        assert len(observed['mint']) == mint_count
+    finally:
+        restore()
+        routing.mint_capability_slot_group = original_mint
+        routing.dispose_routed_slot_group = original_dispose
+    _ok('owner route: hard-pinned, bounded, restored and disposed exactly once')
+
+
+def test_owner_model_listing_uses_v2_openai_routes():
+    from types import SimpleNamespace
+
+    import lib.model_routing as routing
+    import lib.tts as T
+
+    captured = {}
+    original = routing.list_capability_routes
+
+    def _routes(_repository, boundary, capability, **kwargs):
+        captured.update(owner=boundary.owner_user_id, capability=capability,
+                        protocols=kwargs.get('required_protocols'))
+        return [SimpleNamespace(model_id='logical-tts',
+                                provider_id='provider-public')]
+
+    routing.list_capability_routes = _routes
+    try:
+        assert T.list_tts_models(owner_user_id=73) == [
+            {'model': 'logical-tts', 'provider_id': 'provider-public'}]
+        assert T.tts_available(owner_user_id=73) is True
+    finally:
+        routing.list_capability_routes = original
+    assert captured == {'owner': 73, 'capability': 'tts',
+                        'protocols': frozenset({'openai', 'local'})}
+    _ok('owner listing: v2-only and OpenAI speech protocol constrained')
+
+
+def test_local_tts_omits_empty_bearer_header():
+    import lib.tts as T
+    from lib.tts import _synthesize as synth_module
+
+    class _Response:
+        status_code = 200
+        text = ''
+        content = _tiny_wav()
+
+    slot = _FakeSlot()
+    slot.api_key = ''
+    observed = {}
+    original = synth_module.http_post
+
+    def _post(_url, **kwargs):
+        observed.update(kwargs)
+        return _Response()
+
+    synth_module.http_post = _post
+    try:
+        T._post_speech(slot, 'local text', voice='alloy', fmt='wav', speed=1.0)
+    finally:
+        synth_module.http_post = original
+    assert 'Authorization' not in observed['headers']
+    _ok('local TTS: empty credential does not emit an empty Bearer header')
 
 
 def test_synthesize_slot_fallback():
@@ -406,10 +529,14 @@ def main():
         test_slot_config_reference_entries,
         test_config_defaults_without_file,
         test_config_file_wins,
+        test_chunk_size_is_hard_bounded,
         test_availability_and_model_listing,
         test_synthesize_happy_path,
         test_synthesize_voice_precedence,
         test_synthesize_no_slot_503,
+        test_owner_synthesis_pins_one_bounded_route_and_disposes,
+        test_owner_model_listing_uses_v2_openai_routes,
+        test_local_tts_omits_empty_bearer_header,
         test_synthesize_slot_fallback,
         test_synthesize_neuter_voice_resolution,
         test_sniff_mime,

@@ -3,15 +3,19 @@ import { getFeatureBinding } from './feature-registry';
 
 export type FeatureCallable = RuntimeCallable;
 
+export function announceFeatureDomainLoaded(domain: string): void {
+  document.dispatchEvent(new CustomEvent('tofu:feature-domain-loaded', {
+    detail: { domain, source: 'vite' },
+  }));
+}
+
 export function invokeFeatureEntry(
   domain: string,
   name: string,
   args: readonly unknown[],
   stub: FeatureCallable,
 ): unknown {
-  document.dispatchEvent(new CustomEvent('tofu:feature-domain-loaded', {
-    detail: { domain, source: 'vite' },
-  }));
+  announceFeatureDomainLoaded(domain);
   // The retained ESM runtime installs a lazy routing stub in runtimeScope so
   // shell actions can request their owning chunk.  featureRegistry falls back
   // to that service table, therefore its first answer can legitimately be the

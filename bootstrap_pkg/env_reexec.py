@@ -94,6 +94,12 @@ def _tofu_maybe_reexec_into_env():
     _tofu_export_env_native_paths(env_prefix, backend, cfg.get('env_name'))
     if same:
         return
+    if os.environ.get('TOFU_DISABLE_ENV_REEXEC') == '1':
+        # Hard opt-out for test harnesses: importing bootstrap.py under a
+        # foreign interpreter (pytest collection on a non-env python) must
+        # not execv the whole runner into the env python — that silently
+        # restarts the entire suite under replaced argv.
+        return
     if os.environ.get('_TOFU_ENV_REEXEC') == '1':
         sys.stderr.write(
             '\033[33m[bootstrap.py] WARNING: _TOFU_ENV_REEXEC=1 was inherited '

@@ -139,15 +139,15 @@ def _patch_turn_with_prefs(task: dict, learned: list) -> None:
         try:
             from lib.turn_lifecycle import (
                 LifecycleConflict,
-                _task_projection,
+                _projection_provenance,
                 get_turn,
                 update_turn_projection,
             )
             for attempt in range(3):
                 current = get_turn(conv_id, turn_id, user_id=user_id)
                 current_projection = dict(current.get('projection') or {})
-                enriched = _task_projection(task, current_projection)
-                provenance = enriched.get('provenance')
+                provenance = _projection_provenance(
+                    task, current_projection.get('provenance'))
                 if provenance == current_projection.get('provenance'):
                     break
                 next_projection = dict(current_projection)

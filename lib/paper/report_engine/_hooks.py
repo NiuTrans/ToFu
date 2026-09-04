@@ -176,6 +176,7 @@ def _maybe_run_insight(task, phash, ui_lang, report_md, *, truncated_paper, mode
         'fired': result.get('fired', False),
         'baseline': result.get('baseline'),
         'usage': result.get('usage'),
+        'agentUsageV1': result.get('agentUsageV1'),
     }, model=model)
 
     if result.get('markdown') and result.get('insight'):

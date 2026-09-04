@@ -13,16 +13,57 @@
 //  Helpers
 // ══════════════════════════════════════════════════════
 
-/** Collect all models from all providers (flat list with provider info) */
+/** Project available v2 Offerings into the legacy-shaped rows still consumed
+ * by visibility/default selectors. No provider configuration is reconstructed. */
 function _getAllModels() {
   var result = [];
-  for (var pi = 0; pi < _stgProviders.length; pi++) {
-    var p = _stgProviders[pi];
-    var models = p.models || [];
-    for (var mi = 0; mi < models.length; mi++) {
-      result.push({ model: models[mi], provider: p, provIdx: pi, modelIdx: mi });
-    }
-  }
+  if (!_stgModelRouting) return result;
+  var providers = new Map((_stgModelRouting.providers || []).map(function(row) {
+    return [row.provider_id, row];
+  }));
+  var accesses = new Map((_stgModelRouting.provider_accesses || []).map(function(row) {
+    return [row.provider_access_id, row];
+  }));
+  var models = new Map((_stgModelRouting.models || []).map(function(row) {
+    return [(row.creator_id || '') + '\u0000' + (row.model_id || ''), row];
+  }));
+  var enabledOfferingIds = new Set(
+    (_stgModelRouting.deployments || []).filter(function(row) {
+      return row.enabled === true;
+    }).map(function(row) { return row.offering_id; })
+  );
+  (_stgModelRouting.offerings || []).forEach(function(offering, offeringIndex) {
+    var access = accesses.get(offering.provider_access_id);
+    var provider = access && providers.get(access.provider_id);
+    if (!access || !provider || access.enabled === false || offering.stale ||
+        offering.enabled === false || !enabledOfferingIds.has(offering.offering_id)) return;
+    var ref = offering.model || {};
+    var official = models.get((ref.creator_id || '') + '\u0000' + (ref.model_id || ''));
+    // Bare server-config defaults cannot encode a Provider+Offering identity;
+    // pending identity is exposed only by the Provider-scoped quarantine
+    // section of the model-first chat picker.
+    if (!official) return;
+    var projectedModel = Object.assign({}, official, {
+      model_id: official.model_id,
+      creator_id: official.creator_id,
+      capabilities: offering.capabilities || [],
+      offering_id: offering.offering_id,
+      pending_identity: false,
+    });
+    var projectedProvider = {
+      id: provider.provider_id,
+      provider_id: provider.provider_id,
+      name: access.display_name || provider.name || provider.provider_id,
+      brand: provider.brand || '',
+      enabled: access.enabled !== false,
+    };
+    result.push({
+      model: projectedModel,
+      provider: projectedProvider,
+      provIdx: 0,
+      modelIdx: offeringIndex,
+    });
+  });
   return result;
 }
 
@@ -31,72 +72,6 @@ function _setVal(id, value, prop) {
   if (!el) return;
   if (prop === 'checked') el.checked = !!value;
   else el.value = value;
-}
-
-// ══════════════════════════════════════════════════════
-//  Model list ordering — cold sort + insertion sort
-// ══════════════════════════════════════════════════════
-//
-// Each provider's model list is kept ordered by the string the CARD actually
-// renders — the raw model_id (_renderModelCard shows `m.model_id` verbatim).
-// It must NOT use the friendly pricing-registry label: that label comes from
-// MODEL_PRICING (claude-fable-5 → "Fable 5", yuju-claude-opus-5-evaDaily →
-// "Claude Opus 5") and is the correct sort key ONLY for lists that render it
-// (toolbar picker, preset tab, default-model selects — see branding.js).
-// Sorting the settings cards by an invisible name made claude-fable-5 land
-// between Doubao and gemini — alphabetical to the machine, scrambled to the
-// reader (2026-08-04 incident).
-//
-// To avoid re-sorting on every render (which would make rows jump around
-// while editing), the full sort runs only ONCE per editor session — a
-// "cold sort" when the working copy is loaded (_coldSortAllProviderModels
-// in openSettings). In-session additions (auto-discover / template sync /
-// add / rename) keep the order via _insertModelSorted (binary-search
-// insertion). The next settings-open cold-sorts again from scratch.
-
-/** Order two model entries by the raw model_id shown on the card. Uses the
- *  shared numeric-aware collator from settings/branding.js (so
- *  "claude-opus-4.10" sorts after "claude-opus-4.6" and case is folded);
- *  falls back to a lowercase compare if branding.js is absent (stale bundle)
- *  so the list still renders in a stable order. */
-function _compareModelEntries(a, b) {
-  var ka = String((a && a.model_id) || '');
-  var kb = String((b && b.model_id) || '');
-  if (typeof _MODEL_NAME_COLLATOR !== 'undefined' && _MODEL_NAME_COLLATOR) {
-    return _MODEL_NAME_COLLATOR.compare(ka, kb);
-  }
-  var la = ka.toLowerCase(), lb = kb.toLowerCase();
-  return la < lb ? -1 : (la > lb ? 1 : 0);
-}
-
-/** One-time full sort of a provider's model list (in place, by display name). */
-function _coldSortModels(models) {
-  if (!Array.isArray(models)) return models;
-  models.sort(_compareModelEntries);
-  return models;
-}
-
-/** Cold-sort every provider's model list (called once on config load). */
-function _coldSortAllProviderModels() {
-  for (var i = 0; i < _stgProviders.length; i++) {
-    if (_stgProviders[i] && Array.isArray(_stgProviders[i].models)) {
-      _coldSortModels(_stgProviders[i].models);
-    }
-  }
-}
-
-/** Insert one model into an already-sorted list at its display-name position
- *  (binary search). Cheap incremental upkeep so freshly added or renamed
- *  models land correctly without re-sorting the whole list. */
-function _insertModelSorted(models, m) {
-  if (!Array.isArray(models)) return;
-  var lo = 0, hi = models.length;
-  while (lo < hi) {
-    var mid = (lo + hi) >> 1;
-    if (_compareModelEntries(models[mid], m) <= 0) lo = mid + 1;
-    else hi = mid;
-  }
-  models.splice(lo, 0, m);
 }
 
 // ══════════════════════════════════════════════════════
@@ -110,9 +85,6 @@ function switchSettingsTab(tabId) {
   document.querySelectorAll('.settings-tab-panel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'settingsTab_' + tabId);
   });
-  // The matrix-wide panel class only makes sense on the providers tab —
-  // re-fit so switching away shrinks the panel back to 860px.
-  if (typeof _fitMatrixPanelWidth === 'function') _fitMatrixPanelWidth();
   if (tabId === 'preferences' && typeof _populatePreferencesTab === 'function') {
     _populatePreferencesTab();
   }
@@ -122,9 +94,6 @@ function switchSettingsTab(tabId) {
   if (tabId === 'devices' && typeof _populateDevicesTab === 'function') {
     _populateDevicesTab();
   }
-  if (tabId === 'models' && typeof runtimeScope._renderModelCatalogPanel === 'function') {
-    runtimeScope._renderModelCatalogPanel();
-  }
 }
 
 async function _loadServerConfig() {
@@ -132,11 +101,11 @@ async function _loadServerConfig() {
     debugLog('[Settings] Loading server config…', 'info');
     _serverConfig = await Api.serverConfig.get();
     if (!_serverConfig) throw new Error('serverConfig.get returned null');
-    debugLog('[Settings] Server config loaded: ' + (_serverConfig.providers || []).length + ' providers, ' + Object.keys(_serverConfig.presets || {}).length + ' presets', 'info');
+    debugLog('[Settings] Misc server config loaded: ' + Object.keys(_serverConfig.presets || {}).length + ' presets; providers load from model-routing v2', 'info');
     // Populate the read-only card caches: canonical model rates plus the
     // server-owned USD pivots used only for localized Settings presentation.
-    if (_serverConfig.model_pricing && typeof _modelPricingCache !== 'undefined') {
-      _modelPricingCache = _serverConfig.model_pricing;
+    if (_serverConfig.model_pricing) {
+      runtimeScope._setModelPricingCache(_serverConfig.model_pricing);
     }
     if (_serverConfig.model_price_display &&
         _serverConfig.model_price_display.usd_rates) {
@@ -149,50 +118,41 @@ async function _loadServerConfig() {
   }
 }
 
-function _isManagedSubscriptionProvider(provider) {
-  provider = provider || {};
-  return provider.oauth === 'claude' || provider.oauth === 'codex' ||
-    !!provider.managed_oauth || !!provider.adapter ||
-    /^adapter_/.test(provider.id || '') ||
-    provider.id === 'oauth_claude' || provider.id === 'oauth_codex';
-}
-
-/** Apply a freshly loaded server catalogue without discarding unsaved edits.
- * Initial settings load uses ``preserveEdits=false``. OAuth/adapter actions
- * replace only server-owned subscription providers and leave user-edited
- * providers/presets intact. */
-function _applyServerConfigSnapshot(cfg, preserveEdits) {
-  if (!cfg) return null;
-  var freshProviders = JSON.parse(JSON.stringify(cfg.providers || []));
-  if (preserveEdits && Array.isArray(_stgProviders)) {
-    var editable = _stgProviders.filter(function(p) {
-      return !_isManagedSubscriptionProvider(p);
-    });
-    var managed = freshProviders.filter(_isManagedSubscriptionProvider);
-    _stgProviders = editable.concat(managed);
-  } else {
-    _stgProviders = freshProviders;
-    _stgPresets = JSON.parse(JSON.stringify(cfg.presets || {}));
+async function _loadModelRoutingAuthority() {
+  try {
+    var response = await Api.modelRouting.get();
+    var document = response && response.model_routing;
+    if (!document || document.contract_version !== 'tofu.model-routing/v2') {
+      throw new Error('model-routing v2 authority is unavailable');
+    }
+    _stgModelRouting = JSON.parse(JSON.stringify(document));
+    _stgModelRoutingRevision = Number(response.revision || document.revision || 0);
+    _stgModelRoutingLoadError = '';
+    _stgPendingCredentialSecrets = {};
+    return _stgModelRouting;
+  } catch (error) {
+    _stgModelRouting = null;
+    _stgModelRoutingLoadError = String(error && error.message || error || 'unknown');
+    debugLog('[Settings] Failed to load model-routing v2: ' + _stgModelRoutingLoadError, 'error');
+    return null;
   }
-  _stgFaceRefusals = Array.isArray(cfg.face_refusals) ? cfg.face_refusals : [];
-  _coldSortAllProviderModels();
-  return cfg;
 }
 
 function _refreshSubscriptionModelCatalog() {
-  return _loadServerConfig().then(function(cfg) {
+  return Promise.all([
+    _loadServerConfig(),
+    _loadModelRoutingAuthority(),
+  ]).then(function(results) {
+    var cfg = results[0];
     if (!cfg) return null;
-    _applyServerConfigSnapshot(cfg, true);
     if (typeof _renderProvidersTab === 'function') _renderProvidersTab();
     if (typeof _renderPresetsTab === 'function') {
-      var working = Object.assign({}, cfg, {
-        providers: _stgProviders,
-        presets: _stgPresets,
-      });
-      _renderPresetsTab(working);
+      _renderPresetsTab(cfg);
     }
     if (typeof _populateModelDropdown === 'function') {
-      _populateModelDropdown(cfg.dropdown_models || []);
+      var routedModels = (typeof _modelRoutingDropdownModels === 'function')
+        ? _modelRoutingDropdownModels(_stgModelRouting) : [];
+      _populateModelDropdown(routedModels);
     }
     return cfg;
   });
@@ -232,25 +192,25 @@ function openSettings() {
   // a flip takes effect immediately — see tofu_trading/gate.py.
   var tradingCb = document.getElementById('settingTradingEnabled');
   if (tradingCb) {
-    tradingCb.checked = !!(typeof _featureFlags !== 'undefined' && _featureFlags.trading_enabled);
+    tradingCb.checked = !!runtimeScope._featureFlags?.trading_enabled;
   }
 
   // PPTX translate module toggle
   var pptxCb = document.getElementById('settingPptxTranslateEnabled');
   if (pptxCb) {
-    pptxCb.checked = !!(typeof _featureFlags !== 'undefined' && _featureFlags.pptx_translate_enabled);
+    pptxCb.checked = !!runtimeScope._featureFlags?.pptx_translate_enabled;
   }
 
   // Debug mode toggle
   var debugCb = document.getElementById('settingDebugMode');
   if (debugCb) {
-    debugCb.checked = !!(typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode);
+    debugCb.checked = !!runtimeScope._featureFlags?.debug_mode;
   }
 
   // Daily Optimizer toggle — default ON when flag not yet in features.json
   var optCb = document.getElementById('settingOptimizerEnabled');
   if (optCb) {
-    var _optFlag = (typeof _featureFlags !== 'undefined') ? _featureFlags.optimizer_enabled : undefined;
+    var _optFlag = runtimeScope._featureFlags?.optimizer_enabled;
     optCb.checked = (_optFlag === undefined) ? true : !!_optFlag;
   }
 
@@ -299,7 +259,9 @@ function openSettings() {
     // single source of truth (_updateState) rather than being re-derived here.
     var updVer = document.getElementById('settingsUpdateVersion');
     if (updVer && d && d.version) updVer.textContent = t('settings.updateCurrent', { version: d.version });
-    if (typeof _renderSettingsUpdatePill === 'function') _renderSettingsUpdatePill();
+    if (typeof runtimeScope._renderSettingsUpdatePill === 'function') {
+      runtimeScope._renderSettingsUpdatePill();
+    }
     var mcEl = document.getElementById('settingsMobileClient');
     if (mcEl) {
       var url = d && d.mobile_client_url;
@@ -316,42 +278,27 @@ function openSettings() {
   // Show loading states
   var provList = document.getElementById('stgProviderList');
   if (provList) provList.innerHTML = '<p class="stg-loading">' + t('settings.loadingConfig') + '</p>';
+  var modelCatalog = document.getElementById('stgModelCatalog');
+  if (modelCatalog) modelCatalog.innerHTML = '<p class="stg-loading">' + t('settings.loadingConfig') + '</p>';
   var presetTable = document.getElementById('stgPresetTable');
   if (presetTable) presetTable.innerHTML = '<p class="stg-loading">' + t('settings.loading') + '</p>';
 
-  // ── Load server config for other tabs ──
-  _loadServerConfig().then(function(cfg) {
+  // Load the owner model-routing authority independently from miscellaneous
+  // server settings.  The two reads may run together, but only v2 is allowed
+  // to populate the provider/model editor.
+  var _modelRoutingLoad = _loadModelRoutingAuthority();
+  _loadServerConfig().then(async function(cfg) {
+    await _modelRoutingLoad;
     if (!cfg) {
       document.getElementById('settingsStatusHint').textContent = t('settings.serverConfigFailed');
       if (provList) provList.innerHTML = '<p class="stg-empty">' + t('settings.loadingFailed') + '</p>';
+      if (modelCatalog) modelCatalog.innerHTML = '<p class="stg-empty">' + t('settings.loadingFailed') + '</p>';
       if (presetTable) presetTable.innerHTML = '<p class="stg-empty">加载模型预设失败。</p>';
       debugLog('[Settings] Config load failed — provider list and preset table set to error state', 'warning');
       return;
     }
-    _applyServerConfigSnapshot(cfg, false);
-
-    // Pre-load external templates so sync buttons appear on first render
-    _loadExternalProviderTemplates().finally(function() {
-      _renderProvidersTab();
-      // Start auto-polling balance for all eligible providers
-      if (typeof runtimeScope._startBalancePolling === 'function') {
-        runtimeScope._startBalancePolling();
-      }
-      // Fetch today's per-key success-rate stats and refresh inline badges.
-      if (typeof runtimeScope._loadKeyStats === 'function') runtimeScope._loadKeyStats();
-      // Fetch per-model runtime health (success rate / error-throttle
-      // cooldowns) and keep it fresh while the panel is open.
-      if (typeof runtimeScope._startModelHealthPolling === 'function') {
-        runtimeScope._startModelHealthPolling();
-      }
-      // Resolve each provider's wire faces (backend resolve_face — the SAME
-      // resolver the dispatcher uses) so the model cards can show which
-      // protocol each model actually dispatches over.
-      if (typeof _refreshAllFaceResolutions === 'function') _refreshAllFaceResolutions();
-      // Auto-poll per-endpoint live metrics (TTFT/latency/throughput/success)
-      // so local-deployment status stays fresh without manual probing.
-      _startLocalMetricsPolling();
-    });
+    _stgPresets = JSON.parse(JSON.stringify(cfg.presets || {}));
+    _renderProvidersTab();
     _renderPresetsTab(cfg);
     _populateSearchTab(cfg);
     _populateNetworkTab(cfg);

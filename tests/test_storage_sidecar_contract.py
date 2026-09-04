@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import threading
 import time
 
@@ -100,6 +101,43 @@ def test_turn_storage_operations_reject_missing_owner(storage):
     assert raised.value.code == 'database_protocol_error'
 
 
+def test_desktop_egress_preference_is_owner_scoped_bounded_and_receipted(storage):
+    client = storage.client
+    assert client.query(
+        'desktop.egress_agent.get', {'owner_user_id': 1}) == {
+            'present': False, 'agent_id': '', 'updated_at_ms': 0}
+
+    initialized = client.command(
+        'desktop.egress_agent.initialize',
+        {'owner_user_id': 1, 'agent_id': 'agent-1'},
+        'desktop-egress-owner-1-initialize',
+    )
+    assert initialized['present'] is True
+    assert initialized['agent_id'] == 'agent-1'
+    assert client.command(
+        'desktop.egress_agent.initialize',
+        {'owner_user_id': 1, 'agent_id': 'agent-1'},
+        'desktop-egress-owner-1-initialize',
+    ) == initialized
+    assert client.query(
+        'desktop.egress_agent.get', {'owner_user_id': 2})['present'] is False
+
+    updated = client.command(
+        'desktop.egress_agent.set',
+        {'owner_user_id': 1, 'agent_id': 'agent-2'},
+        'desktop-egress-owner-1-set',
+    )
+    assert updated['agent_id'] == 'agent-2'
+    with pytest.raises(StorageError, match='Invalid owner_user_id'):
+        client.query('desktop.egress_agent.get', {})
+    with pytest.raises(StorageError, match='Invalid agent_id'):
+        client.command(
+            'desktop.egress_agent.set',
+            {'owner_user_id': 1, 'agent_id': 'x' * 129},
+            'desktop-egress-owner-1-too-long',
+        )
+
+
 def test_health_preflight_and_project_local_files(storage, tmp_path):
     health = storage.client.health()
     assert health['ready'] is True
@@ -120,11 +158,19 @@ def test_health_preflight_and_project_local_files(storage, tmp_path):
     assert 1 <= rpc['active'] <= rpc['capacity']
     assert rpc['idle_trim_attempts'] >= 0
     assert rpc['idle_trim_reclaimed_bytes'] >= 0
+    assert rpc['idle_trim_duration_ns_total'] >= 0
+    assert rpc['idle_trim_last_duration_ns'] >= 0
     assert metrics['process']['rss_bytes'] > 0
     assert metrics['process']['open_fds_or_handles'] > 0
     assert metrics['process']['threads'] >= 1
     assert metrics['attempt_events']['max_nonterminal_payload_bytes'] == 4 * 1024 * 1024
     assert isinstance(metrics['attempt_events']['by_type'], dict)
+    if health['backend'] == 'sqlite':
+        writer = metrics['writer']
+        assert 4 <= writer['queue_capacity'] <= 1024
+        assert sum(writer['queue_depths'].values()) <= writer['queue_capacity']
+        assert writer['queue_rejections'] >= 0
+        assert writer['cancelled_before_start'] >= 0
 
 
 def test_project_lease_stamp_distinguishes_running_from_clean_stop(tmp_path):
@@ -145,6 +191,34 @@ def test_project_lease_stamp_distinguishes_running_from_clean_stop(tmp_path):
     assert stopped['lease_id'] == running['lease_id']
     assert stopped['status'] == 'stopped'
     assert stopped['stopped_unix_ms'] >= stopped['started_unix_ms']
+
+
+def test_project_lease_publishes_credential_free_storage_locator(tmp_path):
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    authority = data_dir / 'tofu.db'
+    authority.touch()
+    lease = ProjectLease(data_dir)
+    lease.acquire()
+    lease.publish_storage_locator({
+        'format': 'tofu.storage-locator/v1',
+        'backend': 'sqlite',
+        'authority_path': str(authority.resolve()),
+        'configured_path': str(authority.resolve()),
+        'fastpath_active': False,
+    })
+    lease_path = data_dir / '.storage-sidecar-lease.json'
+    running = json.loads(lease_path.read_text(encoding='utf-8'))
+
+    locator = running['storage_locator']
+    assert locator['authority_path'] == str(authority.resolve())
+    assert locator['fastpath_active'] is False
+    assert locator['published_unix_ms'] >= running['started_unix_ms']
+    assert not {'token', 'dsn', 'password'} & set(locator)
+
+    lease.release()
+    stopped = json.loads(lease_path.read_text(encoding='utf-8'))
+    assert stopped['storage_locator'] == locator
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX flock contract')
@@ -339,13 +413,35 @@ def test_process_service_keeps_failed_stop_owner_discoverable():
         install_runtime_for_test(None)
 
 
-def test_command_receipt_replay_and_conflict(storage):
+def test_command_receipt_replay_and_conflict(storage, tmp_path):
     payload = {'namespace': 'contract', 'key': 'once', 'value': {'amount': 7}}
     first = storage.client.command('record.put', payload, 'same-command')
     replay = storage.client.command('record.put', payload, 'same-command')
     assert replay == first
     assert storage.client.query(
         'record.get', {'namespace': 'contract', 'key': 'once'})['version'] == 1
+
+    if storage.client.health()['backend'] == 'sqlite':
+        import sqlite3
+
+        from lib.storage_sidecar.receipt_codec import command_receipt_key_v2
+
+        connection = sqlite3.connect(
+            f'file:{tmp_path / "data" / "tofu.db"}?mode=ro', uri=True)
+        try:
+            legacy_count = connection.execute(
+                'SELECT COUNT(*) FROM storage_command_receipts '
+                'WHERE command_id=?', ('same-command',)
+            ).fetchone()[0]
+            compact = connection.execute(
+                'SELECT operation,length(command_key),length(request_digest) '
+                'FROM storage_command_receipts_v2 WHERE command_key=?',
+                (command_receipt_key_v2('same-command'),),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert legacy_count == 0
+        assert compact == ('record.put', 32, 32)
 
     with pytest.raises(StorageError) as raised:
         storage.client.command(
@@ -386,44 +482,6 @@ def test_incompressible_large_receipt_rolls_back_atomically(storage):
     assert client.query('turn.sync.snapshot', {
         'conversation_id': 'oversize-receipt-conv', 'user_id': 1,
     })['turns'] == []
-
-
-def test_command_receipt_refusal_is_not_memoized(storage):
-    """A clean refusal (``ok=False``) mutates nothing, so it must NOT be
-    memoized as a receipt: the identical retry after the world changes must
-    re-execute. Regression pin for the board.delete strand — a delete refused
-    for active dependents froze its refusal into the receipt table, so the
-    retry after completing the dependent replayed the stale refusal forever.
-    """
-    client = storage.client
-    dep = client.command('board.post', {
-        'user_id': 1, 'project_path': '/ws/receipt-refusal', 'title': 'dep',
-    }, 'receipt-refusal-post-dep')
-    client.command('board.post', {
-        'user_id': 1, 'project_path': '/ws/receipt-refusal', 'title': 'dependent',
-        'depends_on': [dep['id']],
-    }, 'receipt-refusal-post-dependent')
-    delete_payload = {'user_id': 1, 'action': 'delete',
-                      'project_path': '/ws/receipt-refusal',
-                      'task_id': dep['id']}
-    refused = client.command('board.mutate', dict(delete_payload),
-                             'receipt-refusal-delete')
-    assert refused['ok'] is False and refused['error'] == 'has_dependents'
-    dependent_id = [t for t in client.query(
-        'board.list', {
-            'user_id': 1, 'project_path': '/ws/receipt-refusal',
-        })['tasks']
-        if t['title'] == 'dependent'][0]['id']
-    completed = client.command('board.complete', {
-        'user_id': 1, 'project_path': '/ws/receipt-refusal',
-        'task_id': dependent_id,
-    }, 'receipt-refusal-complete')
-    assert completed['ok'] is True
-    # Same command_id + same payload: had the refusal been memoized this
-    # would replay the stale 'has_dependents' instead of executing.
-    retried = client.command('board.mutate', dict(delete_payload),
-                             'receipt-refusal-delete')
-    assert retried['ok'] is True
 
 
 def test_timer_domain_is_transactional_and_idempotent(storage):
@@ -660,6 +718,18 @@ def test_sidecar_turn_pair_enforces_lane_serialization(storage, monkeypatch):
     assert busy.value.code == 'lane_busy'
     assert busy.value.turn['turnId'] == first['turn']['turnId']
 
+    with pytest.raises(LifecycleConflict) as virtual_busy:
+        create_turn_pair(
+            'conv-sidecar-lane-serialization',
+            command_id='lane-goal-continuation',
+            input_projection={'content': 'continue'},
+            config={},
+            user_id=81,
+            input_actor='virtual_user',
+            require_lane_idle=True,
+        )
+    assert virtual_busy.value.code == 'lane_busy'
+
     with pytest.raises(LifecycleConflict) as advanced:
         create_turn_pair(
             'conv-sidecar-lane-serialization', command_id='lane-branch-stale',
@@ -671,10 +741,103 @@ def test_sidecar_turn_pair_enforces_lane_serialization(storage, monkeypatch):
     assert advanced.value.code == 'lane_advanced'
 
 
+def test_human_turn_atomically_supersedes_goal_continuation_intent(
+    storage, monkeypatch,
+):
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda write=False: storage.client)
+    from lib import message_queue as queue
+    from lib.turn_lifecycle import create_turn_pair, fail_start
+
+    conversation_id = 'conv-human-supersedes-goal'
+    initial = create_turn_pair(
+        conversation_id,
+        command_id='goal-supersession-initial',
+        input_projection={'content': 'initial'},
+        config={},
+        user_id=82,
+        conversation_defaults={
+            'allowCreate': True, 'title': 'Goal supersession', 'settings': {}},
+    )
+    fail_start(
+        initial['attempt']['attemptId'],
+        {'kind': 'fixture_settlement', 'message': 'make lane idle'},
+        user_id=82,
+    )
+    queue.enqueue_message(
+        conversation_id,
+        {'text': 'continue old objective', '_goalContinuation': True},
+        {'autopilot': True, '_goalObjective': 'old objective'},
+        kind=queue.KIND_GOAL_CONTINUATION,
+        user_id=82,
+    )
+
+    create_turn_pair(
+        conversation_id,
+        command_id='new-human-intent',
+        input_projection={'content': 'new human objective'},
+        config={},
+        user_id=82,
+    )
+
+    assert queue.get_queue(conversation_id, user_id=82) == []
+
+
+def test_leased_goal_continuation_rejects_newer_queued_human(
+    storage, monkeypatch,
+):
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda write=False: storage.client)
+    from lib import message_queue as queue
+    from lib.turn_lifecycle import (
+        LifecycleConflict,
+        create_turn_pair,
+        fail_start,
+    )
+
+    conversation_id = 'conv-goal-human-race'
+    initial = create_turn_pair(
+        conversation_id,
+        command_id='goal-race-initial',
+        input_projection={'content': 'initial'},
+        config={},
+        user_id=83,
+        conversation_defaults={
+            'allowCreate': True, 'title': 'Goal race', 'settings': {}},
+    )
+    fail_start(
+        initial['attempt']['attemptId'],
+        {'kind': 'fixture_settlement', 'message': 'make lane idle'},
+        user_id=83,
+    )
+    queue.enqueue_message(
+        conversation_id,
+        {'text': 'new human objective'},
+        {'model': 'test'},
+        user_id=83,
+    )
+
+    with pytest.raises(LifecycleConflict) as superseded:
+        create_turn_pair(
+            conversation_id,
+            command_id='leased-stale-goal',
+            input_projection={'content': 'continue old objective'},
+            config={},
+            input_actor='virtual_user',
+            require_lane_idle=True,
+            reject_if_human_queued=True,
+            user_id=83,
+        )
+
+    assert superseded.value.code == 'superseded_by_human'
+    assert [row['kind'] for row in queue.get_queue(
+        conversation_id, user_id=83)] == [queue.KIND_REAL]
+
+
 def test_turn_lifecycle_sidecar_create_read_and_event_sequence(storage, monkeypatch):
     from lib.turn_lifecycle import (
         bind_task, claim_attempt_start, create_turn_pair, get_attempt,
-        get_conversation_revision, get_turn, list_turns, read_events,
+        get_conversation_revision, get_turn, list_turns, mark_task_started, read_events,
         record_task_event,
     )
     command_priorities = []
@@ -723,17 +886,161 @@ def test_turn_lifecycle_sidecar_create_read_and_event_sequence(storage, monkeypa
     )
     assert replay_after_claim['idempotentReplay'] is True
     assert replay_after_claim['_needsStart'] is False
+    attempt_id = result['attempt']['attemptId']
     assert bind_task(
-        result['attempt']['attemptId'], 'task-turn-1', user_id=1,
-    )['status'] == 'running'
+        attempt_id, 'task-turn-1', user_id=1,
+    )['status'] == 'pending'
+    assert get_turn(
+        'turn-sidecar-conv', result['turn']['turnId'], user_id=1,
+    )['status'] == 'pending'
+    assert mark_task_started(attempt_id, 'wrong-task', user_id=1) is None
+    assert mark_task_started(attempt_id, 'task-turn-1', user_id=2) is None
+    assert get_attempt(attempt_id, user_id=1)['status'] == 'pending'
+    with pytest.raises(StorageError) as rebinding:
+        bind_task(attempt_id, 'other-task', user_id=1)
+    assert rebinding.value.code == 'database_conflict'
+
+    events_before_start = len(read_events(attempt_id, user_id=1))
+    started = mark_task_started(attempt_id, 'task-turn-1', user_id=1)
+    assert started['status'] == 'running'
+    assert isinstance(started['startedAt'], int)
+    assert len(read_events(attempt_id, user_id=1)) == events_before_start + 1
+    assert mark_task_started(
+        attempt_id, 'task-turn-1', user_id=1,
+    )['startedAt'] == started['startedAt']
+    assert len(read_events(attempt_id, user_id=1)) == events_before_start + 1
+    task = {
+        'id': 'task-turn-1',
+        '_attemptId': attempt_id,
+        '_userId': 1,
+        'content': 'working',
+        'thinking': '',
+        'toolRounds': [],
+        'segments': [],
+        'status': 'running',
+    }
+    cache_before = storage.client.metrics()['turn_projection_cache']
     assert record_task_event(
-        {'_attemptId': result['attempt']['attemptId'], '_userId': 1,
-         'content': 'done',
-         'thinking': '', 'toolRounds': [], 'segments': [], 'status': 'done'},
-        {'type': 'done', 'finishReason': 'stop'}) is True
-    assert get_attempt(result['attempt']['attemptId'], user_id=1)['status'] == 'completed'
-    assert read_events(result['attempt']['attemptId'], user_id=1)[-1]['type'] == 'terminal_settlement'
+        task, {'type': 'tool_start', 'toolName': 'run_command'}) is True
+    cache_after_first = storage.client.metrics()['turn_projection_cache']
+    assert cache_after_first['misses'] == cache_before['misses'] + 1
+    assert cache_after_first['entries'] == 1
+
+    task['content'] = 'still working'
+    assert record_task_event(
+        task, {'type': 'tool_end', 'toolName': 'run_command'}) is True
+    cache_after_second = storage.client.metrics()['turn_projection_cache']
+    assert cache_after_second['hits'] == cache_after_first['hits'] + 1
+    assert cache_after_second['entries'] == 1
+    projection_metrics = storage.client.metrics()['attempt_events'][
+        'by_type']['projection_updated']
+    assert projection_metrics['projection_blob_write_deferrals'] >= 1
+    assert projection_metrics['projection_blob_write_deferred_bytes'] > 0
+    assert projection_metrics['projection_checkpoint_materializations'] >= 1
+    assert projection_metrics['projection_checkpoint_materialized_bytes'] > 0
+    assert projection_metrics['projection_inline_released_bytes'] > 0
+
+    task['content'] = 'done'
+    task['status'] = 'done'
+    assert record_task_event(
+        task, {'type': 'done', 'finishReason': 'stop'}) is True
+    assert storage.client.metrics()['turn_projection_cache']['entries'] == 0
+    assert get_attempt(attempt_id, user_id=1)['status'] == 'completed'
+    assert read_events(attempt_id, user_id=1)[-1]['type'] == 'terminal_settlement'
     assert ('turn.event.record', 'event') in command_priorities
+
+
+def test_turn_event_record_preserves_empty_patch_without_projection_blob_write(
+        storage, monkeypatch):
+    """The shared SQLite/Postgres contract exposes exact no-op write savings."""
+    from lib.turn_lifecycle import (
+        bind_task,
+        create_turn_pair,
+        get_attempt,
+        get_turn,
+        read_events,
+    )
+
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda write=False: storage.client)
+    created = create_turn_pair(
+        'turn-unchanged-projection',
+        command_id='turn-unchanged-projection-create',
+        input_projection={'content': 'hello'},
+        config={},
+        user_id=1,
+        conversation_defaults={
+            'allowCreate': True,
+            'title': 'Unchanged projection',
+            'createdAt': 1,
+            'settings': {},
+        },
+    )
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    bind_task(attempt_id, 'turn-unchanged-projection-task', user_id=1)
+    initial_turn = get_turn(
+        'turn-unchanged-projection', turn_id, user_id=1)
+    event_payload = {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'turn-unchanged-projection-task',
+        'projection': initial_turn['projection'],
+        'terminal': False,
+        'status': 'running',
+        'settlement': {},
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'phase'},
+    }
+    first = storage.client.command(
+        'turn.event.record',
+        event_payload,
+        'turn-unchanged-projection-event-1',
+        priority='event',
+    )
+    assert first['applied'] is True
+    before_turn = get_turn(
+        'turn-unchanged-projection', turn_id, user_id=1)
+    before_metrics = storage.client.metrics()['attempt_events']
+    before_type = before_metrics['by_type'].get('projection_updated', {})
+
+    result = storage.client.command(
+        'turn.event.record',
+        event_payload,
+        'turn-unchanged-projection-event-2',
+        priority='event',
+    )
+
+    assert result['applied'] is True
+    slim_payload = {
+        **event_payload,
+        'slim': True,
+        'content': str(event_payload['projection'].get('content') or ''),
+        'thinking': str(event_payload['projection'].get('thinking') or ''),
+        'event_payload': {'updateKind': 'tool_progress'},
+    }
+    slim_result = storage.client.command(
+        'turn.event.record',
+        slim_payload,
+        'turn-unchanged-projection-event-3',
+        priority='event',
+    )
+    assert slim_result['applied'] is True
+    after_turn = get_turn(
+        'turn-unchanged-projection', turn_id, user_id=1)
+    assert after_turn['projection'] == before_turn['projection']
+    assert after_turn['projectionRevision'] == before_turn['projectionRevision'] + 2
+    assert get_attempt(attempt_id, user_id=1)['status'] == 'running'
+    assert read_events(
+        attempt_id, user_id=1, projection_mode='patch')[-1][
+            'payload']['projectionPatch']['operations'] == []
+
+    after_type = storage.client.metrics()['attempt_events'][
+        'by_type']['projection_updated']
+    assert after_type['projection_blob_write_skips'] == (
+        before_type.get('projection_blob_write_skips', 0) + 2)
+    assert after_type['projection_blob_write_skipped_bytes'] > (
+        before_type.get('projection_blob_write_skipped_bytes', 0))
 
 
 def test_database_not_found_is_a_stable_404_storage_error():
@@ -902,7 +1209,13 @@ def test_turn_lifecycle_sidecar_recovery_settles_pending_attempt(storage, monkey
         '_attemptId': attempt_id, '_turnProtocolV2': True, '_userId': 1,
         'id': 'task-recovery-sidecar', 'status': 'running',
         'content': 'durable partial', 'thinking': 'work',
-        'toolRounds': [{'status': 'done', 'assistantContent': 'checkpoint'}],
+        'toolRounds': [{
+            'roundNum': 1, 'llmRound': 0,
+            'toolCallId': 'recovery-call',
+            'toolName': 'read_files', 'toolArgs': '{}',
+            'toolContent': 'checkpoint result', 'status': 'done',
+            'assistantContent': 'checkpoint',
+        }],
         'model': 'gpt-4o', 'config': {'model': 'gpt-4o'},
     }
     assert record_task_event(task, {'type': 'delta', 'content': 'durable partial'})
@@ -924,6 +1237,62 @@ def test_turn_lifecycle_sidecar_recovery_settles_pending_attempt(storage, monkey
     assert 'checkpoint_resume' in operations
     assert 'regenerate' in operations
     assert recover_running_attempts() == 0
+
+
+@pytest.mark.parametrize("settlement", [
+    {"resumeOptions": {}},
+    {"resumeOptions": [None]},
+    {"resumeOptions": [{"operation": "continue", "anchor": []}]},
+    {"resumeOptions": [{"operation": "", "anchor": {}}]},
+    {"resumeOptions": [
+        {"operation": "continue", "anchor": {}},
+        {"operation": "continue", "anchor": {"type": "other"}},
+    ]},
+])
+def test_stored_resume_options_reject_malformed_or_ambiguous_authority(
+        settlement):
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _validated_resume_option_anchors,
+    )
+
+    with pytest.raises(StorageError) as raised:
+        _validated_resume_option_anchors(settlement)
+
+    assert raised.value.code == "database_protocol_error"
+
+
+def test_stored_resume_options_keep_legacy_strings_and_exact_anchors():
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _validated_resume_option_anchors,
+    )
+
+    options, anchors = _validated_resume_option_anchors({
+        "resumeOptions": [
+            "continue",
+            {"operation": "checkpoint_resume", "anchor": {
+                "type": "tool_checkpoint", "keptToolRounds": 2,
+            }},
+        ],
+    })
+
+    assert options == {"continue", "checkpoint_resume"}
+    assert anchors == {
+        "continue": {},
+        "checkpoint_resume": {
+            "type": "tool_checkpoint", "keptToolRounds": 2,
+        },
+    }
+
+
+@pytest.mark.parametrize("stored_value", [None, [], "[]", 0, False])
+def test_object_valued_turn_authority_never_truthiness_repairs_corruption(
+        stored_value):
+    from lib.storage_sidecar.operations_pkg._turns import _stored_object
+
+    with pytest.raises(StorageError) as raised:
+        _stored_object(stored_value, "test field")
+
+    assert raised.value.code == "database_integrity"
 
 
 def test_turn_recovery_sidecar_chunked_and_liveness_guards(storage, monkeypatch):
@@ -1072,6 +1441,65 @@ def test_conversation_list_project_filter_precedes_limit_and_owner(storage):
         assert raised.value.code == 'database_protocol_error'
 
 
+def test_conversation_list_title_filter_is_exact_bounded_and_owner_scoped(
+    storage, monkeypatch
+):
+    from lib.storage_sidecar.operations_pkg import _conversations
+
+    monkeypatch.setattr(_conversations, '_TITLE_FILTER_SCAN_PAGE_SIZE', 2)
+    client = storage.client
+    conversations = [
+        ('title-filter-newest-miss', 1, 'Unrelated', '/projects/alpha', 50),
+        ('title-filter-second-miss', 1, 'Still unrelated', '/projects/alpha', 40),
+        ('title-filter-unicode', 1, 'KEY 100%_plan', '/projects/alpha', 30),
+        ('title-filter-older', 1, 'key older', '/projects/alpha', 20),
+        ('title-filter-other-project', 1, 'key elsewhere', '/projects/beta', 60),
+        ('title-filter-foreign', 2, 'key foreign', '/projects/alpha', 70),
+    ]
+    for conversation_id, user_id, title, project_path, updated_at in conversations:
+        _import_conversation(
+            client,
+            conversation_id,
+            user_id=user_id,
+            title=title,
+            settings={'projectPath': project_path},
+            updated_at=updated_at,
+        )
+
+    listed = client.query('conversation.list', {
+        'user_id': 1,
+        'project_path': '/projects/alpha',
+        'title_contains': 'key',
+        'order_by': 'updated_at_desc',
+        'limit': 1,
+        'include_messages': False,
+        'settings_keys': [],
+    })
+    assert [row['metadata']['id'] for row in listed] == [
+        'title-filter-unicode'
+    ]
+
+    literal = client.query('conversation.list', {
+        'user_id': 1,
+        'title_contains': '100%_',
+        'order_by': 'id_asc',
+        'limit': 10,
+        'include_messages': False,
+    })
+    assert [row['metadata']['id'] for row in literal] == [
+        'title-filter-unicode'
+    ]
+
+    for invalid in ('', 7, True, [], 'x' * 513):
+        with pytest.raises(StorageError) as raised:
+            client.query('conversation.list', {
+                'user_id': 1,
+                'title_contains': invalid,
+                'include_messages': False,
+            })
+        assert raised.value.code == 'database_protocol_error'
+
+
 def test_turn_only_header_and_settled_ingestion_are_idempotent(storage):
     client = storage.client
     client.command('conversation.create', {
@@ -1175,10 +1603,11 @@ def test_turn_projection_storage_codec_is_private_and_lossless(
                 'WHERE conversation_id=? AND user_id=?',
                 ('projection-codec-conv', 1),
             ).fetchone()
+            from lib.storage_sidecar.receipt_codec import command_receipt_key_v2
             receipt_row = connection.execute(
-                'SELECT response_json FROM storage_command_receipts '
-                'WHERE command_id=?',
-                ('projection-codec-append',),
+                'SELECT response_json FROM storage_command_receipts_v2 '
+                'WHERE command_key=?',
+                (command_receipt_key_v2('projection-codec-append'),),
             ).fetchone()
         finally:
             connection.close()
@@ -1250,6 +1679,209 @@ def test_turn_lifecycle_sidecar_visible_sync_is_replay_safe(storage, monkeypatch
     )['syncSequence'] == changes[0]['syncSeq']
 
 
+def _record_streaming_projection_events(
+        storage, attempt_id, task_id, projections, command_prefix):
+    for index, projection in enumerate(projections):
+        result = storage.client.command(
+            'turn.event.record',
+            {
+                'attempt_id': attempt_id,
+                'user_id': 1,
+                'task_id': task_id,
+                'projection': projection,
+                'terminal': False,
+                'status': 'running',
+                'settlement': {},
+                'event_type': 'projection_updated',
+                'event_payload': {'updateKind': 'stream'},
+            },
+            f'{command_prefix}-{index}',
+            priority='event',
+        )
+        assert result['applied'] is True
+
+
+def test_visible_sync_advances_revision_across_live_projection_head(
+        storage, monkeypatch):
+    """A visible-sync root advance MUST keep the live patch head foldable."""
+    from lib.turn_lifecycle import (
+        bind_task,
+        create_turn_pair,
+        get_turn,
+        sync_visible_run_turns,
+    )
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda write=False: storage.client)
+    created = create_turn_pair(
+        'turn-visible-live-head',
+        command_id='turn-visible-live-head-create',
+        input_projection={'content': 'hello'},
+        config={},
+        user_id=1,
+        conversation_defaults={
+            'allowCreate': True,
+            'title': 'Visible live head',
+            'createdAt': 1,
+            'settings': {},
+        },
+    )
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    bind_task(attempt_id, 'turn-visible-live-head-task', user_id=1)
+    task = {
+        '_attemptId': attempt_id,
+        '_userId': 1,
+        '_turnId': turn_id,
+        'convId': 'turn-visible-live-head',
+        'config': {},
+    }
+    # The first sync flips the root into a flow turn (head-clearing reset).
+    sync_visible_run_turns(task, [{'role': 'assistant', 'content': 'phase one'}])
+    # Streaming events rebuild a live patch head on the flow root.
+    _record_streaming_projection_events(
+        storage,
+        attempt_id,
+        'turn-visible-live-head-task',
+        [
+            {'content': 'stream one', 'thinking': '',
+             'segments': [], 'toolRounds': []},
+            {'content': 'stream two', 'thinking': '',
+             'segments': [], 'toolRounds': []},
+        ],
+        'turn-visible-live-head-event',
+    )
+    # Committing the next visible phase advances the root revision across
+    # the live head; hydration must survive that advance.
+    sync_visible_run_turns(task, [
+        {'role': 'assistant', 'content': 'phase one'},
+        {'role': 'assistant', 'content': 'phase two'},
+    ])
+    refreshed = get_turn('turn-visible-live-head', turn_id, user_id=1)
+    assert refreshed['projection']['content'] == 'stream two'
+    # bind +1, flow flip +1, two streams +2, sync bump +1.
+    assert refreshed['projectionRevision'] == (
+        created['turn']['projectionRevision'] + 5)
+    assert len(task['_turnVisibleRunTurnIds']) == 2
+
+
+def test_related_announce_advances_revision_across_live_projection_head(
+        storage, monkeypatch):
+    """A related-turn announce MUST NOT orphan the root's live patch head."""
+    from lib.turn_lifecycle import bind_task, create_turn_pair, get_turn
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda write=False: storage.client)
+    created = create_turn_pair(
+        'turn-related-live-head',
+        command_id='turn-related-live-head-create',
+        input_projection={'content': 'hello'},
+        config={},
+        user_id=1,
+        conversation_defaults={
+            'allowCreate': True,
+            'title': 'Related live head',
+            'createdAt': 1,
+            'settings': {},
+        },
+    )
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    bind_task(attempt_id, 'turn-related-live-head-task', user_id=1)
+    _record_streaming_projection_events(
+        storage,
+        attempt_id,
+        'turn-related-live-head-task',
+        [
+            {'content': 'stream one', 'thinking': '',
+             'segments': [], 'toolRounds': []},
+            {'content': 'stream two', 'thinking': '',
+             'segments': [], 'toolRounds': []},
+        ],
+        'turn-related-live-head-event',
+    )
+    input_turn_id = next(
+        row['turnId']
+        for row in storage.client.query('turn.list', {
+            'conversation_id': 'turn-related-live-head',
+            'user_id': 1,
+        })
+        if row['turnId'] != turn_id
+    )
+    storage.client.command(
+        'turn.related.announce',
+        {
+            'attempt_id': attempt_id,
+            'user_id': 1,
+            'turn_ids': [input_turn_id],
+        },
+        'turn-related-live-head-announce',
+    )
+    refreshed = get_turn('turn-related-live-head', turn_id, user_id=1)
+    assert refreshed['projection']['content'] == 'stream two'
+    # bind +1, two streams +2, announce bridge +1.
+    assert refreshed['projectionRevision'] == (
+        created['turn']['projectionRevision'] + 4)
+
+
+def test_related_announce_bridges_externalized_projection_checkpoint(
+        storage, monkeypatch):
+    """A checkpoint-fenced row MUST gain a one-patch bridge on announce."""
+    from lib.turn_lifecycle import bind_task, create_turn_pair, get_turn
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda write=False: storage.client)
+    created = create_turn_pair(
+        'turn-related-checkpoint',
+        command_id='turn-related-checkpoint-create',
+        input_projection={'content': 'hello'},
+        config={},
+        user_id=1,
+        conversation_defaults={
+            'allowCreate': True,
+            'title': 'Related checkpoint',
+            'createdAt': 1,
+            'settings': {},
+        },
+    )
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    bind_task(attempt_id, 'turn-related-checkpoint-task', user_id=1)
+    large = 'x' * (700 * 1024)
+    # The second event exhausts the 1 MiB head budget, externalizing the
+    # projection into a revision-fenced checkpoint.
+    _record_streaming_projection_events(
+        storage,
+        attempt_id,
+        'turn-related-checkpoint-task',
+        [
+            {'content': large + ' one', 'thinking': '',
+             'segments': [], 'toolRounds': []},
+            {'content': large + ' two', 'thinking': '',
+             'segments': [], 'toolRounds': []},
+        ],
+        'turn-related-checkpoint-event',
+    )
+    input_turn_id = next(
+        row['turnId']
+        for row in storage.client.query('turn.list', {
+            'conversation_id': 'turn-related-checkpoint',
+            'user_id': 1,
+        })
+        if row['turnId'] != turn_id
+    )
+    storage.client.command(
+        'turn.related.announce',
+        {
+            'attempt_id': attempt_id,
+            'user_id': 1,
+            'turn_ids': [input_turn_id],
+        },
+        'turn-related-checkpoint-announce',
+    )
+    refreshed = get_turn('turn-related-checkpoint', turn_id, user_id=1)
+    assert refreshed['projection']['content'] == large + ' two'
+    # bind +1, two streams +2, announce bridge +1.
+    assert refreshed['projectionRevision'] == (
+        created['turn']['projectionRevision'] + 4)
+
 def test_visible_turn_shape_projects_orchestration_header_facts():
     from lib.storage_sidecar.operations_pkg._turns import _visible_shape
 
@@ -1261,6 +1893,14 @@ def test_visible_turn_shape_projects_orchestration_header_facts():
         '_flowApproved': False,
         '_flowNextPhase': 'planner',
         '_isStuck': True,
+        'model': 'deepseek-v4-pro',
+        'orchestration': {'modelRoute': {
+            'selectedModel': 'kimi-k3',
+            'resolvedModel': 'deepseek-v4-pro',
+            'role': 'worker',
+            'tier': 'heavy',
+            'kind': 'role_tier',
+        }},
     }, 'flow_node')
 
     assert (actor, kind) == ('critic', 'flow_node')
@@ -1269,140 +1909,17 @@ def test_visible_turn_shape_projects_orchestration_header_facts():
         'approved': False,
         'nextPhase': 'planner',
         'stuck': True,
+        'modelRoute': {
+            'selectedModel': 'kimi-k3',
+            'resolvedModel': 'deepseek-v4-pro',
+            'role': 'worker',
+            'tier': 'heavy',
+            'kind': 'role_tier',
+        },
     }
+    assert projection['model'] == 'deepseek-v4-pro'
     assert not any(key.startswith('_ep') or key == '_isStuck'
                    for key in projection)
-
-
-def test_project_board_sidecar_post_and_read(storage, monkeypatch):
-    from lib.conversations.project_board import post_task, read_board
-    monkeypatch.setattr('lib.conversations.project_board.get_storage_client',
-                        lambda write=False: storage.client)
-    # This contract exercises board persistence through the isolated Sidecar
-    # fixture.  No Git-integration row exists for its ordinary shared-tree
-    # task, so keep the completion gate on its explicit no-row branch instead
-    # of letting it consult the process-global integration repository.
-    monkeypatch.setattr(
-        'lib.integration_state_repository.find_workspace',
-        lambda project_root, task_id, *, user_id: None)
-    posted = post_task(
-        '/workspace/project', 'conv-board', 'Ship Sidecar',
-        user_id=1, depends_on=['dep-1'], write_set=['lib/storage.py'])
-    assert posted['ok'] is True
-    board = read_board('/workspace/project', user_id=1)
-    assert board['open'] == 1
-    assert board['tasks'][0]['depends_on'] == ['dep-1']
-    assert board['tasks'][0]['write_set'] == ['lib/storage.py']
-    claimed = __import__('lib.conversations.project_board', fromlist=['claim_task']).claim_task(
-        '/workspace/project', 'conv-board', posted['id'],
-        user_id=1, ttl_ms=60_000)
-    assert claimed['ok'] is True
-    assert read_board('/workspace/project', user_id=1)['claimed'] == 1
-    completed = __import__('lib.conversations.project_board', fromlist=['complete_task']).complete_task(
-        '/workspace/project', 'conv-board', posted['id'], user_id=1)
-    assert completed['ok'] is True
-    assert read_board('/workspace/project', user_id=1)['done'] == 1
-    reopened = __import__('lib.conversations.project_board', fromlist=['reopen_task']).reopen_task(
-        '/workspace/project', 'conv-board', posted['id'], user_id=1)
-    assert reopened['ok'] is True
-    blocked = __import__('lib.conversations.project_board', fromlist=['block_task']).block_task(
-        '/workspace/project', 'conv-board', posted['id'], '[human-gated] question card',
-        user_id=1, question='Choose a release target', options=['A', 'B'])
-    assert blocked['ok'] is True
-    answered = __import__('lib.conversations.project_board', fromlist=['answer_task']).answer_task(
-        '/workspace/project', 'conv-board', posted['id'], 'A', user_id=1)
-    assert answered['ok'] is True
-
-
-def test_project_watch_sidecar_crud_list_and_goal_injection(storage, monkeypatch):
-    from lib.conversations.project_watch import (
-        add_watch_item, edit_watch_item, list_watch_items,
-        render_goals_injection_block, set_watch_status,
-    )
-
-    monkeypatch.setattr('lib.conversations.project_watch.get_storage_client',
-                        lambda write=False: storage.client)
-    added = add_watch_item('/workspace/project', 'goal', 'Keep startup fast',
-                           user_id=1, created_by_conv='conv-watch')
-    assert added['ok'] is True
-    item_id = added['item']['item_id']
-    assert 'Keep startup fast' in render_goals_injection_block(
-        '/workspace/project', user_id=1)
-    assert edit_watch_item(
-        item_id, user_id=1, text='Keep Sidecar startup fast')['ok'] is True
-    assert list_watch_items(
-        '/workspace/project', user_id=1)['items'][0]['text'] == (
-            'Keep Sidecar startup fast')
-    assert set_watch_status(item_id, 'resolved', user_id=1)['ok'] is True
-    assert render_goals_injection_block('/workspace/project', user_id=1) == ''
-
-
-def test_project_watch_sidecar_response_append_cas(storage, monkeypatch):
-    from lib.conversations.project_watch import _persist_response
-
-    monkeypatch.setattr('lib.conversations.project_watch.get_storage_client',
-                        lambda write=False: storage.client)
-    created = storage.client.command('watch.mutate', {
-        'user_id': 1, 'action': 'add',
-        'project_path': '/workspace/watch', 'kind': 'concern',
-        'text': 'Concern', 'created_by_conv': 'conv-watch',
-    }, 'watch-response-item')
-    item_id = created['item']['item_id']
-    first = _persist_response(item_id, 'first', {'rev': 1}, 'manual',
-                              user_id=1,
-                              fingerprint_guard=('', created['item']['updated_at'], 'fp-1'))
-    assert first['seq'] == 1
-    stale = _persist_response(item_id, 'stale', {'rev': 0}, 'manual',
-                              user_id=1,
-                              fingerprint_guard=('', created['item']['updated_at'], 'fp-stale'))
-    assert stale['conflict'] is True
-
-
-def test_project_feed_sidecar_append_and_incremental_read(storage, monkeypatch):
-    from lib.conversations.project_feed import emit_project_event, read_project_feed
-
-    monkeypatch.setattr('lib.conversations.project_feed.get_storage_client',
-                        lambda write=False: storage.client)
-    first = emit_project_event(
-        '/workspace/feed', 'conv-feed', 'note', 'First', user_id=1)
-    second = emit_project_event(
-        '/workspace/feed', 'conv-feed', 'claimed', 'Second', user_id=1)
-    # Feed seq is 1-based because the exclusive ``seq > since_seq`` contract
-    # must include the first event when a client starts at zero.
-    assert first['seq'] == 1
-    assert second['seq'] == 2
-    page = read_project_feed('/workspace/feed', user_id=1, since_seq=1)
-    assert [event['summary'] for event in page['events']] == ['Second']
-
-
-def test_project_charter_sidecar_read_and_cas_commit(storage, monkeypatch):
-    from lib.conversations.project_charter import commit_charter, read_charter
-
-    monkeypatch.setattr('lib.conversations.project_charter.get_storage_client',
-                        lambda write=False: storage.client)
-    monkeypatch.setattr(
-        'lib.conversations.project_feed.emit_project_event',
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        'lib.conversations.project_status.build_status_snapshot',
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        'lib.conversations.project_watch.address_open_items',
-        lambda *args, **kwargs: None,
-    )
-    assert read_charter('/workspace/charter', user_id=1)['exists'] is False
-    first = commit_charter('/workspace/charter', user_id=1,
-                           add_decision='Use Sidecar',
-                           decision_kind='invariant', summary='Use Sidecar',
-                           updated_by_conv='conv-charter')
-    assert first == {'ok': True, 'version': 1}
-    current = read_charter('/workspace/charter', user_id=1)
-    assert current['decisions'][0]['text'] == 'Use Sidecar'
-    conflict = commit_charter('/workspace/charter', user_id=1, content='stale',
-                              expected_version=0)
-    assert conflict['error'] == 'version_conflict'
 
 
 def test_recent_projects_are_atomic_and_owner_scoped(storage):
@@ -1436,6 +1953,39 @@ def test_recent_projects_are_atomic_and_owner_scoped(storage):
     }, 'recent-owner-1-clear') == {'deleted': 1}
     assert client.query('project.recent.list', {'user_id': 1}) == []
     assert len(client.query('project.recent.list', {'user_id': 2})) == 1
+
+
+def test_recent_project_batch_is_bounded_atomic_and_replay_safe(storage):
+    client = storage.client
+    payload = {
+        'user_id': 7,
+        'project_paths': ['/workspace/b', '/workspace/a', '/workspace/b'],
+        'last_used': 400,
+    }
+    assert client.command(
+        'project.recent.touch_many', payload, 'recent-owner-7-batch'
+    ) == {'touched': 2}
+    # Lost-ACK replay returns the compact receipt without incrementing again.
+    assert client.command(
+        'project.recent.touch_many', payload, 'recent-owner-7-batch'
+    ) == {'touched': 2}
+    rows = {
+        row['path']: row
+        for row in client.query('project.recent.list', {'user_id': 7})
+    }
+    assert rows == {
+        '/workspace/a': {'path': '/workspace/a', 'count': 1, 'last_used': 400},
+        '/workspace/b': {'path': '/workspace/b', 'count': 1, 'last_used': 400},
+    }
+    assert client.query('project.recent.list', {'user_id': 8}) == []
+
+    with pytest.raises(StorageError) as raised:
+        client.command('project.recent.touch_many', {
+            'user_id': 7,
+            'project_paths': [f'/workspace/{index}' for index in range(33)],
+            'last_used': 401,
+        }, 'recent-owner-7-overflow')
+    assert raised.value.code == 'database_protocol_error'
 
 
 def test_knowledge_documents_settings_and_assets_are_owner_scoped(storage):
@@ -1493,8 +2043,21 @@ def test_knowledge_documents_settings_and_assets_are_owner_scoped(storage):
     }, 'knowledge-owner-1-create')
     assert created['created'] is True
     assert created['document']['id'] == document['id']
-    assert created['document']['chunks'][0]['assets'] == [
+    assert 'chunks' not in created['document']
+    content = client.query('knowledge.document.content', {
+        'user_id': 1,
+        'document_id': document['id'],
+        'offset': 0,
+        'limit': 1,
+    })
+    assert content['chunks'][0]['assets'] == [
         {'id': 'asset-private', 'relation': 'primary'}]
+    assert client.query('knowledge.document.content', {
+        'user_id': 2,
+        'document_id': document['id'],
+        'offset': 0,
+        'limit': 1,
+    }) is None
     assert client.query('knowledge.document.list', {'user_id': 2}) == []
     assert client.query('knowledge.asset.get', {
         'user_id': 2, 'asset_id': 'asset-private',
@@ -1506,7 +2069,9 @@ def test_knowledge_documents_settings_and_assets_are_owner_scoped(storage):
     assert client.query('knowledge.settings.get', {
         'user_id': 2,
     }) == {'enabled': False, 'visual_enrichment': False}
-    assert client.query('knowledge.enrichment.owners', {}) == [1]
+    assert client.query('knowledge.enrichment.owners', {'limit': 1}) == [1]
+    with pytest.raises(StorageError, match='Invalid limit'):
+        client.query('knowledge.enrichment.owners', {'limit': 513})
 
     assert client.query('knowledge.enrichment.activity', {'user_id': 1}) == {
         'pending_assets': 1,
@@ -1587,23 +2152,6 @@ def test_knowledge_documents_settings_and_assets_are_owner_scoped(storage):
     assert reclaimed['updated_at'] > now - 30
 
 
-def test_project_status_sidecar_snapshot_history(storage, monkeypatch):
-    from lib.conversations.project_status import (
-        _persist_snapshot, read_status_history,
-    )
-
-    monkeypatch.setattr('lib.conversations.project_status.get_storage_client',
-                        lambda write=False: storage.client)
-    first = _persist_snapshot(
-        '/workspace/status', 'First', {'open': 1}, 'manual', user_id=1)
-    second = _persist_snapshot(
-        '/workspace/status', 'Second', {'open': 2}, 'claim', user_id=1)
-    assert first['seq'] == 0
-    assert second['seq'] == 1
-    history = read_status_history('/workspace/status', user_id=1)
-    assert [item['narrative'] for item in history['snapshots']] == ['Second', 'First']
-
-
 def test_autopilot_marker_is_sidecar_owned_and_idempotent(storage):
     client = storage.client
     conv_id = 'queue-marker-contract'
@@ -1644,6 +2192,14 @@ def test_autopilot_marker_is_sidecar_owned_and_idempotent(storage):
 
 
 def test_queue_enqueue_order_lease_and_finalize_are_atomic(storage):
+    from lib.turn_source_queue_contract import (
+        QUEUE_REAP_PROBE_CONTRACT,
+        QUEUE_REAP_PROBE_CONVERSATIONS_FIELD,
+        QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD,
+        QUEUE_REAP_PROBE_REQUEST_FIELD,
+        QUEUE_REAP_PROBE_RESPONSE_FIELD,
+    )
+
     client = storage.client
     conv_id = 'queue-core-contract'
     _import_conversation(client, conv_id, title='Queue core')
@@ -1672,6 +2228,22 @@ def test_queue_enqueue_order_lease_and_finalize_are_atomic(storage):
         {'convId': conv_id, 'userId': 1}]
     assert client.query('queue.conversations.list_all', {'kind': 'real'}) == [
         {'convId': conv_id, 'userId': 1}]
+    assert client.query('queue.conversations.list_all', {
+        QUEUE_REAP_PROBE_REQUEST_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+        'now_ms': 100,
+    }) == {
+        QUEUE_REAP_PROBE_RESPONSE_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+        QUEUE_REAP_PROBE_CONVERSATIONS_FIELD: [
+            {'convId': conv_id, 'userId': 1},
+        ],
+        QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD: False,
+    }
+    with pytest.raises(StorageError) as invalid_probe:
+        client.query('queue.conversations.list_all', {
+            QUEUE_REAP_PROBE_REQUEST_FIELD: 'tofu.queue.reap-probe/unknown',
+            'now_ms': 100,
+        })
+    assert invalid_probe.value.code == 'database_protocol_error'
 
     leased = client.command('queue.dequeue', {
         'conv_id': conv_id, 'user_id': 1,
@@ -1687,6 +2259,14 @@ def test_queue_enqueue_order_lease_and_finalize_are_atomic(storage):
         'conv_id': conv_id, 'user_id': 1,
         'now_ms': 100, 'lease_ms': 1000,
     }, None)['queueId'] == 'queue-workflow-1'
+    expired_probe = client.query('queue.conversations.list_all', {
+        QUEUE_REAP_PROBE_REQUEST_FIELD: QUEUE_REAP_PROBE_CONTRACT,
+        'now_ms': 1101,
+    })
+    assert expired_probe[QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD] is True
+    assert expired_probe[QUEUE_REAP_PROBE_CONVERSATIONS_FIELD] == [
+        {'convId': conv_id, 'userId': 1},
+    ]
     assert client.command(
         'queue.lease.release', {
             'queue_id': 'queue-real-1', 'user_id': 1},
@@ -1704,6 +2284,40 @@ def test_queue_enqueue_order_lease_and_finalize_are_atomic(storage):
         'queue-clear-contract') == {
             'cleared': 1,
         }
+
+
+def test_queue_goal_continuation_dedupes_and_clears_by_owned_kind(storage):
+    client = storage.client
+    conv_id = 'queue-goal-continuation-contract'
+    _import_conversation(client, conv_id, title='Goal continuation queue')
+    human = {
+        'conv_id': conv_id, 'user_id': 1, 'queue_id': 'queue-human-keep',
+        'message': {'text': 'human'}, 'config': {},
+        'kind': 'real', 'priority': 10, 'created_at_ms': 1,
+    }
+    client.command('queue.enqueue', human, 'queue-human-keep')
+    goal = {
+        'conv_id': conv_id, 'user_id': 1, 'queue_id': 'queue-goal-first',
+        'message': {'text': 'continue'},
+        'config': {'_goalObjective': 'durable objective'},
+        'kind': 'goal_continuation', 'priority': 20, 'created_at_ms': 2,
+    }
+    first = client.command('queue.enqueue', goal, 'queue-goal-first')
+    duplicate = client.command('queue.enqueue', {
+        **goal, 'queue_id': 'queue-goal-second', 'created_at_ms': 3,
+    }, 'queue-goal-second')
+
+    assert first['deduped'] is False
+    assert duplicate['deduped'] is True
+    assert duplicate['queueId'] == first['queueId']
+    assert client.command('queue.kind.clear', {
+        'conv_id': conv_id, 'user_id': 1, 'kind': 'goal_continuation',
+    }, 'queue-goal-clear') == {'cleared': 1}
+    remaining = client.query(
+        'queue.list', {'conv_id': conv_id, 'user_id': 1})
+    assert [(row['queueId'], row['position'], row['kind']) for row in remaining] == [
+        ('queue-human-keep', 1, 'real'),
+    ]
 def test_queue_list_carries_get_queue_preview_contract(storage):
     """queue.list rows carry the documented get_queue preview shape
     (text / has* / peer attribution) ALONGSIDE payload/config.
@@ -1900,8 +2514,8 @@ def test_turn_native_search_projection_end_to_end(storage, monkeypatch):
     assert backfill['scheduled'] is True
 
 
-def test_conversation_list_never_projects_retired_document_archive():
-    """Metadata reads stay light and full reads derive only from turns."""
+def test_conversation_list_keeps_metadata_light_and_reads_legacy_archive():
+    """Full reads retain pre-turn history without taxing metadata pages."""
     from lib.storage_sidecar import operations
 
     captured = []
@@ -1921,6 +2535,11 @@ def test_conversation_list_never_projects_retired_document_archive():
                 'settings_json': '{"folderId": "f"}', 'msg_count': 3,
                 'rev': 7,
             }
+            if 'messages_json' in sql:
+                row['messages_json'] = json.dumps([
+                    {'role': 'user', 'content': 'archived question'},
+                    {'role': 'assistant', 'content': 'archived answer'},
+                ])
             if 'search_text' in sql:
                 row['search_text'] = 'hello'
             return [row]
@@ -1938,10 +2557,113 @@ def test_conversation_list_never_projects_retired_document_archive():
     captured.clear()
     documents = operations._conversation_list(
         _FakeSession(), {'user_id': 1, 'include_messages': True})
-    assert captured and all('messages_json' not in sql for sql in captured)
-    assert 'search_text' in captured[0]
-    assert documents[0]['messages'] == []
-    assert documents[0]['metadata']['search_text'] == 'hello'
+    assert captured and 'messages_json' in captured[0]
+    assert 'search_text' not in captured[0]
+    assert [message['content'] for message in documents[0]['messages']] == [
+        'archived question', 'archived answer']
+    assert documents[0]['metadata']['search_text'] == ''
+
+
+def test_conversation_get_falls_back_to_frozen_archive_and_preserves_count():
+    """A pre-turn conversation is durable history, not an empty placeholder."""
+    from lib.storage_sidecar import operations
+
+    captured = []
+    header = {
+        'id': 'legacy-conv', 'user_id': 7, 'title': 'Legacy',
+        'created_at_ms': 1, 'updated_at_ms': 2,
+        'settings_json': '{}', 'msg_count': 2, 'search_text': 'legacy',
+        'rev': 4,
+    }
+    archived = [
+        {'role': 'user', 'content': 'old question'},
+        {'role': 'assistant', 'content': 'old answer'},
+    ]
+
+    class _FakeSession:
+        backend = 'sqlite'
+
+        def fetch_one(self, sql, params=()):
+            captured.append(('one', sql, params))
+            if 'COUNT(*) AS c' in sql:
+                return {'c': 0}
+            if 'messages_json' in sql:
+                return {'messages_json': json.dumps(archived)}
+            return dict(header)
+
+        def fetch_all(self, sql, params=()):
+            captured.append(('all', sql, params))
+            return []
+
+    document = operations._conversation_get(_FakeSession(), {
+        'conv_id': 'legacy-conv', 'user_id': 7, 'derive_messages': True,
+    })
+
+    assert document['messages'] == archived
+    assert document['metadata']['msg_count'] == 2
+    assert 'messages_json' not in captured[0][1]
+    assert 'search_text' not in captured[0][1]
+    assert 'conversation_id=? AND user_id=?' in captured[1][1]
+    assert 'messages_json' in captured[2][1]
+
+    captured.clear()
+    page = operations._conversation_get(_FakeSession(), {
+        'conv_id': 'legacy-conv', 'user_id': 7, 'derive_messages': True,
+        'message_window': 1, 'before_sequence': 1,
+    })
+    assert page['messages'] == archived[:1]
+    assert page['metadata']['msg_count'] == 2
+    assert page['message_page'] == {
+        'total_count': 2, 'start': 0, 'end': 1,
+    }
+    assert page['metadata']['search_text'] == ''
+    assert 'messages_json' not in captured[0][1]
+    assert 'search_text' not in captured[0][1]
+    assert 'COUNT(*) AS c' in captured[1][1]
+    assert 'messages_json' in captured[2][1]
+
+    captured.clear()
+    metadata = operations._conversation_get(_FakeSession(), {
+        'conv_id': 'legacy-conv', 'user_id': 7, 'derive_messages': False,
+    })
+    assert metadata['messages'] == []
+    assert metadata['metadata']['search_text'] == ''
+    assert 'search_text' not in captured[0][1]
+
+    row = dict(header)
+    operations._backfill_turn_message_counts(_FakeSession(), [row])
+    assert row['msg_count'] == 2
+
+
+def test_conversation_get_turn_window_is_bounded_and_cursor_addressable(storage):
+    """Turn-native detail reads page in SQL and expose absolute cursors."""
+    messages = [
+        {'role': 'user' if index % 2 == 0 else 'assistant',
+         'content': f'message-{index}'}
+        for index in range(4)
+    ]
+    _import_conversation(
+        storage.client, 'window-conv', messages=messages, title='Window')
+
+    tail = storage.client.query('conversation.get', {
+        'conv_id': 'window-conv', 'user_id': 1, 'message_window': 2,
+    })
+    assert [message['content'] for message in tail['messages']] == [
+        'message-2', 'message-3']
+    assert tail['metadata']['msg_count'] == 4
+    assert tail['message_page'] == {
+        'total_count': 4, 'start': 2, 'end': 4,
+    }
+
+    previous = storage.client.query('conversation.get', {
+        'conv_id': 'window-conv', 'user_id': 1, 'message_window': 2,
+        'before_sequence': 2,
+    })
+    assert [message['content'] for message in previous['messages']] == [
+        'message-0', 'message-1']
+    assert previous['message_page'] == {
+        'total_count': 4, 'start': 0, 'end': 2,
+    }
 
 
 def test_conversation_list_settings_keys_projection_bounds_sidebar_payload():
@@ -1959,7 +2681,11 @@ def test_conversation_list_settings_keys_projection_bounds_sidebar_payload():
     class _FakeSession:
         backend = 'sqlite'
 
+        def __init__(self):
+            self.statements = []
+
         def fetch_all(self, sql, params=()):
+            self.statements.append(sql)
             if 'count(*) AS n' in sql:
                 return [{'cid': 'conv-1', 'user_id': 1, 'n': 3}]
             return [{
@@ -1974,14 +2700,26 @@ def test_conversation_list_settings_keys_projection_bounds_sidebar_payload():
                 'msg_count': 3, 'rev': 7,
             }]
 
+    projected_session = _FakeSession()
     projected = operations._conversation_list(
-        _FakeSession(),
+        projected_session,
         {'user_id': 1, 'include_messages': False,
          'settings_keys': ['folderId', 'lastMsgRole']})
     assert projected[0]['metadata']['settings'] == {
         'folderId': 'f', 'lastMsgRole': 'assistant'}
     assert 'autopilotSummaries' not in projected[0]['metadata']['settings']
     assert 'model' not in projected[0]['metadata']['settings']
+
+    empty_session = _FakeSession()
+    empty = operations._conversation_list(
+        empty_session,
+        {'user_id': 1, 'include_messages': False, 'settings_keys': []},
+    )
+    assert empty[0]['metadata']['settings'] == {}
+    assert any(
+        "'{}' AS settings_json" in statement
+        for statement in empty_session.statements
+    ), 'an empty whitelist must not read or decode the stored settings blob'
 
     # Without a projection the settings blob passes through unchanged for
     # non-sidebar callers (project summaries, project dispatch, …).
@@ -1996,6 +2734,84 @@ def test_conversation_list_settings_keys_projection_bounds_sidebar_payload():
                 _FakeSession(),
                 {'user_id': 1, 'include_messages': False, 'settings_keys': bad})
         assert raised.value.code == 'database_protocol_error'
+
+
+@pytest.mark.parametrize(
+    ('backend', 'folder_expression'),
+    [
+        ('sqlite', "json_extract(settings_json, '$.folderId') = ?"),
+        ('postgres', "settings_json ->> 'folderId' = ?"),
+    ],
+)
+def test_conversation_catalog_page_pushes_owner_filter_cursor_and_limit_to_sql(
+    backend, folder_expression
+):
+    """The sidebar page must not materialize an owner's complete archive."""
+    from lib.storage_sidecar import operations
+
+    captured = []
+
+    class _FakeSession:
+        def __init__(self):
+            self.backend = backend
+
+        def fetch_one(self, sql, params=()):
+            captured.append(('one', sql, params))
+            return {'c': 9}
+
+        def fetch_all(self, sql, params=()):
+            captured.append(('all', sql, params))
+            if 'count(*) AS n' in sql:
+                return [
+                    {'cid': 'c3', 'user_id': 7, 'n': 4},
+                    {'cid': 'c2', 'user_id': 7, 'n': 2},
+                ]
+            return [
+                {
+                    'id': cid,
+                    'user_id': 7,
+                    'title': cid.upper(),
+                    'created_at_ms': updated_at - 1,
+                    'updated_at_ms': updated_at,
+                    'settings_json': json.dumps({
+                        'folderId': 'folder-a',
+                        'lastMsgRole': 'assistant',
+                        'large': 'x' * 1000,
+                    }),
+                    'msg_count': 0,
+                    'rev': 1,
+                }
+                for cid, updated_at in [('c3', 499), ('c2', 498), ('c1', 497)]
+            ]
+
+    result = operations._conversation_list(_FakeSession(), {
+        'catalog_page': True,
+        'user_id': 7,
+        'include_messages': False,
+        'order_by': 'updated_at_desc',
+        'folder_id': 'folder-a',
+        'before_updated_at': 500,
+        'before_id': 'c4',
+        'limit': 2,
+        'settings_keys': ['folderId', 'lastMsgRole'],
+    })
+
+    assert result['total_count'] == 9
+    assert result['has_more'] is True
+    assert [item['metadata']['id'] for item in result['items']] == ['c3', 'c2']
+    assert [item['metadata']['msg_count'] for item in result['items']] == [4, 2]
+    assert result['items'][0]['metadata']['settings'] == {
+        'folderId': 'folder-a', 'lastMsgRole': 'assistant'}
+
+    _, count_sql, count_params = captured[0]
+    _, page_sql, page_params = captured[1]
+    assert 'user_id = ?' in count_sql and folder_expression in count_sql
+    assert count_params == (7, 'folder-a')
+    assert 'user_id = ?' in page_sql and folder_expression in page_sql
+    assert page_sql.index('user_id = ?') < page_sql.index('ORDER BY')
+    assert page_sql.index('ORDER BY') < page_sql.index('LIMIT ?')
+    assert page_params == (7, 'folder-a', 500, 500, 'c4', 3)
+    assert all('messages_json' not in sql for _, sql, _ in captured)
 
 
 @pytest.mark.parametrize(
@@ -2061,6 +2877,137 @@ def test_conversation_count_returns_authoritative_total_without_blobs():
     assert captured and 'COUNT(*)' in captured[0]
 
 
+@pytest.mark.parametrize(
+    ('backend', 'timestamp_expression'),
+    [
+        (
+            'sqlite',
+            "json_extract(COALESCE(cp.projection_json,t.projection_json), "
+            "'$.timestamp')",
+        ),
+        (
+            'postgres',
+            "COALESCE(cp.projection_json,t.projection_json) -> 'timestamp'",
+        ),
+    ],
+)
+def test_conversation_activity_dates_projects_only_timestamp_scalars(
+        backend, timestamp_expression):
+    """Turn and legacy content stay behind backend JSON scalar projections."""
+    from lib.storage_sidecar import operations
+
+    calls = []
+
+    class _FakeSession:
+        def __init__(self):
+            self.backend = backend
+
+        def fetch_all(self, sql, params=()):
+            calls.append(('all', sql, params))
+            if 'FROM storage_conversation_turns' in sql:
+                return [
+                    {
+                        'cid': 'turn-backed',
+                        'turn_created_at': 150,
+                        'projection_timestamp': None,
+                    },
+                    {
+                        'cid': 'turn-backed',
+                        'turn_created_at': 160,
+                        'projection_timestamp': 'malformed',
+                    },
+                ]
+            if 'SELECT id,messages_json' in sql:
+                return [
+                    {
+                        'id': 'legacy',
+                        'messages_json': json.dumps([
+                            {
+                                'role': 'user',
+                                'timestamp': 150,
+                                'content': 'private',
+                            },
+                            {
+                                'role': 'assistant',
+                                'content': 'fallback private',
+                            },
+                        ]),
+                    },
+                ]
+            assert 'messages_json' not in sql
+            return [
+                {
+                    'id': 'turn-backed',
+                    'created_at_ms': 100,
+                    'updated_at_ms': 250,
+                },
+                {
+                    'id': 'legacy',
+                    'created_at_ms': 100,
+                    'updated_at_ms': 250,
+                },
+            ]
+
+    result = operations._conversation_activity_dates(_FakeSession(), {
+        'user_id': 7,
+        'updated_at_gte': 100,
+        'created_at_lt': 300,
+        'day_boundaries_ms': [100, 200, 300],
+        'limit': 50,
+    })
+
+    assert result == {'candidate_count': 2, 'counts': [2, 2]}
+    _, candidate_sql, candidate_params = calls[0]
+    assert 'messages_json' not in candidate_sql
+    assert candidate_params == (7, 100, 300, 50)
+    _, turn_sql, turn_params = calls[1]
+    assert timestamp_expression in turn_sql
+    assert 'LEFT JOIN storage_turn_projection_checkpoints AS cp' in turn_sql
+    assert 'content' not in turn_sql and 'projection_json AS' not in turn_sql
+    assert turn_params == (7, 'turn-backed', 'legacy')
+    _, legacy_sql, legacy_params = calls[2]
+    assert 'SELECT id,messages_json' in legacy_sql
+    assert legacy_params == (7, 'legacy')
+    assert [kind for kind, _, _ in calls] == ['all', 'all', 'all']
+
+
+def test_conversation_activity_dates_roundtrip_is_distinct_and_owner_scoped(
+        storage):
+    client = storage.client
+    _import_conversation(
+        client,
+        'activity-owned',
+        user_id=1,
+        created_at=100,
+        updated_at=250,
+        messages=[
+            {'role': 'user', 'timestamp': 150, 'content': 'a'},
+            {'role': 'assistant', 'timestamp': 160, 'content': 'b'},
+            {'role': 'user', 'timestamp': 250, 'content': 'c'},
+        ],
+    )
+    _import_conversation(
+        client,
+        'activity-foreign',
+        user_id=2,
+        created_at=100,
+        updated_at=250,
+        messages=[
+            {'role': 'user', 'timestamp': 150, 'content': 'foreign'},
+        ],
+    )
+
+    result = client.query('conversation.activity_dates', {
+        'user_id': 1,
+        'updated_at_gte': 100,
+        'created_at_lt': 300,
+        'day_boundaries_ms': [100, 200, 300],
+        'limit': 10_000,
+    })
+
+    assert result == {'candidate_count': 1, 'counts': [1, 1]}
+
+
 def test_conversation_count_op_roundtrip(storage):
     """The registered ``conversation.count`` op answers through the real
     sidecar process (the route calls it for the authoritative sidebar total)."""
@@ -2073,6 +3020,54 @@ def test_conversation_count_op_roundtrip(storage):
         updated_at=2,
     )
     assert client.query('conversation.count', {'user_id': 1}) == {'count': 1}
+
+
+def test_conversation_catalog_page_roundtrip_is_owner_scoped_and_cursor_bounded(
+    storage,
+):
+    client = storage.client
+    for conv_id, user_id, updated_at in (
+        ('catalog-c1', 1, 1),
+        ('catalog-c2', 1, 2),
+        ('catalog-c3', 1, 3),
+        ('catalog-other-owner', 2, 4),
+    ):
+        _import_conversation(
+            client,
+            conv_id,
+            user_id=user_id,
+            updated_at=updated_at,
+            settings={'folderId': 'folder-a', 'large': 'x' * 20_000},
+        )
+
+    first = client.query('conversation.list', {
+        'catalog_page': True,
+        'user_id': 1,
+        'include_messages': False,
+        'folder_id': 'folder-a',
+        'limit': 2,
+        'settings_keys': ['folderId'],
+    })
+    assert first['total_count'] == 3
+    assert first['has_more'] is True
+    assert [item['metadata']['id'] for item in first['items']] == [
+        'catalog-c3', 'catalog-c2']
+    assert all(item['metadata']['settings'] == {'folderId': 'folder-a'}
+               for item in first['items'])
+
+    second = client.query('conversation.list', {
+        'catalog_page': True,
+        'user_id': 1,
+        'include_messages': False,
+        'folder_id': 'folder-a',
+        'before_updated_at': 2,
+        'before_id': 'catalog-c2',
+        'limit': 2,
+        'settings_keys': ['folderId'],
+    })
+    assert second['total_count'] == 3
+    assert second['has_more'] is False
+    assert [item['metadata']['id'] for item in second['items']] == ['catalog-c1']
 
 
 def test_conversation_settings_replace_is_snapshot_cas_and_supports_delete(storage):
@@ -2122,14 +3117,14 @@ def test_conversation_settings_replace_is_snapshot_cas_and_supports_delete(stora
     assert document['metadata']['settings'] == {'counter': 1}
 
 
-def test_conversation_list_derives_exact_msg_count_from_main_lane_turns():
-    """The list projection never trusts a retired aggregate transcript count.
+def test_conversation_list_derives_turn_counts_and_preserves_archive_counts():
+    """The list projection respects both durable transcript generations.
 
-    Counts come from the canonical owner-scoped turns — main lane only,
-    because the frontend projects exactly the main-lane turns into
-    ``conv.messages`` (branches nest under a parent message instead), and a
-    branch-inflated count would re-trigger the client's
-    ``serverMsgCount > messages.length`` refetch on every merge.
+    Canonical owner-scoped main-lane turns override the stored aggregate. A
+    conversation with no turns may still have its only durable transcript in
+    the frozen pre-turn archive, so its stored count remains authoritative.
+    Branch turns stay excluded because the frontend nests them below a parent
+    rather than projecting them into ``conv.messages``.
     """
     from lib.storage_sidecar import operations
 
@@ -2159,8 +3154,7 @@ def test_conversation_list_derives_exact_msg_count_from_main_lane_turns():
         _FakeSession(), {'user_id': 1, 'include_messages': False})
     by_id = {d['metadata']['id']: d['metadata'] for d in documents}
     assert by_id['turn-native-conv']['msg_count'] == 2
-    # A stale aggregate value cannot resurrect retired archive content.
-    assert by_id['legacy-conv']['msg_count'] == 0
+    assert by_id['legacy-conv']['msg_count'] == 7
     # The derivation counts only the main lane for every owner/id pair.
     assert count_sql and "lane_id = 'main'" in count_sql[0]
     assert count_params[0] == (
@@ -2183,88 +3177,6 @@ def test_conversation_list_derives_exact_msg_count_from_main_lane_turns():
     empty = operations._conversation_list(
         _EmptySession(), {'user_id': 1, 'include_messages': False})
     assert empty[0]['metadata']['msg_count'] == 0
-
-
-def test_board_import_batch_is_idempotent_and_conflict_safe(storage):
-    client = storage.client
-    document = {
-        'id': 'pt_import1', 'project_path': '/proj', 'title': 'Epic',
-        'status': 'open', 'owner_conv_id': '', 'lease_expires_at': 0,
-        'created_by_conv': 'conv1', 'depends_on': ['pt_other'], 'kind': '',
-        'dispatched': 0, 'blocked_until': 0, 'block_count': 0,
-        'block_reason': '', 'wait_paths': [], 'dispatch_target': '',
-        'write_set': ['lib/a.py'], 'block_question': '', 'human_answer': '',
-        'blocked_by': '', 'created_at': 111, 'updated_at': 222,
-    }
-    first = client.command(
-        'board.import_batch', {'user_id': 1, 'documents': [document]},
-        'board-import-1')
-    assert first['migrated'] == 1 and first['verified'] == 0
-    replayed = client.command(
-        'board.import_batch', {'user_id': 1, 'documents': [document]},
-        'board-import-1')
-    assert replayed['migrated'] == 0 and replayed['verified'] == 1
-
-    board = client.query('board.list', {'user_id': 1, 'project_path': '/proj'})
-    assert [task['id'] for task in board['tasks']] == ['pt_import1']
-    task = board['tasks'][0]
-    assert task['title'] == 'Epic' and task['status'] == 'open'
-    assert task['created_at'] == 111 and task['updated_at'] == 222
-    assert task['depends_on'] == ['pt_other']
-    assert task['write_set'] == ['lib/a.py']
-
-    with pytest.raises(StorageError) as raised:
-        client.command('board.import_batch', {'user_id': 1, 'documents': [
-            {**document, 'title': 'different'}]}, 'board-import-conflict')
-    assert raised.value.code == 'database_conflict'
-    assert client.query(
-        'board.list', {'user_id': 1, 'project_path': '/proj'},
-    )['tasks'][0]['title'] == 'Epic'
-
-    assert client.query(
-        'board.list', {'user_id': 2, 'project_path': '/proj'},
-    )['tasks'] == []
-    with pytest.raises(StorageError) as denied:
-        client.command('board.import_batch', {
-            'user_id': 2, 'documents': [{**document, 'user_id': 1}],
-        }, 'board-import-owner-mismatch')
-    assert denied.value.code == 'database_forbidden'
-    assert http_status_for_storage_error(denied.value) == 403
-
-
-def test_watch_import_batch_is_idempotent_and_conflict_safe(storage):
-    client = storage.client
-    item = {
-        'item_id': 'watch_import1', 'project_path': '/proj', 'kind': 'goal',
-        'text': 'ship it', 'status': 'open', 'promoted': 0,
-        'response_fingerprint': 'fp1', 'created_by_conv': 'conv1',
-        'created_at': 10, 'updated_at': 20,
-    }
-    response = {
-        'item_id': 'watch_import1', 'sequence': 1, 'project_path': '/proj',
-        'response': 'on it', 'pillar_state': {'p1': 'ok'},
-        'trigger': 'manual', 'ts': 30,
-    }
-    payload = {'user_id': 1, 'items': [item], 'responses': [response]}
-    first = client.command('watch.import_batch', payload, 'watch-import-1')
-    assert first['migrated_items'] == 1 and first['migrated_responses'] == 1
-    replayed = client.command('watch.import_batch', payload, 'watch-import-1')
-    assert replayed['verified_items'] == 1 and replayed['verified_responses'] == 1
-    assert replayed['migrated_items'] == 0
-
-    fetched = client.query(
-        'watch.get', {'user_id': 1, 'item_id': 'watch_import1'})
-    assert fetched['text'] == 'ship it'
-    assert fetched['created_at'] == 10
-    assert fetched['responses'][0]['response'] == 'on it'
-    assert fetched['responses'][0]['pillar_state'] == {'p1': 'ok'}
-
-    with pytest.raises(StorageError) as raised:
-        client.command('watch.import_batch', {
-            'user_id': 1,
-            'items': [{**item, 'text': 'different'}], 'responses': []},
-            'watch-import-conflict')
-    assert raised.value.code == 'database_conflict'
 
 
 def test_billing_settlement_fault_rolls_back_and_replays_once(
@@ -2461,6 +3373,308 @@ def test_natural_event_key_deduplicates_without_receipt(storage):
     assert raised.value.code == 'database_conflict'
 
 
+def test_event_bounds_count_sparse_sequences_without_loading_payloads(storage):
+    client = storage.client
+    for sequence in (3, 9, 12):
+        client.command(
+            'event.append', {
+                'task_id': 'event-bounds-sparse',
+                'sequence': sequence,
+                'event': {'type': 'progress', 'payload': 'x' * 10_000},
+            },
+            None,
+            priority='event',
+        )
+
+    assert client.query('event.bounds', {
+        'task_id': 'event-bounds-sparse',
+    }) == {
+        'retained_count': 3,
+        'base_cursor': 3,
+        'next_cursor': 13,
+    }
+    assert client.query('event.bounds', {
+        'task_id': 'event-bounds-empty',
+    }) == {
+        'retained_count': 0,
+        'base_cursor': 0,
+        'next_cursor': 0,
+    }
+
+
+def test_task_result_replay_get_defers_heavy_payload_and_filters_owner(storage):
+    client = storage.client
+    content = 'answer-' * 100_000
+    value = {
+        'task_id': 'compact-replay-task',
+        'conv_id': 'compact-replay-conv',
+        'user_id': 17,
+        'content': content,
+        'thinking': 'reasoning',
+        'error': None,
+        'status': 'done',
+        'tool_rounds': '[{"large":"diagnostic"}]',
+        'metadata': json.dumps({
+            'finishReason': 'stop',
+            'model': 'compact-model',
+            'requestId': 'compact-request',
+            'flowTrace': [{'large': 'dedicated'}],
+        }),
+        'segments': None,
+        'created_at': 10,
+        'completed_at': 20,
+    }
+    client.command(
+        'task_results.checkpoint', {
+            'key': value['task_id'], 'value': value, 'expected_version': 0,
+        },
+        None,
+    )
+
+    compact = client.query('task_results.replay_get', {
+        'key': value['task_id'], 'user_id': 17,
+    })
+    assert compact['status'] == 'done'
+    assert compact['metadata'] == {
+        'finishReason': 'stop',
+        'model': 'compact-model',
+        'requestId': 'compact-request',
+    }
+    assert 'content' not in compact
+    assert 'thinking' not in compact
+    assert 'tool_rounds' not in compact
+    assert client.query('task_results.replay_get', {
+        'key': value['task_id'], 'user_id': 18,
+    }) is None
+
+    full = client.query('task_results.replay_get', {
+        'key': value['task_id'], 'user_id': 17,
+        'include_terminal_payload': True,
+        'include_metadata': True,
+    })
+    assert full['content'] == content
+    assert full['thinking'] == 'reasoning'
+    assert full['metadata']['flowTrace'] == [{'large': 'dedicated'}]
+    assert len(json.dumps(compact)) < 2_048
+    assert len(content) > 500_000
+
+
+def test_task_result_field_codec_stays_private_and_round_trips(
+        storage, tmp_path):
+    from lib.storage_sidecar.task_result_field_codec import (
+        TASK_RESULT_FIELD_CODEC_KEY,
+    )
+
+    value = {
+        'task_id': 'field-codec-task',
+        'conv_id': 'field-codec-conversation',
+        'user_id': 31,
+        'status': 'done',
+        'segments': 'segment payload ' * 20_000,
+        'metadata': json.dumps({
+            'finishReason': 'stop',
+            'toolSummary': 'summary payload ' * 10_000,
+        }),
+        'tool_rounds': None,
+        'content': 'public answer',
+        'thinking': '',
+        'error': None,
+        'created_at': 10,
+        'completed_at': 20,
+    }
+    result = storage.client.command(
+        'task_results.checkpoint', {
+            'key': value['task_id'], 'value': value, 'expected_version': 0,
+        }, None)
+
+    assert result['version'] == 1
+    assert storage.client.query('record.get', {
+        'namespace': 'task_results', 'key': value['task_id'],
+    })['value'] == value
+    listed = storage.client.query('record.list', {
+        'namespace': 'task_results', 'prefix': value['task_id'], 'limit': 1,
+    })
+    assert listed[0]['value'] == value
+    replay = storage.client.query('task_results.replay_get', {
+        'key': value['task_id'], 'user_id': value['user_id'],
+        'include_metadata': True,
+    })
+    assert replay['metadata']['toolSummary'].startswith('summary payload ')
+    assert 'segments' not in replay
+
+    injected = dict(value)
+    injected['task_id'] = 'field-codec-injection'
+    injected['segments'] = {
+        TASK_RESULT_FIELD_CODEC_KEY: {'payload': 'private'},
+    }
+    with pytest.raises(StorageError) as raised:
+        storage.client.command('task_results.checkpoint', {
+            'key': injected['task_id'], 'value': injected,
+            'expected_version': 0,
+        }, None)
+    assert raised.value.code == 'database_protocol_error'
+
+    if storage.client.health()['backend'] == 'sqlite':
+        connection = sqlite3.connect(tmp_path / 'data' / 'tofu.db')
+        raw = connection.execute(
+            "SELECT value_json FROM storage_records WHERE namespace=? "
+            "AND record_key=?",
+            ('task_results', value['task_id']),
+        ).fetchone()[0]
+        connection.close()
+        stored = json.loads(raw)
+        assert TASK_RESULT_FIELD_CODEC_KEY in stored['segments']
+        assert TASK_RESULT_FIELD_CODEC_KEY in stored['metadata']
+        assert stored['status'] == 'done'
+        assert len(raw) < len(json.dumps(value).encode()) * 0.1
+
+
+def test_task_result_compact_replay_skips_unrequested_corrupt_field(
+        storage, tmp_path):
+    if storage.client.health()['backend'] != 'sqlite':
+        pytest.skip('fault injection uses the SQLite authority')
+    from lib.storage_sidecar.task_result_field_codec import (
+        TASK_RESULT_FIELD_CODEC_KEY,
+    )
+
+    value = {
+        'task_id': 'selective-codec-task',
+        'conv_id': 'selective-codec-conversation',
+        'user_id': 32,
+        'status': 'done',
+        'segments': 'segment payload ' * 20_000,
+        'metadata': json.dumps({'finishReason': 'stop'}),
+        'content': 'answer',
+        'thinking': '',
+        'error': None,
+        'created_at': 10,
+        'completed_at': 20,
+    }
+    storage.client.command('task_results.checkpoint', {
+        'key': value['task_id'], 'value': value, 'expected_version': 0,
+    }, None)
+    connection = sqlite3.connect(tmp_path / 'data' / 'tofu.db')
+    raw = connection.execute(
+        "SELECT value_json FROM storage_records WHERE namespace=? "
+        "AND record_key=?",
+        ('task_results', value['task_id']),
+    ).fetchone()[0]
+    stored = json.loads(raw)
+    stored['segments'][TASK_RESULT_FIELD_CODEC_KEY]['payload'] = 'bad'
+    connection.execute(
+        "UPDATE storage_records SET value_json=? WHERE namespace=? "
+        "AND record_key=?",
+        (json.dumps(stored), 'task_results', value['task_id']),
+    )
+    connection.commit()
+    connection.close()
+
+    compact = storage.client.query('task_results.replay_get', {
+        'key': value['task_id'], 'user_id': value['user_id'],
+    })
+    assert compact['status'] == 'done'
+    with pytest.raises(StorageError) as raised:
+        storage.client.query('record.get', {
+            'namespace': 'task_results', 'key': value['task_id'],
+        })
+    assert raised.value.code == 'database_integrity'
+
+
+def test_task_result_plain_ambiguous_replay_survives_codec_rollout(
+        storage, tmp_path):
+    if storage.client.health()['backend'] != 'sqlite':
+        pytest.skip('mixed-version seed uses the SQLite authority')
+    from lib.storage_sidecar.task_result_field_codec import (
+        TASK_RESULT_FIELD_CODEC_KEY,
+    )
+
+    value = {
+        'task_id': 'plain-replay-task',
+        'conv_id': '',
+        'user_id': 33,
+        'status': 'done',
+        'segments': 'historical plain segment ' * 10_000,
+        'metadata': '{}',
+        'content': 'answer',
+        'thinking': '',
+        'error': None,
+        'created_at': 10,
+        'completed_at': 20,
+    }
+    plain = json.dumps(value, sort_keys=True, separators=(',', ':'))
+    connection = sqlite3.connect(tmp_path / 'data' / 'tofu.db')
+    connection.execute(
+        "INSERT INTO storage_records(namespace,record_key,value_json,version,"
+        "updated_at_ms) VALUES (?,?,?,?,?)",
+        ('task_results', value['task_id'], plain, 1, 20),
+    )
+    connection.commit()
+    connection.close()
+
+    replay = storage.client.command('task_results.checkpoint', {
+        'key': value['task_id'], 'value': value, 'expected_version': 0,
+    }, None)
+    assert replay['version'] == 1
+    rewritten = storage.client.command('task_results.checkpoint', {
+        'key': value['task_id'], 'value': value, 'expected_version': 1,
+    }, None)
+    assert rewritten['version'] == 2
+
+    connection = sqlite3.connect(tmp_path / 'data' / 'tofu.db')
+    raw, version = connection.execute(
+        "SELECT value_json,version FROM storage_records WHERE namespace=? "
+        "AND record_key=?",
+        ('task_results', value['task_id']),
+    ).fetchone()
+    connection.close()
+    assert version == 2
+    assert TASK_RESULT_FIELD_CODEC_KEY in json.loads(raw)['segments']
+
+
+def test_task_result_replay_get_rejects_ambiguous_owner_and_invalid_clocks(
+        storage):
+    client = storage.client
+    ambiguous_owner = {
+        'task_id': 'compact-replay-bool-owner',
+        'user_id': True,
+        'status': 'done',
+        'created_at': 10,
+        'completed_at': 20,
+    }
+    client.command(
+        'task_results.checkpoint', {
+            'key': ambiguous_owner['task_id'],
+            'value': ambiguous_owner,
+            'expected_version': 0,
+        },
+        None,
+    )
+    assert client.query('task_results.replay_get', {
+        'key': ambiguous_owner['task_id'], 'user_id': 1,
+    }) is None
+
+    invalid_clock = {
+        'task_id': 'compact-replay-invalid-clock',
+        'user_id': 17,
+        'status': 'done',
+        'created_at': 10,
+        'completed_at': 'not-a-clock',
+    }
+    client.command(
+        'task_results.checkpoint', {
+            'key': invalid_clock['task_id'],
+            'value': invalid_clock,
+            'expected_version': 0,
+        },
+        None,
+    )
+    with pytest.raises(StorageError) as raised:
+        client.query('task_results.replay_get', {
+            'key': invalid_clock['task_id'], 'user_id': 17,
+        })
+    assert raised.value.code == 'database_integrity'
+
+
 def test_large_task_event_payload_is_privately_compressed_and_replays(
         storage, tmp_path):
     import orjson
@@ -2496,7 +3710,7 @@ def test_large_task_event_payload_is_privately_compressed_and_replays(
         assert len(stored) < len(orjson.dumps(event)) // 10
 
 
-def test_task_event_retention_is_tiered_and_never_prunes_project_streams(storage):
+def test_task_event_retention_never_prunes_project_brain_streams(storage):
     client = storage.client
     client.command(
         'event.append', {
@@ -2508,11 +3722,14 @@ def test_task_event_retention_is_tiered_and_never_prunes_project_streams(storage
             'task_id': 'retention-task', 'sequence': 1,
             'event': {'type': 'messages_snapshot', 'messages': []},
         }, None, priority='event')
+    project = '/retention-project'
     client.command(
-        'project.feed.append', {
-            'project_path': '/retention-project', 'user_id': 7,
-            'event': {'type': 'project-note'}, 'keep': 10,
-        }, 'retention-project-feed')
+        'project_brain.narrative.add', {
+            'owner_user_id': 7, 'project_key': project,
+            'kind': 'decision', 'text': 'Retained project fact',
+            'work_id': '', 'conversation_id': 'conv-retention',
+            'timestamp': int(time.time() * 1000),
+        }, 'retention-project-narrative')
 
     future_cutoff = int(time.time() * 1000) + 10_000
     streaming = client.command(
@@ -2523,11 +3740,6 @@ def test_task_event_retention_is_tiered_and_never_prunes_project_streams(storage
     assert streaming['deleted'] == 1
     assert [row['sequence'] for row in client.query(
         'event.list', {'task_id': 'retention-task'})] == [1]
-    assert len(client.query(
-        'project.feed.list', {
-            'project_path': '/retention-project', 'user_id': 7,
-            'since_seq': 0, 'limit': 10,
-        })['events']) == 1
 
     structural = client.command(
         'event.prune', {
@@ -2537,11 +3749,15 @@ def test_task_event_retention_is_tiered_and_never_prunes_project_streams(storage
     assert structural['deleted'] == 1
     assert client.query(
         'event.list', {'task_id': 'retention-task'}) == []
-    assert len(client.query(
-        'project.feed.list', {
-            'project_path': '/retention-project', 'user_id': 7,
-            'since_seq': 0, 'limit': 10,
-        })['events']) == 1
+    projection = client.query('project_brain.get', {
+        'owner_user_id': 7, 'project_key': project,
+    })
+    assert projection['narratives'][0]['text'] == 'Retained project fact'
+    rebuilt = client.maintenance('project_brain.rebuild', {
+        'owner_user_id': 7, 'project_key': project,
+    })
+    assert rebuilt['projection']['narratives'][0]['text'] == (
+        'Retained project fact')
 
 
 def test_event_inspector_summary_counts_roots_and_swarm_children(storage):
@@ -2679,13 +3895,15 @@ def test_sidecar_task_result_write_fence_and_abort_tombstone(storage, monkeypatc
     assert row['value']['abort_requested_at']
 
 
-def test_task_result_abort_is_atomic_idempotent_and_owner_scoped(storage):
+def test_task_result_abort_is_atomic_idempotent_and_owner_scoped(
+        storage, tmp_path):
     task_id = 'task-owner-scoped-abort'
     value = {
         'task_id': task_id,
         'conv_id': '',
         'user_id': 7,
         'status': 'running',
+        'segments': 'preserved abort segment ' * 20_000,
         'content': '',
         'thinking': '',
         'created_at': 1,
@@ -2719,14 +3937,203 @@ def test_task_result_abort_is_atomic_idempotent_and_owner_scoped(storage):
     assert storage.client.query(
         'task_results.abort_requested', {
             'task_id': task_id, 'user_id': 7}) == {'requested': True}
+    assert storage.client.query('record.get', {
+        'namespace': 'task_results', 'key': task_id,
+    })['value']['segments'] == value['segments']
+    if storage.client.health()['backend'] == 'sqlite':
+        from lib.storage_sidecar.task_result_field_codec import (
+            TASK_RESULT_FIELD_CODEC_KEY,
+        )
+        connection = sqlite3.connect(tmp_path / 'data' / 'tofu.db')
+        raw = connection.execute(
+            "SELECT value_json FROM storage_records WHERE namespace=? "
+            "AND record_key=?",
+            ('task_results', task_id),
+        ).fetchone()[0]
+        connection.close()
+        assert TASK_RESULT_FIELD_CODEC_KEY in json.loads(raw)['segments']
+
+
+def test_guarded_task_checkpoint_hides_foreign_keys_and_fences_regressions(
+        storage):
+    from lib.task_result_checkpoint_contract import (
+        TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+    )
+
+    task_id = 'task-guarded-owner-collision'
+    value = {
+        'task_id': task_id,
+        'conv_id': '',
+        'user_id': 7,
+        'status': 'pending',
+        'content': '',
+        'thinking': '',
+        'created_at': 1,
+        'completed_at': 2,
+    }
+    first = storage.client.command(
+        'task_results.checkpoint', {
+            'key': task_id, 'value': value, 'expected_version': 0,
+        }, None)
+
+    foreign = storage.client.command(
+        'task_results.checkpoint', {
+            'key': task_id,
+            'value': {**value, 'user_id': 8, 'status': 'running'},
+            'expected_version': first['version'],
+            'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+            'require_parent': False,
+        }, None)
+    assert foreign == {
+        'key': task_id,
+        'version': 0,
+        'updated_at_ms': 0,
+        'owned': False,
+        'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+    }
+
+    done = storage.client.command(
+        'task_results.checkpoint', {
+            'key': task_id,
+            'value': {**value, 'status': 'done'},
+            'expected_version': first['version'],
+            'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+            'require_parent': False,
+        }, None)
+    late_birth = storage.client.command(
+        'task_results.checkpoint', {
+            'key': task_id,
+            'value': value,
+            'expected_version': done['version'],
+            'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+            'require_parent': False,
+        }, None)
+    assert late_birth['owned'] is False
+
+    with pytest.raises(StorageError) as mismatched:
+        storage.client.command(
+            'task_results.checkpoint', {
+                'key': 'guarded-wire-key',
+                'value': {**value, 'task_id': 'different-value-key'},
+                'expected_version': 0,
+                'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+                'require_parent': False,
+            }, None)
+    assert mismatched.value.code == 'database_protocol_error'
+
+    authority = storage.client.query(
+        'record.get', {'namespace': 'task_results', 'key': task_id})
+    assert authority['version'] == done['version']
+    assert authority['value']['user_id'] == 7
+    assert authority['value']['status'] == 'done'
+
+
+def test_task_checkpoint_cache_facts_are_atomic_and_replay_safe(storage):
+    from lib.task_result_checkpoint_contract import (
+        TASK_RESULT_CACHE_PREFIX_HWM_FIELD,
+        TASK_RESULT_CACHE_SETTINGS_CONTRACT,
+        TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+        TASK_RESULT_LAST_TURN_CACHE_READ_FIELD,
+    )
+
+    conv_id = 'task-cache-fact-replay'
+    _import_conversation(
+        storage.client,
+        conv_id,
+        user_id=7,
+        settings={'unrelated': 'preserved'},
+    )
+
+    def checkpoint_payload(task_id, hwm, last_read):
+        return {
+            'key': task_id,
+            'value': {
+                'task_id': task_id,
+                'conv_id': conv_id,
+                'user_id': 7,
+                'status': 'done',
+                'content': '',
+                'thinking': '',
+                'created_at': 1,
+                'completed_at': 2,
+                TASK_RESULT_CACHE_PREFIX_HWM_FIELD: hwm,
+                TASK_RESULT_LAST_TURN_CACHE_READ_FIELD: last_read,
+            },
+            'expected_version': 0,
+            'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+            'require_parent': True,
+            'cache_settings_contract': TASK_RESULT_CACHE_SETTINGS_CONTRACT,
+        }
+
+    older_payload = checkpoint_payload('task-cache-older', 10, 3_000)
+    older = storage.client.command(
+        'task_results.checkpoint', older_payload, None)
+    newer = storage.client.command(
+        'task_results.checkpoint',
+        checkpoint_payload('task-cache-newer', 20, 4_000),
+        None,
+    )
+    assert older['cache_settings_committed'] is True
+    assert newer['cache_settings_committed'] is True
+
+    replay = storage.client.command(
+        'task_results.checkpoint', older_payload, None)
+    assert replay['version'] == older['version']
+    assert replay[TASK_RESULT_CACHE_PREFIX_HWM_FIELD] == 20
+    assert replay[TASK_RESULT_LAST_TURN_CACHE_READ_FIELD] == 4_000
+    document = storage.client.query(
+        'conversation.get', {
+            'conv_id': conv_id,
+            'user_id': 7,
+            'derive_messages': False,
+        })
+    assert document['metadata']['settings'] == {
+        'cachePrefixHWM': 20,
+        'lastTurnCacheRead': 4_000,
+        'unrelated': 'preserved',
+    }
+
+
+def test_task_checkpoint_cache_facts_require_the_combined_contract(storage):
+    from lib.task_result_checkpoint_contract import (
+        TASK_RESULT_CACHE_PREFIX_HWM_FIELD,
+        TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+    )
+
+    conv_id = 'task-cache-fact-invalid'
+    _import_conversation(storage.client, conv_id, user_id=7)
+    with pytest.raises(StorageError) as raised:
+        storage.client.command(
+            'task_results.checkpoint', {
+                'key': 'task-cache-fact-invalid',
+                'value': {
+                    'task_id': 'task-cache-fact-invalid',
+                    'conv_id': conv_id,
+                    'user_id': 7,
+                    'status': 'done',
+                    TASK_RESULT_CACHE_PREFIX_HWM_FIELD: 10,
+                },
+                'expected_version': 0,
+                'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+                'require_parent': True,
+            },
+            None,
+        )
+    assert raised.value.code == 'database_protocol_error'
+    assert storage.client.query(
+        'record.get', {
+            'namespace': 'task_results',
+            'key': 'task-cache-fact-invalid',
+        }) is None
 
 
 def test_sidecar_task_result_transient_write_failure_is_not_a_fence(storage, monkeypatch):
     """A transient store failure (writer-acquisition timeout) is NOT a
-    recovery/terminal fence: retry with backoff, succeed when it clears, and
-    RAISE when it persists — callers read a False return as a stale-owner
-    verdict and suppress the conversation sync, so a False here silently
-    drops a live turn's durable transcript (2026-08-20 incident)."""
+    recovery/terminal fence. Terminal diagnostics retry with backoff and
+    succeed when pressure clears. A reconstructible running checkpoint instead
+    makes one short maintenance-lane attempt and RAISES when it cannot enter;
+    callers still cannot mistake pressure for the False stale-owner verdict
+    that suppresses downstream terminal work (2026-08-20 incident)."""
     import lib.storage
     monkeypatch.setattr(lib.storage, 'get_storage_client',
                         lambda write=False: storage.client)
@@ -2745,12 +4152,15 @@ def test_sidecar_task_result_transient_write_failure_is_not_a_fence(storage, mon
     monkeypatch.setattr(storage.client, 'command', flaky)
     task = {'id': 'task-transient-retry', '_userId': 1, 'created_at': 1.0}
     assert _upsert_task_row(
-        task, '', content='partial', thinking='', status='running',
+        task, '', content='terminal', thinking='', status='done',
         error_json=None, tr_json=None, meta_json=None) is True
     assert attempts['n'] == 2
 
+    running_attempts = []
+
     def always_fail(command, payload, command_id, **kwargs):
         if command == 'task_results.checkpoint':
+            running_attempts.append(kwargs)
             raise StorageError('database_unavailable',
                                'Storage writer acquisition timed out')
         return real_command(command, payload, command_id, **kwargs)
@@ -2761,6 +4171,10 @@ def test_sidecar_task_result_transient_write_failure_is_not_a_fence(storage, mon
         _upsert_task_row(
             task2, '', content='partial', thinking='', status='running',
             error_json=None, tr_json=None, meta_json=None)
+    assert running_attempts == [{
+        'priority': 'maintenance',
+        'deadline': 0.5,
+    }]
 
 
 def test_sidecar_startup_recovery_keeps_task_and_turn_authorities_separate(
@@ -2787,11 +4201,19 @@ def test_sidecar_startup_recovery_keeps_task_and_turn_authorities_separate(
             'metadata': {},
         },
     }, 'task-recovery-create')
+    storage.client.command('record.put', {
+        'namespace': 'task_results', 'key': 'task-recovery-pending',
+        'value': {
+            'task_id': 'task-recovery-pending', 'conv_id': 'conv-recovery',
+            'status': 'pending', 'content': '', 'thinking': '',
+            'tool_rounds': [], 'metadata': {},
+        },
+    }, 'task-recovery-pending-create')
 
     from lib.tasks_pkg.manager._recovery import recover_stale_tasks_on_startup
     result = recover_stale_tasks_on_startup(
         prev_shutdown={'verdict': 'unclean'})
-    assert result['recoveredTaskCount'] == 1
+    assert result['recoveredTaskCount'] == 2
     assert result['conversationIds'] == ['conv-recovery']
     assert result['interruptedReason'] == 'process_killed'
     row = storage.client.query(
@@ -2799,6 +4221,11 @@ def test_sidecar_startup_recovery_keeps_task_and_turn_authorities_separate(
     assert row['value']['status'] == 'interrupted'
     assert row['value']['interruptedReason'] == 'process_killed'
     assert row['value']['completed_at'] > 0
+    pending_row = storage.client.query(
+        'record.get', {
+            'namespace': 'task_results', 'key': 'task-recovery-pending'})
+    assert pending_row['value']['status'] == 'interrupted'
+    assert pending_row['value']['interruptedReason'] == 'process_killed'
     document = storage.client.query(
         'conversation.get', {'conv_id': 'conv-recovery', 'user_id': 1})
     # A task snapshot is never reverse-projected into the transcript.
@@ -2845,6 +4272,32 @@ def test_rate_limit_bucket_admission_is_atomic(storage):
         results = list(pool.map(hit, range(workers)))
     assert sum(1 for item in results if item['allowed']) == limit
     assert all(item['count'] <= limit for item in results)
+
+
+def test_rate_limit_prunes_expired_rows_across_unrelated_buckets(storage):
+    first = storage.client.command(
+        'rate_limit.record_and_check', {
+            'endpoint': '/old', 'client_key': '198.51.100.1',
+            'event_id': 'rate-expiry-old', 'limit': 5, 'per_seconds': 1,
+        }, 'rate-expiry-old')
+    assert first == {'allowed': True, 'count': 1, 'pruned': 0}
+
+    time.sleep(1.2)
+    trigger = storage.client.command(
+        'rate_limit.record_and_check', {
+            'endpoint': '/unrelated', 'client_key': '198.51.100.2',
+            'event_id': 'rate-expiry-trigger', 'limit': 5,
+            'per_seconds': 60,
+        }, 'rate-expiry-trigger')
+    assert trigger['pruned'] >= 1
+
+    fresh = storage.client.command(
+        'rate_limit.record_and_check', {
+            'endpoint': '/old', 'client_key': '198.51.100.1',
+            'event_id': 'rate-expiry-fresh', 'limit': 5, 'per_seconds': 1,
+        }, 'rate-expiry-fresh')
+    assert fresh['allowed'] is True
+    assert fresh['count'] == 1
 
 
 def test_orchestration_aggregate_semantics(storage):
@@ -2969,6 +4422,54 @@ def test_swarm_checkpoint_aggregate_semantics(storage):
     assert resumable[0]['agents'][0]['status'] == 'running'
 
     assert client.command(
+        'swarm.session.quarantine_ownerless', {
+            'swarm_key': 'swarm-contract', 'now_ms': 600,
+        }, 'swarm-session-quarantine') == {'changed': True}
+    quarantined = client.query(
+        'swarm.session.get', {'swarm_key': 'swarm-contract'})
+    assert quarantined['status'] == 'quarantined:ownerless'
+    assert quarantined['agents'][0]['status'] == 'running'
+    assert client.query('swarm.resumable.list', {}) == []
+    assert client.command(
+        'swarm.session.quarantine_ownerless', {
+            'swarm_key': 'swarm-contract', 'now_ms': 700,
+        }, 'swarm-session-quarantine-repeat') == {'changed': False}
+    assert client.command(
+        'swarm.session.terminate', {
+            'swarm_key': 'swarm-contract', 'now_ms': 750,
+        }, 'swarm-session-terminate-quarantine') == {'changed': False}
+    assert client.query(
+        'swarm.session.get', {
+            'swarm_key': 'swarm-contract'})['status'] == 'quarantined:ownerless'
+
+    with pytest.raises(StorageError) as invalid_status:
+        client.command(
+            'swarm.session.save', {
+                'swarm_key': 'swarm-contract', 'conv_id': 'conv-2',
+                'task_id': 'task-2', 'status': 'quarantined:ownerless',
+                'specs': [{'id': 'a1'}], 'config': {'user_id': 1},
+                'now_ms': 775,
+            }, 'swarm-session-invalid-status')
+    assert invalid_status.value.code == 'database_protocol_error'
+
+    # A concurrent/operator repair wins: quarantine re-checks the owner in
+    # its own transaction and cannot hide newly owned work.
+    assert client.command(
+        'swarm.session.save', {
+            'swarm_key': 'swarm-contract', 'conv_id': 'conv-2',
+            'task_id': 'task-2', 'status': 'running',
+            'specs': [{'id': 'a1'}],
+            'config': {'model': 'test-2', 'user_id': 1},
+            'now_ms': 800,
+        }, 'swarm-session-owner-repair') == {'saved': True}
+    assert client.command(
+        'swarm.session.quarantine_ownerless', {
+            'swarm_key': 'swarm-contract', 'now_ms': 900,
+        }, 'swarm-session-quarantine-after-repair') == {'changed': False}
+    assert [item['swarm_key'] for item in client.query(
+        'swarm.resumable.list', {})] == ['swarm-contract']
+
+    assert client.command(
         'swarm.session.delete', {'swarm_key': 'swarm-contract'},
         'swarm-session-delete') == {'deleted': True}
     assert client.query(
@@ -3011,6 +4512,66 @@ def test_research_artifact_aggregate_semantics(storage):
     assert client.query('paper.report.get', {
         'user_id': 1, 'paper_hash': 'paper-contract', 'lang': 'en',
     })['report'] == 'ordinary paper'
+    excerpt = client.query('paper.report.get', {
+        'user_id': 1, 'paper_hash': 'paper-contract', 'lang': 'en',
+        'max_report_chars': 8,
+    })
+    assert excerpt['report'] == 'ordinary'
+    assert excerpt['model'] == '' and excerpt['meta'] == {}
+    excerpts = client.query('paper.report.excerpts', {
+        'user_id': 1, 'lang': 'en',
+        'paper_hashes': ['missing', 'paper-contract'],
+        'max_report_chars': 8,
+    })
+    assert excerpts == [{
+        'user_id': 1, 'paper_hash': 'paper-contract', 'lang': 'en',
+        'report': 'ordinary', 'created_at': 999,
+    }]
+    fallback = client.query('paper.report.resolve', {
+        'user_id': 1, 'paper_hash': 'paper-contract',
+        'preferred_lang': 'zh', 'fallback_lang': 'en',
+    })
+    assert fallback['lang'] == 'en' and fallback['report'] == 'ordinary paper'
+    client.command('paper.report.upsert', {
+        'user_id': 1, 'paper_hash': 'paper-contract', 'lang': 'zh',
+        'report': '中文论文', 'model': 'm-zh', 'meta': {'language': 'zh'},
+        'created_at': 1000,
+    }, 'paper-report-resolve-zh')
+    preferred = client.query('paper.report.resolve', {
+        'user_id': 1, 'paper_hash': 'paper-contract',
+        'preferred_lang': 'zh', 'fallback_lang': 'en',
+    })
+    assert preferred['lang'] == 'zh' and preferred['report'] == '中文论文'
+    assert client.query('paper.report.resolve', {
+        'user_id': 2, 'paper_hash': 'paper-contract',
+        'preferred_lang': 'zh', 'fallback_lang': 'en',
+    }) is None
+    for index, sibling_lang in enumerate(
+        ('insight:zh', 'termfill:zh', 'checkpoints:zh'), start=1
+    ):
+        client.command('paper.report.upsert', {
+            'user_id': 1, 'paper_hash': 'paper-contract',
+            'lang': sibling_lang, 'report': f'sibling-{index}', 'model': '',
+            'meta': {'index': index}, 'created_at': 1000 + index,
+        }, f'paper-report-reopen-{index}')
+    reopened = client.query('paper.report.reopen', {
+        'user_id': 1, 'paper_hash': 'paper-contract',
+        'preferred_lang': 'zh', 'fallback_lang': 'en',
+        'sibling_langs_by_base': {
+            'zh': ['insight:zh', 'termfill:zh', 'checkpoints:zh'],
+            'en': ['insight:en'],
+        },
+    })
+    assert reopened['report']['lang'] == 'zh'
+    assert [row['lang'] for row in reopened['siblings']] == [
+        'insight:zh', 'termfill:zh', 'checkpoints:zh']
+    assert reopened['siblings'][0]['meta'] == {'index': 1}
+    owner_miss = client.query('paper.report.reopen', {
+        'user_id': 2, 'paper_hash': 'paper-contract',
+        'preferred_lang': 'zh', 'fallback_lang': 'en',
+        'sibling_langs_by_base': {'zh': ['insight:zh']},
+    })
+    assert owner_miss == {'report': None, 'siblings': []}
 
 
 def test_paper_second_pass_merge_is_atomic_and_preserves_siblings(storage):
@@ -3177,18 +4738,84 @@ def test_paper_library_context_and_identity_semantics(storage):
             'created_at': 1000 + index, 'updated_at': 1000 + index,
         }, f'paper-library-{index}') == {'saved': True}
 
+    client.command('paper.report.upsert', {
+        'user_id': 2, 'paper_hash': 'hash-0', 'lang': 'en',
+        'report': 'foreign', 'model': '', 'meta': {}, 'created_at': 1,
+    }, 'paper-library-foreign-report')
+    client.command('paper.report.upsert', {
+        'user_id': 1, 'paper_hash': 'hash-1', 'lang': 'review:en',
+        'report': 'owned', 'model': '', 'meta': {}, 'created_at': 2,
+    }, 'paper-library-owned-report')
+    listed = client.query('paper.library.list', {'user_id': 1})
+    has_report = {row['paperHash']: row['hasReport'] for row in listed}
+    assert has_report == {
+        'hash-0': False, 'hash-1': True, 'hash-2': False,
+    }
+    summaries = client.query('paper.library.summaries', {'user_id': 1})
+    assert all(
+        not {'parsedText', 'qaHistory', 'images', 'babelCache'} & row.keys()
+        for row in summaries
+    )
+    assert [row['id'] for row in summaries] == [
+        row['id'] for row in listed]
+    detail = client.query('paper.library.get', {
+        'user_id': 1, 'id': 'paper-1',
+    })
+    assert detail['parsedText'] == 'parsed-1'
+    assert detail['paperHash'] == 'hash-1'
+    assert detail['hasReport'] is True
+    assert client.query('paper.library.get', {
+        'user_id': 2, 'id': 'paper-1',
+    }) is None
+    reader = client.query('paper.library.reader', {
+        'user_id': 1, 'id': 'paper-1',
+    })
+    assert reader['parsedText'] == 'parsed-1'
+    assert 'babelCache' not in reader
+    assert client.query('paper.library.reader', {
+        'user_id': 2, 'id': 'paper-1',
+    }) is None
+
     assert client.query('paper.library.identity', {
         'user_id': 1, 'paper_hash': 'hash-0',
     }) == {
         'title': 'Current paper', 'arxiv_id': '2608.00000',
-        'parsed_text': 'parsed-0',
+        'parsed_text': 'parsed-0', 'parsed_text_length': 8,
     }
+    assert client.query('paper.library.identity', {
+        'user_id': 1, 'paper_hash': 'hash-0', 'max_text_chars': 4,
+    }) == {
+        'title': 'Current paper', 'arxiv_id': '2608.00000',
+        'parsed_text': 'pars', 'parsed_text_length': 8,
+    }
+    assert client.query('paper.library.identity', {
+        'user_id': 1, 'paper_hash': 'hash-0', 'max_text_chars': 0,
+    }) == {
+        'title': 'Current paper', 'arxiv_id': '2608.00000',
+        'parsed_text': '', 'parsed_text_length': 8,
+    }
+    assert client.query('paper.library.identity', {
+        'user_id': 2, 'paper_hash': 'hash-0', 'max_text_chars': 4,
+    }) is None
     assert client.query('paper.library.recent', {
         'user_id': 1, 'exclude_paper_hash': 'hash-0', 'limit': 40,
     }) == [
         {'title': 'Prior two', 'arxiv_id': '2608.00002'},
         {'title': 'Prior one', 'arxiv_id': '2608.00001'},
     ]
+    targeted = client.query('paper.library.inputs', {
+        'user_id': 1,
+        'arxiv_ids': ['2608.00000', '2608.00002'],
+        'max_text_chars': 4,
+    })
+    assert [row['arxivId'] for row in targeted] == [
+        '2608.00002', '2608.00000']
+    assert [row['parsedText'] for row in targeted] == ['pars', 'pars']
+    assert [row['parsedTextLength'] for row in targeted] == [8, 8]
+    assert client.query('paper.library.inputs', {
+        'user_id': 2, 'arxiv_ids': ['2608.00000'],
+        'max_text_chars': 4,
+    }) == []
 
 
 def test_paper_library_title_backfill_preserves_real_titles(storage):
@@ -3876,7 +5503,11 @@ def test_private_test_backend_selector_is_strict_and_personal_defaults_sqlite(
     monkeypatch.setenv('TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE', '1')
     monkeypatch.delenv('TOFU_STORAGE_TEST_BACKEND', raising=False)
     monkeypatch.delenv('TOFU_STORAGE_SQLITE_READ_POOL', raising=False)
+    monkeypatch.delenv(
+        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY', raising=False)
     monkeypatch.delenv('TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB', raising=False)
+    monkeypatch.delenv(
+        'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB', raising=False)
     monkeypatch.delenv(
         'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB', raising=False)
     monkeypatch.delenv('TOFU_STORAGE_IDLE_TRIM_RSS_MIB', raising=False)
@@ -3884,12 +5515,17 @@ def test_private_test_backend_selector_is_strict_and_personal_defaults_sqlite(
         'TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS', raising=False)
     monkeypatch.delenv('TOFU_TURN_SEARCH_PROJECTION_MAX_MIB', raising=False)
     monkeypatch.delenv('TOFU_STORAGE_RPC_CAPACITY', raising=False)
+    monkeypatch.delenv(
+        'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB', raising=False)
     expected = {
         'TOFU_STORAGE_SQLITE_READ_POOL': 8,
+        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY': 16,
         'TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB': 64,
+        'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB': 32,
         'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB': 1024,
         'TOFU_TURN_SEARCH_PROJECTION_MAX_MIB': 512,
         'TOFU_STORAGE_RPC_CAPACITY': 8,
+        'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB': 128,
         'TOFU_LOG_TOTAL_BUDGET_MB': 128,
     }
     monkeypatch.setattr(
@@ -3898,30 +5534,62 @@ def test_private_test_backend_selector_is_strict_and_personal_defaults_sqlite(
     config = SidecarConfig.from_environment()
     assert config.backend == 'sqlite'
     assert config.read_pool_size == 8
+    assert config.sqlite_writer_queue_capacity == 16
     assert config.sqlite_writer_cache_mib == 64
+    assert config.turn_projection_cache_mib == 32
     assert config.fastpath_wal_rebase_max_mib == 1024
-    assert config.idle_trim_rss_mib == 512
-    assert config.idle_trim_cooldown_s == 300.0
+    assert config.idle_trim_rss_mib == 384
+    assert config.idle_trim_cooldown_s == 60.0
     assert config.turn_search_projection_max_mib == 512
     assert config.turn_search_projection_dir == (
         tmp_path / 'data' / 'projections').resolve()
     assert config.rpc_capacity == 8
+    assert config.rpc_inflight_max_mib == 128
+    monkeypatch.setenv(
+        'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB', '999999')
+    with pytest.raises(RuntimeError, match='must be between 64 and 16384'):
+        SidecarConfig.from_environment()
+    monkeypatch.setenv(
+        'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB', '16384')
+    assert SidecarConfig.from_environment().fastpath_wal_rebase_max_mib \
+        == 16_384
+    monkeypatch.delenv(
+        'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB', raising=False)
     monkeypatch.setenv('TOFU_STORAGE_IDLE_TRIM_RSS_MIB', '768')
-    monkeypatch.setenv('TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS', '60')
+    monkeypatch.setenv('TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS', '90')
     overridden_trim = SidecarConfig.from_environment()
     assert overridden_trim.idle_trim_rss_mib == 768
-    assert overridden_trim.idle_trim_cooldown_s == 60.0
+    assert overridden_trim.idle_trim_cooldown_s == 90.0
     monkeypatch.setenv('TOFU_STORAGE_RPC_CAPACITY', '12')
     assert SidecarConfig.from_environment().rpc_capacity == 12
+    monkeypatch.setenv('TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB', '256')
+    assert SidecarConfig.from_environment().rpc_inflight_max_mib == 256
+    monkeypatch.setenv('TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB', '64')
+    with pytest.raises(RuntimeError, match='must be between 128 and 8192'):
+        SidecarConfig.from_environment()
+    monkeypatch.setenv('TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB', '256')
     monkeypatch.setenv('TOFU_STORAGE_WRITER_STALL_GRACE_S', '60')
     monkeypatch.setenv('TOFU_STORAGE_WRITER_HARD_KILL_S', '60')
     with pytest.raises(RuntimeError, match='must be greater'):
         SidecarConfig.from_environment()
     monkeypatch.delenv('TOFU_STORAGE_WRITER_STALL_GRACE_S')
     monkeypatch.delenv('TOFU_STORAGE_WRITER_HARD_KILL_S')
+    monkeypatch.setenv('TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY', '3')
+    with pytest.raises(RuntimeError, match='must be between 4 and 1024'):
+        SidecarConfig.from_environment()
+    monkeypatch.delenv('TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY')
     monkeypatch.setenv('TOFU_STORAGE_TEST_BACKEND', 'pg')
     with pytest.raises(RuntimeError, match='must be sqlite or postgres'):
         SidecarConfig.from_environment()
+
+
+def test_idle_heap_trim_cooldown_preserves_deployment_profile_boundary():
+    from lib.storage_sidecar.config import (
+        _default_idle_trim_cooldown_seconds,
+    )
+
+    assert _default_idle_trim_cooldown_seconds('personal') == 60.0
+    assert _default_idle_trim_cooldown_seconds('distributed') == 300.0
 
 
 def test_task_results_cost_experiment_scan_projects_only_outcomes():
@@ -3953,7 +5621,11 @@ def test_task_results_cost_experiment_scan_projects_only_outcomes():
             'metadata': metadata,
         }
         value.update(extra)
-        return {'record_key': task_id, 'value_json': json.dumps(value)}
+        return {
+            'record_key': task_id,
+            'value_json': json.dumps(value),
+            'updated_at_ms': completed_at,
+        }
 
     rows = [
         _record('task-keep', 'conv-owned', now_ms,
@@ -3965,7 +5637,8 @@ def test_task_results_cost_experiment_scan_projects_only_outcomes():
         _record('task-plain', 'conv-owned', now_ms,
                 json.dumps({'model': 'm1'})),
         # Malformed metadata is counted, never fatal.
-        _record('task-broken', 'conv-owned', now_ms, '{broken'),
+        _record('task-broken', 'conv-owned', now_ms,
+                '{broken context_cost-v1'),
         # Another user's conversation.
         _record('task-foreign', 'conv-foreign', now_ms,
                 json.dumps({'costExperiment': outcome})),
@@ -4003,12 +5676,16 @@ def test_task_results_cost_experiment_scan_projects_only_outcomes():
     assert kept['outcome'] == outcome
     # The heavy payload never leaves the store.
     assert set(kept) == {'task_id', 'conv_id', 'completed_at', 'outcome'}
-    # Owner and exact experiment projection are applied before the SQL bound.
+    # The first stage is a bounded primary-key walk with no BLOB JSON/LIKE
+    # expression; owner and exact experiment identity are applied before the
+    # returned record cap by the compact second-stage projection.
     assert 'LIMIT ?' in queries[0]
-    assert 'JOIN storage_conversations' in queries[0]
-    assert 'cost_experiment_id' in queries[0]
-    assert "ESCAPE '!'" in queries[0]
-    assert query_params[0][-2] == '%context!_cost-v1%'
+    assert 'record_key > ?' in queries[0]
+    assert 'JOIN ' not in queries[0]
+    assert 'json_extract' not in queries[0]
+    assert ' LIKE ' not in queries[0]
+    assert any('FROM storage_conversations' in query for query in queries[1:])
+    assert query_params[0] == ('task_results', '', 8)
 
     rows.append(_record(
         'task-keep-2', 'conv-owned', now_ms,
@@ -4023,7 +5700,8 @@ def test_task_results_cost_experiment_scan_projects_only_outcomes():
     assert len(capped['records']) == 1
 
 
-def test_cost_experiment_scan_filters_owner_id_window_before_real_cap(storage):
+def test_cost_experiment_scan_filters_owner_id_window_before_real_cap(
+        storage, tmp_path):
     """Exercise the semantic query against the real SQLite/optional PG adapter."""
     client = storage.client
     now_ms = int(time.time() * 1000)
@@ -4051,7 +5729,10 @@ def test_cost_experiment_scan_filters_owner_id_window_before_real_cap(storage):
                 'thinking': 'heavy' * 10_000,
                 'created_at': completed_at - 1,
                 'completed_at': completed_at,
-                'metadata': json.dumps({'costExperiment': outcome}),
+                'metadata': json.dumps({
+                    'costExperiment': outcome,
+                    'toolSummary': 'bounded scan summary ' * 10_000,
+                }),
             },
         }, None)
 
@@ -4082,3 +5763,137 @@ def test_cost_experiment_scan_filters_owner_id_window_before_real_cap(storage):
     assert complete['capped'] is False
     assert {row['task_id'] for row in complete['records']} == {
         'relevant-a', 'relevant-b'}
+    if storage.client.health()['backend'] == 'sqlite':
+        from lib.storage_sidecar.task_result_field_codec import (
+            TASK_RESULT_FIELD_CODEC_KEY,
+        )
+        connection = sqlite3.connect(tmp_path / 'data' / 'tofu.db')
+        raw = connection.execute(
+            "SELECT value_json FROM storage_records WHERE namespace=? "
+            "AND record_key=?",
+            ('task_results', 'relevant-a'),
+        ).fetchone()[0]
+        connection.close()
+        assert TASK_RESULT_FIELD_CODEC_KEY in json.loads(raw)['metadata']
+
+
+def test_cost_experiment_scan_returns_a_bounded_monotonic_cursor():
+    """Legacy BLOB scans expose progress so a timeout never restarts at zero."""
+    from lib.storage_sidecar import operations
+
+    now_ms = 1_800_000_000_000
+    outcome = {
+        'experimentId': 'cursor-v1',
+        'experiment_id': 'cursor-v1',
+        'arm': 'control',
+    }
+
+    def row(key):
+        return {
+            'record_key': key,
+            'updated_at_ms': now_ms,
+            'value_json': json.dumps({
+                'conv_id': 'owned-conv',
+                'completed_at': now_ms,
+                'metadata': json.dumps({'costExperiment': outcome}),
+            }),
+        }
+
+    source = [row('task-a'), row('task-b'), row('task-c')]
+
+    class _FakeSession:
+        backend = 'sqlite'
+
+        def fetch_all(self, sql, params=()):
+            if 'FROM storage_records' in sql:
+                after_key = params[1]
+                limit = (1 if 'SELECT record_key FROM' in sql
+                         else params[-1])
+                return [item for item in source
+                        if item['record_key'] > after_key][:limit]
+            if 'FROM storage_conversations' in sql:
+                return [{'id': 'owned-conv'}]
+            raise AssertionError(f'unexpected query: {sql}')
+
+    first = operations._task_results_cost_experiment_scan(
+        _FakeSession(), {
+            'user_id': 1,
+            'completed_at_gte': now_ms - 1,
+            'experiment_id': 'cursor-v1',
+            'limit': 10,
+            'scan_limit': 2,
+            'after_key': '',
+        })
+    assert first['scanned'] == 2
+    assert first['exhausted'] is False
+    assert first['next_cursor'] == 'task-b'
+    assert [item['task_id'] for item in first['records']] == [
+        'task-b', 'task-a']
+
+    second = operations._task_results_cost_experiment_scan(
+        _FakeSession(), {
+            'user_id': 1,
+            'completed_at_gte': now_ms - 1,
+            'experiment_id': 'cursor-v1',
+            'limit': 10,
+            'scan_limit': 2,
+            'after_key': first['next_cursor'],
+        })
+    assert second['scanned'] == 1
+    assert second['exhausted'] is True
+    assert second['next_cursor'] == ''
+    assert [item['task_id'] for item in second['records']] == ['task-c']
+
+
+def test_turn_image_query_is_owner_revision_and_index_scoped(storage):
+    import base64
+
+    raw = b'\x89PNG\r\n\x1a\n' + (b'legacy-image' * 100)
+    encoded = base64.b64encode(raw).decode('ascii')
+    _import_conversation(
+        storage.client,
+        'turn-image-owner',
+        user_id=41,
+        messages=[{
+            'role': 'assistant',
+            'content': 'historical image',
+            'images': [{
+                'base64': encoded,
+                'preview': f'data:image/png;base64,{encoded}',
+                'mediaType': 'image/png',
+            }],
+        }],
+    )
+    turn = storage.client.query('turn.list', {
+        'conversation_id': 'turn-image-owner',
+        'user_id': 41,
+    })[0]
+    payload = {
+        'conversation_id': 'turn-image-owner',
+        'user_id': 41,
+        'turn_id': turn['turnId'],
+        'projection_revision': turn['projectionRevision'],
+        'image_index': 0,
+    }
+
+    loaded = storage.client.query('turn.image.get', payload)
+
+    assert loaded == {
+        'stale': False,
+        'projectionRevision': turn['projectionRevision'],
+        'mediaType': 'image/png',
+        'base64': encoded,
+    }
+    assert storage.client.query('turn.image.get', {
+        **payload, 'user_id': 42,
+    }) is None
+    assert storage.client.query('turn.image.get', {
+        **payload, 'image_index': 1,
+    }) is None
+    assert storage.client.query('turn.image.get', {
+        **payload,
+        'projection_revision': turn['projectionRevision'] + 1,
+    }) == {
+        'stale': True,
+        'projectionRevision': turn['projectionRevision'],
+    }

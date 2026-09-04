@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import weakref
 
 from quart import Blueprint, Response, current_app
 
@@ -14,27 +16,27 @@ logger = get_logger(__name__)
 api_docs_bp = Blueprint('api_docs', __name__)
 
 
-# Per-app spec cache. Different apps (e.g. unit test fixtures vs the
-# real server) register different blueprint subsets — caching by app
-# identity prevents one fixture's cached spec from leaking into a
-# differently-configured app within the same process.
-_cached_specs: dict[int, dict] = {}
+# Per-app spec cache. A numeric ``id(app)`` key both retains specs after a test
+# app dies and can be reused by a later object, exposing the wrong route set.
+# Weak object identity preserves isolation without retaining disposable apps.
+_cached_specs: weakref.WeakKeyDictionary[object, dict] = weakref.WeakKeyDictionary()
+_cached_specs_lock = threading.Lock()
 
 
 def _spec(force: bool = False) -> dict:
     app = current_app._get_current_object()
-    key = id(app)
-    if force or key not in _cached_specs:
-        try:
-            _cached_specs[key] = build_spec(app)
-        except Exception as e:
-            logger.warning('[OpenAPI] build failed: %s', e, exc_info=True)
-            _cached_specs[key] = {'openapi': '3.1.0',
-                                    'info': {'title': 'Tofu API',
-                                             'version': '1.0.0',
-                                             'description': str(e)},
-                                    'paths': {}}
-    return _cached_specs[key]
+    with _cached_specs_lock:
+        if force or app not in _cached_specs:
+            try:
+                _cached_specs[app] = build_spec(app)
+            except Exception as e:
+                logger.warning('[OpenAPI] build failed: %s', e, exc_info=True)
+                _cached_specs[app] = {'openapi': '3.1.0',
+                                      'info': {'title': 'Tofu API',
+                                               'version': '1.0.0',
+                                               'description': str(e)},
+                                      'paths': {}}
+        return _cached_specs[app]
 
 
 @api_docs_bp.route('/api/openapi.json', methods=['GET'])
@@ -62,7 +64,8 @@ def openapi_refresh():
     """Bust the cache. Useful after dynamic blueprint changes."""
     # Clear all entries so a re-cache happens for every app, not just
     # the one currently bound.
-    _cached_specs.clear()
+    with _cached_specs_lock:
+        _cached_specs.clear()
     _spec(force=True)
     return Response('refreshed\n', mimetype='text/plain')
 

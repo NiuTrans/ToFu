@@ -242,7 +242,7 @@ def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
                 'path': edit.get('path', '?'),
                 'description': edit.get('description', ''),
                 'status': status,
-                'detail': detail[:120],
+                'detail': detail[:400],
             })
         meta['editSummaries'] = summaries
     else:
@@ -396,7 +396,7 @@ def _build_insert_content(meta, fn_name, fn_args, tool_content, path):
                 'path': edit.get('path', '?'),
                 'description': edit.get('description', ''),
                 'status': status,
-                'detail': detail[:120],
+                'detail': detail[:400],
             })
         meta['editSummaries'] = summaries
     else:

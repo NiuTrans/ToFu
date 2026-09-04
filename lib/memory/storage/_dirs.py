@@ -184,6 +184,25 @@ def _iter_roots(project_path, extra_paths):
     return roots
 
 
+def _iter_memory_store_dirs(project_path, extra_paths=None):
+    """Yield every union-store directory in canonical collision order.
+
+    This is the single path-precedence authority shared by corpus listing and
+    direct ID lookup: server skills, server memories, then each primary/extra
+    root's legacy globals, project memories, and legacy project skills.
+    Missing directories are yielded deliberately so callers can choose their
+    own cheap existence/read strategy without duplicating precedence rules.
+    """
+    yield _server_global_skills_dir(), 'global'
+    yield _server_global_memory_dir(), 'global'
+    for root in _iter_roots(project_path, extra_paths):
+        legacy_global_dir = _get_global_memory_dir(root)
+        if legacy_global_dir:
+            yield legacy_global_dir, 'global'
+        yield os.path.join(root, PROJECT_MEMORY_SUBDIR), 'project'
+        yield os.path.join(root, LEGACY_PROJECT_MEMORY_SUBDIR), 'project'
+
+
 def _migrate_one_root_globals(root):
     """Copy a root's legacy global memories into the server store.
 

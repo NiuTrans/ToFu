@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from itertools import islice
 from urllib.parse import urlparse
 
 from lib.log import get_logger
@@ -30,6 +31,8 @@ __all__ = [
 
 RESEARCH_RESUME_TTL_S = 6 * 60 * 60
 _EVIDENCE_SCHEMA_VERSION = 'production-evidence-v1'
+_QUERY_LANE_COUNT = 3
+_MAX_RESULTS_PER_LANE = 12
 
 _DATE_FIELDS = (
     'published_at', 'publishedAt', 'published', 'pub_date', 'pubDate',
@@ -213,9 +216,13 @@ def _official_candidate_hints(card: dict, subject: str) -> list[str]:
 def _search_lane(search_fn, topic: str, spec: dict) -> tuple[list, str]:
     try:
         results = search_fn(
-            spec['query'], max_results=12, user_question=topic,
+            spec['query'], max_results=_MAX_RESULTS_PER_LANE,
+            user_question=topic,
             freshness=spec['freshness'], deepen=spec.get('deepen', False))
-        return list(results or []), ''
+        # ``max_results`` is a request to an adapter, not an authority over
+        # what it returns. Bound lazy and misbehaving providers here before a
+        # three-lane fan-out can retain an arbitrary result stream in memory.
+        return list(islice(results or (), _MAX_RESULTS_PER_LANE)), ''
     except Exception as exc:
         logger.warning('[Production:research] lane=%s query=%r failed: %s',
                        spec['lane'], spec['query'], exc)
@@ -362,7 +369,8 @@ def research_topic(topic: str, *, max_cards: int = 12,
         # One search can return a partial, engine-dependent set.  Independent
         # lanes run concurrently so freshness and authority do not add serial
         # latency or share a single point of retrieval failure.
-        with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+        with ThreadPoolExecutor(
+                max_workers=min(len(specs), _QUERY_LANE_COUNT)) as pool:
             futures = {spec['lane']: pool.submit(_search_lane, search_fn, topic, spec)
                        for spec in specs}
             lane_results = {

@@ -101,6 +101,34 @@ check('tool_preview_head_rendered', toolHtml.includes(THEAD));
 check('tool_preview_tail_rendered', toolHtml.includes(TTAIL));
 check('tool_preview_full_body_rendered', toolHtml.includes(bigPreview));
 
+// ── Criterion 2b: bounded durable detail is explicit, including after F5 ──
+const boundedAgent = {
+  id: 'a2b', role: 'researcher', objective: 'long audit',
+  status: 'done', phase: 'done', preview: 'complete answer',
+  toolCallsOmitted: 7,
+  toolCalls: [{
+    toolName: 'fetch_url', argsBrief: 'many URLs', status: 'done',
+    preview: 'p'.repeat(2000), previewTruncated: true,
+    previewFullChars: 5000,
+  }, {
+    toolName: 'run_command', argsBrief: 'failing command', status: 'failed',
+    error: '', errorTruncated: true, errorFullChars: 9000,
+  }],
+};
+const boundedRound = {
+  roundNum: 22, _swarm: true, _swarmActive: false, status: 'done',
+  _swarmSnapshot: {agents: [boundedAgent], settled: true, agentCount: 1,
+                   doneCount: 1, totalTokens: 1, version: 100001},
+};
+const recovered = _recoverSwarmAgents(boundedRound, []);
+check('durable_omitted_count_recovered',
+  recovered.length === 1 && recovered[0]._toolCallsOmitted === 7);
+const boundedHtml = _buildSwarmPanelHTML(boundedRound, [boundedRound]);
+check('omitted_calls_marker_rendered', boundedHtml.includes('sw-tl-omitted'));
+check('truncated_preview_marker_rendered', boundedHtml.includes('sw-tl-truncated'));
+check('fully_elided_error_stays_expandable',
+  boundedHtml.includes('sw-tl-detail sw-tl-detail-error'));
+
 // ── Criterion 3: a FAILED agent's error renders in full (was cut at 200) ──
 const EHEAD = 'ERRHEAD';
 const ETAIL = 'ERRTAIL';
@@ -118,13 +146,7 @@ check('error_head_rendered', failHtml.includes(EHEAD));
 check('error_tail_rendered', failHtml.includes(ETAIL));
 check('error_full_body_rendered', failHtml.includes(bigErr));
 
-// ── Criterion 4: inbox updates render only in their chronological tool row ──
-// The legacy bubble-top builder remains as a deferred-module compatibility
-// seam, but must not duplicate the canonical `_inboxInject` timeline row.
-check('legacy_inbox_chip_suppressed',
-  _buildSwarmInboxChipsHTML([{ round: 4, count: 1, agentIds: ['test-audit'] }]) === '');
-
-// ── Criterion 5: canonical agent IDs are never shortened ──
+// ── Criterion 4: canonical agent IDs are never shortened ──
 const idRound = {
   roundNum: 4, _swarm: true, _swarmActive: false, status: 'done',
   _swarmStartTime: Date.now() - 1000, _swarmEndTime: Date.now(),
@@ -172,7 +194,7 @@ def test_panel_renders_full_results():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm panel truncated a result:\n' + output
-    assert output.count('PASS') >= 16, f'expected >=16 PASS, got:\n{output}'
+    assert output.count('PASS') >= 19, f'expected >=19 PASS, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

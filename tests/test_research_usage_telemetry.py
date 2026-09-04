@@ -100,6 +100,24 @@ def test_llm_evaluation_usage_is_part_of_the_run_total():
     assert got['total']['models'] == ['judge']
 
 
+def test_discovery_translation_usage_is_part_of_the_harvest_stage():
+    from lib.research.telemetry import aggregate_research_usage
+
+    got = aggregate_research_usage(
+        {'calls': 1, 'total_tokens': 100, 'cost_cny': 0.1},
+        {'calls': 2, 'total_tokens': 200, 'cost_cny': 0.2},
+        {'calls': 3, 'total_tokens': 300, 'cost_cny': 0.3},
+        harvest_usage={
+            'calls': 1, 'total_tokens': 20, 'cost_cny': 0.02,
+            'models': ['translator'],
+        })
+    assert got['total']['calls'] == 7
+    assert got['total']['total_tokens'] == 620
+    assert got['total']['cost_cny'] == 0.62
+    assert got['stages']['harvest']['calls'] == 1
+    assert got['total']['models'] == ['translator']
+
+
 def test_usage_survives_task_ttl_via_research_artifact_store(
         tmp_path, monkeypatch):
     import lib.research.persistence as persistence
@@ -116,6 +134,10 @@ def test_usage_survives_task_ttl_via_research_artifact_store(
         persist_survey('direction', 'en', '# survey', {'open_gaps': []},
                        usage={'calls': 2, 'prompt_tokens': 100,
                               'completion_tokens': 10, 'cost_cny': 0.2},
+                       harvest_usage={
+                           'calls': 1, 'prompt_tokens': 12,
+                           'completion_tokens': 8, 'cost_cny': 0.02,
+                       },
                        user_id=TEST_OWNER_USER_ID)
         persist_ideate('direction', 'en', {
             'accepted': [], 'rejected': [{'reject_stage': 'rubric'}],
@@ -125,9 +147,10 @@ def test_usage_survives_task_ttl_via_research_artifact_store(
             user_id=TEST_OWNER_USER_ID)
         got = load_research_artifacts(
             'direction', 'en', user_id=TEST_OWNER_USER_ID)['usage']
-        assert got['total']['calls'] == 5
-        assert got['total']['prompt_tokens'] == 180
-        assert got['total']['cost_cny'] == 0.5
+        assert got['total']['calls'] == 6
+        assert got['total']['prompt_tokens'] == 192
+        assert got['total']['cost_cny'] == 0.52
+        assert got['stages']['harvest']['calls'] == 1
         assert got['stages']['survey']['calls'] == 2
         assert got['stages']['ideate']['calls'] == 3
     finally:

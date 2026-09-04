@@ -121,11 +121,10 @@ def _components() -> dict:
                     'tool_call_id': {'type': 'string'},
                 },
             },
-            'ChatCompletionRequest': {
+            'ChatCompletionBaseRequest': {
                 'type': 'object',
                 'required': ['messages'],
                 'properties': {
-                    'model': {'type': 'string'},
                     'messages': {'type': 'array',
                                   'items': {'$ref': '#/components/schemas/ChatMessage'}},
                     'tools': {'type': 'array',
@@ -151,6 +150,55 @@ def _components() -> dict:
                     'conversation_id': {'type': 'string'},
                     'idempotency_key': {'type': 'string'},
                 },
+            },
+            'NativeModelSelection': {
+                'oneOf': [
+                    {
+                        'type': 'object',
+                        'additionalProperties': False,
+                        'required': ['creator_id', 'model_id'],
+                        'properties': {
+                            'creator_id': {'type': 'string', 'minLength': 1},
+                            'model_id': {'type': 'string', 'minLength': 1},
+                        },
+                    },
+                    {
+                        'type': 'object',
+                        'additionalProperties': False,
+                        'required': ['provider_id', 'offering_id'],
+                        'properties': {
+                            'provider_id': {'type': 'string', 'minLength': 1},
+                            'offering_id': {'type': 'string', 'minLength': 1},
+                        },
+                    },
+                ],
+            },
+            # Compatibility/direct endpoints retain the upstream string wire
+            # shape; only the native route uses the structured v2 identity.
+            'ChatCompletionRequest': {
+                'allOf': [
+                    {'$ref': '#/components/schemas/ChatCompletionBaseRequest'},
+                    {
+                        'type': 'object',
+                        'required': ['model'],
+                        'properties': {'model': {'type': 'string'}},
+                    },
+                ],
+            },
+            'NativeChatCompletionRequest': {
+                'allOf': [
+                    {'$ref': '#/components/schemas/ChatCompletionBaseRequest'},
+                    {
+                        'type': 'object',
+                        'required': ['model'],
+                        'properties': {
+                            'model': {
+                                '$ref': '#/components/schemas/NativeModelSelection',
+                            },
+                            'routing': {'type': 'object'},
+                        },
+                    },
+                ],
             },
             'ChatCompletionResponse': {
                 'type': 'object',
@@ -194,9 +242,21 @@ def _components() -> dict:
                     'kind': {'type': 'string'},
                     'status': {'type': 'string',
                                 'enum': ['pending', 'running',
-                                         'done', 'error', 'aborted']},
+                                         'done', 'error', 'aborted',
+                                         'interrupted']},
                     'created_at': {'type': 'number'},
                     'finished_at': {'type': 'number', 'nullable': True},
+                    'event_replay': {
+                        'type': 'object',
+                        'description': 'Retained event-window summary. Fetch '
+                                       'event bodies from the cursor replay '
+                                       'endpoint.',
+                        'properties': {
+                            'retained_count': {'type': 'integer'},
+                            'base_cursor': {'type': 'integer'},
+                            'next_cursor': {'type': 'integer'},
+                        },
+                    },
                     'result': {},
                     'error': {
                         'oneOf': [

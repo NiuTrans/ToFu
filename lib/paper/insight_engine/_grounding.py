@@ -39,7 +39,8 @@ def _self_identity(
 
     if phash and (not aid or not title):
         try:
-            identity = PaperLibraryRepository(user_id).identity(phash)
+            identity = PaperLibraryRepository(user_id).identity(
+                phash, max_text_chars=0)
             if identity:
                 if not title:
                     title = identity.title.strip()

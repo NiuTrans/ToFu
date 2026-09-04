@@ -113,6 +113,13 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     'serving': 'server_boot lock state',
     'error': 'swarm agent row / event phase',
     'begin': 'SQLite writer transaction state',
+    # File-transfer and storage-copy records expose their own lifecycle field
+    # named ``phase``; none of these dictionaries rides EventType.PHASE.
+    'completed': 'browser file-transfer record state',
+    'failed': 'media-attachment processing record state',
+    'copying': 'storage fastpath copy state',
+    'copying_database': 'storage shipper copy state',
+    'database_complete': 'storage shipper copy state',
 }
 
 # Frontend ``.phase === "x"`` values that are NOT pushed PHASE values.
@@ -125,6 +132,12 @@ _FRONTEND_PHASE_EXEMPTIONS: dict[str, str] = {
     'warming': 'client-local autopilot virtual-user presentation',
     'responding': 'client-local autopilot virtual-user presentation',
     'waiting': 'client-local missing-phase fallback presentation',
+    # The durable Turn/Attempt join derives these dispatch states when no
+    # transient worker phase exists. ``executor_queued`` also has a canonical
+    # backend phase now, so its no-frame fallback is covered by the registry.
+    'executor_preparing': 'client-derived pending attempt without task binding',
+    'worker_starting': 'client-derived running attempt without worker phase',
+    'storage_wedged': 'client presentation of the storage-wedge status flag',
     # flow_iteration branches in the typed conversation projection.
     'planning': 'flow_iteration.phase branch',
     'reviewing': 'flow_iteration.phase branch',

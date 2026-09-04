@@ -18,6 +18,24 @@ def _patch_pricing(input_price=15.0, output_price=75.0,
     })
 
 
+
+def test_merge_usage_totals_preserves_mixed_vendor_bills_without_alias_loss():
+    from lib.cost import merge_usage_totals
+
+    primary = {"prompt_tokens": 1000, "completion_tokens": 20,
+               "cache_read_tokens": 800}
+    retry = {"input_tokens": 15, "output_tokens": 4,
+             "cache_read_input_tokens": 900}
+    merged = merge_usage_totals(primary, retry)
+
+    assert merged["prompt_tokens"] == 1000
+    assert merged["input_tokens"] == 15
+    assert merged["cache_read_tokens"] == 800
+    assert merged["cache_read_input_tokens"] == 900
+    assert primary == {"prompt_tokens": 1000, "completion_tokens": 20,
+                       "cache_read_tokens": 800}
+
+
 class ComputeCostTest(unittest.TestCase):
 
     def test_empty_usage_returns_none(self):

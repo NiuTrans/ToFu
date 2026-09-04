@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import shutil
@@ -22,6 +23,36 @@ import server_manager as sm
 pytestmark = pytest.mark.unit
 
 
+def test_worker_budget_snapshot_exposes_only_scheduling_provenance(monkeypatch):
+    payload = (
+        b'TOFU_RESOURCE_BUDGET_POLICY_VERSION=old\0'
+        b'TOFU_RESOURCE_BUDGET_AUTOMATIC_DEFAULTS=TOFU_AGENT_WORKERS,'
+        b'TOFU_PROCESS_RSS_RECYCLE_MB,SECRET\0'
+        b'TOFU_AGENT_WORKERS=4\0'
+        b'TOFU_PROCESS_RSS_RECYCLE_MB=6144\0'
+        b'LLM_API_KEY=must-not-leak\0'
+    )
+
+    class _ProcPath:
+        def read_bytes(self):
+            return payload
+
+    monkeypatch.setattr(sm, 'Path', lambda _path: _ProcPath())
+    snapshot = sm.worker_resource_budget_snapshot(42)
+
+    assert snapshot['policyVersion'] == 'old'
+    assert snapshot['policyCurrent'] is False
+    assert snapshot['automatic'] == [
+        'TOFU_AGENT_WORKERS', 'TOFU_PROCESS_RSS_RECYCLE_MB']
+    assert snapshot['values'] == {
+        'TOFU_AGENT_WORKERS': '4',
+        'TOFU_PROCESS_RSS_RECYCLE_MB': '6144',
+    }
+    assert 'SECRET' not in repr(snapshot)
+    assert 'must-not-leak' not in repr(snapshot)
+REAL_RUN_FRONTEND_PREFLIGHT = sm.run_frontend_preflight
+
+
 @pytest.fixture(autouse=True)
 def _scrub_ambient_server_env(monkeypatch):
     """Tests launched from a tofu-spawned shell inherit the LIVE server's
@@ -32,6 +63,10 @@ def _scrub_ambient_server_env(monkeypatch):
     for name in ('_TOFU_RUNTIME_PORT', 'PORT', 'TOFU_HEARTBEAT_DIR',
                  'TOFU_PROCESS_RSS_RECYCLE_MB', 'TOFU_PROCESS_RSS_RELIEF_MB'):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        sm, 'run_frontend_preflight',
+        lambda *_args, **_kwargs: (True, ''),
+    )
 
 
 def _free_port() -> int:
@@ -113,6 +148,56 @@ def test_manager_log_maintenance_failure_is_observable_but_nonfatal(
     messages = [record.getMessage() for record in caplog.records]
     assert any('stream=server_console' in message for message in messages)
     assert any('stream=server_manager' in message for message in messages)
+
+
+def test_frontend_preflight_runs_project_command_with_bounded_contract(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    (project / 'serverctl.py').write_text('# preflight command\n')
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed['command'] = command
+        observed['kwargs'] = kwargs
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(sm.subprocess, 'run', fake_run)
+    environment = {'PATH': os.environ.get('PATH', '')}
+
+    ok, error = REAL_RUN_FRONTEND_PREFLIGHT(
+        str(project), sys.executable, environment, 'automatic recovery')
+
+    assert ok is True
+    assert error == ''
+    assert observed['command'][1:3] == [
+        str(project / 'serverctl.py'), 'prepare-frontend']
+    assert observed['command'][-1] == 'automatic recovery'
+    assert observed['kwargs']['timeout'] \
+        == sm.DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT
+    assert observed['kwargs']['env']['TOFU_PROJECT_PATH'] \
+        == str(project.resolve())
+
+
+def test_worker_spawn_refuses_failed_frontend_preflight_before_popen(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(
+        sm, 'run_frontend_preflight',
+        lambda *_args, **_kwargs: (False, 'authoring digest mismatch'),
+    )
+    monkeypatch.setattr(
+        sm.subprocess, 'Popen',
+        lambda *_args, **_kwargs: pytest.fail(
+            'worker must not spawn after frontend preflight failure'),
+    )
+
+    result = manager._spawn('automatic-recovery')
+
+    assert result['ok'] is False
+    assert 'authoring digest mismatch' in result['message']
+    assert manager._state['observed'] == 'crashloop'
+    assert manager._state['workerFailureCount'] == 0
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX flock contract')
@@ -229,7 +314,7 @@ def test_restart_waits_for_just_stopped_sidecar_lease(
     }]
 
 
-def test_application_probe_requires_identity_then_readiness(monkeypatch):
+def test_application_probe_combines_identity_and_readiness(monkeypatch):
     calls = []
 
     def fake_read(url, **_kwargs):
@@ -238,6 +323,7 @@ def test_application_probe_requires_identity_then_readiness(monkeypatch):
             return 200, {'ok': True, 'pid': 42}
         return 503, {
             'ok': False,
+            'pid': 42,
             'ready': False,
             'state': 'starting',
             'storage': {'ready': False, 'state': 'restarting'},
@@ -252,7 +338,7 @@ def test_application_probe_requires_identity_then_readiness(monkeypatch):
     probe = sm.probe_application_readiness(
         15000, 42, preferred_scheme='http')
 
-    assert [url.rsplit('/', 1)[-1] for url in calls] == ['health', 'ready']
+    assert [url.rsplit('/', 1)[-1] for url in calls] == ['ready']
     assert probe['health'] is True
     assert probe['liveness'] is True
     assert probe['ready'] is False
@@ -261,6 +347,31 @@ def test_application_probe_requires_identity_then_readiness(monkeypatch):
     assert probe['url'] is None
     assert 'database_unavailable' in probe['readinessError']
     assert 'lifecycle=starting, storage=restarting' in probe['readinessError']
+
+
+def test_application_probe_falls_back_for_legacy_readiness_payload(monkeypatch):
+    calls = []
+
+    def fake_read(url, **_kwargs):
+        calls.append(url)
+        if url.endswith('/api/health'):
+            return 200, {'ok': True, 'pid': 42}
+        return 200, {
+            'ok': True,
+            'ready': True,
+            'state': 'ready',
+            'storage': {'ready': True, 'state': 'ready'},
+        }
+
+    monkeypatch.setattr(sm, '_read_probe_json', fake_read)
+
+    probe = sm.probe_application_readiness(
+        15000, 42, preferred_scheme='http')
+
+    assert [url.rsplit('/', 1)[-1] for url in calls] == ['ready', 'health']
+    assert probe['liveness'] is True
+    assert probe['ready'] is True
+    assert probe['pidMatches'] is True
 
 
 def test_probe_json_preserves_structured_http_error_body(monkeypatch):
@@ -514,6 +625,128 @@ def test_start_rejects_malformed_http_configuration(tmp_path, monkeypatch):
     assert manager.start(server_env=['PORT=7'])['ok'] is False
 
 
+def test_production_environment_rejects_pytest_storage_but_test_project_allows_it():
+    pytest_data = (
+        '/tmp/tofu-pytest-runs-1000/'
+        'tofu-test-data-gw3-pid-979421-fixture')
+
+    error = sm.production_server_environment_error(
+        '/srv/tofu', {'TOFU_DATA_DIR': pytest_data})
+
+    assert 'TOFU_DATA_DIR' in error
+    assert 'pytest-owned temporary storage' in error
+    assert sm.production_server_environment_error(
+        '/tmp/pytest-of-user/pytest-7/project',
+        {'TOFU_DATA_DIR': pytest_data},
+    ) == ''
+    assert sm.production_server_environment_error(
+        '/srv/tofu', {'TOFU_DATA_DIR': '/var/lib/tofu'}) == ''
+
+
+def test_manager_quarantines_persisted_pytest_environment_before_adoption(
+        monkeypatch):
+    contaminated = {
+        'version': sm.STATE_VERSION,
+        'desired': 'running',
+        'observed': 'running',
+        'serverArgs': ['--port', '15599'],
+        'serverEnv': {
+            'PORT': '15599',
+            'TOFU_DATA_DIR': (
+                '/tmp/tofu-pytest-runs-1000/'
+                'tofu-test-data-gw3-pid-979421-fixture'),
+        },
+        'worker': {},
+    }
+    persisted = []
+    monkeypatch.setattr(sm, '_read_json', lambda _path: dict(contaminated))
+    monkeypatch.setattr(
+        sm, '_atomic_json',
+        lambda _path, payload: persisted.append(
+            json.loads(json.dumps(payload))))
+    monkeypatch.setattr(sm, 'project_server_env', lambda _project: {'PORT': '15000'})
+    monkeypatch.setattr(
+        sm, 'read_lock_status',
+        lambda project: _status(Path(project)))
+
+    manager = sm.LifecycleManager('/srv/tofu')
+
+    assert manager._state['serverArgs'] == []
+    assert manager._state['serverEnv'] == {'PORT': '15000'}
+    assert manager._state['port'] == 15000
+    quarantine = manager._state['environmentQuarantine']
+    assert quarantine['discardedKeys'] == ['PORT', 'TOFU_DATA_DIR']
+    assert 'pytest-owned temporary storage' in quarantine['reason']
+    assert persisted
+    assert persisted[0]['serverEnv'] == {'PORT': '15000'}
+
+
+def test_restart_rejects_pytest_environment_before_stopping_worker(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    manager.project = '/srv/tofu'
+    monkeypatch.setattr(
+        manager, 'stop',
+        lambda **_kwargs: pytest.fail('unsafe restart must not stop a worker'))
+
+    result = manager.restart(server_env={
+        'TOFU_DATA_DIR': (
+            '/tmp/tofu-pytest-runs-1000/'
+            'tofu-test-data-gw3-pid-979421-fixture'),
+    })
+
+    assert result['ok'] is False
+    assert 'pytest-owned temporary storage' in result['message']
+
+
+def test_spawn_refuses_contaminated_environment_before_preflight_or_popen(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    manager.project = '/srv/tofu'
+    manager._state['serverEnv'] = {
+        'TOFU_DATA_DIR': (
+            '/tmp/tofu-pytest-runs-1000/'
+            'tofu-test-data-gw3-pid-979421-fixture'),
+    }
+    monkeypatch.setattr(
+        sm, 'run_frontend_preflight',
+        lambda *_args, **_kwargs: pytest.fail('unsafe spawn reached preflight'))
+    monkeypatch.setattr(
+        sm.subprocess, 'Popen',
+        lambda *_args, **_kwargs: pytest.fail('unsafe spawn reached Popen'))
+
+    result = manager._spawn('test-contamination')
+
+    assert result['ok'] is False
+    assert manager._state['desired'] == 'stopped'
+    assert 'pytest-owned temporary storage' in result['message']
+
+
+def test_existing_worker_with_pytest_storage_is_never_adopted(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    manager.project = '/srv/tofu'
+    live = _status(Path('/srv/tofu'), running=True, pid=4321)
+
+    def process_environment(_pid, name):
+        if name == 'TOFU_DATA_DIR':
+            return (
+                '/tmp/tofu-pytest-runs-1000/'
+                'tofu-test-data-gw3-pid-979421-fixture')
+        return None
+
+    monkeypatch.setattr(sm, 'proc_env_value', process_environment)
+
+    error = manager._identity_error(live)
+
+    assert error is not None
+    assert 'unsafe environment' in error
+    assert 'pytest-owned temporary storage' in error
+
+
 def test_stop_persists_desired_before_signal(tmp_path, monkeypatch):
     project = _project(tmp_path)
     monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
@@ -527,6 +760,8 @@ def test_stop_persists_desired_before_signal(tmp_path, monkeypatch):
         persisted = json.loads(manager.state_path.read_text())
         assert persisted['desired'] == 'stopped'
         assert persisted['observed'] == 'stopping'
+        assert persisted['pendingWorkerExitIntent']['pid'] == 2222
+        assert persisted['pendingWorkerExitIntent']['reason'] == 'manual'
         return True, False, 'stopped cleanly'
 
     monkeypatch.setattr(manager, '_terminate', fake_terminate)
@@ -666,6 +901,222 @@ def test_failure_without_oom_delta_remains_unexpected_exit(
     assert manager.status()['lastExitCause'] == 'unexpected_exit'
 
 
+def _install_clean_worker_marker(
+        manager, project, *, pid=987654, reason='signal', clean_ts=None):
+    stamp = time.time() if clean_ts is None else clean_ts
+    marker = project / 'data' / '.server_shutdown.json'
+    marker.write_text(json.dumps({
+        'state': 'clean',
+        'pid': pid,
+        'host': sm._hostname(),
+        'clean_ts': stamp,
+        'reason': reason,
+    }))
+    manager._state['worker'] = {
+        'pid': pid,
+        'host': sm._hostname(),
+        'spawnedAt': stamp - 1,
+        'processStartTime': 42,
+        'processCwd': str(project.resolve()),
+    }
+    manager._state['desired'] = 'running'
+    return marker
+
+
+def test_clean_exit_recovers_immediately_without_spending_failure_budget(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    monkeypatch.setattr(manager, '_active_storage_lease', lambda: {'held': False})
+    _install_clean_worker_marker(manager, project, reason='restart')
+    spawned = []
+    monkeypatch.setattr(
+        manager, '_spawn',
+        lambda source: spawned.append(source) or {'ok': True},
+    )
+
+    manager.reconcile()
+
+    assert spawned == ['clean-restart-recovery']
+    assert manager._state['workerFailureCount'] == 0
+    assert manager._state['restartCount'] == 0
+    assert manager._state['failureHistory'] == []
+    assert manager._state['plannedExitCount'] == 1
+    assert manager._state['lastWorkerExitKind'] == 'planned'
+    assert manager._state['lastWorkerExitReason'] == 'restart'
+
+
+def test_generic_clean_signal_without_manager_intent_spends_failure_budget(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    monkeypatch.setattr(sm, 'cgroup_oom_kill_count', lambda: 0)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    monkeypatch.setattr(manager, '_active_storage_lease', lambda: {'held': False})
+    _install_clean_worker_marker(manager, project, reason='signal')
+
+    manager.reconcile()
+
+    assert manager._state['plannedExitCount'] == 0
+    assert manager._state['workerFailureCount'] == 1
+    assert manager._state['lastExitCause'] == 'unintended_signal'
+    assert manager._state['failureHistory']
+
+
+def test_manager_restart_intent_proves_generic_signal_was_planned(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    monkeypatch.setattr(manager, '_active_storage_lease', lambda: {'held': False})
+    stamp = time.time()
+    _install_clean_worker_marker(
+        manager, project, reason='signal', clean_ts=stamp)
+    manager._state['pendingWorkerExitIntent'] = {
+        'pid': 987654,
+        'host': sm._hostname(),
+        'reason': 'restart',
+        'requestedAt': stamp,
+        'recoverySource': 'manager-restart',
+    }
+    spawned = []
+    monkeypatch.setattr(
+        manager, '_spawn',
+        lambda source: spawned.append(source) or {'ok': True},
+    )
+
+    manager.reconcile()
+
+    assert spawned == ['manager-restart']
+    assert manager._state['plannedExitCount'] == 1
+    assert manager._state['workerFailureCount'] == 0
+    assert manager._state['lastWorkerExitReason'] == 'restart'
+
+
+def test_clean_exit_is_counted_once_while_orphan_sidecar_lease_drains(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    monkeypatch.setattr(manager, '_launcher_is_alive', lambda: False)
+    _install_clean_worker_marker(manager, project, reason='restart')
+    lease_states = iter([
+        {'held': True, 'kind': 'storage_sidecar', 'pid': 222},
+        {'held': True, 'kind': 'storage_sidecar', 'pid': 222},
+        {'held': False},
+    ])
+    monkeypatch.setattr(
+        manager, '_active_storage_lease', lambda: next(lease_states))
+    spawned = []
+
+    def _spawn(source):
+        manager._state['pendingRecoverySource'] = ''
+        spawned.append(source)
+        return {'ok': True}
+
+    monkeypatch.setattr(manager, '_spawn', _spawn)
+
+    manager.reconcile()
+    manager.reconcile()
+    manager.reconcile()
+
+    assert spawned == ['clean-restart-recovery']
+    assert manager._state['plannedExitCount'] == 1
+    assert manager._state['workerFailureCount'] == 0
+    assert manager._state['failureHistory'] == []
+
+
+def test_manual_clean_exit_changes_durable_desired_state_to_stopped(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    _install_clean_worker_marker(manager, project, reason='manual')
+    monkeypatch.setattr(
+        manager, '_spawn',
+        lambda _source: pytest.fail('manual shutdown must not respawn'),
+    )
+
+    manager.reconcile()
+
+    assert manager._state['desired'] == 'stopped'
+    assert manager._state['observed'] == 'stopped'
+    assert manager._state['plannedExitCount'] == 1
+    assert manager._state['workerFailureCount'] == 0
+    persisted = json.loads(manager.state_path.read_text())
+    assert persisted['desired'] == 'stopped'
+
+
+def test_stale_or_wrong_pid_clean_marker_cannot_hide_worker_failure(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    monkeypatch.setattr(sm, 'cgroup_oom_kill_count', lambda: 0)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    monkeypatch.setattr(manager, '_active_storage_lease', lambda: {'held': False})
+    marker = _install_clean_worker_marker(
+        manager, project, pid=987654, reason='signal')
+    payload = json.loads(marker.read_text())
+    payload['pid'] = 987655
+    marker.write_text(json.dumps(payload))
+
+    manager.reconcile()
+
+    assert manager._state['plannedExitCount'] == 0
+    assert manager._state['workerFailureCount'] == 1
+    assert manager._state['lastExitCause'] == 'unexpected_exit'
+
+
+def test_real_failure_is_counted_before_orphan_sidecar_lease_wait(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    monkeypatch.setattr(sm, 'cgroup_oom_kill_count', lambda: 0)
+    manager = sm.LifecycleManager(str(project))
+    manager._state['desired'] = 'running'
+    manager._state['worker'] = {
+        'pid': 987654,
+        'host': sm._hostname(),
+        'spawnedAt': time.time() - 10,
+    }
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    monkeypatch.setattr(manager, '_active_storage_lease', lambda: {
+        'held': True,
+        'kind': 'storage_sidecar',
+        'label': 'Storage sidecar',
+        'pid': 222,
+    })
+
+    manager.reconcile()
+
+    assert manager._state['workerFailureCount'] == 1
+    assert manager._state['failureHistory']
+    assert manager._state['storageBlocker']['resumeSource'] \
+        == 'automatic-recovery'
+    assert manager._state['nextRetryAt'] > time.time()
+
+
 def test_explicit_failure_budget_reset_preserves_lifetime_diagnostics(
         tmp_path, monkeypatch):
     project = _project(tmp_path)
@@ -795,7 +1246,7 @@ def test_spawn_translates_project_allocator_override_after_env_merge(
     assert child_environment['MALLOC_ARENA_MAX'] == '3'
 
 
-_WORKER = r'''import fcntl, json, os, signal, socket, sys
+_WORKER = r'''import fcntl, json, os, signal, socket, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 resident_blob = bytearray(int(os.environ.get('WORKER_ALLOC_MB', '0')) * 1024 * 1024)
 for resident_offset in range(0, len(resident_blob), 4096):
@@ -819,7 +1270,23 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode()
         self.send_response(200); self.send_header('Content-Length', str(len(body)))
         self.end_headers(); self.wfile.write(body)
-signal.signal(signal.SIGTERM, lambda *_a: sys.exit(0))
+def handle_sigterm(*_args):
+    if os.environ.get('WORKER_CLEAN_SIGNAL') == '1':
+        marker_path = os.path.join(data, '.server_shutdown.json')
+        temporary_path = marker_path + '.tmp'
+        with open(temporary_path, 'w', encoding='utf-8') as stream:
+            json.dump({
+                'state': 'clean',
+                'pid': os.getpid(),
+                'host': socket.gethostname(),
+                'clean_ts': time.time(),
+                'reason': 'signal',
+            }, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, marker_path)
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, handle_sigterm)
 HTTPServer(('127.0.0.1', int(os.environ['PORT'])), Handler).serve_forever()
 '''
 
@@ -921,6 +1388,62 @@ def test_real_sigkill_worker_recovers_with_new_pid_and_measured_rto(
 
 
 @pytest.mark.serial
+def test_real_unintended_clean_signal_recovers_with_failure_budget(
+        tmp_path, monkeypatch):
+    """An external graceful stop lacks intent and cannot bypass crash-looping."""
+    port = _free_port()
+    project = _project(tmp_path, _WORKER)
+    monkeypatch.setenv('PORT', str(port))
+    # The miniature worker writes its shutdown certificate to the project's
+    # in-tree data directory.  Pin the manager to that same declared authority
+    # instead of inheriting pytest's suite-wide isolated TOFU_DATA_DIR.
+    monkeypatch.setenv('TOFU_DATA_DIR', str(project))
+    monkeypatch.setenv('WORKER_CLEAN_SIGNAL', '1')
+    monkeypatch.setenv('TOFU_HEARTBEAT_DIR', str(tmp_path / 'heartbeat'))
+    manager = sm.LifecycleManager(str(project), sys.executable,
+                                  monitor_interval=0.2)
+    first_pid = None
+    try:
+        assert manager.start(source='clean-signal-integration')['ok'] is True
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            current = manager.status(probe_health=True)
+            if current.get('running') and current.get('health'):
+                break
+            time.sleep(0.1)
+        assert current.get('health') is True
+        first_pid = int(current['pid'])
+
+        os.kill(first_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            manager.reconcile()
+            current = manager.status(probe_health=True)
+            if (current.get('running') and current.get('health')
+                    and current.get('pid') != first_pid):
+                break
+            time.sleep(0.1)
+
+        assert current.get('health') is True
+        assert current.get('pid') != first_pid
+        assert current['launchSource'] == 'automatic-recovery'
+        assert current['workerFailureCount'] == 1
+        assert current['plannedExitCount'] == 0
+        assert current['restartCount'] == 1
+        assert current['recentFailureCount'] == 1
+        assert current['lastWorkerExitKind'] == 'failure'
+        assert current['lastWorkerExitReason'] == 'unintended_signal'
+    finally:
+        status = sm.read_lock_status(str(project))
+        if status.get('running'):
+            try:
+                os.kill(int(status['pid']), signal.SIGKILL)
+            except OSError:
+                pass
+        manager.close()
+
+
+@pytest.mark.serial
 def test_real_worker_over_rss_ceiling_is_gracefully_recycled(
         tmp_path, monkeypatch):
     """The stdlib manager must stop a real bloated worker before kernel OOM."""
@@ -982,18 +1505,29 @@ def test_serverctl_process_roundtrip(tmp_path):
     (project / 'logs').mkdir()
     for name in (
             'serverctl.py', 'server_manager.py', 'supervisor.py',
-            'supervisor.sh', 'tofu_dotenv.py', 'runtime_guards.py'):
+            'supervisor.sh', 'supervisor_protocol.py', 'tofu_dotenv.py',
+            'runtime_guards.py'):
         shutil.copy(root / name, project / name)
     (project / 'server.py').write_text(_WORKER)
     (project / 'stop.sh').write_text('#!/bin/sh\nexit 0\n')
     os.chmod(project / 'supervisor.sh', 0o755)
     manager_port = _free_port()
     worker_port = _free_port()
+    owner_lease = subprocess.Popen(
+        [sys.executable, '-c', 'import sys; sys.stdin.buffer.read()'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     env = {
         **os.environ,
         'TOFU_SUPERVISOR_PORT': str(manager_port),
         'TOFU_SUPERVISOR_HOST': '127.0.0.1',
         'TOFU_SUPERVISOR_PYTHON': sys.executable,
+        # The helper exits on pipe EOF. Normal test teardown closes it, while
+        # an abruptly killed pytest worker closes the same non-inherited FD.
+        # Either way the detached watchdog has a per-test ownership boundary.
+        'TOFU_SUPERVISOR_OWNER_PID': str(owner_lease.pid),
         'TOFU_PROJECT_PATH': str(project),
         'PORT': str(worker_port),
         'TOFU_HEARTBEAT_DIR': str(tmp_path / 'heartbeat'),
@@ -1002,6 +1536,8 @@ def test_serverctl_process_roundtrip(tmp_path):
         # already-admitted boundary so cleanup can exercise the manager roundtrip.
         'TOFU_LIFECYCLE_GATE_PASSED': 'shutdown',
     }
+    watchdog_pid = None
+    retired_project = tmp_path / 'retired-cli-project'
     try:
         start = subprocess.run(
             [sys.executable, 'serverctl.py', 'start', '--wait', '10'],
@@ -1016,6 +1552,13 @@ def test_serverctl_process_roundtrip(tmp_path):
         assert payload['desired'] == 'running'
         assert payload['running'] is True
         assert payload['port'] == worker_port
+        watchdog_status = subprocess.run(
+            ['bash', 'supervisor.sh', 'status'], cwd=project, env=env,
+            capture_output=True, text=True, timeout=15)
+        watchdog_match = re.search(
+            r'setsid watchdog: RUNNING \(pid=(\d+)', watchdog_status.stdout)
+        assert watchdog_status.returncode == 0 and watchdog_match is not None
+        watchdog_pid = int(watchdog_match.group(1))
 
         stop = subprocess.run(
             [sys.executable, 'serverctl.py', 'stop'], cwd=project, env=env,
@@ -1027,10 +1570,38 @@ def test_serverctl_process_roundtrip(tmp_path):
         stopped = json.loads(after.stdout)
         assert stopped['desired'] == 'stopped'
         assert stopped['observed'] == 'stopped'
+
+        # Model the xdist/temporary-checkout owner disappearing without a
+        # cooperative ``supervisor.sh stop``. The manager and its self-healing
+        # watchdog must release their port/process budget on their own.
+        project.rename(retired_project)
+        deadline = time.monotonic() + 5.0
+        while sm.pid_is_alive(watchdog_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not sm.pid_is_alive(watchdog_pid)
+        watchdog_pid = None
     finally:
-        subprocess.run(['bash', 'supervisor.sh', 'stop'], cwd=project, env=env,
-                       capture_output=True, text=True, timeout=30)
-        status = sm.read_lock_status(str(project))
+        if owner_lease.stdin is not None:
+            try:
+                owner_lease.stdin.close()
+            except OSError:
+                pass
+        try:
+            owner_lease.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            owner_lease.terminate()
+            owner_lease.wait(timeout=5)
+        active_project = project if project.is_dir() else retired_project
+        if (active_project / 'supervisor.sh').is_file():
+            subprocess.run(
+                ['bash', 'supervisor.sh', 'stop'], cwd=active_project, env=env,
+                capture_output=True, text=True, timeout=30)
+        if watchdog_pid is not None and sm.pid_is_alive(watchdog_pid):
+            try:
+                os.killpg(watchdog_pid, signal.SIGTERM)
+            except OSError:
+                pass
+        status = sm.read_lock_status(str(active_project))
         if status.get('running'):
             try:
                 os.kill(int(status['pid']), signal.SIGKILL)

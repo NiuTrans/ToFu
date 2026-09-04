@@ -45,6 +45,8 @@ __all__ = [
     'plan_mode_filter_tool_schemas',
     'plan_mode_rejection',
     'extract_proposed_plan',
+
+    'interaction_mode_generated_turn_identity',
     'normalize_interaction_mode_conversation_settings',
     'normalize_interaction_mode_runtime_config',
     'normalize_plan_mode_conversation_settings',
@@ -65,10 +67,7 @@ __all__ = [
 #   * schedule_/timer_  — mutate the scheduler store.
 #   * generate_image / produce_* — paid artifact generation (writes files,
 #                         spends quota) — an execution, not an exploration.
-#   * project_* / integration_* — advisory project-brain operations are
-#                         intentionally outside ToolSpec.write_tools because
-#                         they do not require Manual-mode approval, but they
-#                         still mutate shared coordination state.
+#   * integration_*     — execution controls for an isolated writer.
 PLAN_MODE_EXTRA_BAN = frozenset({
     'todo_write',
     'spawn_agents',
@@ -78,10 +77,6 @@ PLAN_MODE_EXTRA_BAN = frozenset({
     'generate_image',
     'produce_video', 'produce_report', 'produce_research',
     'produce_slides', 'edit_slides',
-    'project_charter_propose',
-    'project_board_post', 'project_board_claim',
-    'project_board_complete', 'project_board_block',
-    'project_message', 'project_intervene',
     'integration_checkpoint', 'integration_submit',
     # GUI automation always changes the user's interactive desktop state.
     'desktop_gui_action',
@@ -139,6 +134,18 @@ def normalize_interaction_mode_runtime_config(
         result['imageGenMode'] = False
     return result
 
+
+
+def interaction_mode_generated_turn_identity(
+    cfg: Mapping | None,
+) -> tuple[str, str]:
+    """Derive durable generated-Turn identity from normalized mode state."""
+    normalized = normalize_interaction_mode_runtime_config(cfg)
+    if plan_mode_enabled(normalized):
+        return 'planner', 'plan'
+    if _runtime_flow_selected(normalized):
+        return 'assistant', 'flow_node'
+    return 'assistant', 'reply'
 
 def normalize_interaction_mode_conversation_settings(
     settings: Mapping | None,

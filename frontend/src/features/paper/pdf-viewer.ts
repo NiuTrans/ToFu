@@ -1,4 +1,6 @@
+import { readBrowserStorage } from '../../core/browser-storage';
 import { featureRegistry } from '../../feature-registry';
+import { escapeHtml as escape } from '../../html-safety';
 type JsonObject = Record<string, unknown>;
 type PdfJsModule = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
 
@@ -42,9 +44,7 @@ type PaperPdfWindow = Window & {
   pdfjsLib?: PdfJs;
   apiUrl?: (url: string) => string;
   debugLog?: (message: string, level?: string) => void;
-  escapeHtml?: (value: unknown) => string;
   _ensurePdfJs?: () => Promise<unknown>;
-  _paperNow?: () => number;
   _updatePaperTitles?: () => void;
   _getActivePaperEntry?: () => PaperEntry | null;
   _persistPaperEntry?: (entry: PaperEntry) => void;
@@ -149,8 +149,6 @@ function log(message: string, level = 'info'): void {
 }
 
 function now(): number {
-  const clock = globals()._paperNow;
-  if (typeof clock === 'function') return clock();
   return typeof performance !== 'undefined' && performance.now
     ? performance.now() : Date.now();
 }
@@ -158,14 +156,6 @@ function now(): number {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error ?? 'unknown error');
-}
-
-function escape(value: unknown): string {
-  const helper = globals().escapeHtml;
-  if (typeof helper === 'function') return helper(value);
-  const span = document.createElement('span');
-  span.textContent = value == null ? '' : String(value);
-  return span.innerHTML;
 }
 
 /** Re-base a persisted API URL onto the live proxy base path. */
@@ -179,11 +169,7 @@ export function resolvePaperPdfUrl(url: string): string {
 
 /** Optional operator gate for bypassing broken HTTP Range proxies. */
 export function shouldFetchPdfAsData(): boolean {
-  try {
-    return localStorage.getItem('tofu_paper_pdf_data') === '1';
-  } catch {
-    return false;
-  }
+  return readBrowserStorage('tofu_paper_pdf_data') === '1';
 }
 
 /** Download bytes through the unified API client, with no transfer timeout. */

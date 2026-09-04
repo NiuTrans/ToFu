@@ -7,6 +7,7 @@ symbol. This module is a leaf (no intra-package imports).
 
 import json
 import re
+from collections.abc import Mapping
 
 from lib.log import get_logger
 
@@ -188,9 +189,23 @@ def _coerce_str_list(val):
     """Best-effort coerce ``val`` (str | list | None) to a list[str]."""
     if val is None or val == '':
         return []
-    if isinstance(val, list):
+    if isinstance(val, (list, tuple)):
         return [str(x) for x in val if x]
     return [str(val)]
+
+
+def _copy_metadata_value(value):
+    """Thaw cached metadata containers before they enter public records."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_copy_metadata_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            key: _copy_metadata_value(item)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _extract_package_metadata(meta):
@@ -215,27 +230,29 @@ def _extract_package_metadata(meta):
         'primary_env': '',
         'install_specs': [],
     }
-    md = meta.get('metadata') if isinstance(meta, dict) else None
-    if not isinstance(md, dict):
+    md = meta.get('metadata') if isinstance(meta, Mapping) else None
+    if not isinstance(md, Mapping):
         return out
 
     block = md.get('openclaw') or md.get('clawdbot') or {}
-    if not isinstance(block, dict):
+    if not isinstance(block, Mapping):
         return out
 
     requires = block.get('requires') or {}
-    if isinstance(requires, dict):
+    if isinstance(requires, Mapping):
         out['requires_bins'] = _coerce_str_list(requires.get('bins'))
         out['requires_any_bins'] = _coerce_str_list(requires.get('anyBins'))
         out['requires_env'] = _coerce_str_list(requires.get('env'))
 
     out['requires_os'] = _coerce_str_list(block.get('os'))
-    out['homepage'] = str(block.get('homepage') or meta.get('homepage') or '')
+    out['homepage'] = str(_copy_metadata_value(
+        block.get('homepage') or meta.get('homepage') or ''))
     out['always'] = bool(block.get('always'))
-    out['primary_env'] = str(block.get('primaryEnv') or '')
+    out['primary_env'] = str(_copy_metadata_value(
+        block.get('primaryEnv') or ''))
     install = block.get('install')
-    if isinstance(install, list):
-        out['install_specs'] = install
+    if isinstance(install, (list, tuple)):
+        out['install_specs'] = _copy_metadata_value(install)
     return out
 
 

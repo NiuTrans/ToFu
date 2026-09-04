@@ -10,14 +10,14 @@ gave no actionable reason.
 
 Fix (revised after owner feedback — an upload is a harmless copy, so don't
 dead-end it): ``_dirInsideAttachedRoot(dir)`` (over ``_attachedRootPaths()``
-reading ``projectState``) still detects the out-of-workspace case, but instead
+reading the live Project state port) still detects the out-of-workspace case, but instead
 of refusing, ``_runFolderDrop`` OFFERS to add the folder in one click
 (``showConfirm`` → ``_addDropDirAsRoot`` reusing the tested ``setPaths`` path),
 then saves. Adding a root has a visible side effect (a scan + a new project-bar
 folder), so we ask first rather than expand the workspace silently.
 
 We brace-EXTRACT the two REAL shipped pure functions from project.js and eval
-them under node against a stubbed ``projectState`` — an empty dir (→ active
+them under node against a stubbed live Project state port — an empty dir (→ active
 root, backend-resolved) is allowed; a path inside a root (incl. a nested
 subdir) is allowed; a sibling/outside path is blocked. A NEUTER that forces the
 predicate to always-true proves the gate is load-bearing.
@@ -69,7 +69,8 @@ def _build_harness(neuter: bool) -> str:
         src = f.read()
     fn_roots = _extract_fn(src, '_attachedRootPaths')
     fn_inside = _extract_fn(src, '_dirInsideAttachedRoot')
-    assert 'projectState' in fn_roots, 'gate must read projectState'
+    assert 'ProjectPresentationShellState.projectState' in fn_roots, (
+        'gate must read the live Project state port')
 
     if neuter:
         # Force the predicate to always accept — reproduces the pre-fix bug
@@ -83,6 +84,7 @@ def _build_harness(neuter: bool) -> str:
         "  path: '/home/u/proj',\n"
         "  extraRoots: [{ path: '/home/u/extra', readOnly: false }, '/home/u/strroot'],\n"
         "};\n"
+        "var ProjectPresentationShellState = { get projectState() { return projectState; } };\n"
         + fn_roots + "\n" + fn_inside + "\n"
         "var out = [];\n"
         "function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }\n"

@@ -12,13 +12,14 @@ Five steps, in order:
 2. Cache-aware tool-result ordering: sort consecutive tool results by
    tool_call_id so the prefix is deterministic across rounds
    (important for automatic prefix caching on OpenAI/Qwen).
-3. Emit the messages-snapshot debug event — AFTER the sort so the
-   panel reflects the real outbound ordering.
-4. Build the request body through the explicit ``_ports`` dependency owner.
-5. Attach internal task/conversation context — the session-stable TTL latch,
-   the Responses prompt-cache namespace, and the user-approved economic
-   working-set threshold.  Protocol converters consume these keys; none reach
-   an upstream wire unchanged.
+3. Build the request body through the explicit ``_ports`` dependency owner.
+4. Emit the messages-snapshot debug event from that canonical body, avoiding a
+   second full-history sanitize; body-build failures retain the old diagnostic
+   fallback from the sorted source messages.
+5. Attach validated prompt-admission evidence and internal task/conversation
+   context — the session-stable TTL latch, Responses prompt-cache namespace,
+   and user-approved economic working-set threshold. Protocol converters
+   consume these keys; none reach an upstream wire unchanged.
 
 Returns ``(_tools_this_round, body)``: the gated tool list is still
 needed downstream by the round-checkpoint call (slice 20).
@@ -34,6 +35,10 @@ from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 from lib.tasks_pkg.orchestrator._messages_snapshot import (
     emit_messages_snapshot_event,
 )
+from lib.token_counter.evidence import (
+    ADMITTED_INPUT_TOKENS_KEY,
+    validated_admitted_input_tokens,
+)
 
 
 logger = get_logger(__name__)
@@ -42,7 +47,10 @@ logger = get_logger(__name__)
 def build_round_request(task, rs, messages, tool_list, *,
                         round_num, tid,
                         thinking_depth, temperature, max_tokens,
-                        response_format):
+                        response_format, admitted_input_tokens=None,
+                        admitted_tool_schema_tokens=None,
+                        admitted_tool_schema_fingerprint=None,
+                        reusable_text_token_counts_by_identity=None):
     """Build this round's (gated tool list, request body) pair.
 
     ``task`` / ``rs`` / ``messages`` / ``tool_list`` are positional
@@ -58,38 +66,71 @@ def build_round_request(task, rs, messages, tool_list, *,
     # (important for automatic prefix caching on OpenAI/Qwen).
     sort_tool_results(messages, conv_id=task.get('convId', ''))
 
-    # Emit messages snapshot for the debug panel (AFTER sort_tool_results
-    # so the panel reflects the real outbound ordering). See
-    # _messages_snapshot for the wire-sanitize / kind='request' /
-    # Flow-phase contracts and the best-effort try/except that
-    # ensures an inspector failure never breaks the LLM round.
+    _snapshot_arguments = {
+        'tid': tid,
+        'round_num': round_num,
+        'model': rs.model,
+        'thinking_enabled': rs.thinking_enabled,
+        'thinking_depth': thinking_depth,
+        'preset': rs.preset,
+        'temperature': temperature,
+        'max_tokens': max_tokens,
+        'response_format': response_format,
+        'tools': _tools_this_round,
+    }
+    try:
+        body = orchestrator_ports.build_request_body(
+            rs.model, messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_enabled=rs.thinking_enabled,
+            preset=rs.preset,
+            thinking_depth=thinking_depth,
+            tools=_tools_this_round,
+            response_format=response_format,
+            stream=True,
+            precomputed_input_tokens=admitted_input_tokens,
+        )
+    except Exception:
+        # Retain the failed preflight in the inspector, but never replace the
+        # body builder's typed failure with diagnostic work.
+        emit_messages_snapshot_event(
+            task, messages, **_snapshot_arguments)
+        raise
+
+    # The successful body already paid for field stripping, structural repair,
+    # and canonical ordering. Reusing its message list avoids a second O(prompt)
+    # sanitize/copy while the snapshot projector remains caller-independent.
     emit_messages_snapshot_event(
         task, messages,
-        tid=tid, round_num=round_num, model=rs.model,
-        thinking_enabled=rs.thinking_enabled,
-        thinking_depth=thinking_depth,
-        preset=rs.preset,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        response_format=response_format,
-        tools=_tools_this_round,
+        prepared_messages=body.get('messages'),
+        **_snapshot_arguments,
     )
-
-    body = orchestrator_ports.build_request_body(
-        rs.model, messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        thinking_enabled=rs.thinking_enabled,
-        preset=rs.preset,
-        thinking_depth=thinking_depth,
-        tools=_tools_this_round,
-        response_format=response_format,
-        stream=True,
-    )
+    # Preserve the already-paid full-prompt admission count for downstream
+    # slot retries and cache-settle classification. Consumers fall back to
+    # local estimation unless
+    # this is a positive non-bool integer; provider boundaries strip the key.
+    _validated_input_tokens = validated_admitted_input_tokens(
+        admitted_input_tokens)
+    if _validated_input_tokens is not None:
+        body[ADMITTED_INPUT_TOKENS_KEY] = _validated_input_tokens
     # Attach task_id for session-stable TTL latch in
     # add_cache_breakpoints (prevents mid-session cache key shift).
     body['_task_id'] = task['id']
     body['_conv_id'] = task.get('convId') or ''
+    # Private transport metadata for the durable Request Inspector archive.
+    # ``prepare_request`` removes it at the same boundary as every other
+    # underscore key, after using it to bind the final provider-specific body
+    # to the owner/Attempt. It never reaches provider JSON.
+    body['_raw_archive_context'] = {
+        'userId': task.get('_userId') or 0,
+        'conversationId': task.get('convId') or '',
+        'turnId': task.get('_turnId') or '',
+        'attemptId': task.get('_attemptId') or '',
+        'taskId': task.get('id') or '',
+        'roundNum': round_num + 1,
+        'model': rs.model,
+    }
     # Request-local authority latches must never survive a failed policy
     # lookup into the next round.
     task['_ptc_local'] = None
@@ -118,6 +159,8 @@ def build_round_request(task, rs, messages, tool_list, *,
         _optimization = resolve_tool_orchestration(
             requested_programmatic=(
                 _experiment_flags['tools']['programmaticCalling']),
+            requested_programmatic_exposure=(
+                _experiment_flags['tools']['programmaticExposure']),
             requested_multi_agent=_orchestration_flags['multiAgent'],
             messages=messages, tools=_tools_this_round, round_num=round_num,
             model=rs.model,
@@ -125,15 +168,38 @@ def build_round_request(task, rs, messages, tool_list, *,
         body['_programmatic_tool_calling'] = _optimization[
             'programmaticCalling']
         body['_programmatic_stage'] = _optimization['programmaticStage']
-        # Local-backend (all-models PTC) per-round context.  The wire
-        # boundary (_sse_core) resolves native_openai vs local; the gateway
-        # handler gates program eligibility on the task latch below.  The
-        # latch is refreshed EVERY round so a stale read-only contract can
-        # never outlive the intent that activated it.
+        # Local-backend (all-models PTC) per-round context. The wire boundary
+        # (_sse_core) resolves native_openai vs local; this latch selects the
+        # local tier and retains activation evidence, never child authority.
+        # Refresh it every round so stale routing cannot outlive the intent
+        # that activated it.
         body['_programmatic_tier'] = _optimization.get(
             'programmaticTier') or ''
+        # Two consecutive zero-child authoring failures prove that continuing
+        # to ask this model for free-form ToolScript is wasting rounds. The
+        # task-local latch makes one sticky, cache-visible transition to the
+        # schema-validated calls[] batch surface; a later task starts fresh.
+        if (task.get('_toolScriptBatchFallback')
+                and body['_programmatic_tier'] == 'program'):
+            body['_programmatic_tier'] = 'batch'
         body['_programmatic_eligible_tools'] = list(
             _optimization.get('programmaticEligibleTools') or [])
+        from lib.tasks_pkg.programmatic_escalation import (
+            resolve_programmatic_exposure)
+        _programmatic_active = (
+            _optimization['programmaticCalling']
+            in ACTIVE_PROGRAMMATIC_MODES)
+        _programmatic_exposure, _programmatic_exposure_reason = (
+            resolve_programmatic_exposure(
+                task, messages, round_num=round_num,
+                requested_policy=(
+                    _experiment_flags['tools']['programmaticExposure']),
+                programmatic_active=_programmatic_active,
+            ))
+        body['_programmatic_exposure'] = _programmatic_exposure
+        _optimization['programmaticExposure'] = _programmatic_exposure
+        _optimization['programmaticExposureReason'] = (
+            _programmatic_exposure_reason)
         # ``programmaticSerialChain`` remains in the task-owned decision row
         # below for adoption diagnostics.  It deliberately does NOT enter the
         # request body: interpolating a growing per-round observation into the
@@ -141,8 +207,7 @@ def build_round_request(task, rs, messages, tool_list, *,
         task['_ptc_local'] = (
             {'tier': body['_programmatic_tier'],
              'eligible': body['_programmatic_eligible_tools']}
-            if _optimization['programmaticCalling']
-            in ACTIVE_PROGRAMMATIC_MODES else None)
+            if _programmatic_active else None)
         body['_multi_agent_mode'] = _optimization['multiAgent']
         body['_multi_agent_stage'] = _optimization['multiAgentStage']
         body['_multi_agent_max_concurrent_agents'] = (
@@ -232,10 +297,32 @@ def build_round_request(task, rs, messages, tool_list, *,
                        tid, e, exc_info=True)
 
     try:
-        from lib.context_telemetry import capture_round_context
+        from lib.context_telemetry import (
+            TOOL_SCHEMA_EVIDENCE_KEY,
+            build_tool_schema_evidence,
+            capture_round_context,
+        )
+        # The opaque sidecar proves only this body-builder call. The existing
+        # immutable wire-catalog copy is the later identity baseline, avoiding
+        # another schema/list copy while provider projections remain free to
+        # invalidate the count by replacing any element.
+        if body.get('tools') is _tools_this_round:
+            _schema_evidence = build_tool_schema_evidence(
+                body.get('_tool_wire_catalog'),
+                admitted_tool_schema_tokens,
+                model=rs.model,
+                source_fingerprint=admitted_tool_schema_fingerprint,
+            )
+            if _schema_evidence is not None:
+                body[TOOL_SCHEMA_EVIDENCE_KEY] = _schema_evidence
         capture_round_context(
             task, body.get('messages') or [], _tools_this_round,
-            round_num=round_num, model=rs.model)
+            round_num=round_num,
+            model=rs.model,
+            precomputed_tool_schema_tokens=admitted_tool_schema_tokens,
+            reusable_text_token_counts_by_identity=(
+                reusable_text_token_counts_by_identity),
+        )
     except Exception as e:
         logger.debug('[Task %s] round context telemetry skipped: %s', tid, e)
 

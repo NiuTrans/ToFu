@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
+import time
 from typing import Any
 
 from lib.storage.errors import StorageError
@@ -34,6 +35,11 @@ _TERMINAL_STATUSES = frozenset({'succeeded', 'failed', 'cancelled'})
 _MAX_JOB_PAYLOAD_BYTES = 1024 * 1024
 _MAX_ERROR_BYTES = 64 * 1024
 _MAX_CLOCK_MS = 9_223_372_036_854_775_000
+# Fencing skew bound: ``now_ms`` feeds ``available_at_ms`` and
+# ``lease_deadline_ms``, so a caller clock far ahead of the authority would
+# strand a job past every reaper horizon.  A far-behind clock merely makes
+# leases immediately due, so the bound is one-sided toward the future.
+_MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1000
 
 
 def _optional_text(
@@ -51,8 +57,21 @@ def _job_owner(payload: Mapping[str, Any]) -> int:
 
 
 def _job_now(payload: Mapping[str, Any]) -> int:
-    return _integer(
+    """Return a client wall clock that cannot strand a durable job.
+
+    ``now_ms`` drives ``available_at_ms`` and ``lease_deadline_ms``.  A clock
+    far in the future would make a queued job unclaimable or a running job
+    unreapable, so reject it instead of silently fencing the job forever.
+    """
+    client_now = _integer(
         payload, 'now_ms', minimum=0, maximum=_MAX_CLOCK_MS)
+    server_now = int(time.time() * 1000)
+    if client_now - server_now > _MAX_CLOCK_SKEW_MS:
+        raise StorageError(
+            'database_protocol_error',
+            'Worker job clock is too far ahead of the server clock',
+        )
+    return client_now
 
 
 def _job_document(row: Mapping[str, Any]) -> dict[str, Any]:

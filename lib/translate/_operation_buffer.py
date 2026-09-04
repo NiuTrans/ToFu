@@ -25,9 +25,9 @@ class IncrementalOperationBuffer:
     def put_segment(self, key: int | str, text: str) -> int:
         """Queue the newest preview; return evicted count, or -1 after terminal.
 
-        ``key`` is an int llmRound for narration prose, or the collision-free
-        segment blockId (``thinking:llm-N`` / ``thinking:terminal``) for
-        reasoning — identical keys replace their queued predecessor.
+        ``key`` is a collision-free segment blockId. Integer ``llmRound`` keys
+        remain accepted for compatibility with old producers. Identical keys
+        replace their queued predecessor.
         """
         item = ('segment', key, text)
         with self._condition:
@@ -48,17 +48,38 @@ class IncrementalOperationBuffer:
             self._condition.notify()
             return dropped
 
-    def put_terminal(self, item: Any, *, replace: bool = False) -> int:
-        """Queue a terminal item, evicting previews so delivery is guaranteed."""
+    def put_terminal(
+        self,
+        item: Any,
+        *,
+        replace: bool = False,
+        preserve_segment_keys: frozenset[int | str] = frozenset(),
+    ) -> int:
+        """Queue a terminal item, evicting previews so delivery is guaranteed.
+
+        ``preserve_segment_keys`` keeps explicitly terminal-owned enrichment
+        (currently the final reasoning block) immediately before the handoff.
+        """
         with self._condition:
             if self._terminal_queued and not replace:
                 return -1
             dropped = 0
             if replace:
+                retained = deque(
+                    queued for queued in self._items
+                    if (
+                        isinstance(queued, tuple)
+                        and queued[0] == 'segment'
+                        and queued[1] in preserve_segment_keys
+                    )
+                )
                 dropped = sum(
                     1 for queued in self._items
-                    if isinstance(queued, tuple) and queued[0] == 'segment')
-                self._items.clear()
+                    if isinstance(queued, tuple)
+                    and queued[0] == 'segment'
+                    and queued[1] not in preserve_segment_keys
+                )
+                self._items = retained
             else:
                 while len(self._items) >= self.capacity:
                     self._items.popleft()

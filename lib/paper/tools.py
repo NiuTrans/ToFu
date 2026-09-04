@@ -45,7 +45,10 @@ from lib.tools.contracts import (
     compile_execution_contract_documents,
     validate_tool_arguments_from_documents,
 )
-from lib.tools.result_projection import TOOL_RESULT_PROJECTION_ITEMS_KEY
+from lib.tools.result_projection import (
+    TOOL_RESULT_PRODUCER_METADATA_KEY,
+    TOOL_RESULT_PROJECTION_ITEMS_KEY,
+)
 logger = get_logger(__name__)
 
 @dataclass(frozen=True)
@@ -99,7 +102,25 @@ _PAPER_FULL_DIRECT_NAMES = frozenset({
     'read_tool_artifact',
     'search_tool_artifact',
 })
-_PAPER_UNATTENDED_EXCLUDED_NAMES = frozenset({'ask_human'})
+_PAPER_UNATTENDED_BASE_EXCLUDED_NAMES = frozenset({'ask_human'})
+
+
+def _paper_unattended_excluded_names() -> frozenset[str]:
+    """Return capabilities that cannot truthfully execute without a person.
+
+    Paper engines have no attended approval UI. Ordinary writes follow their
+    explicit audited auto-apply policy, but ``confirmation_tools`` can only
+    execute with a one-use receipt minted by that UI. Deriving this set from
+    the registry prevents each new high-risk family from becoming a visible,
+    permanently rejecting paper capability until someone remembers a second
+    paper-specific denylist.
+    """
+    from lib.tools.registry import all_specs
+
+    names = set(_PAPER_UNATTENDED_BASE_EXCLUDED_NAMES)
+    for spec in all_specs():
+        names.update(spec.confirmation_tools)
+    return frozenset(names)
 
 
 def build_research_tool_schemas() -> list[dict]:
@@ -238,7 +259,7 @@ def _build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
     scheduler, memory, and agent capabilities). The default provider surface is
     the full uncapped catalog for every model. An explicit, model-neutral budget
     may defer optional tools behind ``search_tools``/``execute_tools``; that
-    gateway pair independently targets 500 tokens. Budget drift degrades schema
+    gateway pair independently targets 600 tokens. Budget drift degrades schema
     detail but never makes a report request unavailable.
     """
     from lib.tools.gateway import (
@@ -265,6 +286,7 @@ def _build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
         registry_cfg['userId'] = owner_id
     registry_wire, ctx = build_paper_full_tool_context(
         cfg=registry_cfg, owner_user_id=owner_id)
+    unattended_excluded_names = _paper_unattended_excluded_names()
 
     executable = []
     # The uncapped product default retains the complete task-authorized catalog.
@@ -277,7 +299,7 @@ def _build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
     )
     for schema in source_catalog:
         name = _paper_schema_name(schema)
-        if not name or name in _PAPER_UNATTENDED_EXCLUDED_NAMES:
+        if not name or name in unattended_excluded_names:
             continue
         if owner_id <= 0 and name in {
                 'read_tool_artifact', 'search_tool_artifact'}:
@@ -557,9 +579,12 @@ def make_paper_exec_shim(*, task_id, conv_id='', abort=None, cfg=None,
     human must be present to answer); unattended / headless chat tasks
     auto-apply. Paper engines are unattended by construction — there is no
     human to prompt — so they inherit chat's own unattended semantics:
-    write-partition tools (memory CRUD, scheduler create/manage, MCP tools)
-    execute without a prompt, and EVERY such call is recorded via
+    ordinary write-partition tools (memory CRUD, scheduler create/manage, MCP
+    tools) execute without a prompt, and EVERY such call is recorded via
     ``audit_log('paper_tool_auto_approve', …)`` in ``_execute_shared_tool``.
+    Tools whose registry contract requires attended confirmation are removed
+    from the frozen paper epoch instead: no headless runtime may mint the
+    one-use human receipt their handlers consume.
     Never route a paper engine through the attended pipeline (a background
     task must never block on a click that cannot happen), and never strip the
     audit trail (it is the visible record of this policy).
@@ -629,9 +654,9 @@ def make_paper_exec_shim(*, task_id, conv_id='', abort=None, cfg=None,
         shim['_toolSearchMode'] = (
             'local' if SEARCH_TOOLS_NAME in wire_names else 'off')
         if EXECUTE_TOOLS_NAME in wire_names:
-            # ToolScript is a bounded read-only reduction. Ordinary ``calls``
-            # still enter the normal permission/approval pipeline, including
-            # writes.
+            # The eligible set shapes hosted-PTC activation/guidance only.
+            # Local ToolScript authority is the task catalog plus the ordinary
+            # contract, permission, and approval pipeline.
             shim['_ptc_local'] = {
                 'tier': 'program',
                 'eligible': sorted(
@@ -670,8 +695,9 @@ def _validate_paper_tool_arguments(name, args, documents_by_name, *, task_id='')
 
 def cap_tool_result(content, tool_name, tool_use_id='', *, owner_user_id=0,
                     model='', observed_at_ms=0, world_version='',
-                    tool_arguments=None, projection_items=None):
-    """Project one raw paper tool result into ToolResultEnvelopeV2.
+                    tool_arguments=None, projection_items=None,
+                    producer_metadata=None):
+    """Build one bounded internal ToolResultEnvelopeV2 record.
 
     Every tool, including ``read_files``, is bounded to 8k model-visible
     tokens.  Oversized content is persisted only through the owner-scoped
@@ -690,6 +716,7 @@ def cap_tool_result(content, tool_name, tool_use_id='', *, owner_user_id=0,
         world_version=str(world_version or ''),
         tool_arguments=tool_arguments,
         projection_items=projection_items,
+        producer_metadata=producer_metadata,
     )
 
 
@@ -734,22 +761,14 @@ class PaperToolResultBudgetV2:
                 24_000 if self.result_envelope == 'v2' else None),
         }
 
-    @staticmethod
-    def _envelope_metadata(content):
-        try:
-            value = json.loads(content)
-        except (TypeError, ValueError):
-            return {}
-        return value if isinstance(value, dict) else {}
-
-    def _annotate_round_entry(self, record, visible, *, aggregate=False):
+    def _annotate_round_entry(self, record, visible, evidence=None, *,
+                              aggregate=False):
         round_entry = record.get('round_entry')
         if not isinstance(round_entry, dict):
             return
         from lib.tasks_pkg.compaction._budget import _result_tokens
         raw = record['raw_content']
-        value = (self._envelope_metadata(visible)
-                 if self.result_envelope == 'v2' else {})
+        value = evidence if isinstance(evidence, dict) else {}
         round_entry.update({
             'resultContract': (
                 'tofu.tool-result/v2'
@@ -765,6 +784,8 @@ class PaperToolResultBudgetV2:
                 else visible != raw),
             'toolContent': visible[:4000],
         })
+        if value:
+            round_entry['toolResultEvidence'] = dict(value)
         if aggregate:
             round_entry['aggregateResultBudgetApplied'] = True
 
@@ -775,18 +796,31 @@ class PaperToolResultBudgetV2:
         import time
         raw = (content if isinstance(content, str)
                else json.dumps(content, ensure_ascii=False, default=str))
+        from lib.tasks_pkg.compaction.api import mark_empty_result
+        raw = mark_empty_result(tool_name, raw)
         projection_items = (
             round_entry.pop(TOOL_RESULT_PROJECTION_ITEMS_KEY, None)
             if isinstance(round_entry, dict) else None)
+        producer_metadata = (
+            round_entry.pop(TOOL_RESULT_PRODUCER_METADATA_KEY, None)
+            if isinstance(round_entry, dict) else None)
+        evidence = None
         if self.result_envelope == 'v2':
-            visible = cap_tool_result(
+            envelope = cap_tool_result(
                 raw, tool_name, tool_call_id,
                 owner_user_id=self.owner_user_id, model=self.model,
                 observed_at_ms=int(time.time() * 1000),
                 world_version=world_version,
                 tool_arguments=tool_arguments,
                 projection_items=projection_items,
+                producer_metadata=producer_metadata,
             )
+            from lib.tools.result_envelope import split_tool_result_delivery
+
+            delivery = split_tool_result_delivery(envelope)
+            visible = delivery.model_text
+            evidence = (dict(delivery.evidence)
+                        if delivery.evidence is not None else None)
         else:
             from lib.tasks_pkg.compaction.api import (
                 budget_tool_result,
@@ -798,6 +832,7 @@ class PaperToolResultBudgetV2:
             visible = clamp_tool_result_text(
                 tool_name, visible, tc_id=tool_call_id,
                 conv_id=self.conv_id)
+            envelope = visible
         message = {
             'role': 'tool', 'tool_call_id': tool_call_id,
             'content': visible,
@@ -810,10 +845,11 @@ class PaperToolResultBudgetV2:
             'tool_name': str(tool_name or ''),
             'tool_call_id': str(tool_call_id or ''),
             'raw_content': raw,
+            'envelope_content': envelope,
             'round_entry': round_entry,
         }
         self._records_by_round.setdefault(int(round_index), []).append(record)
-        self._annotate_round_entry(record, visible)
+        self._annotate_round_entry(record, visible, evidence)
         return visible
 
     def finish_round(self, round_index):
@@ -827,7 +863,10 @@ class PaperToolResultBudgetV2:
         )
         values = {
             record['key']: (
-                record['message']['content'], record['tool_name'],
+                (record['envelope_content']
+                 if self.result_envelope == 'v2'
+                 else record['message']['content']),
+                record['tool_name'],
                 record['tool_call_id'],
             )
             for record in records
@@ -841,10 +880,23 @@ class PaperToolResultBudgetV2:
             updated = enforce_round_aggregate_budget(
                 values, conv_id=self.conv_id)
         for record in records:
-            visible = updated[record['key']][0]
+            bounded = updated[record['key']][0]
+            evidence = None
+            if self.result_envelope == 'v2':
+                from lib.tools.result_envelope import (
+                    split_tool_result_delivery,
+                )
+                delivery = split_tool_result_delivery(bounded)
+                visible = delivery.model_text
+                evidence = (dict(delivery.evidence)
+                            if delivery.evidence is not None else None)
+                record['envelope_content'] = bounded
+            else:
+                visible = bounded
             aggregate = visible != record['message']['content']
             record['message']['content'] = visible
-            self._annotate_round_entry(record, visible, aggregate=aggregate)
+            self._annotate_round_entry(
+                record, visible, evidence, aggregate=aggregate)
 
 
 def _execute_shared_tool(name, args, shim, round_entry, abort):

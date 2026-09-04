@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tofu-search"
+version = "0.10.3"
+description = "Multi-engine web search, vertical lookups, and content fetching with optional LLM filtering — standalone library from the Tofu AI assistant"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "Tofu Team"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+
+dependencies = [
+    "requests>=2.32.4",
+    "trafilatura>=1.6",
+    "beautifulsoup4>=4.13.4",
+    "python-dateutil>=2.8",
+    "urllib3>=2.5",
+    # lxml is a TRANSITIVE dep of trafilatura, NOT imported by tofu_search
+    # directly. All BeautifulSoup parsing in this package uses 'html.parser'
+    # (see search/_common.py:soup_of) — lxml 6.x/libxml2 can segfault under
+    # concurrent threads, so the only lxml consumer (trafilatura.extract) is
+    # serialized under _TRAFILATURA_LOCK in fetch/html_extract.py. Pinned here
+    # with a floor >=5.3 to keep a known-good version resolved; do NOT switch
+    # any bs4 construction to the 'lxml' parser.
+    #
+    # That lock is a PROCESS-GLOBAL serialization point. At the library's own
+    # concurrency (a 16-thread fetch pool dominated by network I/O) it costs a
+    # few ms per page and is unmeasurable. Serving this package concurrently
+    # multiplies extraction calls by the number of in-flight requests, so the
+    # lock's cost must be re-measured before assuming it stays negligible.
+    "lxml>=5.3",
+]
+
+[project.optional-dependencies]
+playwright = ["playwright>=1.49"]
+pdf = ["pymupdf>=1.24", "pymupdf4llm>=0.0.17"]
+# 'all' means every CONTENT-processing capability. The MCP server is an
+# interface layer, not a capability, so it is deliberately excluded: a library
+# user who wants better extraction should not silently acquire a protocol SDK.
+all = ["playwright>=1.49", "pymupdf>=1.24", "pymupdf4llm>=0.0.17"]
+# SDK v2 speaks the stateless 2026-07-28 protocol and serves legacy handshake
+# clients from the same server, which keeps existing ChatUI configurations
+# compatible while allowing current MCP hosts to connect.
+mcp = ["mcp>=2,<3", "anyio>=4.9"]
+test = ["pytest>=8.0", "pytest-cov>=4.1"]
+dev = ["pytest>=8.0", "pytest-cov>=4.1", "ruff>=0.6"]
+
+[project.scripts]
+tofu-search-mcp = "tofu_search.mcp_server.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/rangehow/ToFu/tree/main/packages/tofu-search"
+Documentation = "https://github.com/rangehow/ToFu/blob/main/packages/tofu-search/README.md"
+Repository = "https://github.com/rangehow/ToFu"
+
+[tool.setuptools.packages.find]
+include = ["tofu_search*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["unit: offline unit test"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [".tofu_trash"]
+
+# Focused on bug-catching rules (pyflakes, bugbear, import-sorting) plus T20
+# (flake8-print). T20 is not a style preference here: this package is meant to
+# be embedded, including in a process whose stdout carries a protocol stream
+# (an MCP stdio server). A single stray print() corrupts that stream and the
+# failure surfaces as an unparseable message on the host side, far from its
+# cause. Diagnostics go through tofu_search.log, which writes to stderr.
+# The broader E/W/UP style rules are deliberately deferred to avoid a large
+# reformat of the extracted codebase; tighten this over time.
+[tool.ruff.lint]
+select = ["F", "I", "B", "T20"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "T20"]
+# Examples are run by a human from a terminal; printing IS their output.
+"examples/*" = ["T20"]

@@ -48,6 +48,24 @@ def _catalog():
     ]
 
 
+def _xuecheng_catalog():
+    return [
+        _tool(
+            'mcp__xuecheng__read_doc',
+            description=(
+                '[MCP:xuecheng] Read or summarize a 学城 document as Markdown.')),
+        _tool(
+            'mcp__xuecheng__search_docs',
+            description=(
+                '[MCP:xuecheng] Full-text search across 学城 (Xuecheng) docs.')),
+        _tool(
+            'mcp__xuecheng__login',
+            description=(
+                '[MCP:xuecheng] Log in after a data tool returns '
+                'NOT_LOGGED_IN. May send an approval push.')),
+    ]
+
+
 def test_exact_name_miss_is_called_out_instead_of_inviting_research():
     result = search_executable_catalog(_catalog(), 'project_board_complete')
 
@@ -132,3 +150,185 @@ def test_distinct_queries_do_not_trip_the_repeat_breaker(monkeypatch):
             task, {}, 'search_tools', 'call-1', {'query': query},
             1, {}, {}, None, False)
         assert 'repeated_query' not in json.loads(content)
+
+
+def _claim_catalog():
+    claim = _tool(
+        'project_board_claim',
+        description='Claim an OPEN epic before you start working it.')
+    claim['function']['parameters'] = {
+        'type': 'object',
+        'properties': {'task_id': {'type': 'string'}},
+        'required': ['task_id'],
+    }
+    return [
+        claim,
+        _tool('project_board_read',
+              description='Read the project coordination board.'),
+    ]
+
+
+def test_disclosed_exact_lookup_re_returns_schema_for_execute_tools():
+    # Incident anchor: a disclosed-only tool (schema returned by an earlier
+    # search, then lost to compaction) hit the already_visible branch, whose
+    # notice claimed the tool was directly callable and returned no schema —
+    # the model guessed epic_id instead of task_id (mtgzs6bnmglpfa).
+    result = search_executable_catalog(
+        _claim_catalog(), 'project_board_claim',
+        disclosed_names={'project_board_claim'})
+
+    assert result['already_disclosed'] == 'project_board_claim'
+    assert 'already_visible' not in result
+    assert [row['name'] for row in result['items']] == ['project_board_claim']
+    schema = result['items'][0]['arguments_schema']
+    assert schema['required'] == ['task_id']
+    assert 'execute_tools' in result['notice']
+    assert 'NOT in your direct tool list' in result['notice']
+    assert 'Do not search for this name again' in result['notice']
+
+
+def test_disclosed_exact_lookup_ignores_a_wrong_namespace_filter():
+    result = search_executable_catalog(
+        _claim_catalog(), 'project_board_claim', namespace='project',
+        namespace_by_name={'project_board_claim': 'conversation',
+                           'project_board_read': 'conversation'},
+        disclosed_names={'project_board_claim'})
+
+    assert result['already_disclosed'] == 'project_board_claim'
+    assert [row['name'] for row in result['items']] == ['project_board_claim']
+
+
+def test_disclosed_tool_stays_omitted_from_broad_results():
+    result = search_executable_catalog(
+        _claim_catalog(), 'project board epic',
+        disclosed_names={'project_board_claim'})
+
+    names = {row['name'] for row in result['items']}
+    assert 'project_board_claim' not in names
+    assert 'project_board_read' in names
+
+
+def test_zero_result_search_points_at_omitted_disclosed_tools():
+    result = search_executable_catalog(
+        _claim_catalog(), 'nonexistent capability xyz',
+        disclosed_names={'project_board_claim'})
+
+    assert result['items'] == []
+    assert 'already disclosed' in result['notice']
+
+
+def test_wire_visible_wins_over_disclosed_for_exact_lookup():
+    result = search_executable_catalog(
+        _claim_catalog(), 'project_board_claim',
+        visible_names={'project_board_claim'},
+        disclosed_names={'project_board_claim'})
+
+    assert result['already_visible'] == 'project_board_claim'
+    assert 'already_disclosed' not in result
+    assert result['items'] == []
+
+
+def test_handler_re_discloses_schema_lost_to_compaction(monkeypatch):
+    from lib.tasks_pkg.handlers import tool_gateway as handler
+
+    monkeypatch.setattr(handler, '_finalize', lambda *args, **kwargs: None)
+    task = {
+        'id': 'task-redisclose', 'model': 'test',
+        '_executable_tool_catalog': _claim_catalog(),
+        '_executableToolNamespaceByName': {},
+    }
+
+    def run(query):
+        _tc_id, content, _aborted = handler.handle_search_tools(
+            task, {}, 'search_tools', 'call-1', {'query': query},
+            1, {}, {}, None, False)
+        return json.loads(content)
+
+    first = run('project board epic')
+    assert 'project_board_claim' in {row['name'] for row in first['items']}
+
+    second = run('project_board_claim')
+    assert second['already_disclosed'] == 'project_board_claim'
+    assert second['items'][0]['arguments_schema']['required'] == ['task_id']
+
+    third = run('board coordination')
+    assert third['items'] == []
+    assert 'already disclosed' in third['notice']
+
+
+def test_visible_tool_is_omitted_and_exact_lookup_says_call_it_directly():
+    visible = {'mcp__xuecheng__read_doc'}
+
+    broad = search_executable_catalog(
+        _xuecheng_catalog(), 'xuecheng document authorization',
+        visible_names=visible)
+    assert 'mcp__xuecheng__read_doc' not in {
+        row['name'] for row in broad['items']}
+
+    exact = search_executable_catalog(
+        _xuecheng_catalog(), 'mcp__xuecheng__read_doc',
+        visible_names=visible)
+    assert exact['items'] == []
+    assert exact['already_visible'] == 'mcp__xuecheng__read_doc'
+    assert 'call it directly' in exact['notice'].lower()
+    assert 'missing_name' not in exact
+
+
+def test_handler_uses_final_wire_projection_not_broader_assembly_schema(
+        monkeypatch):
+    from lib.tasks_pkg.handlers import tool_gateway as handler
+
+    monkeypatch.setattr(handler, '_finalize', lambda *args, **kwargs: None)
+    catalog = _xuecheng_catalog()
+    task = {
+        'id': 'task-visible-tools', 'model': 'test',
+        '_executable_tool_catalog': catalog,
+        # Assembly proposed both tools, but the provider budget retained only
+        # read_doc. The final wire projection is the visibility authority.
+        '_tool_schema': catalog[:2],
+        'events': [{
+            'type': 'tool_wire_projection', 'roundNum': 2,
+            'toolNames': [
+                'mcp__xuecheng__read_doc', 'search_tools', 'execute_tools'],
+        }],
+    }
+
+    _tc_id, content, _aborted = handler.handle_search_tools(
+        task, {}, 'search_tools', 'call-visible',
+        {'query': 'xuecheng document'}, 2, {'llmRound': 2}, {}, None, False)
+
+    names = {row['name'] for row in json.loads(content)['items']}
+    assert 'mcp__xuecheng__read_doc' not in names
+    assert 'mcp__xuecheng__search_docs' in names
+
+
+def test_fail_open_directory_still_omits_visible_tools(monkeypatch):
+    from lib.tasks_pkg.handlers import tool_gateway as handler
+
+    monkeypatch.setattr(handler, '_finalize', lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        handler, 'search_executable_catalog',
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('boom')))
+    catalog = _xuecheng_catalog()
+    task = {
+        'id': 'task-visible-fail-open', 'model': 'test',
+        '_executable_tool_catalog': catalog,
+        '_tool_schema': [catalog[0]],
+    }
+
+    _tc_id, content, _aborted = handler.handle_search_tools(
+        task, {}, 'search_tools', 'call-fail-open',
+        {'query': 'xuecheng'}, 2, {'llmRound': 2}, {}, None, False)
+
+    result = json.loads(content)
+    assert result['fail_open'] is True
+    assert 'mcp__xuecheng__read_doc' not in {
+        row['name'] for row in result['items']}
+    assert 'mcp__xuecheng__search_docs' in {
+        row['name'] for row in result['items']}
+
+
+def test_authentication_intent_ranks_login_ahead_of_document_search():
+    for query in ('authorize access to xuecheng docs', '学城登录授权'):
+        result = search_executable_catalog(_xuecheng_catalog(), query)
+        assert result['items'][0]['name'] == 'mcp__xuecheng__login'

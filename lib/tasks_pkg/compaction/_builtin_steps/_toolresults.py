@@ -14,7 +14,7 @@ import json
 
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._steps import CompactionContext, register_step
-from lib.tasks_pkg.compaction._tokens import _human_size
+from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens, _human_size
 from lib.tasks_pkg.compaction._builtin_steps._shared import _log_id
 
 logger = get_logger(__name__)
@@ -68,6 +68,65 @@ def _find_paired_assistant(messages: list, tool_idx: int) -> int | None:
     return None
 
 
+def _newest_tool_batch_indices(messages: list, tool_indices: list[int]) -> set[int]:
+    """Return the latest assistant(tool_calls) batch's result indices.
+
+    This evidence is input to the immediately following model call and must
+    survive even when one result alone exceeds the token-tail budget.
+    """
+    for assistant_idx in range(len(messages) - 1, -1, -1):
+        assistant = messages[assistant_idx]
+        if assistant.get('role') != 'assistant' or not assistant.get('tool_calls'):
+            continue
+        call_ids = {
+            str(call.get('id') or '')
+            for call in assistant.get('tool_calls') or ()
+            if isinstance(call, dict) and call.get('id')
+        }
+        if not call_ids:
+            continue
+        batch = {
+            idx for idx in tool_indices
+            if idx > assistant_idx
+            and str(messages[idx].get('tool_call_id') or '') in call_ids
+        }
+        if batch:
+            # A later user/assistant boundary proves the model already consumed
+            # this batch. It is no longer the evidence for the immediately
+            # following call and may be compacted under the ordinary budget.
+            last_result = max(batch)
+            if any(messages[idx].get('role') in ('user', 'assistant')
+                   for idx in range(last_result + 1, len(messages))):
+                return set()
+            return batch
+    return set()
+
+
+def _hot_tool_result_indices(ctx: CompactionContext,
+                             tool_indices: list[int]) -> set[int]:
+    """Select a count- and token-bounded hot tail plus the newest batch."""
+    if not tool_indices:
+        return set()
+    count_limit = max(0, int(ctx.constants.MICRO_HOT_TAIL))
+    token_limit = max(0, int(getattr(
+        ctx.constants, 'MICRO_HOT_TAIL_TOKENS', 48_000)))
+    protected = _newest_tool_batch_indices(ctx.messages, tool_indices)
+    count_hot = set(tool_indices[-count_limit:]) if count_limit else set()
+
+    token_hot: set[int] = set(protected)
+    accumulated = sum(
+        max(0, _estimate_msg_tokens(ctx.messages[idx])) for idx in protected)
+    for idx in reversed(tool_indices):
+        if idx in protected:
+            continue
+        estimate = max(0, _estimate_msg_tokens(ctx.messages[idx]))
+        if accumulated + estimate > token_limit:
+            break
+        token_hot.add(idx)
+        accumulated += estimate
+    return protected | (count_hot & token_hot)
+
+
 @register_step('compact_tool_results')
 def compact_tool_results(ctx: CompactionContext) -> int:
     """Compress cold tool results outside the hot tail.  Records the
@@ -95,13 +154,13 @@ def compact_tool_results(ctx: CompactionContext) -> int:
 
     tool_indices = [i for i, m in enumerate(messages) if m.get('role') == 'tool']
 
-    cold_indices = []
-    if len(tool_indices) <= _c.MICRO_HOT_TAIL:
-        logger.debug('[L1] %d tool results ≤ hot-tail size %d, '
+    hot_indices = _hot_tool_result_indices(ctx, tool_indices)
+    cold_indices = [idx for idx in tool_indices if idx not in hot_indices]
+    if not cold_indices:
+        logger.debug('[L1] %d tool results fit count=%d/token=%d hot tail; '
                      'skipping Phase B (Phase C image strip may still run)',
-                     len(tool_indices), _c.MICRO_HOT_TAIL)
-    else:
-        cold_indices = tool_indices[:-_c.MICRO_HOT_TAIL]
+                     len(tool_indices), _c.MICRO_HOT_TAIL,
+                     int(getattr(_c, 'MICRO_HOT_TAIL_TOKENS', 48_000)))
 
     compacted_count = 0
     skipped_short = 0

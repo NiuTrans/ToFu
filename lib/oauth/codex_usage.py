@@ -40,6 +40,9 @@ CODEX_USAGE_RESET_TTL_S = 30 * 60
 CODEX_USAGE_RESET_FAILURE_RETRY_S = 60
 CODEX_USAGE_RESET_TIMEOUT_S = 5
 CODEX_USAGE_RESET_DETAILS_TIMEOUT_S = 5
+CODEX_USAGE_RESET_PUSH_CHANNEL = "oauth"
+CODEX_USAGE_RESET_PUSH_TASK_ID = "codex-reset"
+CODEX_USAGE_RESET_PUSH_EVENT_TYPE = "codex.reset_offer.updated"
 
 _CACHE_SCHEMA_VERSION = 1
 _MAX_CACHE_ENTRIES = 16
@@ -607,6 +610,39 @@ def _is_refreshing(cache_key: str) -> bool:
         return cache_key in _refreshing_keys
 
 
+def _publish_codex_usage_reset_update(
+    *, user_id: str, reset_offer: dict[str, Any]
+) -> None:
+    """Publish one bounded owner-scoped completion projection, fail-soft.
+
+    The HTTP status read remains the durable reconciliation path.  This frame
+    only lets an already-connected browser consume the daemon's result without
+    issuing a second status request; lost frames converge through its bounded
+    fallback timer.
+    """
+    if not str(user_id or "").strip():
+        return
+    try:
+        from lib.agent_core.push import push_event
+
+        push_event(
+            CODEX_USAGE_RESET_PUSH_CHANNEL,
+            CODEX_USAGE_RESET_PUSH_TASK_ID,
+            {
+                "type": CODEX_USAGE_RESET_PUSH_EVENT_TYPE,
+                "provider": "codex",
+                "reset_offer": dict(reset_offer),
+            },
+            user_id=user_id,
+        )
+    except Exception as error:
+        # Push is an optimization, never the authority for account state.
+        logger.debug(
+            "[CodexUsageReset] completion push failed; browser will reconcile: %s",
+            error,
+        )
+
+
 def trigger_codex_usage_reset_refresh(*, user_id: str = "") -> bool:
     """Start one process-local daemon refresh for the current owner/account."""
     from lib.oauth.token_store import load_token
@@ -626,8 +662,26 @@ def trigger_codex_usage_reset_refresh(*, user_id: str = "") -> bool:
         _refreshing_keys.add(cache_key)
 
     def _run() -> None:
+        reset_offer: dict[str, Any] | None = None
         try:
-            refresh_codex_usage_reset(user_id=user_id, force=False)
+            try:
+                reset_offer = refresh_codex_usage_reset(
+                    user_id=user_id, force=False
+                )
+            except Exception as error:
+                logger.warning(
+                    "[CodexUsageReset] daemon refresh failed before projection: %s",
+                    error,
+                )
+            # Keep publication inside the bounded daemon lifecycle. This makes
+            # ``refreshing=False`` a true completion barrier for callers and
+            # prevents the next owner/account refresh from borrowing capacity
+            # while this one is still publishing its receipt.
+            if reset_offer is not None:
+                _publish_codex_usage_reset_update(
+                    user_id=user_id,
+                    reset_offer=reset_offer,
+                )
         finally:
             with _state_lock:
                 _refreshing_keys.discard(cache_key)

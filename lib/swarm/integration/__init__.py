@@ -3,7 +3,7 @@
 Routes the four swarm-control tools the master LLM may call:
 
   * ``spawn_agents``      — fire-and-forget; returns a handle dict
-  * ``await_agents``      — blocking wait (capped at 120 s)
+  * ``await_agents``      — blocking wait (capped at 60 s)
   * ``get_agent_result``  — pull one agent's full final answer
   * artifact tools (``store_artifact`` / ``read_artifact`` / ``list_artifacts``)
                           — proxied to the live session's ArtifactStore
@@ -60,6 +60,9 @@ from lib.swarm.integration._logs import (  # noqa: E402,F401
     _read_log_file,
     _resolve_output_dir,
     _swarm_base_dir,
+    start_swarm_output_cleanup,
+    stop_swarm_output_cleanup,
+    swarm_output_cleanup_snapshot,
 )
 
 # ── Shared process-wide session registry + autocontinue state ──
@@ -82,6 +85,7 @@ from lib.swarm.integration._state import (  # noqa: E402,F401
     _sessions_lock,
     _set_session,
     _start_cleanup_timer,
+    SwarmSessionCapacityExceeded,
     abort_swarm,
     add_session_alias,
     get_active_session,
@@ -117,11 +121,14 @@ from lib.swarm.integration._rehydrate import (  # noqa: E402,F401
 __all__ = [
     # Config / consts
     'SESSION_TTL_SECONDS', 'MAX_SESSIONS', 'SWARM_OUTPUT_DIR',
+    'SwarmSessionCapacityExceeded',
     'AWAIT_AGENTS_HARD_CAP_SEC', 'SWARM_AUTOCONTINUE_ENABLED',
     'SWARM_AUTOCONTINUE_MAX_CHAIN', '_CLEANUP_INTERVAL',
     '_env_truthy', 'swarm_key_for', '_persist_config', '_PERSIST_CFG_KEYS',
     # Logs / disk
     '_resolve_output_dir', '_swarm_base_dir', '_read_log_file', '_read_agent_log',
+    'start_swarm_output_cleanup', 'stop_swarm_output_cleanup',
+    'swarm_output_cleanup_snapshot',
     # Shared state (by reference)
     '_active_sessions', '_session_timestamps', '_key_aliases', '_sessions_lock',
     '_last_cleanup', '_cleanup_timer',

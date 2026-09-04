@@ -16,7 +16,7 @@ tables are owned by the Sidecar:
 
   * ``swarm_sessions`` — one row per conversation-scoped swarm key:
     the spec set, the config needed to rebuild the tool list on rehydrate,
-    and the session status (running / terminated).
+    and the session status (running / terminated / explicit quarantine).
   * ``swarm_agents`` — one row per sub-agent: its full ``messages`` array
     (the resumable conversation), live status, the final result, and a
     ``delivered`` flag that replaces the in-memory inbox for crash recovery.
@@ -102,6 +102,33 @@ def mark_session_terminated(swarm_key: str) -> None:
     except Exception as e:
         logger.warning('[SwarmPersist] mark_session_terminated(%s) failed: %s',
                        swarm_key, e)
+
+
+def quarantine_ownerless_session(swarm_key: str) -> bool:
+    """Persistently exclude an invalid ownerless row from startup recovery.
+
+    The Sidecar re-checks the durable config inside the command transaction;
+    a row repaired concurrently is left unchanged. Agent rows are retained as
+    diagnostic/recovery evidence. ``True`` means this call performed the
+    quarantine, while every storage failure remains best-effort and falsy.
+    """
+    if not swarm_key:
+        return False
+    try:
+        result = _command('swarm.session.quarantine_ownerless', {
+            'swarm_key': swarm_key, 'now_ms': _now_ms(),
+        })
+    except Exception as e:
+        logger.error(
+            '[SwarmPersist] quarantine_ownerless_session(%s) FAILED: %s',
+            swarm_key, e, exc_info=True)
+        return False
+    changed = bool(result.get('changed')) if isinstance(result, dict) else False
+    if changed:
+        logger.debug(
+            '[SwarmPersist] quarantined ownerless session key=%s; durable '
+            'agent evidence retained', swarm_key)
+    return changed
 
 
 def delete_session(swarm_key: str) -> None:

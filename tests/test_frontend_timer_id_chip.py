@@ -83,9 +83,6 @@ let trSrc = fs.readFileSync(process.argv[2], 'utf8');   // ui/tool_rounds.js (di
 const richSrc = fs.readFileSync(process.argv[3], 'utf8'); // ui/tool_rounds_rich.js (timer watcher block)
 // ONE eval so the rich block's top-level consts stay in scope for it.
 eval(trSrc + '\n' + richSrc);
-// tool_rounds_rich.js installs a real 1Hz setInterval (the countdown ticker) that
-// keeps node's event loop alive forever — cancel it so the harness can exit.
-if (win._timerCountdownTicker) { clearInterval(win._timerCountdownTicker); }
 eval(fs.readFileSync(process.argv[4], 'utf8')); // upload_preview.js (installs click delegation)
 
 const out = [];

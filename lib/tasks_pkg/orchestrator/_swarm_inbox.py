@@ -97,8 +97,13 @@ def drain_and_inject_inbox(
             # the send route enqueues under. Delivered exactly once via
             # the deferred-confirm flush after the LLM call (mirrors peer).
             _steer_items = _drain_inbox(_swarm_key, modes=['user-steer'])
+            # Project path-overlap advice exists only on the live task.  It is
+            # consumed before this model round or discarded at settlement;
+            # it never enters the durable inbox/feed/attention projections.
+            _project_items = list(
+                task.pop('_projectOverlapAdvisories', []) or ())
             _inbox_items = (list(_swarm_items) + list(_peer_items)
-                            + list(_steer_items))
+                            + list(_steer_items) + _project_items)
             if _inbox_items:
                 # Coalesce ALL drained items into a single user
                 # message — one message with N <swarm-update>
@@ -134,15 +139,28 @@ def drain_and_inject_inbox(
                     # Swarm: persist the delivered flag so a restart
                     # mid-turn doesn't re-inject these <swarm-update>s.
                     if _swarm_items:
+                        _delivered_agent_ids = [
+                            it.get('agent_id', '') for it in _swarm_items
+                            if it.get('agent_id')
+                        ]
                         try:
                             from lib.swarm import persistence as _swarm_persist
                             _swarm_persist.mark_delivered(
                                 _swarm_key_for(task),
-                                [it.get('agent_id', '') for it in _swarm_items
-                                 if it.get('agent_id')])
+                                _delivered_agent_ids)
                         except Exception as _mde:
                             logger.debug('[Task %s] swarm mark_delivered failed: %s',
                                          tid, _mde)
+                        try:
+                            from lib.swarm.integration import get_active_session
+                            _live_session = get_active_session(_swarm_key)
+                            if _live_session is not None:
+                                _live_session.mark_results_delivered(
+                                    _delivered_agent_ids)
+                        except Exception as _lde:
+                            logger.debug(
+                                '[Task %s] live swarm delivery mark failed: %s',
+                                tid, _lde)
                         _swarm_previews = [{
                             'agentId': it.get('agent_id', ''),
                             'text': (it.get('value') or '')[:1200],

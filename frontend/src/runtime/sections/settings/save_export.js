@@ -14,15 +14,11 @@
 // ══════════════════════════════════════════════════════
 
 function closeSettings() {
-  if (typeof runtimeScope._stopBalancePolling === 'function') {
-    runtimeScope._stopBalancePolling();
-  }
-  _stopLocalMetricsPolling();
   for (const name of [
-    '_stopModelHealthPolling', '_destroyPrivateHosts', '_destroyBrowserAccess',
+    '_destroyPrivateHosts', '_destroyBrowserAccess',
     '_destroyDevicesTab',
-    '_destroySpeechTab', '_destroyCredentialsVault', '_destroyAutoSetup',
-    '_destroyAuthSources', '_destroyKeyStats', '_destroyModelCatalogPanel',
+    '_destroySpeechTab', '_destroyCredentialsVault', '_destroyAuthSources',
+    '_destroyModelCatalogPanel',
   ]) {
     const cleanup = runtimeScope[name];
     if (typeof cleanup === 'function') cleanup();
@@ -35,15 +31,17 @@ function closeSettings() {
   }
   document.getElementById("settingsModal").classList.remove("open");
   // Refresh model dropdown to reflect any visibility changes
-  if (typeof _populateModelDropdown === 'function' && typeof _registeredModels !== 'undefined' && _registeredModels.length > 0) {
-    _populateModelDropdown(_registeredModels);
+  if (typeof _populateModelDropdown === 'function' && runtimeScope._registeredModels.length > 0) {
+    _populateModelDropdown(runtimeScope._registeredModels);
     _applyModelUI(config.model);
   }
   // Refresh image gen picker to reflect visibility changes
-  if (typeof _loadIgModels === 'function') _loadIgModels();
+  if (typeof runtimeScope._loadIgModels === 'function') {
+    void runtimeScope._loadIgModels();
+  }
 }
 
-function saveSettings() {
+async function saveSettings() {
   // 1. Client-side config (General tab)
   if (typeof _collectResponsesExperimentControls === 'function') {
     _collectResponsesExperimentControls();
@@ -83,20 +81,20 @@ function saveSettings() {
     if (typeof refreshInputSendHint === 'function') refreshInputSendHint();
   }
 
-  try { localStorage.setItem("claude_client_config", JSON.stringify(config)); }
+  try { localStorage.setItem("claude_client_config", JSON.stringify(_configForPersist())); }
   catch (e) { debugLog('[saveSettings] localStorage save failed: ' + e.message, 'error'); }
 
   // 2. Feature flags (trading toggle)
   var tradingCb = document.getElementById('settingTradingEnabled');
   if (tradingCb) {
     var newVal = tradingCb.checked;
-    var curVal = !!(typeof _featureFlags !== 'undefined' && _featureFlags.trading_enabled);
+    var curVal = !!runtimeScope._featureFlags?.trading_enabled;
     if (newVal !== curVal) {
       Api.features.set({ trading_enabled: newVal })
         .then(function(r) { return r ? r.json() : {}; }).then(function(data) {
         if (data && data.ok) {
           debugLog('Trading module ' + (newVal ? 'enabled' : 'disabled') + ' — applied', 'success');
-          if (typeof _featureFlags !== 'undefined') _featureFlags.trading_enabled = newVal;
+          if (runtimeScope._featureFlags) runtimeScope._featureFlags.trading_enabled = newVal;
           // Show/hide the topbar entry immediately. The backend enforces the
           // same flag per request and in its background workers, so this is
           // presentation only — nothing here is what stops the module.
@@ -112,13 +110,13 @@ function saveSettings() {
   var pptxCb = document.getElementById('settingPptxTranslateEnabled');
   if (pptxCb) {
     var newPptx = pptxCb.checked;
-    var curPptx = !!(typeof _featureFlags !== 'undefined' && _featureFlags.pptx_translate_enabled);
+    var curPptx = !!runtimeScope._featureFlags?.pptx_translate_enabled;
     if (newPptx !== curPptx) {
       Api.features.set({ pptx_translate_enabled: newPptx })
         .then(function(r) { return r ? r.json() : {}; }).then(function(data) {
         if (data && data.ok) {
           debugLog('PPTX translate ' + (newPptx ? 'enabled' : 'disabled'), 'success');
-          if (typeof _featureFlags !== 'undefined') _featureFlags.pptx_translate_enabled = newPptx;
+          if (runtimeScope._featureFlags) runtimeScope._featureFlags.pptx_translate_enabled = newPptx;
         }
       }).catch(function(e) { debugLog('Feature flag save failed: ' + e.message, 'error'); });
     }
@@ -128,13 +126,13 @@ function saveSettings() {
   var debugCb = document.getElementById('settingDebugMode');
   if (debugCb) {
     var newDbg = debugCb.checked;
-    var curDbg = !!(typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode);
+    var curDbg = !!runtimeScope._featureFlags?.debug_mode;
     if (newDbg !== curDbg) {
       Api.features.set({ debug_mode: newDbg })
         .then(function(r) { return r ? r.json() : {}; }).then(function(data) {
         if (data && data.ok) {
           debugLog('Debug mode ' + (newDbg ? 'enabled' : 'disabled'), 'success');
-          if (typeof _featureFlags !== 'undefined') _featureFlags.debug_mode = newDbg;
+          if (runtimeScope._featureFlags) runtimeScope._featureFlags.debug_mode = newDbg;
           // Show/hide unfinished orchestration surfaces (Flow submenu, Studio /
           // Tasks topbar + mobile-sheet items). See index.html loadFeatureFlags.
           if (typeof _applyDebugModeVisibility === 'function') {
@@ -158,14 +156,14 @@ function saveSettings() {
   var optCb = document.getElementById('settingOptimizerEnabled');
   if (optCb) {
     var newOpt = optCb.checked;
-    var _curFlag = (typeof _featureFlags !== 'undefined') ? _featureFlags.optimizer_enabled : undefined;
+    var _curFlag = runtimeScope._featureFlags?.optimizer_enabled;
     var curOpt = (_curFlag === undefined) ? true : !!_curFlag;
     if (newOpt !== curOpt) {
       Api.features.set({ optimizer_enabled: newOpt })
         .then(function(r) { return r ? r.json() : {}; }).then(function(data) {
         if (data && data.ok) {
           debugLog('Daily Optimizer ' + (newOpt ? 'enabled' : 'disabled'), 'success');
-          if (typeof _featureFlags !== 'undefined') _featureFlags.optimizer_enabled = newOpt;
+          if (runtimeScope._featureFlags) runtimeScope._featureFlags.optimizer_enabled = newOpt;
           // Show/hide the topbar badge immediately.
           var badge = document.getElementById('optimizerBadge');
           if (badge) badge.style.display = newOpt ? 'inline-flex' : 'none';
@@ -176,7 +174,11 @@ function saveSettings() {
 
   // 3. Server config (Providers / Presets / Search)
   if (_serverConfig) {
-    _saveServerConfig();
+    if (typeof _persistSttProvider === 'function') {
+      await _persistSttProvider();
+    }
+    var saved = await _saveServerConfig();
+    if (!saved) return;
   }
 
   debugLog("Settings saved", "success");
@@ -192,9 +194,7 @@ async function _saveServerConfig() {
   }
 
   var payload = {
-    providers: _stgProviders,
     presets: cleanPresets,
-    models: {},
     search: {},
     hidden_models: (_serverConfig && _serverConfig.hidden_models) || [],
     hidden_ig_models: (_serverConfig && _serverConfig.hidden_ig_models) || [],
@@ -265,16 +265,28 @@ async function _saveServerConfig() {
     payload.mt_provider = _collectMtProviderConfig();
   }
 
-  // Speech-to-text: fold the dedicated STT provider into the providers list
-  // BEFORE it is shipped (payload.providers = _stgProviders below/above).
-  // Writes an explicit per-cell key_access capability override — see
-  // settings/speech.js header (the DEFAULT_SLOT_CONFIGS trap).
-  if (typeof _applySttToProviders === 'function') {
-    _applySttToProviders();
-    payload.providers = _stgProviders;
-  }
-
   try {
+    if (!_stgModelRouting) {
+      throw new Error('model-routing v2 authority is not loaded');
+    }
+    var routingResponse = await Api.modelRouting.replace(
+      _stgModelRouting, _stgModelRoutingRevision);
+    _stgModelRouting = routingResponse.model_routing;
+    _stgModelRoutingRevision = Number(routingResponse.revision || 0);
+    var pendingCredentialIds = Object.keys(_stgPendingCredentialSecrets);
+    for (var secretIndex = 0; secretIndex < pendingCredentialIds.length; secretIndex++) {
+      var credentialId = pendingCredentialIds[secretIndex];
+      var secretResponse = await Api.modelRouting.putCredentialSecret(
+        credentialId,
+        _stgPendingCredentialSecrets[credentialId],
+        _stgModelRoutingRevision,
+      );
+      _stgModelRoutingRevision = Number(secretResponse.revision || _stgModelRoutingRevision);
+    }
+    if (pendingCredentialIds.length) {
+      await _loadModelRoutingAuthority();
+    }
+    _stgPendingCredentialSecrets = {};
     var r = await Api.serverConfig.update(payload);
     var data = r ? await r.json().catch(function() { return {}; }) : {};
     if (data.ok) {
@@ -290,22 +302,17 @@ async function _saveServerConfig() {
       // don't appear in the preset toggle until a page refresh.
       if (typeof _loadServerConfigAndPopulate === 'function') {
         _loadServerConfigAndPopulate();
-        if (data.model_catalog_sync_started) {
-          // The save only wakes the worker; /models can take up to 10s per
-          // provider. Refresh a few bounded times so newly advertised models
-          // reach the toolbar in this SPA session without asking for reload.
-          [2000, 12000, 32000].forEach(function(delay) {
-            setTimeout(function() {
-              _loadServerConfigAndPopulate();
-            }, delay);
-          });
-        }
       }
+      return true;
     } else {
       debugLog('[Settings] Save failed: ' + (data.error || 'unknown'), 'error');
+      return false;
     }
   } catch (e) {
     debugLog('[Settings] Save failed: ' + e.message, 'error');
+    var statusHint = document.getElementById('settingsStatusHint');
+    if (statusHint) statusHint.textContent = '保存失败：' + e.message;
+    return false;
   }
 }
 

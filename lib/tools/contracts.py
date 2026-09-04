@@ -1,7 +1,8 @@
 """Single-source tool contracts and deterministic provider compilation.
 
 ``ToolContractV2`` owns model text, detailed discovery help, parameters,
-execution validation, permission, idempotency, errors, and PTC eligibility.
+execution validation, permission, idempotency, result recovery, errors, and
+PTC eligibility.
 Legacy schemas can be adapted read-only while tool families migrate.
 """
 
@@ -16,8 +17,42 @@ from typing import Any, Iterable, Literal, Mapping
 
 ToolPermission = Literal["read", "write", "approval", "external"]
 ToolIdempotency = Literal["read_only", "idempotent", "non_idempotent"]
+ToolResultRecovery = Literal["artifact", "source", "none"]
 
 _PROVIDER_SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_JSON_ATOMIC_TYPES = (str, int, float, bool, type(None))
+
+
+def _clone_contract_value(value: Any, memo: dict[int, Any] | None = None) -> Any:
+    """Clone ordinary JSON contract data without ``deepcopy`` dispatch cost.
+
+    Provider schemas are JSON values, so exact built-in dictionaries/lists can
+    take a small recursive path. A memo preserves shared references and cycles;
+    extension types retain their historical ``deepcopy`` behavior.
+    """
+    if type(value) in _JSON_ATOMIC_TYPES:
+        return value
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
+    if type(value) is dict:
+        cloned: dict[Any, Any] = {}
+        memo[identity] = cloned
+        cloned.update(
+            (_clone_contract_value(key, memo),
+             _clone_contract_value(item, memo))
+            for key, item in value.items()
+        )
+        return cloned
+    if type(value) is list:
+        cloned_list: list[Any] = []
+        memo[identity] = cloned_list
+        cloned_list.extend(
+            _clone_contract_value(item, memo) for item in value)
+        return cloned_list
+    return copy.deepcopy(value, memo)
 
 
 class ToolContractError(ValueError):
@@ -63,6 +98,7 @@ class ToolContractV2:
     errors: tuple[ToolErrorContract, ...] = ()
     ptc_eligible: bool = False
     namespace: str = "general"
+    result_recovery: ToolResultRecovery = "artifact"
     contract_version: str = field(default="tofu.tool-contract/v2", init=False)
 
     def __post_init__(self) -> None:
@@ -85,6 +121,9 @@ class ToolContractV2:
             raise ValueError("write/approval tools cannot be PTC eligible")
         if self.ptc_eligible and self.idempotency == "non_idempotent":
             raise ValueError("non-idempotent tools cannot be PTC eligible")
+        if self.result_recovery not in {"artifact", "source", "none"}:
+            raise ValueError(
+                "result_recovery must be artifact, source, or none")
 
     def provider_schema(self) -> dict[str, Any]:
         """Compile the short, cache-stable provider function schema."""
@@ -93,7 +132,7 @@ class ToolContractV2:
             "function": {
                 "name": self.name,
                 "description": self.model_description.strip(),
-                "parameters": copy.deepcopy(dict(self.parameters)),
+                "parameters": _clone_contract_value(dict(self.parameters)),
             },
         }
 
@@ -106,10 +145,11 @@ class ToolContractV2:
             "summary": self.model_description.strip(),
             "help": (self.detailed_help or self.model_description).strip(),
             "aliases": list(self.search_metadata),
-            "arguments_schema": copy.deepcopy(dict(self.parameters)),
+            "arguments_schema": _clone_contract_value(dict(self.parameters)),
             "permission": self.permission,
             "idempotency": self.idempotency,
             "ptcEligible": self.ptc_eligible,
+            "resultRecovery": self.result_recovery,
             "errors": [
                 {"code": error.code, "retryable": error.retryable,
                  "nextAction": error.next_action}
@@ -155,8 +195,13 @@ def _validate(value: Any, schema: Mapping[str, Any], *, path: str) -> Any:
         minimum = int(schema.get("minLength") or 0)
         maximum = schema.get("maxLength")
         if len(value) < minimum or (maximum is not None and len(value) > int(maximum)):
+            allowed = (f"{minimum}–{int(maximum)}" if maximum is not None
+                       else f">= {minimum}")
             raise ToolContractError(
-                "invalid_argument_length", f"Invalid length at {path}.", path=path)
+                "invalid_argument_length",
+                f"Invalid length at {path} "
+                f"(got {len(value)} chars; allowed {allowed}).",
+                path=path)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
             raise ToolContractError(
@@ -196,7 +241,7 @@ def _validate(value: Any, schema: Mapping[str, Any], *, path: str) -> Any:
         for key, child_schema in properties.items():
             if key not in out and isinstance(child_schema, Mapping) \
                     and "default" in child_schema:
-                out[key] = copy.deepcopy(child_schema["default"])
+                out[key] = _clone_contract_value(child_schema["default"])
             if key in out and isinstance(child_schema, Mapping):
                 out[key] = _validate(out[key], child_schema,
                                      path=f"{path}.{key}")
@@ -208,6 +253,7 @@ def adapt_legacy_tool_contract(
     schema: Mapping[str, Any], *, namespace: str = "general",
     search_metadata: tuple[str, ...] = (), permission: ToolPermission = "read",
     idempotency: ToolIdempotency = "read_only", ptc_eligible: bool = False,
+    result_recovery: ToolResultRecovery = "artifact",
 ) -> ToolContractV2:
     """Read-only compatibility adapter for existing provider schemas."""
     function = schema.get("function") if isinstance(schema, Mapping) else None
@@ -230,6 +276,7 @@ def adapt_legacy_tool_contract(
         idempotency=idempotency,
         ptc_eligible=ptc_eligible,
         namespace=namespace,
+        result_recovery=result_recovery,
     )
 
 
@@ -260,7 +307,7 @@ def compile_execution_contract_documents(
             raise ValueError(f"duplicate executable tool contract: {name}")
         existing = authoritative.get(name)
         if isinstance(existing, Mapping):
-            document = copy.deepcopy(dict(existing))
+            document = _clone_contract_value(dict(existing))
             if str(document.get("name") or "") != name:
                 raise ValueError(
                     f"tool contract name mismatch for executable tool {name}")

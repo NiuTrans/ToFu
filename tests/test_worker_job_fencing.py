@@ -307,10 +307,8 @@ def test_postgres_claim_adapter_uses_skip_locked():
 
 
 def test_worker_job_registry_marks_live_cas_operations_unreceipted():
-    from lib.storage_sidecar.operation_domains import REGISTRY_VERSION
     from lib.storage_sidecar.operation_domains.worker_jobs import OPERATIONS
 
-    assert REGISTRY_VERSION == 21
     assert OPERATIONS['worker_job.enqueue'].receipt_required is True
     assert OPERATIONS['worker_job.request_cancel'].receipt_required is True
     assert OPERATIONS['worker_job.complete'].receipt_required is True
@@ -339,7 +337,7 @@ def test_schema_25_migrates_to_worker_job_authority(tmp_path):
     }
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION == 40
+    assert int(version) == SCHEMA_VERSION
     assert {
         'claim_owner', 'lease_deadline_ms', 'fencing_token', 'attempt_no',
         'cancel_sequence', 'replay_cursor',

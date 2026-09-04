@@ -185,6 +185,27 @@ def _tool_display_fetch_url(fn_name, fn_args, tc_id, tc_args_str):
     return target_url, {'toolName': 'fetch_url', '_display_query': display_query}
 
 
+def _tool_display_server_download(fn_name, fn_args, tc_id, tc_args_str):
+    """Show the destination intent for the canonical server-file download.
+
+    The existing ``fetch_url`` web card already owns URL-safe rendering and a
+    stable frontend icon. Reuse that card family while keeping the collapsed
+    label explicit that the bytes are being staged on the server, rather than
+    merely fetched for reading.
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    target_url = str(args.get('url') or '').strip()
+    short = _short_url(target_url) if target_url else ''
+    display_query = (
+        f'Download to server: {short}' if short else 'Download URL to server'
+    )
+    return target_url or display_query, {
+        'toolName': 'fetch_url',
+        '_display_query': display_query,
+        '_serverDownload': True,
+    }
+
+
 def _tool_display_code_exec(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for standalone code execution tool calls."""
     from lib.project_mod import project_tool_display
@@ -324,11 +345,24 @@ def _tool_display_skills(fn_name, fn_args, tc_id, tc_args_str):
 def _tool_display_conv_ref(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for conversation reference tool calls.
 
-    No emoji prefix — the frontend renders a per-tool SVG icon (see
-    ``_webToolSvg`` in ``static/js/ui/tool_rounds.js``).
+    A raw conversation id answers none of the user's questions — the label
+    names the conversation's TITLE when the display-time enrichment resolved
+    one (``_conv_title`` hint), and falls back to the short id only when the
+    title is genuinely unknown. No emoji prefix — the frontend renders a
+    per-tool SVG icon (see ``_webToolSvg`` in ``static/js/ui/tool_rounds.js``).
     """
-    kw = fn_args.get('keyword', 'all') if fn_name == 'list_conversations' else fn_args.get('conversation_id', '?')[:8]
-    display = f"{fn_name}: {kw}"
+    args = fn_args if isinstance(fn_args, dict) else {}
+    if fn_name == 'list_conversations':
+        kw = str(args.get('keyword') or '').strip()
+        display = (f'List conversations matching "{kw}"' if kw
+                   else 'List conversations')
+        return display, {'toolName': fn_name}
+    title = str(args.get('_conv_title') or '').strip()
+    if title:
+        display = f'Read conversation "{title}"'
+    else:
+        cid = str(args.get('conversation_id') or '').strip()
+        display = f'Read conversation {cid[:8]}' if cid else 'Read conversation'
     return display, {'toolName': fn_name}
 
 
@@ -352,18 +386,30 @@ def _tool_display_brain(fn_name, fn_args, tc_id, tc_args_str):
         title = (args.get('title') or '').strip()
         display = f'Propose to charter: {title}' if title else 'Propose a charter amendment'
     elif fn_name == 'project_peer_status':
+        title = (args.get('_conv_title') or '').strip()
         cid = (args.get('conv_id') or '').strip()
-        display = f'Peer status: conv {cid[:8]}' if cid else 'Live peer status'
+        if title:
+            display = f'Peer status: "{title}"'
+        else:
+            display = f'Peer status: conv {cid[:8]}' if cid else 'Live peer status'
     elif fn_name == 'project_feed_read':
         display = 'Read the project activity feed'
     elif fn_name == 'project_message':
+        title = (args.get('_conv_title') or '').strip()
         to = (args.get('to_conv_id') or '').strip()
-        display = f'Message → conv {to[:8]}' if to else 'Send a peer message'
+        if title:
+            display = f'Message → "{title}"'
+        else:
+            display = f'Message → conv {to[:8]}' if to else 'Send a peer message'
     elif fn_name == 'project_intervene':
+        title = (args.get('_conv_title') or '').strip()
         to = (args.get('to_conv_id') or '').strip()
         hard = bool(args.get('hard_abort'))
         kind = 'Hard intervene' if hard else 'Advisory intervene'
-        display = f'{kind} → conv {to[:8]}' if to else kind
+        if title:
+            display = f'{kind} → "{title}"'
+        else:
+            display = f'{kind} → conv {to[:8]}' if to else kind
     elif fn_name == 'integration_status':
         display = 'Check Git integration status'
     elif fn_name == 'integration_checkpoint':
@@ -384,20 +430,30 @@ def _tool_display_brain(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_artifact(fn_name, fn_args, tc_id, tc_args_str):
-    """Label bounded continuation/search over a prior large tool result."""
+    """Label bounded continuation/search over a prior large tool result.
+
+    This is the no-provenance fallback: the artifact_ref content digest and
+    the cursor offset are machine handles, so they are not rendered. When the
+    spill site registered the artifact's origin on this task,
+    ``_build_tool_round_entry`` relabels the row with the SOURCE round + tool
+    display (``Read compacted result of R10 · …``) — that readable label is
+    the common case; this fallback covers cross-turn reads and secondary
+    surfaces with no task context.
+    """
     args = fn_args if isinstance(fn_args, dict) else {}
-    artifact_ref = str(args.get('artifact_ref') or '').strip()
-    short_ref = artifact_ref[:16]
     if fn_name == 'search_tool_artifact':
-        query = str(args.get('query') or '').strip()
-        target = f' in {short_ref}' if short_ref else ''
-        display = f'Search tool result{target}: {query}' if query \
-            else f'Search tool result{target}'
+        searches = args.get('searches')
+        if isinstance(searches, list) and searches:
+            display = f'Search {len(searches)} saved tool results'
+        else:
+            query = str(args.get('query') or '').strip()
+            display = (f'Search saved tool result: {query}' if query
+                       else 'Search saved tool result')
     else:
-        cursor = str(args.get('cursor') or '').strip()
-        target = f': {short_ref}' if short_ref else ''
-        suffix = f' from {cursor}' if cursor and cursor != '0' else ''
-        display = f'Read tool result{target}{suffix}'
+        reads = args.get('reads')
+        display = (f'Read {len(reads)} saved tool results'
+                   if isinstance(reads, list) and reads
+                   else 'Read saved tool result')
     return display, {'toolName': fn_name}
 
 
@@ -420,14 +476,115 @@ def _tool_display_todo(fn_name, fn_args, tc_id, tc_args_str):
     return display, {'toolName': fn_name}
 
 
+def _tool_display_local_serve(fn_name, fn_args, tc_id, tc_args_str):
+    """Human labels for managed local-deployment tools.
+
+    The salient part is the model path basename (prepare/deploy) — internal
+    instance ids stay machine handles and are not shown, mirroring the
+    scheduler renderer's id rule.
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    path = str(args.get('model_path') or '').strip()
+    base = path.rstrip('/').rsplit('/', 1)[-1] if path else ''
+    if fn_name == 'local_serve_prepare':
+        display = (f'Inspect local model: {base}' if base
+                   else 'Inspect local model')
+    elif fn_name == 'local_serve_deploy':
+        engine = str(args.get('engine') or '').strip()
+        display = (f'Deploy local model: {base}' if base
+                   else 'Deploy local model')
+        if engine:
+            display += f' · {engine}'
+    elif fn_name == 'local_serve_status':
+        display = 'Check local deployment status'
+    elif fn_name == 'local_serve_list':
+        display = 'List local deployments'
+    elif fn_name == 'local_serve_stop':
+        display = 'Stop local deployment'
+    elif fn_name == 'local_serve_remove':
+        display = 'Remove local deployment'
+    else:
+        display = fn_name
+    return display, {'toolName': fn_name}
+
+
 def _tool_display_scheduler(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for scheduler tool calls (frontend renders SVG icon)."""
-    return fn_name, {'toolName': fn_name}
+    """Human labels for scheduler/timer tools (frontend renders SVG icon).
+
+    Internal task/timer ids are machine handles and are deliberately not
+    shown; the schedule name, cron expression, action verb, or watch
+    instruction is the human-readable salient part.
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    if fn_name == 'schedule_create':
+        name = str(args.get('name') or '').strip()
+        sched = str(args.get('schedule') or '').strip()
+        display = f'Create schedule "{name}"' if name else 'Create schedule'
+        if sched:
+            display += f' · {sched}'
+    elif fn_name == 'schedule_list':
+        display = 'List scheduled tasks'
+    elif fn_name == 'schedule_manage':
+        action = str(args.get('action') or '').strip()
+        display = f'Schedule: {action}' if action else 'Manage schedule'
+    elif fn_name == 'await_task':
+        action = str(args.get('action') or '').strip()
+        display = f'Await task: {action}' if action else 'Await task'
+    elif fn_name == 'timer_create':
+        instr = str(args.get('check_instruction') or '').strip()
+        clip = instr if len(instr) <= 60 else instr[:59] + '…'
+        display = (f'Create timer watcher: {clip}' if clip
+                   else 'Create timer watcher')
+    elif fn_name == 'timer_manage':
+        action = str(args.get('action') or '').strip()
+        display = (f'Timer watcher: {action}' if action
+                   else 'Manage timer watcher')
+    else:
+        display = fn_name
+    return display, {'toolName': fn_name}
 
 
 def _tool_display_desktop(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for desktop tool calls (frontend renders SVG icon)."""
-    return fn_name, {'toolName': fn_name}
+    """Human labels for desktop tools (frontend renders SVG icon).
+
+    These used to render the bare ``desktop_*`` function name; show the
+    salient argument (path / app / command / action) instead.
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    path = str(args.get('path') or '').strip()
+    if fn_name == 'desktop_list_files':
+        display = f'List local files: {path}' if path else 'List local files'
+    elif fn_name == 'desktop_read_file':
+        display = f'Read local file: {path}' if path else 'Read local file'
+    elif fn_name == 'desktop_write_file':
+        display = f'Write local file: {path}' if path else 'Write local file'
+    elif fn_name == 'desktop_open_file':
+        display = f'Open on desktop: {path}' if path else 'Open file on desktop'
+    elif fn_name == 'desktop_open_app':
+        app = str(args.get('app') or '').strip()
+        display = f'Open app: {app}' if app else 'Open desktop app'
+    elif fn_name == 'desktop_run_command':
+        cmd = str(args.get('command') or '').strip()
+        display = f'Run on desktop: {cmd}' if cmd else 'Run desktop command'
+    elif fn_name == 'desktop_screenshot':
+        display = 'Screenshot the desktop'
+    elif fn_name == 'desktop_gui_action':
+        action = str(args.get('action') or '').strip()
+        text = str(args.get('text') or '').strip()
+        display = f'Desktop GUI: {action}' if action else 'Desktop GUI action'
+        if text:
+            clip = text if len(text) <= 40 else text[:39] + '…'
+            display += f' "{clip}"'
+    elif fn_name == 'desktop_clipboard':
+        action = str(args.get('action') or '').strip()
+        display = (f'Desktop clipboard: {action}' if action
+                   else 'Desktop clipboard')
+    elif fn_name == 'desktop_system_info':
+        kind = str(args.get('type') or 'overview').strip()
+        display = f'Desktop system info [{kind}]'
+    else:
+        display = fn_name
+    return display, {'toolName': fn_name}
 
 
 def _tool_display_swarm(fn_name, fn_args, tc_id, tc_args_str):
@@ -472,7 +629,7 @@ def _tool_display_swarm(fn_name, fn_args, tc_id, tc_args_str):
             single = str(agent_ids[0] or '')
         else:
             single = (fn_args.get('agent_id', '') if isinstance(fn_args, dict) else '')
-        label = f'Fetching result for {single[:12]}' if single else 'Fetching agent result'
+        label = f'Fetching result for {single}' if single else 'Fetching agent result'
         return label, {'toolName': 'get_agent_result'}
 
     # Artifact tools fall through to the generic renderer in the dispatch
@@ -533,10 +690,11 @@ def _tool_display_inspect_image(fn_name, fn_args, tc_id, tc_args_str):
     else:
         base = os.path.basename(path) or path
     ops = []
-    if fn_args.get('crop'):
+    has_crop = fn_args.get('crop') is not None
+    if has_crop:
         ops.append('crop')
     z = fn_args.get('zoom')
-    if z:
+    if z and not has_crop:
         try:
             ops.append(f'{float(z):g}×')
         except (TypeError, ValueError):

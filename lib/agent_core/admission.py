@@ -38,7 +38,10 @@ import weakref
 from typing import Optional
 
 from lib.log import get_logger
-from runtime_guards import deployment_resource_default
+from runtime_guards import (
+    deployment_resource_default,
+    task_concurrency_hard_ceiling,
+)
 
 logger = get_logger(__name__)
 
@@ -73,7 +76,15 @@ def _default_max_inflight() -> int:
             '[Admission] TOFU_MAX_INFLIGHT_TASKS must be positive; using %d',
             default)
         n = default
-    return min(256, n)
+    hard_ceiling = task_concurrency_hard_ceiling(os.environ)
+    if n > hard_ceiling:
+        logger.warning(
+            '[Admission] TOFU_MAX_INFLIGHT_TASKS=%d exceeds the worker RSS '
+            'budget; clamping to %d (raise TOFU_PROCESS_RSS_RECYCLE_MB with '
+            'TOFU_TASK_RSS_RESERVE_MB to increase both safely)',
+            n, hard_ceiling,
+        )
+    return min(256, n, hard_ceiling)
 
 
 def _memory_pressure_allows_admission() -> bool:
@@ -88,12 +99,42 @@ def _memory_pressure_allows_admission() -> bool:
     Off-cgroup/unreadable environments fail open. Set
     ``TOFU_ADMISSION_CGROUP_PCT=0`` to disable this independent safety gate.
     """
+    global _last_pressure_warn
+
     # Never let a host's unrelated test-runner cgroup pressure make otherwise
     # deterministic unit tests return 503. Tests that exercise this gate opt in
     # by setting the knob explicitly.
     if ('pytest' in sys.modules
-            and 'TOFU_ADMISSION_CGROUP_PCT' not in os.environ):
+            and 'TOFU_ADMISSION_CGROUP_PCT' not in os.environ
+            and 'TOFU_ADMISSION_PROCESS_RSS' not in os.environ):
         return True
+    process_guard = str(
+        os.environ.get('TOFU_ADMISSION_PROCESS_RSS', '1') or '1'
+    ).strip().lower() not in {'0', 'false', 'no', 'off'}
+    if process_guard:
+        try:
+            from lib.cgroup_guard import process_rss_admission_snapshot
+            process_snapshot = process_rss_admission_snapshot()
+        except Exception as e:
+            logger.debug(
+                '[Admission] process RSS admission probe failed open: %s', e)
+            process_snapshot = None
+        if process_snapshot and not process_snapshot.get('allowed'):
+            now = time.monotonic()
+            with _pressure_warn_lock:
+                should_log = now - _last_pressure_warn >= 30.0
+                if should_log:
+                    _last_pressure_warn = now
+            if should_log:
+                logger.warning(
+                    '[Admission] refusing new agent: worker RSS %.1f MiB has '
+                    'only %.1f MiB below its hard ceiling; one task reserves '
+                    '%.1f MiB',
+                    float(process_snapshot['rss_bytes']) / (1 << 20),
+                    float(process_snapshot['headroom_bytes']) / (1 << 20),
+                    float(process_snapshot['reserve_bytes']) / (1 << 20),
+                )
+            return False
     raw = os.environ.get('TOFU_ADMISSION_CGROUP_PCT', '96')
     try:
         threshold = float(raw or '96')
@@ -120,7 +161,6 @@ def _memory_pressure_allows_admission() -> bool:
         return True
     if pct < threshold:
         return True
-    global _last_pressure_warn
     now = time.monotonic()
     with _pressure_warn_lock:
         should_log = now - _last_pressure_warn >= 30.0
@@ -160,13 +200,12 @@ class AdmissionController:
     behaviour is byte-equivalent to the old in-process semaphore. The atomic
     acquire means concurrent admits can never overshoot the ceiling.
 
-    The public contract is unchanged — ``try_acquire()`` / ``release()`` take
-    no id (6 call sites rely on that). Since ``release()`` has no id, THIS
-    replica tracks the slot keys it minted in an in-process LIFO and releases
-    one per ``release()`` call. That bookkeeping is intentionally per-replica
-    (a replica only releases its OWN slots; a crashed replica's slots reclaim
-    by TTL) — it does NOT undermine the cross-replica count, which lives in the
-    store. ``max_inflight=0`` means unbounded.
+    New execution owners use ``acquire() -> lease_id`` and
+    ``release(lease_id)`` so concurrent terminal callbacks can release only the
+    slot they acquired. ``try_acquire()`` / argument-free ``release()`` remain
+    a compatibility adapter for older callers and tests; production request
+    paths must carry the explicit token. A crashed replica's exact outstanding
+    leases still reclaim by TTL. ``max_inflight=0`` means unbounded.
     """
 
     _KIND = 'admit'
@@ -175,7 +214,7 @@ class AdmissionController:
         self.max_inflight = (_default_max_inflight()
                              if max_inflight is None else max(0, max_inflight))
         self._lock = threading.Lock()
-        self._held: list[str] = []  # this replica's minted slot keys (LIFO)
+        self._held: dict[str, None] = {}  # exact locally-owned lease keys
         self._ttl = _admit_slot_ttl()
         self._last_refusal_reason = ''
         self._heartbeat_stop = threading.Event()
@@ -185,18 +224,18 @@ class AdmissionController:
         from lib.runtime_state_store import get_store
         return get_store()
 
-    def try_acquire(self) -> bool:
-        """Acquire a slot without blocking.
+    def acquire(self) -> str | None:
+        """Acquire and return one explicit lease id without blocking.
 
-        Returns True if a slot was granted (caller MUST later call
-        :meth:`release`), False if the server is at capacity (503). Always
-        True when task-count admission is unbounded and the independent memory
+        Returns a token if a slot was granted (caller MUST later pass it to
+        :meth:`release`), ``None`` at capacity. A token is also returned when
+        task-count admission is unbounded and the independent memory
         pressure gate is open. Atomic — no check-then-act overshoot.
         """
         if not _memory_pressure_allows_admission():
             with self._lock:
                 self._last_refusal_reason = 'memory_pressure'
-            return False
+            return None
         import uuid
         slot_key = uuid.uuid4().hex
         ok = self._store().acquire_slot(
@@ -204,13 +243,17 @@ class AdmissionController:
             count_prefix='')
         if ok:
             with self._lock:
-                self._held.append(slot_key)
+                self._held[slot_key] = None
                 self._last_refusal_reason = ''
             self._ensure_heartbeat()
         else:
             with self._lock:
                 self._last_refusal_reason = 'capacity'
-        return ok
+        return slot_key if ok else None
+
+    def try_acquire(self) -> bool:
+        """Compatibility boolean adapter; new owners should retain acquire()."""
+        return self.acquire() is not None
 
     def _ensure_heartbeat(self) -> None:
         """Start one lease-heartbeat thread for this controller, lazily.
@@ -251,7 +294,7 @@ class AdmissionController:
             return
         try:
             self._store().refresh_slots(
-                self._KIND, held, ttl=self._ttl, count_prefix='')
+                self._KIND, tuple(held), ttl=self._ttl, count_prefix='')
         except Exception as e:
             # Admission remains fail-open. A later heartbeat retries, while the
             # tasks themselves continue completely unaffected.
@@ -264,20 +307,34 @@ class AdmissionController:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, timeout))
 
-    def release(self) -> None:
-        """Return a slot. Idempotent-safe against over-release (pops one of
-        THIS replica's minted slot keys and deletes it from the store)."""
+    def release(self, lease_id: str | None = None) -> bool:
+        """Return an exact slot and report whether this call owned it.
+
+        Omitting ``lease_id`` retains the legacy LIFO adapter. Explicit tokens
+        are idempotent: a duplicate or foreign release is a no-op and cannot
+        decrement another execution's shared count.
+        """
         with self._lock:
-            slot_key = self._held.pop() if self._held else None
-        if slot_key is None:
+            if lease_id is None:
+                slot_key = next(reversed(self._held), None) if self._held else None
+            else:
+                slot_key = str(lease_id or '') or None
+            owned = bool(slot_key and slot_key in self._held)
+            if owned:
+                self._held.pop(slot_key, None)
+        if not owned or slot_key is None:
             # Over-release (more releases than acquires on this replica) — the
             # store count is already correct; nothing to delete. Log at debug.
             logger.debug('[Admission] release with no held slot — over-release')
-            return
+            return False
         try:
             self._store().release_slot(self._KIND, slot_key, '')
         except Exception as e:
             logger.warning('[Admission] slot release failed: %s', e)
+            # The durable TTL is the recovery owner. The local heartbeat must
+            # not resurrect a lease whose execution already terminalized.
+            return False
+        return True
 
     @property
     def in_flight(self) -> int:

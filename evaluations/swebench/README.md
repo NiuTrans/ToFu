@@ -141,7 +141,7 @@ key。若 key 只通过 `LLM_API_KEYS` 环境变量提供，可以额外传
   --agent rootless_vm.harbor_tofu_agent:TofuHostAgent \
   --agent-version 0.8.4 \
   --reasoning-effort max \
-  --model deepseek-v4-flash-meituan \
+  --model deepseek-v4-flash \
   --task swe-bench/psf__requests-1142 \
   --backend rootless-qemu \
   --rootless-base-disk "$ROOTLESS_VM_BASE_DISK" \
@@ -169,7 +169,7 @@ export TOFU_CODEX_01491_BINARY=/absolute/pinned/codex
 export TOFU_CODEX_01491_SHA256=<64-hex-sha256>
 export TOFU_KIMI_PROVIDER_FACE=meituan-chat
 export TOFU_KIMI_SLOT_ID=<non-secret-shared-slot-id>
-export KIMI_CHAT_BASE_URL=<meituan-kimi-chat-base-url>
+export KIMI_CHAT_BASE_URL=<kimi-chat-base-url>
 export KIMI_API_KEY=<host-only-key>
 
 "$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench run \
@@ -231,7 +231,7 @@ arm、prompt contract、tool schema、provider/slot、thinking 和 agent revisio
 ```bash
 export TOFU_KIMI_PROVIDER_FACE=meituan-chat
 export TOFU_KIMI_SLOT_ID=<non-secret-shared-slot-id>
-export KIMI_CHAT_BASE_URL=<meituan-kimi-chat-base-url>
+export KIMI_CHAT_BASE_URL=<kimi-chat-base-url>
 export KIMI_API_KEY=<host-only-key>
 
 "$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench run \

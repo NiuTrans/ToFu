@@ -21,7 +21,7 @@ class ServerLifecycleTest {
         alias: String = "s",
         baseUrl: String = "https://abc-vscode-dc1.codelab.example.com/proxy/15000/",
         cookieHost: String? = null,
-        projectPath: String? = "/home/dev/chatui",
+        projectPath: String? = "/home/dev/tofu",
     ) = Profile(
         id = 1, alias = alias, baseUrl = baseUrl,
         authType = AuthType.CODE_SERVER_PASSWORD,

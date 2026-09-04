@@ -1,11 +1,9 @@
 """lib/video_analysis/_store.py — the video-processing registry.
 
-One JSON document (``<data_root>/video_analysis.json``) mapping
-``video_id → record``. The record is the LIVE status the polling endpoint
-serves; it is NOT the durable payload — once processing finishes, the
-frontend embeds the full frame list + transcript into the conversation
-message itself (the same pattern as ``images[]``), so conversations keep
-working after the registry entry is pruned.
+One bounded JSON document (``<data_root>/video_analysis.json``) maps
+``video_id → record`` for live polling only. Durable originals and derived
+evidence live under the unified attachment authority; conversation turns keep
+only its reference, so pruning this registry never removes user data.
 
 All writes go through :func:`lib.json_store.update_json_atomic` (per-path
 lock + atomic rename), so the background pipeline thread and the polling
@@ -28,7 +26,7 @@ from lib.video_analysis._config import RECORD_TTL_S
 logger = get_logger(__name__)
 
 #: Processing phases, in order — the frontend progress chip renders these.
-PHASES = ('probe', 'persist', 'frames', 'storyboard', 'audio', 'done')
+PHASES = ('probe', 'frames', 'storyboard', 'audio', 'done')
 
 
 def _registry_path() -> str:

@@ -29,13 +29,17 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from lib.storage_sidecar import fastpath
+from lib.storage.errors import StorageError
+from lib.storage_sidecar import fastpath, shipper as shipper_module
 from lib.storage_sidecar.shipper import (
     WalShipper,
     adaptive_wal_rebase_budget,
+    filesystem_wal_rebase_maximum,
+    proactive_wal_rebase_trigger,
 )
 
 pytestmark = pytest.mark.unit
@@ -133,10 +137,104 @@ def test_wal_rebase_budget_scales_with_authority_and_has_a_disk_ceiling():
     mib = 1024 ** 2
     gib = 1024 ** 3
 
-    assert adaptive_wal_rebase_budget(512 * mib, 8 * gib) == 64 * mib
-    assert adaptive_wal_rebase_budget(16 * gib, 8 * gib) == 2 * gib
+    assert adaptive_wal_rebase_budget(512 * mib, 8 * gib) == 128 * mib
+    assert adaptive_wal_rebase_budget(16 * gib, 8 * gib) == 4 * gib
     assert adaptive_wal_rebase_budget(80 * gib, 8 * gib) == 8 * gib
+    assert adaptive_wal_rebase_budget(80 * gib, 16 * gib) == 16 * gib
     assert adaptive_wal_rebase_budget(80 * gib, 512 * mib) == 512 * mib
+
+
+def test_proactive_wal_rebase_reserves_one_sixteenth_for_checkpoint_races():
+    mib = 1024 ** 2
+    gib = 1024 ** 3
+
+    assert proactive_wal_rebase_trigger(16 * gib) == 15 * gib
+    assert proactive_wal_rebase_trigger(64 * mib) == 60 * mib
+
+
+def test_ship_pass_rebases_before_the_hard_write_pressure_fence(
+        tmp_path, monkeypatch):
+    pressure_bytes = 16 * 1024 ** 2
+    shipper = WalShipper(
+        tmp_path / 'front.sqlite3',
+        tmp_path / 'shadow',
+        authority_uuid='proactive-rebase',
+        checkpoint_fn=lambda: None,
+        wal_budget_bytes=pressure_bytes,
+    )
+    observed_wal_bytes = {'value': shipper._wal_rebase_trigger_bytes - 1}
+    monkeypatch.setattr(shipper, '_frame_size', lambda: 1)
+    monkeypatch.setattr(
+        shipper, '_local_wal_size', lambda: observed_wal_bytes['value'])
+    monkeypatch.setattr(
+        shipper, '_maybe_write_manifest', lambda **_kwargs: None)
+    shipper._wal_shipped = observed_wal_bytes['value']
+    cycles = []
+    monkeypatch.setattr(
+        shipper, '_snapshot_cycle', lambda: cycles.append('rebase'))
+
+    shipper._ship_pass_locked()
+    assert cycles == []
+
+    observed_wal_bytes['value'] = shipper._wal_rebase_trigger_bytes
+    shipper._wal_shipped = observed_wal_bytes['value']
+    shipper.notify_commit()
+    shipper.assert_write_admitted()
+    shipper._ship_pass_locked()
+
+    assert cycles == ['rebase']
+    assert shipper.status()['write_pressure_active'] is False
+    assert shipper.status()['wal_write_headroom_bytes'] == (
+        pressure_bytes - shipper._wal_rebase_trigger_bytes
+    )
+
+
+def test_wal_rebase_maximum_is_bounded_by_both_filesystems():
+    mib = 1024 ** 2
+    gib = 1024 ** 3
+
+    assert filesystem_wal_rebase_maximum(
+        16 * gib,
+        local_free_bytes=100 * gib,
+        shadow_free_bytes=1024 * gib,
+    ) == 2 * gib
+    assert filesystem_wal_rebase_maximum(
+        512 * mib,
+        local_free_bytes=100 * gib,
+        shadow_free_bytes=1024 * gib,
+    ) == 512 * mib
+    assert filesystem_wal_rebase_maximum(
+        16 * gib,
+        local_free_bytes=None,
+        shadow_free_bytes=None,
+    ) == 16 * gib
+
+
+def test_shipper_rechecks_local_and_shadow_free_space_for_default_budget(
+        tmp_path, monkeypatch):
+    gib = 1024 ** 3
+    local_dir = tmp_path / 'front'
+    shadow_dir = tmp_path / 'data' / fastpath.SHADOW_DIRNAME
+    local_dir.mkdir()
+    shadow_dir.mkdir(parents=True)
+    local_db = local_dir / 'tofu.db'
+    local_db.touch()
+    os.truncate(local_db, 16 * gib)
+
+    def disk_usage(path):
+        free = 100 * gib if Path(path) == local_dir else 1024 * gib
+        return SimpleNamespace(free=free)
+
+    monkeypatch.setattr(shipper_module.shutil, 'disk_usage', disk_usage)
+    shipper = WalShipper(
+        local_db,
+        shadow_dir,
+        authority_uuid='test',
+        checkpoint_fn=lambda: None,
+        wal_budget_max_bytes=16 * gib,
+    )
+
+    assert shipper.status()['wal_rebase_budget_bytes'] == 2 * gib
 
 
 def test_explicit_shipper_wal_budget_remains_authoritative(tmp_path):
@@ -150,6 +248,64 @@ def test_explicit_shipper_wal_budget_remains_authoritative(tmp_path):
     )
 
     assert shipper.status()['wal_rebase_budget_bytes'] == 2 * 1024 ** 2
+
+
+def test_rebase_write_pressure_fences_new_writes_at_the_wal_budget(
+        tmp_path, monkeypatch):
+    budget_bytes = 2 * 1024 ** 2
+    observed_wal_bytes = {'value': 0}
+    shipper = WalShipper(
+        tmp_path / 'front.sqlite3',
+        tmp_path / 'shadow',
+        authority_uuid='pressure-authority',
+        checkpoint_fn=lambda: None,
+        wal_budget_bytes=budget_bytes,
+    )
+    monkeypatch.setattr(
+        shipper, '_local_wal_size', lambda: observed_wal_bytes['value'])
+
+    # The threshold protects the ordinary pre-checkpoint window too: a failed
+    # capacity preflight must not leave the local WAL free to grow forever.
+    shipper._set_rebase_active(False)
+    shipper.assert_write_admitted()
+    observed_wal_bytes['value'] = budget_bytes
+    shipper.notify_commit()
+
+    with pytest.raises(StorageError) as raised:
+        shipper.assert_write_admitted()
+    assert raised.value.code == 'database_busy'
+    assert raised.value.retryable is True
+    assert raised.value.retry_after_ms == 250
+    status = shipper.status()
+    assert status['rebase_active'] is False
+    assert status['write_pressure_active'] is True
+    assert status['write_pressure_activations'] == 1
+    assert status['write_pressure_rejections'] == 1
+    assert status['wal_write_pressure_bytes'] == budget_bytes
+    assert status['local_wal_bytes'] == budget_bytes
+    assert status['wal_write_headroom_bytes'] == 0
+
+    shipper._set_rebase_active(True)
+    assert shipper.status()['write_pressure_active'] is True
+
+    # Publication alone must not release a full WAL: the next raw checkpoint
+    # owns that transition. Once the checkpoint truncates the WAL, admission
+    # reopens immediately.
+    shipper._set_rebase_active(False)
+    assert shipper.status()['write_pressure_active'] is True
+    observed_wal_bytes['value'] = 0
+    shipper._set_rebase_active(False)
+    shipper.assert_write_admitted()
+    assert shipper.status()['write_pressure_active'] is False
+
+    def fail_wal_observation():
+        raise OSError('injected WAL stat failure')
+
+    monkeypatch.setattr(shipper, '_local_wal_size', fail_wal_observation)
+    shipper._observe_current_write_pressure()
+    status = shipper.status()
+    assert status['write_pressure_active'] is True
+    assert status['write_pressure_observation_failures'] == 1
 
 
 def test_shipper_reclaims_only_dead_owner_private_snapshot_artifacts(
@@ -181,6 +337,122 @@ def test_shipper_reclaims_only_dead_owner_private_snapshot_artifacts(
     assert unrelated.read_bytes() == b'keep-user'
     assert shipper.metrics['stale_artifacts_reclaimed'] == 2
     assert shipper.metrics['stale_artifact_bytes_reclaimed'] == 10
+
+
+def test_new_shipper_generation_discovers_resumable_snapshot(tmp_path):
+    local_db = tmp_path / 'front' / 'tofu.db'
+    shadow_dir = tmp_path / 'data' / fastpath.SHADOW_DIRNAME
+    local_db.parent.mkdir(parents=True)
+    shadow_dir.mkdir(parents=True)
+    connection = sqlite3.connect(local_db, isolation_level=None)
+    connection.execute('CREATE TABLE items(k TEXT PRIMARY KEY, v INTEGER)')
+    connection.close()
+    fastpath.write_shadow_manifest(shadow_dir, {
+        'format': 'tofu.fastpath-shadow.v1',
+        'authority_uuid': 'restart-authority',
+        'generation': 4,
+        'wal_shipped_bytes': 0,
+        'snapshot_bytes': local_db.stat().st_size,
+        'updated_at': time.time(),
+    })
+    interrupted = WalShipper(
+        local_db,
+        shadow_dir,
+        authority_uuid='restart-authority',
+        checkpoint_fn=lambda: None,
+    )
+    interrupted._generation = 4
+    interrupted._rebase_snapshot.write_bytes(b'partial')
+    interrupted._write_rebase_state(
+        fastpath._source_fingerprint(local_db),
+        len(b'partial'),
+        phase='copying_database',
+    )
+
+    replacement = WalShipper(
+        local_db,
+        shadow_dir,
+        authority_uuid='restart-authority',
+        checkpoint_fn=lambda: None,
+    )
+    replacement._resume_or_snapshot()
+
+    assert replacement._generation == 4
+    assert replacement._needs_snapshot is True
+    assert replacement._shadow_wal_matches_local is False
+    assert replacement.status()['snapshot_progress_bytes'] == len(b'partial')
+    assert replacement._rebase_snapshot.read_bytes() == b'partial'
+
+
+def test_rebase_capacity_credits_only_owned_resume_progress(
+        tmp_path, monkeypatch):
+    shipper = WalShipper(
+        tmp_path / 'front' / 'tofu.db',
+        tmp_path / 'shadow',
+        authority_uuid='capacity-authority',
+        checkpoint_fn=lambda: None,
+    )
+    shipper._shadow_dir.mkdir(parents=True)
+    shipper._rebase_snapshot.write_bytes(b'reusable-prefix-plus-tail')
+    captured = {}
+
+    def capture(_directory, source_bytes, *, purpose, reusable_bytes):
+        captured.update({
+            'source_bytes': source_bytes,
+            'purpose': purpose,
+            'reusable_bytes': reusable_bytes,
+        })
+
+    monkeypatch.setattr(fastpath, '_require_copy_capacity', capture)
+
+    shipper._require_rebase_capacity(1234, durable_bytes=8)
+
+    assert captured == {
+        'source_bytes': 1234,
+        'purpose': 'fastpath shadow rebase',
+        'reusable_bytes': 8,
+    }
+
+
+def test_rebase_state_write_discards_uncommitted_private_replacement(tmp_path):
+    shipper = WalShipper(
+        tmp_path / 'front' / 'tofu.db',
+        tmp_path / 'shadow',
+        authority_uuid='state-authority',
+        checkpoint_fn=lambda: None,
+    )
+    shipper._shadow_dir.mkdir(parents=True)
+    interrupted_replacement = shipper._rebase_state.with_name(
+        shipper._rebase_state.name + '.new')
+    interrupted_replacement.write_text('uncommitted', encoding='utf-8')
+
+    shipper._write_rebase_state(
+        {'size': 0}, 0, phase='copying_database')
+
+    assert not interrupted_replacement.exists()
+    assert json.loads(shipper._rebase_state.read_text(encoding='utf-8'))[
+        'database_bytes'] == 0
+
+
+def test_wal_copy_refuses_a_short_source_instead_of_zero_extending(tmp_path):
+    local_db = tmp_path / 'front' / 'tofu.db'
+    local_db.parent.mkdir(parents=True)
+    local_db.write_bytes(b'database')
+    local_wal = local_db.with_name(local_db.name + '-wal')
+    local_wal.write_bytes(b'abc')
+    shipper = WalShipper(
+        local_db,
+        tmp_path / 'shadow',
+        authority_uuid='short-wal-authority',
+        checkpoint_fn=lambda: None,
+    )
+    destination = tmp_path / 'partial-shadow.wal'
+
+    with pytest.raises(RuntimeError, match='ended at 3 of 5'):
+        shipper._copy_range_to(destination, 0, 5)
+
+    assert destination.read_bytes() == b'abc'
+
 
 @pytest.fixture()
 def front(tmp_path):
@@ -247,6 +519,7 @@ def front(tmp_path):
         tick_s=0.1,
     )
     writer._on_commit = shipper.notify_commit
+    writer.set_write_admission_hook(shipper.assert_write_admitted)
     yield type('Front', (), {
         'db': local_db, 'shadow_dir': shadow_dir, 'writer': writer,
         'shipper': shipper, 'put': staticmethod(put),
@@ -286,6 +559,9 @@ def test_initial_snapshot_then_incremental_shipping(front):
     status = shipper.status()
     assert status['ships'] >= 1
     assert status['ship_lag_bytes'] >= 0
+    assert status['snapshot_database_bytes_copied'] \
+        == manifest['snapshot_bytes']
+    assert status['snapshot_wal_bytes_copied'] >= 0
 
 
 def test_backup_pin_forces_checkpointed_generation_and_reuses_shadow_inode(
@@ -304,15 +580,144 @@ def test_backup_pin_forces_checkpointed_generation_and_reuses_shadow_inode(
     )
 
     snapshot, _shadow_wal = fastpath.shadow_paths(front.shadow_dir)
-    assert result == {
-        'generation': generation_before + 1,
-        'bytes': snapshot.stat().st_size,
-        'copy_strategy': 'hardlink',
-    }
+    assert result['generation'] == generation_before + 1
+    assert result['bytes'] == snapshot.stat().st_size
+    assert result['copy_strategy'] == 'hardlink'
+    assert 0 < result['recovery_point_at'] <= time.time()
     assert (destination.stat().st_dev, destination.stat().st_ino) == (
         snapshot.stat().st_dev, snapshot.stat().st_ino)
     assert _open_items(destination)['included-before-backup'] == 17
     assert front.checkpoint_deadlines[-1] == deadline_at
+
+
+def test_timed_out_snapshot_resumes_from_last_durable_checkpoint(
+        front, tmp_path, monkeypatch):
+    """A multi-GiB backup timeout must not discard its fsynced prefix."""
+    front.shipper._tick_s = 60
+    front.shipper.start()
+    front.shipper._wake.set()
+    _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
+              label='initial snapshot before resumable backup')
+    front.writer._on_commit = None
+    front.put('included-after-resume', 29)
+    snapshot, _shadow_wal = fastpath.shadow_paths(front.shadow_dir)
+    previous_snapshot = snapshot.read_bytes()
+    previous_manifest = _shadow_manifest(front.shadow_dir)
+    monkeypatch.setattr(fastpath, '_SEED_COPY_CHECKPOINT_BYTES', 4096)
+    original_state_write = shipper_module.write_json_durable
+    interrupted = False
+
+    def interrupt_after_first_checkpoint(path, payload):
+        nonlocal interrupted
+        original_state_write(path, payload)
+        if (Path(path) == front.shipper._rebase_state
+                and int(payload.get('database_bytes') or 0) > 0
+                and not interrupted):
+            interrupted = True
+            raise TimeoutError('simulated backup deadline')
+
+    monkeypatch.setattr(
+        shipper_module, 'write_json_durable',
+        interrupt_after_first_checkpoint)
+    with pytest.raises(TimeoutError, match='simulated backup deadline'):
+        front.shipper.pin_checkpointed_snapshot_for_backup(
+            tmp_path / 'timed-out.sqlite3',
+            deadline_at=time.monotonic() + 10,
+        )
+
+    state = json.loads(front.shipper._rebase_state.read_text(encoding='utf-8'))
+    durable_bytes = state['database_bytes']
+    recovery_point_at = state['recovery_point_at']
+    assert 0 < durable_bytes < front.db.stat().st_size
+    assert front.shipper._rebase_snapshot.stat().st_size >= durable_bytes
+    assert snapshot.read_bytes() == previous_snapshot
+    assert _shadow_manifest(front.shadow_dir) == previous_manifest
+    front.put('committed-after-recovery-boundary', 30)
+
+    monkeypatch.setattr(
+        shipper_module, 'write_json_durable', original_state_write)
+    original_copy = fastpath._copy_file_checkpointed
+    resume_offsets = []
+
+    def record_resume(*args, **kwargs):
+        if Path(args[0]) == front.db:
+            resume_offsets.append(kwargs['durable_bytes'])
+        return original_copy(*args, **kwargs)
+
+    monkeypatch.setattr(fastpath, '_copy_file_checkpointed', record_resume)
+    destination = tmp_path / 'resumed.sqlite3'
+    result = front.shipper.pin_checkpointed_snapshot_for_backup(
+        destination,
+        deadline_at=time.monotonic() + 10,
+    )
+
+    assert resume_offsets == [durable_bytes]
+    assert result['generation'] == previous_manifest['generation'] + 1
+    assert _open_items(destination)['included-after-resume'] == 29
+    assert 'committed-after-recovery-boundary' not in _open_items(destination)
+    assert result['recovery_point_at'] == recovery_point_at
+    assert not front.shipper._rebase_state.exists()
+    assert not front.shipper._rebase_snapshot.exists()
+    status = front.shipper.status()
+    assert status['snapshot_resume_count'] == 1
+    assert status['snapshot_resumed_bytes'] == durable_bytes
+    assert status['snapshot_progress_bytes'] == 0
+
+
+def test_changed_snapshot_source_invalidates_resumable_prefix(
+        front, tmp_path, monkeypatch):
+    """A resume witness is authority only while its source identity matches."""
+    front.shipper._tick_s = 60
+    front.shipper.start()
+    front.shipper._wake.set()
+    _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
+              label='initial snapshot before changed-source backup')
+    front.writer._on_commit = None
+    front.put('changed-source', 31)
+    monkeypatch.setattr(fastpath, '_SEED_COPY_CHECKPOINT_BYTES', 4096)
+    original_state_write = shipper_module.write_json_durable
+    interrupted = False
+
+    def interrupt_after_first_checkpoint(path, payload):
+        nonlocal interrupted
+        original_state_write(path, payload)
+        if (Path(path) == front.shipper._rebase_state
+                and int(payload.get('database_bytes') or 0) > 0
+                and not interrupted):
+            interrupted = True
+            raise TimeoutError('simulated changed-source boundary')
+
+    monkeypatch.setattr(
+        shipper_module, 'write_json_durable',
+        interrupt_after_first_checkpoint)
+    with pytest.raises(TimeoutError, match='changed-source boundary'):
+        front.shipper.pin_checkpointed_snapshot_for_backup(
+            tmp_path / 'timed-out-changed.sqlite3',
+            deadline_at=time.monotonic() + 10,
+        )
+    monkeypatch.setattr(
+        shipper_module, 'write_json_durable', original_state_write)
+
+    status = front.db.stat()
+    os.utime(front.db, ns=(status.st_atime_ns, status.st_mtime_ns + 1))
+    original_copy = fastpath._copy_file_checkpointed
+    resume_offsets = []
+
+    def record_restart(*args, **kwargs):
+        if Path(args[0]) == front.db:
+            resume_offsets.append(kwargs['durable_bytes'])
+        return original_copy(*args, **kwargs)
+
+    monkeypatch.setattr(fastpath, '_copy_file_checkpointed', record_restart)
+    destination = tmp_path / 'restarted.sqlite3'
+    front.shipper.pin_checkpointed_snapshot_for_backup(
+        destination,
+        deadline_at=time.monotonic() + 10,
+    )
+
+    assert resume_offsets == [0]
+    assert _open_items(destination)['changed-source'] == 31
+    assert front.shipper.status()['snapshot_resume_count'] == 0
 
 
 def test_backup_pin_wait_for_shipper_is_deadline_bounded(tmp_path):
@@ -335,6 +740,77 @@ def test_backup_pin_wait_for_shipper_is_deadline_bounded(tmp_path):
 
     assert time.monotonic() - started_at < 0.5
     assert not (tmp_path / 'never-created.sqlite3').exists()
+
+
+def test_backup_rebase_capacity_refuses_before_checkpoint(
+        front, tmp_path, monkeypatch):
+    front.shipper._tick_s = 60
+    front.shipper.start()
+    front.shipper._wake.set()
+    _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
+              label='initial snapshot before capacity refusal')
+    front.writer._on_commit = None
+    front.put('must-remain-in-old-generation', 37)
+    snapshot, _shadow_wal = fastpath.shadow_paths(front.shadow_dir)
+    previous_snapshot = snapshot.read_bytes()
+    checkpoint_count = len(front.checkpoint_deadlines)
+
+    monkeypatch.setattr(
+        fastpath,
+        '_require_copy_capacity',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError('needs more free bytes')),
+    )
+
+    with pytest.raises(StorageError, match='needs more free bytes') as raised:
+        front.shipper.pin_checkpointed_snapshot_for_backup(
+            tmp_path / 'capacity-refused.sqlite3',
+            deadline_at=time.monotonic() + 10,
+        )
+
+    assert raised.value.code == 'database_unavailable'
+    assert raised.value.retryable is False
+    assert len(front.checkpoint_deadlines) == checkpoint_count
+    assert snapshot.read_bytes() == previous_snapshot
+    assert not front.shipper._rebase_state.exists()
+    assert not front.shipper._rebase_snapshot.exists()
+
+
+def test_backup_rebase_rechecks_capacity_after_wal_growth(
+        front, tmp_path, monkeypatch):
+    front.shipper._tick_s = 60
+    front.shipper.start()
+    front.shipper._wake.set()
+    _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
+              label='initial snapshot before late capacity refusal')
+    front.writer._on_commit = None
+    front.put('preserved-behind-late-capacity-gate', 41)
+    snapshot, _shadow_wal = fastpath.shadow_paths(front.shadow_dir)
+    previous_snapshot = snapshot.read_bytes()
+    capacity_calls = []
+
+    def refuse_publication(_directory, source_bytes, **kwargs):
+        capacity_calls.append((source_bytes, kwargs['reusable_bytes']))
+        if len(capacity_calls) == 3:
+            raise RuntimeError('WAL growth exhausted shadow capacity')
+
+    monkeypatch.setattr(
+        fastpath, '_require_copy_capacity', refuse_publication)
+
+    with pytest.raises(StorageError, match='WAL growth exhausted'):
+        front.shipper.pin_checkpointed_snapshot_for_backup(
+            tmp_path / 'late-capacity-refused.sqlite3',
+            deadline_at=time.monotonic() + 10,
+        )
+
+    state = json.loads(
+        front.shipper._rebase_state.read_text(encoding='utf-8'))
+    assert len(capacity_calls) == 3
+    assert capacity_calls[-1][0] >= front.db.stat().st_size
+    assert 0 < capacity_calls[-1][1] <= front.db.stat().st_size
+    assert state['database_bytes'] == front.db.stat().st_size
+    assert snapshot.read_bytes() == previous_snapshot
+    assert not front.shipper._rebase_wal.exists()
 
 
 def test_backup_pin_cross_device_fallback_is_sequential_and_equivalent(
@@ -360,6 +836,80 @@ def test_backup_pin_cross_device_fallback_is_sequential_and_equivalent(
     assert destination.stat().st_size == snapshot.stat().st_size
     assert destination.stat().st_ino != snapshot.stat().st_ino
     assert _open_items(destination)['cross-device-backup'] == 23
+
+
+def test_backup_pin_same_dir_link_reject_falls_back_to_rename(
+        front, tmp_path, monkeypatch):
+    front.shipper.start()
+    _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
+              label='initial snapshot manifest')
+    front.put('cross-dir-link-backup', 42)
+    real_link = os.link
+
+    def beegfs_style_link(source, destination):
+        if os.path.dirname(os.fspath(source)) != os.path.dirname(
+                os.fspath(destination)):
+            raise OSError(errno.EPERM, 'cross-directory link rejected')
+        return real_link(source, destination)
+
+    monkeypatch.setattr(
+        'lib.storage_sidecar.shipper.os.link', beegfs_style_link)
+    destination = tmp_path / 'renamed-backup.sqlite3'
+
+    result = front.shipper.pin_checkpointed_snapshot_for_backup(
+        destination,
+        deadline_at=time.monotonic() + 10,
+        require_hardlink=True,
+    )
+
+    snapshot, _shadow_wal = fastpath.shadow_paths(front.shadow_dir)
+    assert result['copy_strategy'] == 'hardlink-rename'
+    assert destination.stat().st_ino == snapshot.stat().st_ino
+    assert _open_items(destination)['cross-dir-link-backup'] == 42
+
+
+def test_budget_rotation_still_refuses_when_filesystem_has_no_links(
+        front, tmp_path, monkeypatch):
+    front.shipper.start()
+    _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
+              label='initial snapshot manifest')
+    monkeypatch.setattr(
+        'lib.storage_sidecar.shipper.os.link',
+        lambda _source, _destination: (_ for _ in ()).throw(
+            OSError(errno.EPERM, 'no hard links at all')),
+    )
+    destination = tmp_path / 'refused-nolink.sqlite3'
+
+    with pytest.raises(StorageError, match='requires a same-filesystem'):
+        front.shipper.pin_checkpointed_snapshot_for_backup(
+            destination,
+            deadline_at=time.monotonic() + 10,
+            require_hardlink=True,
+        )
+
+    assert not destination.exists()
+
+def test_budget_rotation_refuses_cross_device_full_copy_fallback(
+        front, tmp_path, monkeypatch):
+    front.shipper.start()
+    _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
+              label='initial snapshot manifest')
+    monkeypatch.setattr(
+        'lib.storage_sidecar.shipper.os.link',
+        lambda _source, _destination: (_ for _ in ()).throw(
+            OSError(errno.EXDEV, 'different filesystem')),
+    )
+    destination = tmp_path / 'refused-budget-copy.sqlite3'
+
+    with pytest.raises(StorageError, match='requires a same-filesystem') as raised:
+        front.shipper.pin_checkpointed_snapshot_for_backup(
+            destination,
+            deadline_at=time.monotonic() + 10,
+            require_hardlink=True,
+        )
+
+    assert raised.value.retryable is False
+    assert not destination.exists()
 
 
 def test_first_shadow_hardlinks_unchanged_verified_classic_seed(tmp_path):
@@ -488,16 +1038,34 @@ def test_shipper_stop_cancels_snapshot_without_restarting_it(
     assert not front.shipper._thread.is_alive()
     assert snapshot_copy_attempts == [True]
     assert not list(front.shadow_dir.glob('snapshot.sqlite3.tmp-*'))
+    assert front.shipper._rebase_state.is_file()
+    assert front.shipper._rebase_state.read_text(encoding='utf-8')
 
 
 def test_snapshot_cycle_rebases_on_wal_budget(front):
-    front.shipper._wal_budget_bytes = 64 * 1024  # force an early cycle
+    forced_budget = 64 * 1024
+    front.shipper._wal_budget_bytes = forced_budget  # force an early cycle
+    front.shipper._wal_rebase_trigger_bytes = forced_budget
+    front.shipper.metrics['wal_rebase_budget_bytes'] = forced_budget
+    front.shipper.metrics['wal_rebase_trigger_bytes'] = forced_budget
+    front.shipper.metrics['wal_write_pressure_bytes'] = forced_budget
     front.shipper.start()
     _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
               label='initial snapshot')
     blob = 'x' * 8192
     for i in range(40):
-        front.put(f'big{i}', blob and i)  # keep rows modest but WAL-growing
+        retry_deadline = time.monotonic() + 5
+        while True:
+            try:
+                front.put(f'big{i}', blob and i)  # modest but WAL-growing
+                break
+            except StorageError as exc:
+                if (exc.code != 'database_busy'
+                        or time.monotonic() >= retry_deadline):
+                    raise
+                # Rebase pressure is a typed transient refusal. The tiny test
+                # image should publish quickly and release admission again.
+                time.sleep(0.01)
     _wait_for(lambda: front.shipper.status()['generation'] >= 2,
               label='budget-triggered snapshot cycle')
     status = front.shipper.status()
@@ -1062,6 +1630,8 @@ def test_supervisor_fastpath_backup_pins_one_checkpointed_shadow_generation(
         snapshot, _shadow_wal = fastpath.shadow_paths(shadow_dir)
         assert result['source_mode'] == 'fastpath-checkpointed-shadow'
         assert result['copy_strategy'] == 'hardlink'
+        assert result['recovery_point_at'] == manifest['recovery_point_at']
+        assert result['recovery_point_at'].endswith('+00:00')
         assert result['snapshot_generation'] >= 2
         assert manifest['snapshot_generation'] == result['snapshot_generation']
         assert manifest['sha256'] == result['sha256']

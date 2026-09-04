@@ -37,6 +37,9 @@ logger = get_logger(__name__)
 _PAUSE_SAME_SEGMENT_MS = 150
 _PAUSE_SAME_SECTION_MS = 300
 _PAUSE_SECTION_BREAK_MS = 800
+_MAX_SYNTHESIS_CHUNKS = 160
+_MAX_AUDIO_PART_BYTES = 32 * 1024 * 1024
+_MAX_AUDIO_INPUT_BYTES = 192 * 1024 * 1024
 
 #: Sentence-ending punctuation for chunk splits (zh + en).
 _SENTENCE_END_RE = re.compile(r'(?<=[。！？；!?;.])\s*')
@@ -72,14 +75,24 @@ def _chunk_text(text: str, max_chars: int) -> list[str]:
 
 
 def _synth_chunk_with_retry(chunk: str, *, voice: str, fmt: str,
-                            speed: float | None) -> tuple[bytes, str]:
+                            speed: float | None,
+                            abort_check=None,
+                            synthesize_fn=None) -> tuple[bytes, str]:
     """Synthesize one chunk; ONE retry on TTSError. Returns (bytes, model)."""
+    synthesize_fn = synthesize_fn or _tts.synthesize
     try:
-        res = _tts.synthesize(chunk, voice=voice, fmt=fmt, speed=speed)
+        res = synthesize_fn(chunk, voice=voice, fmt=fmt, speed=speed)
         return res.audio_bytes, res.model
     except _tts.TTSError as _e:
         logger.debug('synth chunk with retry: TTSError (%s)', _e)
-        res = _tts.synthesize(chunk, voice=voice, fmt=fmt, speed=speed)
+        if abort_check and abort_check():
+            raise AudioSynthesisAborted() from _e
+        try:
+            res = synthesize_fn(chunk, voice=voice, fmt=fmt, speed=speed)
+        except _tts.TTSError as retry_error:
+            if abort_check and abort_check():
+                raise AudioSynthesisAborted() from retry_error
+            raise
         return res.audio_bytes, res.model
 
 
@@ -119,7 +132,11 @@ def _transcode_to_mp3(wav_bytes: bytes) -> bytes | None:
 def synthesize_script_audio(script: dict, *, voice: str,
                             abort_check=None, on_segment_done=None,
                             fmt: str | None = None,
-                            speed: float | None = None) -> dict:
+                            speed: float | None = None,
+                            max_workers: int | None = None,
+                            owner_user_id: int | None = None,
+                            tenant_id: str | None = None,
+                            _synthesize_fn=None) -> dict:
     """Synthesize the whole script into one audio blob.
 
     Args:
@@ -143,29 +160,160 @@ def synthesize_script_audio(script: dict, *, voice: str,
     segments = script.get('segments') or []
     if not segments:
         raise _tts.TTSError('script has no segments to synthesize', status=400)
+    from lib.paper.podcast_prompts import PODCAST_MODES, PODCAST_SEGMENT_LIMITS
+    mode = script.get('mode') if script.get('mode') in PODCAST_MODES else 'short'
+    segment_limit = PODCAST_SEGMENT_LIMITS[mode]
+    if len(segments) > segment_limit:
+        raise _tts.TTSError(
+            f'{mode} podcast has {len(segments)} segments; limit is '
+            f'{segment_limit}', status=400)
+    from lib.paper.podcast_engine._validate import estimate_seconds
+    estimated_seconds = sum(
+        estimate_seconds((segment or {}).get('text') or '')
+        for segment in segments)
+    duration_limit = PODCAST_MODES[mode][2] * 1.25
+    if estimated_seconds > duration_limit:
+        raise _tts.TTSError(
+            f'{mode} podcast estimates {estimated_seconds:.0f}s; synthesis '
+            f'ceiling is {duration_limit:.0f}s', status=400)
     use_fmt = (fmt or '').strip() or _tts.default_format()
     max_chars = _tts.max_input_chars()
+
+    segment_plans = [
+        ((segment or {}).get('section') or '',
+         _chunk_text((segment or {}).get('text') or '', max_chars))
+        for segment in segments
+    ]
+    chunk_count = sum(len(chunks) for _section, chunks in segment_plans)
+    if chunk_count > _MAX_SYNTHESIS_CHUNKS:
+        raise _tts.TTSError(
+            f'podcast requires {chunk_count} synthesis chunks; limit is '
+            f'{_MAX_SYNTHESIS_CHUNKS}', status=400)
+
+    if max_workers is None:
+        from runtime_guards import resolve_resource_budget
+        worker_limit = resolve_resource_budget(
+            'TOFU_PRODUCTION_TTS_FANOUT', maximum=8)
+    else:
+        try:
+            worker_limit = max(1, min(8, int(max_workers)))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError('max_workers must be a positive integer') from exc
+
+    # Validate and plan the full bounded job before touching owner routing.
+    # One session is then shared by every segment worker; its synthesize method
+    # installs the hard pin separately on each pooled thread.
+    if owner_user_id is not None:
+        with _tts.synthesis_session(owner_user_id, tenant_id) as session:
+            return synthesize_script_audio(
+                script,
+                voice=voice,
+                abort_check=abort_check,
+                on_segment_done=on_segment_done,
+                fmt=use_fmt,
+                speed=speed,
+                max_workers=worker_limit,
+                _synthesize_fn=session.synthesize,
+            )
+
+    def _synthesize_segment(index: int, plan):
+        section, chunks = plan
+        rows = []
+        for chunk in chunks:
+            if abort_check and abort_check():
+                raise AudioSynthesisAborted()
+            synthesize_kwargs = {
+                'voice': voice,
+                'fmt': use_fmt,
+                'speed': speed,
+                'abort_check': abort_check,
+            }
+            if _synthesize_fn is not None:
+                synthesize_kwargs['synthesize_fn'] = _synthesize_fn
+            blob, model = _synth_chunk_with_retry(chunk, **synthesize_kwargs)
+            if len(blob) > _MAX_AUDIO_PART_BYTES:
+                raise _tts.TTSError(
+                    f'TTS part is {len(blob)} bytes; limit is '
+                    f'{_MAX_AUDIO_PART_BYTES}', status=502)
+            rows.append((blob, model, _tts.sniff_container(blob)))
+        return index, section, rows
+
+    total = len(segment_plans)
+    segment_results = [None] * total
+    completed_count = 0
+
+    def _record(result) -> None:
+        nonlocal completed_count
+        index, section, rows = result
+        segment_results[index] = (section, rows)
+        completed_count += 1
+        if on_segment_done:
+            on_segment_done(completed_count, total)
+
+    if worker_limit == 1 or total == 1:
+        for index, plan in enumerate(segment_plans):
+            _record(_synthesize_segment(index, plan))
+    else:
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+        queued = list(enumerate(segment_plans))
+        active = {}
+        failure = None
+
+        def _submit_available(pool) -> None:
+            while queued and len(active) < worker_limit:
+                index, plan = queued.pop(0)
+                future = pool.submit(_synthesize_segment, index, plan)
+                active[future] = index
+
+        with ThreadPoolExecutor(
+                max_workers=min(worker_limit, total),
+                thread_name_prefix='paper-podcast-tts') as pool:
+            _submit_available(pool)
+            while active:
+                done, _not_done = wait(active, return_when=FIRST_COMPLETED)
+                for future in sorted(done, key=lambda item: active[item]):
+                    segment_index = active.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.debug(
+                            '[PaperPodcast] segment future failed index=%d: %s',
+                            segment_index, type(exc).__name__,
+                        )
+                        failure = failure or exc
+                    else:
+                        _record(result)
+                if abort_check and abort_check():
+                    failure = AudioSynthesisAborted()
+                if failure is None:
+                    _submit_available(pool)
+        if failure is not None:
+            raise failure
+
+    retained_audio_bytes = sum(
+        len(blob)
+        for result in segment_results
+        for blob, _model, _container in result[1]
+    )
+    if retained_audio_bytes > _MAX_AUDIO_INPUT_BYTES:
+        raise _tts.TTSError(
+            f'TTS parts retain {retained_audio_bytes} bytes; assembly limit is '
+            f'{_MAX_AUDIO_INPUT_BYTES}', status=502)
 
     parts: list[bytes] = []
     pauses: list[int] = []
     containers: set[str] = set()
     tts_model = ''
     prev_section: str | None = None
-    total = len(segments)
 
-    for si, seg in enumerate(segments):
-        section = (seg or {}).get('section') or ''
-        chunks = _chunk_text((seg or {}).get('text') or '', max_chars)
-        for ci, chunk in enumerate(chunks):
-            if abort_check and abort_check():
-                raise AudioSynthesisAborted()
-            blob, model = _synth_chunk_with_retry(chunk, voice=voice,
-                                                  fmt=use_fmt, speed=speed)
+    for result in segment_results:
+        section, rows = result
+        for chunk_index, (blob, model, container) in enumerate(rows):
             tts_model = tts_model or model
-            containers.add(_tts.sniff_container(blob))
+            containers.add(container)
             if not parts:
                 pauses.append(0)
-            elif ci > 0:
+            elif chunk_index > 0:
                 pauses.append(_PAUSE_SAME_SEGMENT_MS)   # chunk of same segment
             elif section == prev_section:
                 pauses.append(_PAUSE_SAME_SECTION_MS)   # new segment, same section
@@ -173,8 +321,6 @@ def synthesize_script_audio(script: dict, *, voice: str,
                 pauses.append(_PAUSE_SECTION_BREAK_MS)  # section boundary
             parts.append(blob)
         prev_section = section
-        if on_segment_done:
-            on_segment_done(si + 1, total)
 
     # ── Stitch ──
     duration_estimated = False

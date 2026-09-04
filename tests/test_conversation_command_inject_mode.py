@@ -9,14 +9,12 @@ hit a bare ``lane_busy`` 409 instead of the legacy
 
 The fixed contract:
 
-  * ``injectMode: 'steer'`` → the message rides the conversation-keyed
-    ``agent_inbox`` (``mode='user-steer'``) into the running turn's next
-    round boundary; ACK carries ``steered: true``; NO turn pair and NO
-    queue row are created.
-  * ``injectMode: 'queue'`` → the message lands in the durable
-    ``message_queue``; ACK carries ``queued: true`` + position; when the
-    occupying attempt settles, the settlement drain turns the row into a
-    fresh input+output turn pair and starts its attempt.
+  * ``injectMode: 'steer'`` → a durable injection block commits on the live
+    assistant Turn before its conversation-keyed inbox wakeup; ACK carries
+    ``steered: true`` and no new Turn pair is created.
+  * ``injectMode: 'queue'`` → acceptance atomically creates the durable queue
+    row plus its real input/output Turn pair and pending Attempt; dispatch
+    later activates those same identities.
   * no ``injectMode`` → the ``lane_busy`` 409 contract is preserved for
     programmatic clients.
 
@@ -50,7 +48,7 @@ def conversation_command_db(chat_sidecar):
 
 
 def _start_first_turn(flask_client, monkeypatch, task_id='internal-task-run'):
-    """Create turn pair #1 with a live (running) attempt; returns the ACK."""
+    """Create turn pair #1 with a live bound attempt; returns the ACK."""
     import lib.conversation_sync.task_start as task_start_runtime
 
     starts = []
@@ -74,13 +72,13 @@ def _start_first_turn(flask_client, monkeypatch, task_id='internal-task-run'):
     return ack.get_json(), starts
 
 
-def test_queue_mode_enqueues_without_creating_turn(flask_client, conversation_command_db,
+def test_queue_mode_accepts_real_pending_turn_pair(flask_client, conversation_command_db,
                                                    monkeypatch):
     from lib.message_queue import get_queue_depth
     from lib.turn_lifecycle import list_turns
 
     first, starts = _start_first_turn(flask_client, monkeypatch)
-    assert first['turn']['status'] == 'running'
+    assert first['turn']['status'] == 'pending'
     assert len(starts) == 1
 
     resp = flask_client.post(
@@ -96,13 +94,15 @@ def test_queue_mode_enqueues_without_creating_turn(flask_client, conversation_co
     assert body['position'] == 1
     assert body['queueId']
     assert body['queueItem']['sourceMessageId'] == 'message-second'
+    assert body['queueItem']['inputTurnId'] == body['submittedTurn']['turnId']
+    assert body['queueItem']['outputTurnId'] == body['turn']['turnId']
+    assert body['queueItem']['attemptId'] == body['attempt']['attemptId']
     assert body['latestTurn']['turnId'] == first['turn']['turnId']
 
-    # The durable row exists, no executor was started, and NO new turn pair
-    # was created (the two turns are the first send's input + output).
+    # The durable row and pair exist, but no executor starts before dispatch.
     assert get_queue_depth('conv-command-inject', user_id=1) == 1
     assert len(starts) == 1
-    assert len(list_turns('conv-command-inject', user_id=1)['turns']) == 2
+    assert len(list_turns('conv-command-inject', user_id=1)['turns']) == 4
 
 
 def test_steer_mode_injects_into_running_turn_inbox(flask_client, conversation_command_db,
@@ -131,10 +131,16 @@ def test_steer_mode_injects_into_running_turn_inbox(flask_client, conversation_c
     assert items[0]['value'] == 'steer me'
     # enqueue() merges `extra` into the item verbatim.
     assert items[0]['_user_msg']['content'] == 'steer me'
+    assert items[0]['blockId'] == 'injection:user-steer:cmd-steer'
     # …and NOT to the durable queue; no new turn, no new executor start.
     assert get_queue_depth('conv-command-inject', user_id=1) == 0
     assert len(starts) == 1
-    assert len(list_turns('conv-command-inject', user_id=1)['turns']) == 2
+    turns = list_turns('conv-command-inject', user_id=1)['turns']
+    assert len(turns) == 2
+    injection = turns[-1]['projection']['_userSteerInjects'][0]
+    assert injection['blockId'] == 'injection:user-steer:cmd-steer'
+    assert injection['deliveryState'] == 'pending'
+    assert injection['previews'] == [{'text': 'steer me'}]
 
 
 def test_missing_inject_mode_preserves_lane_busy_conflict(flask_client,
@@ -262,10 +268,10 @@ def test_drain_defers_while_lane_still_live(flask_client, conversation_command_d
               'config': {'model': 'gpt-4o'},
               'injectMode': 'queue'})
 
-    # Attempt #1 is still running → create_turn_pair raises lane_busy and
-    # the drain releases the lease instead of dropping the row.
+    # Attempt #1 is still running, so activation defers without replacing or
+    # deleting the already accepted pair.
     assert message_queue.dispatch_next_queued(
         'conv-command-inject', user_id=1) is None
     assert message_queue.get_queue_depth(
         'conv-command-inject', user_id=1) == 1
-    assert len(list_turns('conv-command-inject', user_id=1)['turns']) == 2
+    assert len(list_turns('conv-command-inject', user_id=1)['turns']) == 4

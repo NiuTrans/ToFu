@@ -10,18 +10,27 @@ Browser-centric flow:
   7. POST /api/oauth/logout   → delete tokens
 """
 
+from collections.abc import Mapping
+from urllib.parse import parse_qs, urlparse
+
 from quart import Blueprint, request
 
 from lib.log import get_logger
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_ok, api_payload,
 )
-from lib.request_parser import parse_body
+from lib.request_parser import BadRequest, optional_str, parse_body
 
 logger = get_logger(__name__)
 
 oauth_bp = Blueprint('oauth', __name__)
 
+
+def _request_owner_user_id() -> int:
+    """Resolve browser-flow ownership at the shared auth boundary."""
+    from routes.api_v1.auth import request_principal
+
+    return request_principal().require_owner(context='OAuth browser flow')
 
 
 def _truthy(v) -> bool:
@@ -37,6 +46,20 @@ def _truthy(v) -> bool:
     return str(v or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def _oauth_request_data() -> Mapping[str, object]:
+    """Select the legacy GET fallback or the canonical JSON body once.
+
+    These endpoints keep GET for proxies that refuse POST to an unfamiliar
+    path.  POST is still a mutation: strict parsing prevents malformed JSON
+    from turning into an empty/default OAuth action.  Callers invoke this
+    before their operational ``try`` block so field errors remain 400s rather
+    than being relabeled as internal OAuth failures.
+    """
+    if request.method == 'GET':
+        return request.args
+    return parse_body(force=True, strict=True)
+
+
 @oauth_bp.route('/api/oauth/login', methods=['GET', 'POST'])
 def oauth_login():
     """Start an OAuth login flow.
@@ -50,24 +73,22 @@ def oauth_login():
     GET Query: ?provider=claude|codex
     Returns: { "auth_url": "...", "status": "started", "provider": "...", "callback_port": N }
     """
+    data = _oauth_request_data()
+    provider = optional_str(data, 'provider', default='', max_len=16)
+    prefer_console = _truthy(data.get('prefer_console'))
+    if provider not in ('claude', 'codex'):
+        return api_error('Invalid provider. Use "claude" or "codex".', status=400)
+
+    owner_user_id = _request_owner_user_id()
     try:
         from lib.oauth.manager import start_oauth_flow
-
-        logger.info('[OAuth API] %s /api/oauth/login from %s', request.method, request.remote_addr)
-
-        # Support both GET (query params) and POST (JSON body)
-        if request.method == 'GET':
-            provider = request.args.get('provider', '')
-            prefer_console = _truthy(request.args.get('prefer_console'))
-        else:
-            data = parse_body(force=True)
-            provider = data.get('provider', '')
-            prefer_console = _truthy(data.get('prefer_console'))
-
-        if provider not in ('claude', 'codex'):
-            return api_error('Invalid provider. Use "claude" or "codex".', status=400)
-
-        result = start_oauth_flow(provider, prefer_console=prefer_console)
+        logger.info('[OAuth API] %s /api/oauth/login from %s',
+                    request.method, request.remote_addr)
+        result = start_oauth_flow(
+            provider,
+            owner_user_id=owner_user_id,
+            prefer_console=prefer_console,
+        )
 
         if 'error' in result:
             return api_payload(result, 400)
@@ -90,40 +111,45 @@ def oauth_callback():
       or: { "provider": "claude" | "codex", "callback_url": "http://localhost:.../callback?code=XXX" }
     GET Query: ?provider=claude|codex&code=XXX or ?provider=...&callback_url=...
     """
-    try:
-        from lib.oauth.manager import exchange_code
-        from urllib.parse import urlparse, parse_qs
+    data = _oauth_request_data()
+    provider = optional_str(data, 'provider', default='', max_len=16)
+    code = optional_str(
+        data, 'code', default='', strip=False, max_len=16_384)
+    callback_url = optional_str(
+        data, 'callback_url', default='', max_len=16_384)
+    state = optional_str(
+        data, 'state', default='', strip=False, max_len=4096)
+    manual = _truthy(data.get('manual'))
+    if provider not in ('claude', 'codex'):
+        return api_bad_request('Invalid provider')
 
-        logger.info('[OAuth API] %s /api/oauth/callback from %s', request.method, request.remote_addr)
-
-        # Support both GET (query params) and POST (JSON body)
-        if request.method == 'GET':
-            provider = request.args.get('provider', '')
-            code = request.args.get('code', '')
-            callback_url = request.args.get('callback_url', '')
-            state = request.args.get('state', '')
-        else:
-            data = parse_body(force=True)
-            provider = data.get('provider', '')
-            code = data.get('code', '')
-            callback_url = data.get('callback_url', '')
-            state = data.get('state', '')
-
-        if provider not in ('claude', 'codex'):
-            return api_bad_request('Invalid provider')
-
-        # Extract code from callback URL if provided
-        if callback_url and not code:
+    # A pasted callback URL is the manual path by definition: pick up its
+    # state when the caller did not pass one separately.  URL decoding is
+    # input validation, so failures stay outside the operational 500 handler.
+    if callback_url and not code:
+        try:
             parsed = urlparse(callback_url)
             params = parse_qs(parsed.query)
-            code = params.get('code', [None])[0]
-            if not code:
-                return api_bad_request('No authorization code found in the URL')
-
+        except ValueError as error:
+            raise BadRequest(
+                'callback_url is invalid', field='callback_url') from error
+        code = params.get('code', [None])[0]
         if not code:
-            return api_bad_request('No authorization code provided')
+            return api_bad_request('No authorization code found in the URL')
+        state = state or params.get('state', [''])[0]
+        manual = True
+    if not code:
+        return api_bad_request('No authorization code provided')
 
-        result = exchange_code(provider, code, state=state)
+    owner_user_id = _request_owner_user_id()
+    try:
+        from lib.oauth.manager import exchange_code
+        logger.info('[OAuth API] %s /api/oauth/callback from %s',
+                    request.method, request.remote_addr)
+        result = exchange_code(
+            provider, code, state=state,
+            owner_user_id=owner_user_id, manual=manual,
+        )
 
         if 'error' in result:
             return api_payload(result, 400)
@@ -144,20 +170,23 @@ def oauth_store_token():
 
     POST Body: { "provider": "claude"|"codex", "token": { ...token JSON... } }
     """
+    data = _oauth_request_data()
+    provider = optional_str(data, 'provider', default='', max_len=16)
+    token_response = data.get('token')
+    if provider not in ('claude', 'codex'):
+        return api_bad_request('Invalid provider')
+    if not isinstance(token_response, dict):
+        return api_bad_request('Missing or invalid token payload')
+
+    owner_user_id = _request_owner_user_id()
     try:
         from lib.oauth.manager import store_token
-
-        logger.info('[OAuth API] POST /api/oauth/store-token from %s', request.remote_addr)
-        data = parse_body(force=True)
-        provider = data.get('provider', '')
-        token_response = data.get('token')
-
-        if provider not in ('claude', 'codex'):
-            return api_bad_request('Invalid provider')
-        if not isinstance(token_response, dict):
-            return api_bad_request('Missing or invalid token payload')
-
-        result = store_token(provider, token_response)
+        logger.info('[OAuth API] POST /api/oauth/store-token from %s',
+                    request.remote_addr)
+        result = store_token(
+            provider, token_response,
+            owner_user_id=owner_user_id,
+        )
         if 'error' in result:
             return api_payload(result, 400)
         return api_ok(result)
@@ -179,22 +208,17 @@ def oauth_logout():
     POST Body: { "provider": "claude" | "codex" }
     GET Query: ?provider=claude|codex
     """
+    data = _oauth_request_data()
+    provider = optional_str(data, 'provider', default='', max_len=16)
+    if provider not in ('claude', 'codex'):
+        return api_bad_request('Invalid provider')
+
     try:
         from lib.oauth.manager import logout_oauth
-
-        logger.info('[OAuth API] %s /api/oauth/logout from %s', request.method, request.remote_addr)
-
-        # Support both GET (query params) and POST (JSON body)
-        if request.method == 'GET':
-            provider = request.args.get('provider', '')
-        else:
-            data = parse_body(force=True)
-            provider = data.get('provider', '')
-
-        if provider not in ('claude', 'codex'):
-            return api_bad_request('Invalid provider')
-
-        result = logout_oauth(provider)
+        owner_user_id = _request_owner_user_id()
+        logger.info('[OAuth API] %s /api/oauth/logout from %s',
+                    request.method, request.remote_addr)
+        result = logout_oauth(provider, owner_user_id=owner_user_id)
         if not result.get('ok'):
             return api_internal_error(result.get('error', 'internal_error'))
         return api_ok(result)

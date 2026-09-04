@@ -3,11 +3,15 @@
 Extracted from master.py for modularity.
 """
 
-import random
 import threading
-import time
+from collections.abc import Callable, Hashable
 
+from lib.llm_errors import AbortedError
 from lib.log import get_logger
+from lib.swarm.execution_gate import (
+    OwnerFairExecutionGate,
+    process_swarm_execution_gate,
+)
 from lib.swarm.protocol import SubAgentResult
 
 logger = get_logger(__name__)
@@ -18,39 +22,57 @@ class RateLimiter:
 
     Wraps around sub-agent execution so we don't blow up the API with
     too many concurrent requests when we have many parallel agents.
-
-    Enhanced with exponential back-off on 429 / rate-limit errors.
     """
 
-    def __init__(self, max_concurrent: int = 8,
-                 backoff_base: float = 1.0,
-                 backoff_max: float = 30.0):
+    def __init__(self, max_concurrent: int = 8, *,
+                 owner_key: Hashable | None = None,
+                 execution_gate: OwnerFairExecutionGate | None = None):
         self._semaphore = threading.Semaphore(max_concurrent)
+        self._owner_key = owner_key
+        # Standalone users retain the historical local-only limiter.
+        # Production masters always supply their explicit owner and therefore
+        # cross the one process-wide expensive-execution gate.
+        self._execution_gate = (
+            execution_gate
+            if execution_gate is not None else
+            process_swarm_execution_gate() if owner_key is not None else None
+        )
         self._active = 0
         self._lock = threading.Lock()
-        self._backoff_base = backoff_base
-        self._backoff_max = backoff_max
-        # Shared backoff state for rate-limit events
-        self._rate_limit_until = 0.0  # monotonic timestamp
 
-    def acquire(self):
-        """Acquire a slot, waiting if at capacity.
+    @staticmethod
+    def _raise_if_aborted(
+        abort_check: Callable[[], bool] | None,
+    ) -> None:
+        if abort_check is not None and abort_check():
+            raise AbortedError('swarm execution cancelled before admission')
 
-        The rate-limit backoff is honoured BEFORE taking a semaphore permit so
-        a global 429 pause does not hold permits hostage: if every admitted
-        thread slept while occupying a slot, throughput would collapse to
-        ``max_concurrent / backoff`` instead of a coordinated pause.
-        """
+    def acquire(
+        self,
+        *,
+        abort_check: Callable[[], bool] | None = None,
+    ):
+        """Acquire a slot, waiting if at capacity."""
         logger.debug('[RateLimiter] acquire: waiting for slot (active=%d)', self._active)
-        # Respect rate-limit backoff first, WITHOUT holding a permit.
-        with self._lock:
-            wait_until = self._rate_limit_until
-        now = time.monotonic()
-        if wait_until > now:
-            wait_dur = wait_until - now
-            logger.debug('[RateLimiter] acquire: rate-limit backoff %.1fs before acquiring permit', wait_dur)
-            time.sleep(wait_dur)
-        self._semaphore.acquire()
+        if abort_check is None:
+            self._semaphore.acquire()
+        else:
+            while not self._semaphore.acquire(timeout=0.25):
+                self._raise_if_aborted(abort_check)
+            try:
+                self._raise_if_aborted(abort_check)
+            except BaseException:
+                self._semaphore.release()
+                raise
+        try:
+            if self._execution_gate is not None:
+                self._execution_gate.acquire(
+                    self._owner_key,
+                    abort_check=abort_check,
+                )
+        except BaseException:
+            self._semaphore.release()
+            raise
         with self._lock:
             self._active += 1
             logger.debug('[RateLimiter] acquire: slot acquired (active=%d)', self._active)
@@ -60,34 +82,25 @@ class RateLimiter:
         with self._lock:
             self._active -= 1
             logger.debug('[RateLimiter] release: slot released (active=%d)', self._active)
+        if self._execution_gate is not None:
+            self._execution_gate.release(self._owner_key)
         self._semaphore.release()
-
-    def report_rate_limit(self):
-        """Called when a 429/rate-limit error is received.
-
-        Sets a shared backoff timestamp with exponential increase + jitter.
-        """
-        now = time.monotonic()
-        with self._lock:
-            current_wait = max(0, self._rate_limit_until - now)
-            if current_wait < self._backoff_base:
-                next_wait = self._backoff_base
-            else:
-                next_wait = min(current_wait * 2, self._backoff_max)
-            next_wait += random.uniform(0, 1)
-            self._rate_limit_until = now + next_wait
-        logger.warning('[RateLimiter] Rate limit reported, backing off %.1fs', next_wait)
 
     @property
     def active(self) -> int:
         with self._lock:
             return self._active
 
-    def run_agent(self, agent) -> 'SubAgentResult':
+    def run_agent(
+        self,
+        agent,
+        *,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> 'SubAgentResult':
         """Run an agent within the rate limit."""
         logger.debug('[RateLimiter] Acquiring slot for agent=%s (active=%d)',
                      agent.agent_id, self.active)
-        self.acquire()
+        self.acquire(abort_check=abort_check)
         logger.debug('[RateLimiter] Slot acquired for agent=%s (active=%d)',
                      agent.agent_id, self.active)
         try:
@@ -97,42 +110,3 @@ class RateLimiter:
             logger.debug('[RateLimiter] Slot released for agent=%s (active=%d)',
                          agent.agent_id, self.active)
 
-    def run_agent_with_backoff(self, agent,
-                               max_wait: float = 60.0,
-                               max_attempts: int = 4) -> 'SubAgentResult':
-        """Run an agent with exponential back-off on 429 / rate-limit errors.
-
-        If ``agent.run()`` raises and the error message contains '429' or
-        'rate' (case-insensitive), we back off and retry up to
-        *max_attempts* times.  The back-off schedule is
-        ``2^attempt + jitter`` seconds, capped at *max_wait*.
-        """
-        last_exc: Exception | None = None
-        for attempt in range(max_attempts):
-            self.acquire()
-            try:
-                return agent.run()
-            except Exception as exc:
-                err_str = str(exc).lower()
-                is_rate = '429' in err_str or 'rate' in err_str
-                if is_rate and attempt < max_attempts - 1:
-                    self.report_rate_limit()
-                    delay = min(2 ** attempt + random.uniform(0, 1), max_wait)
-                    logger.warning(
-                        '[RateLimiter] Rate-limited (attempt %d/%d), backing off %.1fs: %s',
-                        attempt + 1, max_attempts, delay, exc,
-                        exc_info=True)
-
-                    time.sleep(delay)
-                    last_exc = exc
-                    continue
-                raise
-            finally:
-                self.release()
-        # All attempts consumed and the last one was a rate-limit error we
-        # chose to retry — this is a terminal give-up, not a transient retry,
-        # so it warrants an ERROR (the per-attempt logs above are WARNING).
-        logger.error('[RateLimiter] Agent %s exhausted %d rate-limit retries — '
-                     'giving up: %s', getattr(agent, "agent_id", "?"),
-                     max_attempts, last_exc)
-        raise last_exc  # type: ignore[misc]

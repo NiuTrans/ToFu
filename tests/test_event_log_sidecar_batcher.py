@@ -89,3 +89,45 @@ def test_construction_failure_is_explicit(fresh, monkeypatch):
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError('boom')))
     with pytest.raises(RuntimeError, match='boom'):
         el._ensure_sidecar_batcher()
+
+
+def test_batcher_rejection_uses_one_natural_key_direct_fallback(
+    fresh,
+    monkeypatch,
+):
+    from lib.storage import StorageError
+
+    el, _created = fresh
+    batch_calls = []
+    direct_calls = []
+
+    class RejectingBatcher:
+        def append(self, **kwargs):
+            batch_calls.append(kwargs)
+            raise StorageError(
+                'database_busy', 'event queue saturated', True, 25)
+
+    class DirectClient:
+        def command(self, operation, payload, command_id, **kwargs):
+            direct_calls.append((operation, payload, command_id, kwargs))
+            return {'inserted': True}
+
+    monkeypatch.setattr(el, '_ensure_sidecar_batcher', RejectingBatcher)
+    monkeypatch.setattr('lib.storage.get_storage_client', lambda **_kwargs: DirectClient())
+    monkeypatch.setattr(el, '_invalidate_event_read_caches', lambda _task_id: None)
+
+    result = el.append_persistent_event(
+        'task-fallback', 7, {'type': 'delta', 'content': 'durable'})
+
+    assert result == {'inserted': True}
+    assert len(batch_calls) == 1
+    assert direct_calls == [(
+        'event.append',
+        {
+            'task_id': 'task-fallback',
+            'sequence': 7,
+            'event': {'type': 'delta', 'content': 'durable'},
+        },
+        None,
+        {'priority': 'event', 'deadline': el._PERSIST_TIMEOUT_S},
+    )]

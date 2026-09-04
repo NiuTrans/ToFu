@@ -116,7 +116,7 @@ def test_auto_repair_ladder_shape():
     body = _extract_fn_body(src, 'async function attemptAutoRepair(')
     assert 'chrome.tabs.query({})' in body, (
         'the ladder must first look for an ALREADY-OPEN Tofu tab')
-    assert 't.url.startsWith(SERVER_URL)' in body, (
+    assert '_isOwnServerTab(t)' in body and 'tab.url.startsWith(SERVER_URL)' in _src(), (
         'a tab only counts when it belongs to OUR server — minting '
         'against a different Tofu would pair the wrong account')
     assert '_mintKeyViaTab(' in body, (

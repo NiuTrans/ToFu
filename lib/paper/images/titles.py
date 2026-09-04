@@ -21,7 +21,8 @@ def lookup_paper_title(phash: str, *, user_id: int) -> str:
     if not _safe_hash_dir(phash):
         return ''
     try:
-        identity = PaperLibraryRepository(user_id).identity(phash)
+        identity = PaperLibraryRepository(user_id).identity(
+            phash, max_text_chars=0)
     except Exception as e:
         logger.warning('[Paper:Report] Title lookup failed for hash=%s: %s', phash, e)
         return ''

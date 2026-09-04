@@ -83,16 +83,17 @@ def _post_to_provider(slot, audio_bytes: bytes, filename: str, mime: str,
     (proxy-aware). Raises :class:`TranscriptionError` on any transport or
     HTTP-status failure.
     """
-    import lib as _lib
     from lib.http_client import http_post
 
-    base = (slot.base_url or getattr(_lib, 'LLM_BASE_URL', '') or '').rstrip('/')
+    base = (slot.base_url or '').rstrip('/')
     if not base:
         raise TranscriptionError('No base URL configured for transcription slot',
                                  status=503)
     url = f'{base}/audio/transcriptions'
 
-    headers = {'Authorization': f'Bearer {slot.api_key}'}
+    headers = {}
+    if slot.api_key:
+        headers['Authorization'] = f'Bearer {slot.api_key}'
     if slot.extra_headers:
         headers.update(slot.extra_headers)
     # NOTE: do NOT set Content-Type — requests derives the multipart boundary
@@ -175,7 +176,9 @@ def _transcribe_via_chat(slot, audio_bytes: bytes, mime: str,
 def transcribe(audio_bytes: bytes, filename: str,
                content_type: str | None = None, *,
                language: str | None = None,
-               prompt: str | None = None) -> TranscriptionResult:
+               prompt: str | None = None,
+               owner_user_id: int | None = None,
+               tenant_id: str | None = None) -> TranscriptionResult:
     """Transcribe an audio blob to text via a configured transcription slot.
 
     Args:
@@ -246,6 +249,62 @@ def transcribe(audio_bytes: bytes, filename: str,
         return TranscriptionResult(text='', model='silence-gate',
                                    provider_id='local', duration_s=duration_s)
 
+    # Validation and the silence gate deliberately precede repository access:
+    # malformed/silent input must not depend on model availability or mint a
+    # request-scoped slot group.  Once validated, owner-aware callers route
+    # through an isolated v2 group and recurse into the provider-only path.
+    if owner_user_id is not None:
+        from lib.llm_dispatch.provider_pin import provider_pin
+        from lib.model_routing import (
+            ModelRoutingError,
+            ModelRoutingRepository,
+            OPENAI_CHAT_COMPATIBLE_PROTOCOLS,
+            OPENAI_COMPATIBLE_PROTOCOLS,
+            OwnerBoundary,
+            dispose_routed_slot_group,
+            mint_capability_slot_group,
+        )
+
+        repository = ModelRoutingRepository()
+        boundary = OwnerBoundary.create(owner_user_id, tenant_id)
+        route_group = None
+        last_route_error = None
+        for capability in (TRANSCRIPTION_CAP, AUDIO_CHAT_CAP):
+            try:
+                required_protocols = (
+                    OPENAI_COMPATIBLE_PROTOCOLS
+                    if capability == TRANSCRIPTION_CAP
+                    else OPENAI_CHAT_COMPATIBLE_PROTOCOLS
+                )
+                _model, route_group = mint_capability_slot_group(
+                    repository,
+                    boundary,
+                    capability,
+                    required_protocols=required_protocols,
+                    owner_tag=f'audio-transcribe:{owner_user_id}',
+                )
+                break
+            except ModelRoutingError as exc:
+                last_route_error = exc
+                if exc.kind != 'model_route_unavailable':
+                    raise TranscriptionError(str(exc), status=503) from exc
+        if route_group is None:
+            raise TranscriptionError(
+                str(last_route_error or 'No transcription model is configured'),
+                status=503,
+            )
+        try:
+            with provider_pin(route_group.pin_id):
+                return transcribe(
+                    audio_bytes,
+                    filename,
+                    content_type,
+                    language=language,
+                    prompt=prompt,
+                )
+        finally:
+            dispose_routed_slot_group(route_group)
+
     slots = _facade._transcription_slots()
     if not slots:
         raise TranscriptionError(
@@ -296,8 +355,11 @@ def transcribe(audio_bytes: bytes, filename: str,
                            len(text), duration_s, len(text) / duration_s,
                            _facade.max_chars_per_second(), slot.key_name, slot.model,
                            mode)
+        logical_model = getattr(slot, 'logical_model', '') or slot.model
+        public_provider_id = (getattr(slot, 'routing_provider_id', '')
+                              or slot.provider_id or 'default')
         _facade.audit_log('audio_transcribe',
-                          model=slot.model, provider_id=slot.provider_id or 'default',
+                          model=logical_model, provider_id=public_provider_id,
                           mode=mode, bytes=len(audio_bytes), mime=mime,
                           duration_s=(round(duration_s, 1) if duration_s is not None else None),
                           text_len=len(text), suspected_hallucination=suspected)
@@ -305,8 +367,8 @@ def transcribe(audio_bytes: bytes, filename: str,
                     len(audio_bytes), mime, slot.key_name, slot.model, mode,
                     len(text))
         return TranscriptionResult(
-            text=text, model=slot.model,
-            provider_id=slot.provider_id or 'default', duration_s=duration_s)
+            text=text, model=logical_model,
+            provider_id=public_provider_id, duration_s=duration_s)
 
     raise last_err or TranscriptionError('All transcription slots failed',
                                          status=502)

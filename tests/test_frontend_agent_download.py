@@ -86,6 +86,7 @@ const AGENT = { os: 'windows', arch: 'x86_64',
 
 // ── 1. remote + ready artifact ⇒ one-file installer PRIMARY ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://tofu.example.com/',
   agent_installer_ready: true,
@@ -112,6 +113,7 @@ check('remote_no_pairing_vocabulary', !html1.includes('配对码'));
 
 // ── 1b. stale installer ⇒ honest preparation state ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://tofu.example.com/',
   agent_installer_ready: false,
@@ -124,6 +126,7 @@ check('stale_no_manual_pairing', !html1b.includes('lcMintBtn'));
 
 // ── 2. remote WITHOUT agent artifact ⇒ full fallback, no dead end ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://tofu.example.com/',
   downloads: [FULL], agent_downloads: [] }, null);
@@ -137,6 +140,7 @@ check('fallback_no_pairing_copy', !html2.includes('配对码'));
 
 // ── 3. local_source ⇒ BOTH installs role-labeled, installer in agent card ──
 const LOCAL_SRC = { connected: false, setup_state: 'local_source',
+  visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'http://127.0.0.1:15000/',
   agent_installer_ready: true,
@@ -170,6 +174,7 @@ check('state_change_still_rerenders',
 
 // ── 6. every host class keeps connection details internal ──
 const PROXIED = { connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://5665bc99-vscode-zw05.mlp.internal.example.com/',
   server_url_reachability: 'public',
@@ -184,6 +189,7 @@ check('public_host_never_teaches_manual_tunnel',
   !/隧道地址|ssh 隧道|ssh-tunnel/.test(html6));
 // Private/loopback hosts also keep connection details internal.
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: '', server_url: 'http://192.168.1.10:15000/',
   server_url_reachability: 'private',
   agent_installer_ready: true,
@@ -192,6 +198,7 @@ const html6p = document.getElementById('lcDesktopSetup').innerHTML;
 check('private_host_has_no_connect_line', !html6p.includes('lcMintBtn'));
 // Installer downloaded but nothing arrived: a simple automatic wait state.
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: '', server_url: 'http://192.168.1.10:15000/',
   server_url_reachability: 'private', bridge_tokens_issued: 2,
   agent_installer_ready: true,
@@ -203,12 +210,14 @@ check('awaiting_hint_is_simple', html6b.includes('自动寻找服务器'));
 check('awaiting_hint_no_pairing_code', !html6b.includes('配对码'));
 // …but never cry wolf once connected, or before any token exists.
 _lcRenderDesktop({ connected: true, setup_state: 'connected',
+  visitor_os: 'windows',
   bridge_tokens_issued: 2,
   agent_installer_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 check('no_awaiting_hint_when_connected',
   !document.getElementById('lcDesktopSetup').innerHTML.includes('首次连入'));
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: '', server_url: 'http://192.168.1.10:15000/',
   server_url_reachability: 'private', bridge_tokens_issued: 0,
   agent_installer_ready: true,
@@ -218,6 +227,7 @@ check('no_awaiting_hint_without_tokens',
 
 // ── 7. loopback bind ⇒ the operator-facing warning surfaces ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
+  visitor_os: 'windows',
   download_url: '', server_url: 'http://192.168.1.10:15000/',
   server_url_reachability: 'private', server_bind: 'loopback',
   agent_installer_ready: true,

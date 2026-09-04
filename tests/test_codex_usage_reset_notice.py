@@ -14,6 +14,7 @@ from tests._runtime_sections import native_module_path, runtime_section_path
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 NOTICE_OWNER = ROOT / "frontend/src/features/subscription-reset-notice.ts"
+BACKGROUND_OWNER = ROOT / "frontend/src/features/background.ts"
 
 
 _NODE_HARNESS = r"""
@@ -139,6 +140,117 @@ _NODE_HARNESS = r"""
   check('fresh_retry_result_prompts', refreshNotices.length === 1);
   refreshing.destroy();
 
+  const pushedNotices = [];
+  const pushedTimeouts = [];
+  const pushedCanceled = [];
+  let pushedReads = 0;
+  let pushedListener = null;
+  let pushedUnsubscribed = 0;
+  const pushed = createSubscriptionResetNoticeController({
+    ...deps,
+    storage: new MemoryStorage(),
+    readStatus: async () => {
+      pushedReads += 1;
+      return response({ state: 'unknown', available_count: null,
+        captured_at: null, stale: false, refreshing: true });
+    },
+    notify: (notice) => { pushedNotices.push(notice); return true; },
+    subscribeOfferUpdates: (listener) => {
+      pushedListener = listener;
+      return () => { pushedUnsubscribed += 1; };
+    },
+    setTimeout: (callback, delay) => {
+      const row = {callback, delay}; pushedTimeouts.push(row); return row;
+    },
+    clearTimeout: (handle) => { pushedCanceled.push(handle); },
+  });
+  pushed.start();
+  await wait();
+  check('push_path_uses_bounded_lost_frame_fallback',
+    pushedTimeouts.length === 1 && pushedTimeouts[0].delay === 15000);
+  pushedListener({
+    type: CODEX_RESET_NOTICE_PUSH_EVENT_TYPE,
+    provider: 'codex',
+    reset_offer: available('f'.repeat(24)),
+  });
+  check('completion_push_prompts_without_second_status_read',
+    pushedNotices.length === 1 && pushedReads === 1);
+  check('completion_push_cancels_http_fallback',
+    pushedCanceled.length === 1 && pushedCanceled[0] === pushedTimeouts[0]);
+  pushedListener({
+    type: 'wrong.event', provider: 'codex',
+    reset_offer: available('0'.repeat(24)),
+  });
+  check('malformed_or_foreign_push_is_ignored', pushedNotices.length === 1);
+  pushed.destroy();
+  check('destroy_releases_push_subscription', pushedUnsubscribed === 1);
+
+  let visible = true;
+  let hiddenReads = 0;
+  let hiddenListener = null;
+  const hiddenNotices = [];
+  const hidden = createSubscriptionResetNoticeController({
+    ...deps,
+    storage: new MemoryStorage(),
+    isVisible: () => visible,
+    readStatus: async () => {
+      hiddenReads += 1;
+      return response({ state: 'unknown', available_count: null,
+        captured_at: null, stale: false, refreshing: true });
+    },
+    notify: (notice) => { hiddenNotices.push(notice); return true; },
+    subscribeOfferUpdates: (listener) => {
+      hiddenListener = listener;
+      return () => {};
+    },
+  });
+  hidden.start();
+  await wait();
+  visible = false;
+  hiddenListener({
+    type: CODEX_RESET_NOTICE_PUSH_EVENT_TYPE,
+    provider: 'codex',
+    reset_offer: available('1'.repeat(24)),
+  });
+  check('hidden_completion_does_not_consume_notification', hiddenNotices.length === 0);
+  visible = true;
+  await hidden.checkIfDue();
+  check('visibility_resume_consumes_push_without_status_request',
+    hiddenNotices.length === 1 && hiddenReads === 1);
+  hidden.destroy();
+
+  let resolveRacingStatus = null;
+  let racingListener = null;
+  const racingNotices = [];
+  const racingTimeouts = [];
+  const racingStatus = new Promise((resolve) => { resolveRacingStatus = resolve; });
+  const racing = createSubscriptionResetNoticeController({
+    ...deps,
+    storage: new MemoryStorage(),
+    readStatus: async () => racingStatus,
+    notify: (notice) => { racingNotices.push(notice); return true; },
+    subscribeOfferUpdates: (listener) => {
+      racingListener = listener;
+      return () => {};
+    },
+    setTimeout: (callback, delay) => {
+      const row = {callback, delay}; racingTimeouts.push(row); return row;
+    },
+  });
+  racing.start();
+  await wait();
+  racingListener({
+    type: CODEX_RESET_NOTICE_PUSH_EVENT_TYPE,
+    provider: 'codex',
+    reset_offer: available('2'.repeat(24)),
+  });
+  resolveRacingStatus(response({ state: 'unknown', available_count: null,
+    captured_at: null, stale: false, refreshing: true }));
+  await wait();
+  check('completion_push_supersedes_older_inflight_http_projection',
+    racingNotices.length === 1 && racingTimeouts.length === 0);
+  racing.destroy();
+
   const malformed = normalizeCodexResetOffer({
     state: 'available', available_count: 1, notification_key: '',
     captured_at: 1000, stale: false, refreshing: false,
@@ -184,8 +296,33 @@ def test_typed_notice_controller_contract():
     )
     assert result.returncode == 0, result.stderr or result.stdout
     summary = result.stdout.strip().splitlines()[-1]
-    assert '"passed":14' in summary, summary
+    assert '"passed":22' in summary, summary
     assert '"failed":[]' in summary, summary
+
+
+def test_background_owns_one_releasable_reset_offer_push_subscription():
+    source = BACKGROUND_OWNER.read_text(encoding="utf-8")
+    assert "runtimeFunction<RuntimePushSubscribe>('pushSubscribe')" in source
+    assert "runtimeFunction<RuntimePushUnsubscribe>('pushUnsubscribe')" in source
+    assert "CODEX_RESET_NOTICE_PUSH_CHANNEL" in source
+    assert "CODEX_RESET_NOTICE_PUSH_TASK_ID" in source
+    assert "return () => unsubscribe(" in source
+
+
+def test_reset_offer_push_contract_matches_backend_constants():
+    from lib.oauth import codex_usage
+
+    source = NOTICE_OWNER.read_text(encoding="utf-8")
+    expected = {
+        "CODEX_RESET_NOTICE_PUSH_CHANNEL":
+            codex_usage.CODEX_USAGE_RESET_PUSH_CHANNEL,
+        "CODEX_RESET_NOTICE_PUSH_TASK_ID":
+            codex_usage.CODEX_USAGE_RESET_PUSH_TASK_ID,
+        "CODEX_RESET_NOTICE_PUSH_EVENT_TYPE":
+            codex_usage.CODEX_USAGE_RESET_PUSH_EVENT_TYPE,
+    }
+    for name, value in expected.items():
+        assert f"export const {name} = '{value}';" in source
 
 
 _SETTINGS_HARNESS = r"""
@@ -193,7 +330,7 @@ const fs = require('fs');
 const { setup } = require(process.env.JSDOM_HARNESS);
 const { window, document, check, report } = setup({
   root: process.argv[3],
-  html: '<!doctype html><body><div id="oauthCodexResetOffer"></div></body>',
+  html: '<!doctype html><body><div id="oauthCodexQuota"></div><div id="oauthCodexResetOffer"></div></body>',
   targets: [process.argv[2]],
   globals: {
     Api: { oauth: { status: async () => null } },
@@ -211,6 +348,13 @@ const { window, document, check, report } = setup({
         'settings.oauthResetExpires': `Expires ${values && values.time}`,
         'settings.oauthResetStale': 'Stale result',
         'settings.oauthResetRedeemHint': 'Never auto-redeem',
+        'settings.oauthQuotaTitle': 'Subscription quota',
+        'settings.oauthQuotaRemaining': `${values && values.remaining}% remaining`,
+        'settings.oauthQuotaResetsAt': `Resets ${values && values.time}`,
+        'settings.oauthQuotaSource': 'Latest Codex response',
+        'settings.oauthQuotaPending': 'Run Codex first',
+        'quota.window5h': '5 hours',
+        'quota.window7d': '7 days',
       };
       return copy[key] || key;
     },
@@ -219,6 +363,34 @@ const { window, document, check, report } = setup({
 global._i18nLang = window._i18nLang = 'en';
 try {
   const el = document.getElementById('oauthCodexResetOffer');
+
+  const quotaEl = document.getElementById('oauthCodexQuota');
+  _renderOAuthQuota('codex', {
+    primary: {
+      remaining_percent: 62,
+      window_minutes: 10080,
+      resets_at: 1896134400,
+    },
+    secondary: {
+      remaining_percent: 100,
+      window_minutes: 300,
+    },
+  }, true);
+  const resetEl = quotaEl.querySelector('.oauth-quota-reset');
+
+  const expectedResetTime = new Intl.DateTimeFormat('en-US', {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  }).format(new Date(1896134400 * 1000));
+  check('quota_reset_time_is_rendered_inline',
+    !!resetEl && resetEl.textContent.startsWith('Resets '));
+  check('quota_reset_time_uses_localized_calendar_parts',
+    !!resetEl && resetEl.textContent === `Resets ${expectedResetTime}`);
+  check('quota_window_without_timestamp_has_no_fabricated_reset',
+    quotaEl.querySelectorAll('.oauth-quota-reset').length === 1);
+  check('invalid_quota_reset_timestamp_is_omitted',
+    _oauthQuotaResetLabel('invalid') === '');
+  check('quota_reset_is_grouped_with_window_label',
+    !!resetEl && resetEl.parentElement.classList.contains('oauth-quota-window'));
   _renderOAuthResetOffer('codex', {
     state: 'available', available_count: 1, stale: false,
     expires_at: 1896134400,
@@ -307,6 +479,6 @@ def test_settings_offer_renderer_is_explicit_about_reset_state():
     run_harness(
         target_js=runtime_section_path("settings/oauth.js"),
         body_js=_SETTINGS_HARNESS,
-        expect_pass=8,
+        expect_pass=13,
         label="codex-reset-settings",
     )

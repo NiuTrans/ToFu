@@ -21,20 +21,24 @@ import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_sections_dir
+from tests._runtime_sections import native_module_path, runtime_sections_dir
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = runtime_sections_dir()
+HTML_SAFETY = native_module_path(
+    '.native/markdown-html-safety.js',
+    os.path.join(ROOT, 'frontend', 'src', 'html-safety.ts'),
+)
 
 
 def _node_available() -> bool:
     return shutil.which('node') is not None
 
 
-# Load escape_html.js + the real marked UMD, stub the few globals
+# Load the typed HTML-safety owner + the real marked UMD, stub the few globals
 # renderMarkdown touches (BASE_PATH, _ensureKatex), then eval markdown.js
 # and exercise renderMarkdown directly.  DOMPurify / katex / projectState
 # are all guarded by `typeof … !== 'undefined'` in the source, so leaving
@@ -48,7 +52,7 @@ global.marked = require(process.argv[4]);   // marked CJS (same build the Vite g
 var BASE_PATH = '';
 var _ensureKatex = function(){};            // no-op: katex stays unloaded
 
-eval(load(process.argv[2]));   // escape_html.js  → escapeHtml
+(0, eval)(load(process.argv[2])); // typed HTML-safety owner → escapeHtml
 eval(load(process.argv[3]));   // core/markdown.js → renderMarkdown
 
 const out = [];
@@ -85,7 +89,7 @@ def test_backtick_content_renders_as_code_not_math():
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'core', 'escape_html.js'),
+             HTML_SAFETY,
              os.path.join(JS_DIR, 'core', 'markdown.js'),
              os.path.join(ROOT, 'node_modules', 'marked', 'lib', 'marked.cjs')],
             capture_output=True, text=True, timeout=30,

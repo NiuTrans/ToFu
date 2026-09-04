@@ -21,7 +21,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from rootless_vm.trajectory import write_collected_trajectory
-from tofu_agent import AgentRuntime, ProviderConfig, __version__
+from tofu_agent import AgentRuntime, ModelRoutingConfig, __version__
 from evaluations.swebench.tofu_kimi_runtime import (
     TOFU_KIMI_HARBOR_SYSTEM_PROMPT as _SYSTEM_PROMPT,
     tofu_kimi_clean_tool_schemas,
@@ -35,6 +35,100 @@ _EVENT_OBSERVATION_SCHEMA = "tofu.harbor-runtime-event-observation/v1"
 _HARBOR_EVIDENCE_SCHEMA = "tofu.harbor-production-kimi-evidence/v1"
 _TOOL_AUDIT_SCHEMA = "tofu.harbor-custom-tool-audit/v1"
 _CUSTOM_TOOLS = tofu_kimi_custom_tools()
+
+
+def _harbor_model_routing(
+    *, base_url: str, api_key: str, thinking_format: str,
+) -> ModelRoutingConfig:
+    """Build the benchmark's single, explicit v2 access authority.
+
+    Harbor owns one host-side credential and one fixed Kimi deployment.  Keep
+    that integration fact in the adapter, but express it through the same
+    creator/model/provider/access/connection graph as every other runtime.
+    This avoids reviving the removed inline-provider shortcut while keeping
+    the secret outside the serializable aggregate and benchmark artifacts.
+    """
+    model_ref = {'creator_id': 'moonshot', 'model_id': 'kimi-k3'}
+    provider_id = 'harbor-kimi'
+    access_id = f'{provider_id}-access'
+    connection_id = f'{provider_id}-connection'
+    credential_id = f'{provider_id}-credential'
+    secret_reference = f'{provider_id}-secret'
+    offering_id = f'{provider_id}-offering'
+    return ModelRoutingConfig(
+        document={
+            'contract_version': 'tofu.model-routing/v2',
+            'revision': 0,
+            'creators': [{
+                'creator_id': model_ref['creator_id'],
+                'name': 'Moonshot AI',
+            }],
+            'models': [{
+                **model_ref,
+                'display_name': 'Kimi K3',
+                'capabilities': ['text', 'thinking', 'tools'],
+                'context_window': 262_144,
+                'quality_rank': 10,
+            }],
+            'providers': [{
+                'provider_id': provider_id,
+                'name': 'Harbor Kimi host access',
+                'scope': 'owner',
+            }],
+            'provider_accesses': [{
+                'provider_access_id': access_id,
+                'provider_id': provider_id,
+                'enabled': True,
+                'quota_policy': {},
+            }],
+            'connections': [{
+                'connection_id': connection_id,
+                'provider_access_id': access_id,
+                'base_url': base_url,
+                'protocol': 'openai',
+                'enabled': True,
+                'priority': 0,
+                'extra_headers': {},
+                'thinking_format': thinking_format,
+            }],
+            'credentials': [{
+                'credential_id': credential_id,
+                'provider_access_id': access_id,
+                'kind': 'api_key',
+                'secret_reference': secret_reference,
+                'key_hint': 'configured',
+                'enabled': True,
+                'authorization': {
+                    'connection_ids': [connection_id],
+                    'models': [dict(model_ref)],
+                },
+                'quota_policy': {},
+            }],
+            'offerings': [{
+                'offering_id': offering_id,
+                'provider_access_id': access_id,
+                'identity_state': 'confirmed',
+                'model': dict(model_ref),
+                'enabled': True,
+                'capabilities': ['text', 'thinking', 'tools'],
+                'context_window': 262_144,
+                'priority': 0,
+            }],
+            'deployments': [{
+                'deployment_id': f'{provider_id}-deployment',
+                'offering_id': offering_id,
+                'connection_id': connection_id,
+                'wire_model_id': 'kimi-k3',
+                'enabled': True,
+                'identity_confidence': 'high',
+                'probe_status': 'passed',
+                'priority': 0,
+            }],
+        },
+        model=model_ref,
+        routing={'preferred_provider_id': provider_id},
+        credential_secrets={secret_reference: api_key},
+    )
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -394,10 +488,9 @@ class TofuKimiRuntimeAgent(BaseAgent):
         api_key = str(os.environ.get(self._upstream_api_key_env) or "")
         if not upstream or not api_key:
             raise RuntimeError("Tofu Kimi host-only provider inputs are missing")
-        provider = ProviderConfig(
+        model_routing = _harbor_model_routing(
             base_url=upstream,
             api_key=api_key,
-            model="kimi-k3",
             thinking_format=self._thinking_format,
         )
         runtime_config = json.loads(json.dumps(self._runtime_config))
@@ -422,8 +515,8 @@ class TofuKimiRuntimeAgent(BaseAgent):
         result = None
         runtime_evidence: dict[str, Any] | None = None
         runtime = AgentRuntime.local(
-            provider=provider,
-            provider_source="harbor-formal-kimi",
+            model_routing=model_routing,
+            model_routing_source="harbor-formal-kimi",
             subject_id="benchmark:harbor-tofu-kimi",
             max_inflight=1,
         )

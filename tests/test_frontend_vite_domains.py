@@ -72,8 +72,10 @@ def test_vendor_and_locale_owners_are_esm_chunks():
     assert 'let pdfjsLib' not in runtime
     assert 'return runtimeScope[name] ?? runtimeActions[name]' in runtime
     i18n = _read('frontend/src/i18n/index.ts')
-    assert "import('./locales/zh.json')" in i18n
-    assert "import('./locales/en.json')" in i18n
+    assert "from './generated/zh.generated.json?url'" in i18n
+    assert "from './generated/en.generated.json?url'" in i18n
+    assert "import('./locales/" not in i18n
+    assert 'fetch(localeUrls[language]' in i18n
     assert 'window.t' not in i18n
 
 
@@ -102,13 +104,16 @@ def test_manifest_validation_covers_standalone_url_assets(tmp_path, monkeypatch)
     out = tmp_path / 'vite'
     emitted = out / 'assets'
     emitted.mkdir(parents=True)
-    for name in ('main.js', 'admin.js', 'worker.mjs'):
+    for name in ('main.js', 'admin.js', 'worker.mjs', 'catalog.json'):
         (emitted / name).write_text('// emitted', encoding='utf-8')
     manifest = {
         'frontend/src/main.ts': {
             'file': 'assets/main.js', 'isEntry': True,
+            'assets': ['assets/catalog.json'],
             assets.I18N_CATALOG_DIGEST_FIELD:
                 assets._source_i18n_catalog_digest(),
+            assets.VITE_AUTHORING_DIGEST_FIELD:
+                assets._source_vite_authoring_digest(),
         },
         'frontend/src/admin.ts': {
             'file': 'assets/admin.js', 'isEntry': True,
@@ -124,7 +129,9 @@ def test_manifest_validation_covers_standalone_url_assets(tmp_path, monkeypatch)
     assets.clear_vite_asset_cache()
 
     assert assets.validate_vite_artifact() == manifest
-    assert 'assets/main.js' in assets.get_vite_asset_tags('main')
+    main_tags = assets.get_vite_asset_tags('main')
+    assert 'assets/main.js' in main_tags
+    assert 'catalog.json' not in main_tags
     assert 'assets/admin.js' in assets.get_vite_asset_tags('admin')
     manifest['frontend/src/main.ts'][assets.I18N_CATALOG_DIGEST_FIELD] = '0' * 64
     manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
@@ -161,6 +168,7 @@ def test_locale_source_change_preserves_requests_but_fails_deploy_validation(
             'isEntry': True,
             assets.I18N_CATALOG_DIGEST_FIELD:
                 assets._source_i18n_catalog_digest(),
+            assets.VITE_AUTHORING_DIGEST_FIELD: 'a' * 64,
         },
     }
     manifest_path = out / 'manifest.json'

@@ -33,15 +33,21 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import tempfile
 
 import pytest
 
 from tests._jsdom import JS_DIR, node_deps_available, run_harness
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 
 _SRC = os.path.join(JS_DIR, 'core', 'conversation_invalidation.js')
+_FRAME_OWNER = native_module_path(
+    '.native/frame-identity-folders.js',
+    Path(__file__).resolve().parents[1] / 'frontend/src/core/frame-identity.ts',
+)
 
 # The exact delete-reconcile assignment the fix introduced (neuter target).
 _UNASSIGN = (
@@ -61,8 +67,8 @@ const _timers = [];
 const { document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="convList"></div></body>',
-  // argv[4] = frame_identity.js. The handler's ownership gate fails closed,
-  // so load that owner before the invalidation adapter.
+  // argv[4] = the typed frame-identity owner. The retained handler gets only
+  // a composition adapter that supplies the current authenticated owner.
   targets: [process.argv[4], process.argv[2]],
   globals: {
     setTimeout: (fn) => { _timers.push(fn); return _timers.length; },
@@ -71,9 +77,18 @@ const { document, check, report } = setup({
     activeStreams: new Map(),
     conversations: [],
     _currentUserId: 1,
-    saveConversations: () => { global.__saved = (global.__saved || 0) + 1; },
+    _frameIsOurs: (frameOwnerId) =>
+      frameBelongsToOwner(global._currentUserId, frameOwnerId),
+    reconcileConversationCatalogMetadata: () => {
+      global.__saved = (global.__saved || 0) + 1;
+    },
     renderConversationList: () => { global.__rendered = (global.__rendered || 0) + 1; },
     ConvCache: { put: () => {} },
+    // core/conversation_invalidation.js registers the catalog-revision gate's
+    // teardown on the retained composition lifecycle (defined by _prelude.js,
+    // which this focused harness does not load). The handler under test never
+    // drives the lifecycle, so an inert stub is faithful here.
+    retainedCompositionLifecycle: { add: () => {}, destroy: () => {}, listen: () => {} },
     debugLog: () => {},
   },
 });
@@ -148,7 +163,7 @@ def test_folders_changed_applies_without_refresh():
     run_harness(
         target_js=_SRC,
         body_js=_BODY,
-        extra_targets=[os.path.join(JS_DIR, 'core', 'frame_identity.js')],
+        extra_targets=[_FRAME_OWNER],
         min_pass=7,
         label='folders-changed apply',
     )
@@ -175,7 +190,7 @@ def test_NC_no_unassign_leaves_stale_folderid():
         run_harness(
             target_js=neutered_path,
             body_js=_BODY,
-            extra_targets=[os.path.join(JS_DIR, 'core', 'frame_identity.js')],
+            extra_targets=[_FRAME_OWNER],
             min_pass=3,
             label='folders-changed apply NC',
         )

@@ -1,6 +1,6 @@
 {
   // ─────────────────────────────────────────────────────────────────────
-  // Tofu / chatui — shared workspace settings
+  // Tofu — shared workspace settings
   //
   // Why this file exists:
   //   VS Code (and code-server / web-VSCode) spawns a fileWatcher worker

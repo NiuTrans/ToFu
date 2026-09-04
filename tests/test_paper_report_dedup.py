@@ -23,9 +23,12 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+import pytest  # noqa: E402
 
 TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
+_REPOSITORY_STACK = []
+pytestmark = pytest.mark.unit
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -53,6 +56,16 @@ def _patch_dispatch(monkeyplan):
     import lib.paper.report_engine.worker as re_mod
     plan = list(monkeyplan)
 
+    class _Repository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == TEST_OWNER_USER_ID
+
+        def put_report(self, *_args, **_kwargs):
+            return True
+
+    _REPOSITORY_STACK.append(re_mod.PaperArtifactRepository)
+    re_mod.PaperArtifactRepository = _Repository
+
     def _fake_dispatch(messages, on_content=None, on_thinking=None, **kw):
         content, tool_calls = plan.pop(0)
         if content and on_content:
@@ -68,6 +81,8 @@ def _patch_dispatch(monkeyplan):
 def _restore_dispatch(orig):
     import lib.paper.report_engine.worker as re_mod
     re_mod.dispatch_stream = orig
+    if _REPOSITORY_STACK:
+        re_mod.PaperArtifactRepository = _REPOSITORY_STACK.pop()
 
 
 REPORT_BODY = (
@@ -101,6 +116,8 @@ def test_interim_draft_discarded():
         assert n == 1, f'TL;DR heading appears {n}× — report duplicated!'
         assert report.count('## 📝 Technical Reference') == 1
         assert task['status'] == 'done'
+        assert task['report_meta']['agentUsageV1']['stage'] == 'report'
+        assert task['report_meta']['agentUsageV1']['agent_dispatches'] == 2
     finally:
         re_mod.execute_paper_tool = orig_tool
         _restore_dispatch(orig)
@@ -194,6 +211,16 @@ def _patch_dispatch_restreaming(body):
     the returned msg['content'], so a retry can never double the written doc.
     """
     import lib.paper.report_engine.worker as re_mod
+
+    class _Repository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == TEST_OWNER_USER_ID
+
+        def put_report(self, *_args, **_kwargs):
+            return True
+
+    _REPOSITORY_STACK.append(re_mod.PaperArtifactRepository)
+    re_mod.PaperArtifactRepository = _Repository
 
     def _fake_dispatch(messages, on_content=None, on_thinking=None, **kw):
         if on_content:

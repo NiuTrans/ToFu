@@ -277,41 +277,12 @@ def plan_has_submit_action(plan):
 
 
 # ── OpenReview page identification ──────────────────────────────────────
-_FORUM_ID_RE = re.compile(r'[?&](?:id|noteId|forum)=([A-Za-z0-9_\-]+)')
 
 
 def is_openreview_url(url):
     """True when ``url`` is an openreview.net page."""
     u = _norm(url)
     return 'openreview.net' in u
-
-
-def extract_forum_id(url):
-    """Pull the OpenReview forum / note id from a submission URL, or ''.
-
-    Handles ``…/forum?id=XXXX`` and ``…?noteId=XXXX`` shapes.
-    """
-    m = _FORUM_ID_RE.search(str(url or ''))
-    return m.group(1) if m else ''
-
-
-def extract_pdf_url(elements, page_url=''):
-    """Find the paper PDF link on the OpenReview page, or ''.
-
-    OpenReview exposes the PDF as ``/pdf?id=XXXX`` (a link) or ``/attachment``.
-    We scan the interactive elements' hrefs; fall back to deriving ``/pdf?id=``
-    from the forum id in the page URL.
-    """
-    for el in (elements or []):
-        href = _norm(el.get('href'))
-        if not href:
-            continue
-        if '/pdf?id=' in href or href.endswith('.pdf') or '/attachment' in href:
-            return el.get('href')
-    fid = extract_forum_id(page_url)
-    if fid:
-        return f'https://openreview.net/pdf?id={fid}'
-    return ''
 
 
 # ── Extracting fillable values from a finished review body ──────────────

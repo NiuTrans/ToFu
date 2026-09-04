@@ -10,17 +10,14 @@ Two layers, one contract (mirrors tests/test_browser_display_labels.py):
   * Backend labels (lib/tasks_pkg/tool_display/_renderers.py): every shipped
     motion_video_* / produce_* tool rendered with {} args and with typical
     arg shapes — never the raw fn_name, never '?', never a dangling colon.
-  * Frontend parity guards (the Vite-owned runtime module): the
-    _MOTION_TOOL_FAMILY list must equal the backend family sets exactly, and
-    every family name must have an icon-map entry whose glyph exists —
-    otherwise the round silently degrades to the generic fallback (the drift
-    half of the same incident).
+  * Frontend rich-card dispatch remains connected to the typed presentation
+    owner. Family/catalogue parity is exercised through that owner's public
+    API in ``test_frontend_tool_round_presentation.py``.
 
 The structured result card (_renderMotionVideoBlock in the same ESM owner)
 is exercised under jsdom by tests/test_frontend_motion_tool_render.py.
 """
 
-import re
 from pathlib import Path
 
 import pytest
@@ -144,51 +141,11 @@ def test_update_search_settings_read_vs_write():
     assert 'fetch_top_n' in write and 'fetch_timeout' in write
 
 
-# ── 4. Frontend parity guards (the drift half of the incident) ────────
-
-def _frontend_family():
-    src = TOOL_ROUNDS.read_text(encoding='utf-8')
-    m = re.search(r'_MOTION_TOOL_FAMILY\s*=\s*\[([^\]]+)\]', src)
-    assert m, '_MOTION_TOOL_FAMILY list not found in tool_rounds.js'
-    return set(re.findall(r'"([^"]+)"', m.group(1)))
-
-
-def _frontend_icon_map_block():
-    src = TOOL_ROUNDS.read_text(encoding='utf-8')
-    m = re.search(r'if \(_isRoundMotion\(round\)\) \{\s*const m = \{(.*?)\};',
-                  src, re.S)
-    assert m, 'motion icon map not found in _getRoundIcon'
-    return m.group(1)
-
-
-def test_frontend_motion_family_matches_backend_sets():
-    backend = _backend_family()
-    frontend = _frontend_family()
-    assert frontend == backend, (
-        f'frontend/motion family drift — missing: {sorted(backend - frontend)}, '
-        f'stale: {sorted(frontend - backend)}')
-
-
-def test_frontend_icon_map_covers_the_whole_family():
-    block = _frontend_icon_map_block()
-    mapped = set(re.findall(r'(\w+):\s*"(\w+)"', block))
-    mapped_names = {name for name, _icon in mapped}
-    missing = _frontend_family() - mapped_names
-    assert not missing, f'family tools with no icon-map entry: {sorted(missing)}'
-    # …and every referenced glyph must exist in _motionToolSvg.
-    src = TOOL_ROUNDS.read_text(encoding='utf-8')
-    svg_block = re.search(r'_motionToolSvg = \{(.*?)\n\};', src, re.S)
-    assert svg_block, '_motionToolSvg block not found'
-    glyphs = set(re.findall(r'^\s*(\w+):\s*\'<svg', svg_block.group(1), re.M))
-    missing_glyphs = {icon for _name, icon in mapped} - glyphs
-    assert not missing_glyphs, f'icon-map glyphs with no SVG: {sorted(missing_glyphs)}'
-
-
 def test_frontend_card_probe_is_wired_in_render_pipeline():
     # The card probe in _renderUnifiedToolLine must reference the rich renderer
     # through a typeof guard (deferred-load contract) and the family predicate.
     src = TOOL_ROUNDS.read_text(encoding='utf-8')
-    assert '_isRoundMotion(round) && round.status === "done"' in src
+    assert 'isMotionToolRound(round) && round.status === "done"' in src
     assert "typeof _renderMotionVideoBlock === 'function'" in src
 
 
@@ -196,7 +153,7 @@ def test_rich_renderer_is_shipping_in_the_deferred_module():
     rich = TOOL_ROUNDS.read_text(encoding='utf-8')
     assert 'function _renderMotionVideoBlock(round, svg, q, badgeHtml)' in rich
     # The retained upgrade sweep must include motion rounds.
-    assert '_isRoundMotion' in rich
+    assert 'isMotionToolRound' in rich
 
 
 # ── 5. Census: no shipped tool family may be missing from the display

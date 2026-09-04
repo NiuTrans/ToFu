@@ -34,6 +34,42 @@ ZERO_DELIVERABLE_DIRECTIVE = (
     'plan. Do not just read, search, or describe.'
 )
 
+GOAL_COMPLETION_EVIDENCE_DIRECTIVE = (
+    'Do not declare the objective complete without the required machine '
+    'evidence line. Verify the acceptance criteria, then end the reply with '
+    '[PROGRESS: resolved=X remaining=Y]. TASK_DONE is accepted only when '
+    'remaining=0.'
+)
+
+GOAL_REMAINING_DIRECTIVE = (
+    'You declared the objective complete, but your own progress line says '
+    'remaining={remaining}. Completion requires remaining=0: drive the '
+    'remaining acceptance criteria to done (or explicitly justify why each '
+    'is out of scope), then re-issue your verdict with an updated '
+    '[PROGRESS: resolved=X remaining=0] line.'
+)
+
+GOAL_STOP_VERIFY_CHALLENGE_DIRECTIVE = (
+    'You declared the objective complete without verifying anything '
+    'yourself this run — the assistant changed real state, and an owner '
+    'sign-off requires independent evidence, not the assistant\'s '
+    'self-report. Before declaring completion again, use your tools to '
+    'check the most consequential claims (read the changed files, run or '
+    'inspect the tests/build), then re-issue your verdict with the '
+    '[PROGRESS: resolved=X remaining=Y] line. If verification exposes a '
+    'gap, give the assistant the gap instead of declaring completion.'
+)
+
+GOAL_STOP_VACUOUS_CHALLENGE_DIRECTIVE = (
+    'You declared the objective complete with resolved=0 and zero '
+    'state-changing work anywhere in this run — an empty close-out. Either '
+    'the objective genuinely needs no tool work (a subjective/advisory '
+    'question already answered): then restate completion with a one-line '
+    'justification of WHY no work was needed; or work remains: then name '
+    'the concrete next step. End with the [PROGRESS: resolved=X '
+    'remaining=Y] line.'
+)
+
 
 class OrchestrationLoopAborted(Exception):
     """Signal translated to the graph interpreter's internal abort unwind."""
@@ -104,6 +140,8 @@ class OrchestrationLoopRuntime:
         exit_reason = 'max_iterations'
         completed_iterations = 0
         replan_exhausted = False
+        producer_sc_total = 0
+        stop_challenged = False
         for index in range(cap):
             if self._abort_check():
                 raise OrchestrationLoopAborted()
@@ -124,6 +162,7 @@ class OrchestrationLoopRuntime:
             )
 
             producer = self._progress.aggregate_iteration()
+            producer_sc_total += int((producer or {}).get('sc_count') or 0)
             zero_streak = advance_zero_deliverable_streak(
                 zero_streak,
                 reported=bool(producer and producer.get('reported')),
@@ -160,11 +199,110 @@ class OrchestrationLoopRuntime:
             )
 
             if verifier_role == 'virtual_user':
-                self._feedback.record_virtual_user_progress(
+                progress_entry = self._feedback.record_virtual_user_progress(
                     verifier_output,
-                    self._progress.aggregate_iteration(),
+                    producer,
                     progress_parser=self._progress_parser,
                 )
+                _resolved, remaining = self._progress_parser(verifier_output)
+                if phase == 'stop':
+                    vu_tool_rounds = self._feedback.verifier_tool_rounds()
+                    cum_resolved = progress_entry.get('cum_resolved')
+                    if remaining is None:
+                        # GoalRun policy requires concrete completion evidence.
+                        # The compatibility classifier intentionally fails open
+                        # for old standalone carriers; the sole new Goal Mode
+                        # owner fails closed here at its Flow lifecycle boundary.
+                        phase = 'worker'
+                        self._feedback.set_directive(
+                            GOAL_COMPLETION_EVIDENCE_DIRECTIVE)
+                        self._emit({
+                            'type': 'goal_completion_evidence_missing',
+                            'node_id': loop_id,
+                            'iteration': iteration,
+                        })
+                        logger.warning(
+                            '[FlowEngine] loop %s refused VU completion without '
+                            'a parseable remaining=0 progress receipt',
+                            loop_id,
+                        )
+                    elif remaining > 0:
+                        # Ledger reconciliation: the VU's own progress line
+                        # contradicts the completion claim.
+                        phase = 'worker'
+                        self._feedback.set_directive(
+                            GOAL_REMAINING_DIRECTIVE.format(
+                                remaining=remaining))
+                        self._emit({
+                            'type': 'goal_stop_rejected',
+                            'node_id': loop_id,
+                            'iteration': iteration,
+                            'reason': 'remaining',
+                            'remaining': remaining,
+                        })
+                        logger.warning(
+                            '[FlowEngine] loop %s refused VU completion: '
+                            'self-reported remaining=%d',
+                            loop_id,
+                            remaining,
+                        )
+                    elif (
+                        not stop_challenged
+                        and producer_sc_total > 0
+                        and vu_tool_rounds == 0
+                    ):
+                        # The producer changed real state but the VU never
+                        # verified anything with its own tools — challenge
+                        # the first such stop instead of accepting it.
+                        stop_challenged = True
+                        phase = 'worker'
+                        self._feedback.set_directive(
+                            GOAL_STOP_VERIFY_CHALLENGE_DIRECTIVE)
+                        self._emit({
+                            'type': 'goal_stop_rejected',
+                            'node_id': loop_id,
+                            'iteration': iteration,
+                            'reason': 'unverified',
+                        })
+                        logger.warning(
+                            '[FlowEngine] loop %s challenged VU completion: '
+                            'producer made %d state-changing call(s) but '
+                            'the VU used 0 tool rounds — forcing verification',
+                            loop_id,
+                            producer_sc_total,
+                        )
+                    elif (
+                        not stop_challenged
+                        and not cum_resolved
+                        and producer_sc_total == 0
+                        and vu_tool_rounds == 0
+                    ):
+                        # Vacuous close-out: nothing resolved, nothing built,
+                        # nothing checked. Challenge once; a genuinely
+                        # no-work objective passes on the justified re-issue.
+                        stop_challenged = True
+                        phase = 'worker'
+                        self._feedback.set_directive(
+                            GOAL_STOP_VACUOUS_CHALLENGE_DIRECTIVE)
+                        self._emit({
+                            'type': 'goal_stop_rejected',
+                            'node_id': loop_id,
+                            'iteration': iteration,
+                            'reason': 'vacuous',
+                        })
+                        logger.warning(
+                            '[FlowEngine] loop %s challenged vacuous VU '
+                            'completion (resolved=0, no state changes, no '
+                            'verification)',
+                            loop_id,
+                        )
+                    elif producer_sc_total > 0 and vu_tool_rounds == 0:
+                        logger.warning(
+                            '[FlowEngine] loop %s accepting VU completion '
+                            'without VU tool verification — challenge was '
+                            'already issued once this loop',
+                            loop_id,
+                        )
 
             if phase == 'stop':
                 logger.info(

@@ -18,7 +18,10 @@ from typing import Any
 
 from lib.orchestration._execution_projection import render_role_brief
 from lib.orchestration._runtime_params import resolve_node_runtime_param
-from lib.orchestration_runner_result import OrchestrationAgentResult
+from lib.orchestration_runner_result import (
+    OrchestrationAgentResult,
+    OrchestrationModelRoute,
+)
 from lib.orchestration_tool_usage import classify_orchestration_tool_usage
 
 
@@ -32,6 +35,16 @@ class OrchestrationAgentRunnerConfig:
     project_path: str = ''
     system_prompt_base: str = ''
     thinking_enabled: bool = True
+    model_routing_policy: str = 'role_tier'
+
+    def __post_init__(self) -> None:
+        if self.model_routing_policy not in {'selected', 'role_tier'}:
+            raise ValueError(
+                f'unsupported orchestration model routing policy: '
+                f'{self.model_routing_policy!r}')
+        if self.model_routing_policy == 'selected' and not self.model:
+            raise ValueError(
+                'selected-model orchestration requires a model')
 
     def executor_options(self) -> dict[str, Any]:
         """Return the public FlowExecutor options for an isolated child."""
@@ -42,6 +55,7 @@ class OrchestrationAgentRunnerConfig:
             'project_path': self.project_path,
             'system_prompt_base': self.system_prompt_base,
             'thinking_enabled': self.thinking_enabled,
+            'model_routing_policy': self.model_routing_policy,
         }
 
 
@@ -54,10 +68,50 @@ class OrchestrationSubAgentRunner:
         *,
         emit: Callable[[dict], None],
         abort_check: Callable[[], bool],
+        model_resolver: Callable[..., str] | None = None,
     ):
         self._config = config
         self._emit = emit
         self._abort_check = abort_check
+        self._model_resolver = model_resolver
+
+    def _resolve_model_route(self, node: dict) -> OrchestrationModelRoute:
+        """Resolve the leaf route once, before constructing the SubAgent."""
+        selected_model = str(self._config.model or '')
+        role = str(node.get('role') or 'general')
+        tier = str(resolve_node_runtime_param(node, 'tier') or 'standard')
+        routing_policy = self._config.model_routing_policy
+        if routing_policy == 'selected':
+            resolved_model = selected_model
+        else:
+            resolver = self._model_resolver
+            if resolver is None:
+                from lib.swarm.registry import resolve_model_for_tier
+                resolver = resolve_model_for_tier
+            parent_config = (
+                (self._config.parent_task or {}).get('config') or {})
+            resolver_kwargs = {
+                'role': role,
+                'provider_id': str(
+                    parent_config.get('_pinned_provider_id') or ''),
+            }
+            parent_task = self._config.parent_task or {}
+            if parent_task.get('_userId') is not None:
+                from lib.tasks_pkg.manager import task_user_id
+                resolver_kwargs.update({
+                    'owner_user_id': task_user_id(parent_task),
+                    'tenant_id': parent_task.get('_tenant_id'),
+                })
+            resolved_model = str(resolver(
+                tier, selected_model, **resolver_kwargs) or selected_model)
+        return OrchestrationModelRoute(
+            selected_model=selected_model,
+            resolved_model=resolved_model,
+            role=role,
+            tier=tier,
+            kind=('selected' if routing_policy == 'selected'
+                  else 'role_tier'),
+        )
 
     def __call__(
         self, node: dict, context: str, iteration: int,
@@ -68,12 +122,14 @@ class OrchestrationSubAgentRunner:
         from lib.swarm.agent import SubAgent
         from lib.swarm.protocol import SubAgentStatus, SubTaskSpec
 
+        model_route = self._resolve_model_route(node)
         spec = SubTaskSpec(
             role=node.get('role', 'general'),
             objective=(render_role_brief(node) or node.get('name')
                        or 'Execute this step.'),
             context=context,
-            model_tier=resolve_node_runtime_param(node, 'tier'),
+            model_override=model_route.resolved_model,
+            model_tier=model_route.tier,
         )
         parent = self._config.parent_task or {
             'id': 'flow',
@@ -98,6 +154,7 @@ class OrchestrationSubAgentRunner:
                     'emits': emits,
                     'phase': phase or 'working',
                     'detail': chunk,
+                    'modelRoute': model_route.to_projection(),
                     **meta,
                 })
                 return
@@ -112,6 +169,15 @@ class OrchestrationSubAgentRunner:
                 'chunk': chunk,
             })
 
+        def tool_event_sink(event: dict) -> None:
+            self._emit({
+                'type': 'step_tool_event',
+                'node_id': node_id,
+                'role': role,
+                'emits': emits,
+                'event': dict(event),
+            })
+
         agent = SubAgent(
             spec,
             parent_task=parent,
@@ -122,7 +188,40 @@ class OrchestrationSubAgentRunner:
             abort_check=self._abort_check,
             project_path=self._config.project_path,
             stream_sink=stream_sink,
+            tool_event_sink=tool_event_sink,
         )
+        actual_model = str(
+            getattr(agent, 'model', '') or model_route.resolved_model)
+        if actual_model != model_route.resolved_model:
+            model_route = OrchestrationModelRoute(
+                selected_model=model_route.selected_model,
+                resolved_model=actual_model,
+                role=model_route.role,
+                tier=model_route.tier,
+                kind=model_route.kind,
+            )
+        if model_route.switched:
+            self._emit({
+                'type': 'step_phase',
+                'node_id': node_id,
+                'role': role,
+                'emits': emits,
+                'phase': 'working',
+                'detail': (
+                    f'Model routing: {model_route.selected_model} → '
+                    f'{model_route.resolved_model} '
+                    f'({model_route.role}, {model_route.tier})'
+                ),
+                'detailKey': 'stream.phase.modelRouted',
+                'detailArgs': {
+                    'from': model_route.selected_model,
+                    'to': model_route.resolved_model,
+                    'role': model_route.role,
+                    'tier': model_route.tier,
+                },
+                'model': model_route.resolved_model,
+                'modelRoute': model_route.to_projection(),
+            })
         result = agent.run()
         tool_log = result.tool_log or []
         return OrchestrationAgentResult(
@@ -133,9 +232,12 @@ class OrchestrationSubAgentRunner:
                 if result.status != SubAgentStatus.COMPLETED.value else ''
             ),
             thinking=''.join(thinking_parts),
+            model_route=model_route,
             tool_usage=classify_orchestration_tool_usage({
                 'tool_log': tool_log,
             }),
+            tool_log=tuple(
+                dict(row) for row in tool_log if isinstance(row, dict)),
         )
 
 

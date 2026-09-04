@@ -55,6 +55,17 @@ runtimeScope._pvideo = _pvideo;
 var _PVIDEO_POLL_MS = 1500;
 var _PV_POLL_FAIL_LIMIT = 5;
 
+// Explicit retained presentation ports consumed by the lazy typed runtime.
+// These stay module-private: featureRegistry resolves them through runtimeScope.
+Object.assign(runtimeScope, {
+  _pvT,
+  _pvEsc,
+  _pvRender,
+  _pvRenderProgress,
+  _pvRenderActivity,
+  _pvRenderSceneGrid,
+});
+
 function _pvT(key, fallback) {
   return (typeof t === 'function') ? t(key) : (fallback || key);
 }
@@ -283,7 +294,7 @@ function _pvRender() {
       '<select id="videoLangSel" class="pm-sr" tabindex="-1" aria-hidden="true">' +
       '<option value="zh"' + (s.lang === 'zh' ? ' selected' : '') + '>中文</option>' +
       '<option value="en"' + (s.lang === 'en' ? ' selected' : '') + '>English</option></select></div>';
-    h += _pmModelFieldHtml('video', s);
+    h += modelFieldHtml('video', s);
     h += '<div class="pm-field"><div class="pm-field-label">' +
       _pvEsc(_pvT('paper.mediaOptQuality', 'Quality')) + '</div>' +
       '<div class="pm-options cols-3">' +
@@ -384,7 +395,7 @@ function _pvRender() {
     host.innerHTML = h;
     _pvRenderProgress();
     _pvRenderActivity();
-    _pvStartTick();
+    startVideoTick();
     _pvRenderSceneGrid(0);
     return;
   }
@@ -420,7 +431,7 @@ function _pvRender() {
   if (s.artifactModel) {
     h += '<span class="paper-podcast-badge" id="videoModelBadge" title="' +
       _pvEsc(_pvT('paper.mediaModelTitle', 'Model used for generation')) + '">' +
-      _pvEsc(_pmShortName(s.artifactModel)) + '</span>';
+      _pvEsc(shortModelName(s.artifactModel)) + '</span>';
   }
   if (r.duration) {
     var mm = Math.floor(r.duration / 60), ss = Math.round(r.duration % 60);
@@ -444,7 +455,7 @@ function _pvRender() {
     h += '<video id="paperVideoPlayer" class="paper-video-player" controls ' +
       'preload="metadata" src="' + _pvEsc(fileUrl) + '"></video>';
     h += '<div class="paper-podcast-actions">';
-    h += _pmModelInlineHtml('video', s);
+    h += modelInlineHtml('video', s);
     h += '<a class="paper-podcast-btn" href="' + _pvEsc(fileUrl) +
       '" download="paper-video-' + (s.paperHash || '').slice(0, 8) + '.mp4">' +
       _pvIconSvg('download') + '<span>' +
@@ -525,4 +536,3 @@ function _pvRenderSceneGrid(cacheBust) {
   h += '</div>';
   grid.innerHTML = h;
 }
-

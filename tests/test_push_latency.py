@@ -41,6 +41,91 @@ class TestPushLatencyPingPong:
         frame = asyncio.run(client.drain())
         assert frame == {'channel': 'system', 'type': 'pong', 't': None}
 
+    def test_explicit_build_probe_piggybacks_current_build_id(self, monkeypatch):
+        from lib import vite_assets
+
+        calls = []
+        refreshes = []
+        monkeypatch.setattr(
+            vite_assets,
+            'get_vite_build_id',
+            lambda entry: calls.append(entry) or 'main-BBB222.js',
+        )
+        monkeypatch.setattr(
+            vite_assets,
+            'request_vite_build_id_refresh',
+            lambda: refreshes.append('scheduled') or True,
+        )
+        client = PushClient(user_id=1)
+        _handle_client_frame(
+            client,
+            {'action': 'ping', 't': 7654321, 'buildProbe': True},
+        )
+
+        frame = asyncio.run(client.drain())
+        assert frame == {
+            'channel': 'system',
+            'type': 'pong',
+            't': 7654321,
+            'buildId': 'main-BBB222.js',
+        }
+        assert calls == ['main']
+        assert refreshes == ['scheduled']
+
+    def test_build_probe_is_literal_true_and_missing_id_is_fail_quiet(
+            self, monkeypatch):
+        from lib import vite_assets
+
+        calls = []
+        refreshes = []
+        monkeypatch.setattr(
+            vite_assets,
+            'get_vite_build_id',
+            lambda entry: calls.append(entry) or '',
+        )
+        monkeypatch.setattr(
+            vite_assets,
+            'request_vite_build_id_refresh',
+            lambda: refreshes.append('scheduled') or True,
+        )
+        ignored = PushClient(user_id=1)
+        _handle_client_frame(
+            ignored,
+            {'action': 'ping', 't': 1, 'buildProbe': 'true'},
+        )
+        assert asyncio.run(ignored.drain()) == {
+            'channel': 'system', 'type': 'pong', 't': 1,
+        }
+        assert calls == []
+        assert refreshes == []
+
+        empty = PushClient(user_id=1)
+        _handle_client_frame(
+            empty,
+            {'action': 'ping', 't': 2, 'buildProbe': True},
+        )
+        assert asyncio.run(empty.drain()) == {
+            'channel': 'system', 'type': 'pong', 't': 2,
+        }
+        assert calls == ['main']
+        assert refreshes == ['scheduled']
+
+    def test_build_probe_failure_cannot_drop_liveness_pong(self, monkeypatch):
+        from lib import vite_assets
+
+        def fail(_entry):
+            raise RuntimeError('fault-injected manifest failure')
+
+        monkeypatch.setattr(vite_assets, 'get_vite_build_id', fail)
+        client = PushClient(user_id=1)
+        _handle_client_frame(
+            client,
+            {'action': 'ping', 't': 3, 'buildProbe': True},
+        )
+        assert asyncio.run(client.drain()) == {
+            'channel': 'system', 'type': 'pong', 't': 3,
+        }
+
     def test_non_ping_frames_do_not_produce_a_pong(self):
         client = PushClient(user_id=1)
         # subscribe/unsubscribe/abort/garbage must not enqueue a pong.

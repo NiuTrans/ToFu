@@ -8,8 +8,13 @@ chooses SQLite or PostgreSQL behind its semantic protocol.
 
 Entry points
 ------------
-``get_conversation`` reads one owner-scoped snapshot.
+``get_conversation`` reads one owner-scoped full, metadata-only, or bounded-page
+snapshot.
 ``list_conversations`` reads a bounded, filtered snapshot set.
+``ConversationRepository.list_catalog_page`` reads one metadata page plus its
+authoritative total without materializing the owner's complete archive.
+``count_conversation_activity_intervals`` counts activity through timestamp-
+only authority projections rather than hydrating transcript content.
 ``scan_conversations_bounded`` lists lightweight candidates first, then
 hydrates transcripts in small RPC batches so archive scans cannot build one
 oversize storage frame.
@@ -34,6 +39,7 @@ from lib.storage.errors import StorageError
 StorageClientFactory = Callable[..., Any]
 _TRANSCRIPT_SCAN_BATCH_SIZE = 4
 _TRANSCRIPT_SCAN_MAX_BATCH_SIZE = 32
+_ACTIVITY_DATE_MAX_INTERVALS = 366
 _FRAME_TOO_LARGE_MESSAGE = "Storage frame exceeds the size limit"
 
 
@@ -69,6 +75,15 @@ class ConversationSnapshot(Mapping[str, Any]):
         return len(self.metadata) + 1
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationCatalogPage:
+    """One bounded owner-scoped metadata page from a single read snapshot."""
+
+    items: tuple[ConversationSnapshot, ...]
+    total_count: int
+    has_more: bool
+
+
 class ConversationRepository:
     """Stateless adapter around the semantic storage protocol."""
 
@@ -102,15 +117,39 @@ class ConversationRepository:
         *,
         user_id: int,
         include_messages: bool = True,
+        message_window: int | None = None,
+        before_sequence: int | None = None,
     ) -> ConversationSnapshot | None:
-        document = self._client().query(
-            "conversation.get",
-            {
-                "conv_id": _conversation_id(conversation_id),
-                "user_id": _owner_id(user_id),
-                "derive_messages": bool(include_messages),
-            },
-        )
+        if message_window is not None:
+            if (
+                isinstance(message_window, bool)
+                or not isinstance(message_window, int)
+                or not 1 <= message_window <= 500
+            ):
+                raise ValueError("message_window must be between 1 and 500")
+            if not include_messages:
+                raise ValueError(
+                    "message_window requires include_messages=True"
+                )
+        if before_sequence is not None:
+            if (
+                isinstance(before_sequence, bool)
+                or not isinstance(before_sequence, int)
+                or before_sequence < 0
+            ):
+                raise ValueError("before_sequence must be a non-negative integer")
+            if message_window is None:
+                raise ValueError("before_sequence requires message_window")
+        payload = {
+            "conv_id": _conversation_id(conversation_id),
+            "user_id": _owner_id(user_id),
+            "derive_messages": bool(include_messages),
+        }
+        if message_window is not None:
+            payload["message_window"] = message_window
+        if before_sequence is not None:
+            payload["before_sequence"] = before_sequence
+        document = self._client().query("conversation.get", payload)
         if document is None:
             return None
         if not include_messages:
@@ -124,6 +163,7 @@ class ConversationRepository:
         user_id: int,
         ids: list[str] | tuple[str, ...] | None = None,
         project_path: str | None = None,
+        title_contains: str | None = None,
         updated_at_gte: int | None = None,
         updated_at_gt: int | None = None,
         created_at_lt: int | None = None,
@@ -155,6 +195,16 @@ class ConversationRepository:
             ):
                 raise ValueError("project_path must be a non-empty bounded string")
             payload["project_path"] = project_path
+        if title_contains is not None:
+            if (
+                not isinstance(title_contains, str)
+                or not title_contains.strip()
+                or len(title_contains) > 512
+            ):
+                raise ValueError(
+                    "title_contains must be non-empty bounded text"
+                )
+            payload["title_contains"] = title_contains.strip()
         if settings_keys is not None:
             if not all(
                 isinstance(key, str) and key.strip() for key in settings_keys
@@ -171,6 +221,88 @@ class ConversationRepository:
         if not isinstance(documents, list):
             raise RuntimeError("conversation list projection is malformed")
         return [self._snapshot(document) for document in documents]
+
+    def list_catalog_page(
+        self,
+        *,
+        user_id: int,
+        limit: int,
+        folder_id: str | None = None,
+        before_updated_at: int | None = None,
+        before_id: str = "",
+        settings_keys: list[str] | tuple[str, ...] | None = None,
+    ) -> ConversationCatalogPage:
+        """Read a cursor page and complete matching count in one Sidecar RPC."""
+        owner_id = _owner_id(user_id)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError("limit must be between 1 and 1000")
+        normalized_folder_id = None
+        if folder_id is not None:
+            if (
+                not isinstance(folder_id, str)
+                or not folder_id.strip()
+                or len(folder_id) > 512
+            ):
+                raise ValueError("folder_id must be a non-empty bounded string")
+            normalized_folder_id = folder_id.strip()
+        if before_updated_at is not None and (
+            isinstance(before_updated_at, bool)
+            or not isinstance(before_updated_at, int)
+            or before_updated_at < 0
+        ):
+            raise ValueError("before_updated_at must be a non-negative integer")
+        if not isinstance(before_id, str) or len(before_id) > 256:
+            raise ValueError("before_id must be a bounded string")
+        if before_updated_at is None and before_id:
+            raise ValueError("before_id requires before_updated_at")
+
+        payload: dict[str, Any] = {
+            "user_id": owner_id,
+            "catalog_page": True,
+            "include_messages": False,
+            "order_by": "updated_at_desc",
+            "limit": limit,
+            "before_id": before_id,
+        }
+        if normalized_folder_id is not None:
+            payload["folder_id"] = normalized_folder_id
+        if before_updated_at is not None:
+            payload["before_updated_at"] = before_updated_at
+        if settings_keys is not None:
+            if not all(
+                isinstance(key, str) and key.strip() for key in settings_keys
+            ):
+                raise ValueError("settings_keys must contain non-empty strings")
+            payload["settings_keys"] = [key.strip() for key in settings_keys]
+
+        result = self._client().query("conversation.list", payload)
+        if not isinstance(result, Mapping):
+            raise RuntimeError("conversation catalog page is malformed")
+        documents = result.get("items")
+        total_count = result.get("total_count")
+        has_more = result.get("has_more")
+        if not isinstance(documents, list) or not all(
+            isinstance(document, Mapping) for document in documents
+        ):
+            raise RuntimeError("conversation catalog items are malformed")
+        if (
+            isinstance(total_count, bool)
+            or not isinstance(total_count, int)
+            or total_count < len(documents)
+            or len(documents) > limit
+        ):
+            raise RuntimeError("conversation catalog total is malformed")
+        if not isinstance(has_more, bool):
+            raise RuntimeError("conversation catalog cursor is malformed")
+        return ConversationCatalogPage(
+            items=tuple(self._snapshot(document) for document in documents),
+            total_count=total_count,
+            has_more=has_more,
+        )
 
     def scan_bounded(
         self,
@@ -224,6 +356,73 @@ class ConversationRepository:
                 )
 
         return len(conversation_ids), snapshots()
+
+    def activity_counts(
+        self,
+        *,
+        user_id: int,
+        updated_at_gte: int,
+        day_boundaries_ms: list[int] | tuple[int, ...],
+        created_at_lt: int | None = None,
+        limit: int = 10_000,
+    ) -> tuple[int, list[int]]:
+        """Count distinct active conversations in explicit time intervals."""
+        if (
+            isinstance(updated_at_gte, bool)
+            or not isinstance(updated_at_gte, int)
+        ):
+            raise ValueError("updated_at_gte must be an integer")
+        if created_at_lt is not None and (
+            isinstance(created_at_lt, bool) or not isinstance(created_at_lt, int)
+        ):
+            raise ValueError("created_at_lt must be an integer")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 10_000
+        ):
+            raise ValueError("limit must be between 1 and 10000")
+        boundaries = list(day_boundaries_ms)
+        if (
+            not 2 <= len(boundaries) <= _ACTIVITY_DATE_MAX_INTERVALS + 1
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in boundaries
+            )
+            or any(
+                left >= right
+                for left, right in zip(boundaries, boundaries[1:])
+            )
+        ):
+            raise ValueError("day_boundaries_ms must be strictly increasing")
+        payload: dict[str, Any] = {
+            "user_id": _owner_id(user_id),
+            "updated_at_gte": updated_at_gte,
+            "day_boundaries_ms": boundaries,
+            "limit": limit,
+        }
+        if created_at_lt is not None:
+            payload["created_at_lt"] = created_at_lt
+        result = self._client().query("conversation.activity_dates", payload)
+        if not isinstance(result, Mapping):
+            raise RuntimeError("conversation activity projection is malformed")
+        candidate_count = result.get("candidate_count")
+        counts = result.get("counts")
+        if (
+            isinstance(candidate_count, bool)
+            or not isinstance(candidate_count, int)
+            or not 0 <= candidate_count <= limit
+            or not isinstance(counts, list)
+            or len(counts) != len(boundaries) - 1
+            or any(
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or not 0 <= count <= candidate_count
+                for count in counts
+            )
+        ):
+            raise RuntimeError("conversation activity projection is malformed")
+        return candidate_count, list(counts)
 
     def _hydrate_id_batch(
         self,
@@ -308,11 +507,15 @@ def get_conversation(
     *,
     user_id: int,
     include_messages: bool = True,
+    message_window: int | None = None,
+    before_sequence: int | None = None,
 ) -> ConversationSnapshot | None:
     return ConversationRepository().get(
         conversation_id,
         user_id=user_id,
         include_messages=include_messages,
+        message_window=message_window,
+        before_sequence=before_sequence,
     )
 
 
@@ -321,6 +524,7 @@ def list_conversations(
     user_id: int,
     ids: list[str] | tuple[str, ...] | None = None,
     project_path: str | None = None,
+    title_contains: str | None = None,
     updated_at_gte: int | None = None,
     updated_at_gt: int | None = None,
     created_at_lt: int | None = None,
@@ -333,6 +537,7 @@ def list_conversations(
         user_id=user_id,
         ids=ids,
         project_path=project_path,
+        title_contains=title_contains,
         updated_at_gte=updated_at_gte,
         updated_at_gt=updated_at_gt,
         created_at_lt=created_at_lt,
@@ -367,6 +572,24 @@ def scan_conversations_bounded(
     )
 
 
+def count_conversation_activity_intervals(
+    *,
+    user_id: int,
+    updated_at_gte: int,
+    day_boundaries_ms: list[int] | tuple[int, ...],
+    created_at_lt: int | None = None,
+    limit: int = 10_000,
+) -> tuple[int, list[int]]:
+    """Count activity without projecting message content across the RPC."""
+    return ConversationRepository().activity_counts(
+        user_id=user_id,
+        updated_at_gte=updated_at_gte,
+        day_boundaries_ms=day_boundaries_ms,
+        created_at_lt=created_at_lt,
+        limit=limit,
+    )
+
+
 def search_conversation_ids(
     query: str,
     *,
@@ -381,10 +604,12 @@ def search_conversation_ids(
 
 
 __all__ = [
+    "ConversationCatalogPage",
     "ConversationRepository",
     "ConversationSnapshot",
     "get_conversation",
     "list_conversations",
     "scan_conversations_bounded",
+    "count_conversation_activity_intervals",
     "search_conversation_ids",
 ]

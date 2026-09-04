@@ -1,31 +1,16 @@
 """Typed public values for the embeddable and headless Tofu runtime.
 
-Provider credentials are deliberately represented by a redacting type. They
-may be supplied in code, through the CLI, or once through environment
-variables; no runtime result serializes the secret.
+The standalone runtime consumes the same ``tofu.model-routing/v2`` aggregate
+as the full Tofu application. Credential values live in a separate, redacting secret map and are
+never serialized by a result or public diagnostic projection.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
-from urllib.parse import urlsplit
-
-
-_HTTP_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
-_FORBIDDEN_PROVIDER_HEADERS = frozenset({
-    'authorization',
-    'content-length',
-    'cookie',
-    'host',
-    'proxy-authorization',
-    'set-cookie',
-    'transfer-encoding',
-    'x-api-key',
-})
 CUSTOM_TOOLS_MODES = frozenset({'augment', 'exclusive'})
 
 
@@ -63,123 +48,81 @@ def _env_first(environ: Mapping[str, str], *names: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderConfig:
-    """The only model-provider configuration most embedders need.
+class ModelRoutingConfig:
+    """One complete v2 access aggregate plus independently supplied secrets."""
 
-    ``base_url`` must expose an OpenAI-compatible chat endpoint. An empty key
-    is valid for local engines such as vLLM or Ollama. ``model`` is both the
-    requested wire model and Tofu's routing identity.
-    """
-
-    base_url: str
-    model: str
-    api_key: str = field(default='', repr=False)
-    extra_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
-    thinking_format: str = ''
-    capabilities: frozenset[str] = field(default_factory=frozenset)
+    document: Mapping[str, Any]
+    model: Mapping[str, str]
+    routing: Mapping[str, Any] = field(default_factory=dict)
+    credential_secrets: Mapping[str, str] = field(
+        default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        base_url = str(self.base_url or '').strip().rstrip('/')
-        model = str(self.model or '').strip()
-        if not base_url.startswith(('http://', 'https://')):
+        from lib.model_routing import (
+            ModelRoutingError, normalize_document, parse_native_model_selection,
+        )
+        try:
+            document = normalize_document(self.document)
+            model = dict(self.model)
+            routing = dict(self.routing or {})
+            parse_native_model_selection({'model': model, 'routing': routing})
+        except (ModelRoutingError, TypeError, ValueError) as exc:
+            raise AgentConfigurationError(str(exc)) from exc
+        if not isinstance(self.credential_secrets, Mapping):
             raise AgentConfigurationError(
-                'provider base_url must start with http:// or https://')
-        if _contains_http_control(base_url):
-            raise AgentConfigurationError(
-                'provider base_url must not contain control characters')
-        if len(base_url) > 2048:
-            raise AgentConfigurationError(
-                'provider base_url must be at most 2048 characters')
-        parsed = urlsplit(base_url)
-        if not parsed.hostname:
-            raise AgentConfigurationError(
-                'provider base_url must contain a hostname')
-        if parsed.username is not None or parsed.password is not None:
-            raise AgentConfigurationError(
-                'provider base_url must not contain embedded credentials; '
-                'use api_key or extra_headers')
-        if parsed.query or parsed.fragment:
-            raise AgentConfigurationError(
-                'provider base_url must not contain a query or fragment')
-        if not model:
-            raise AgentConfigurationError('provider model is required')
-        if _contains_http_control(model):
-            raise AgentConfigurationError(
-                'provider model must not contain control characters')
-        if len(model) > 512:
-            raise AgentConfigurationError(
-                'provider model must be at most 512 characters')
-        if not isinstance(self.extra_headers, Mapping):
-            raise AgentConfigurationError(
-                'provider extra_headers must be an object')
-        headers: dict[str, str] = {}
-        for key, value in dict(self.extra_headers or {}).items():
-            name = str(key or '').strip()
-            if not name:
+                'credential_secrets must be an object keyed by secret_reference')
+        secrets: dict[str, str] = {}
+        for reference, raw_value in self.credential_secrets.items():
+            key = str(reference or '').strip()
+            value = str(raw_value or '').strip()
+            if not key or len(key) > 256:
                 raise AgentConfigurationError(
-                    'provider extra_headers contains an empty name')
-            content = str(value)
-            if len(name) > 256 or len(content) > 16384:
+                    'credential_secrets contains an invalid secret_reference')
+            if len(value.encode('utf-8')) > 8192 or _contains_http_control(value):
                 raise AgentConfigurationError(
-                    'provider extra header name or value is too long')
-            if not _HTTP_HEADER_NAME.fullmatch(name):
-                raise AgentConfigurationError(
-                    'provider extra header names must be valid HTTP tokens')
-            if name.lower() in _FORBIDDEN_PROVIDER_HEADERS:
-                raise AgentConfigurationError(
-                    f'provider extra header {name!r} is reserved')
-            if _contains_http_control(content):
-                raise AgentConfigurationError(
-                    'provider extra header values must not contain control '
-                    'characters or newlines')
-            headers[name] = content
-        if len(headers) > 64:
+                    'credential secret is oversized or contains control characters')
+            secrets[key] = value
+        required = {
+            str(row.get('secret_reference') or '')
+            for row in document['credentials']
+            if row.get('enabled') and row.get('kind') != 'local_identity'
+        }
+        missing = sorted(reference for reference in required if reference not in secrets)
+        if missing:
             raise AgentConfigurationError(
-                'provider extra_headers accepts at most 64 entries')
-        api_key = str(self.api_key or '').strip()
-        if len(api_key) > 16384:
+                'credential_secrets is missing enabled references: '
+                + ', '.join(missing))
+        unknown = sorted(set(secrets) - {
+            str(row.get('secret_reference') or '')
+            for row in document['credentials']
+        })
+        if unknown:
             raise AgentConfigurationError(
-                'provider api_key must be at most 16384 characters')
-        if _contains_http_control(api_key):
-            raise AgentConfigurationError(
-                'provider api_key must not contain control characters or '
-                'newlines')
-        object.__setattr__(self, 'base_url', base_url)
+                'credential_secrets contains unknown references: '
+                + ', '.join(unknown))
+        object.__setattr__(self, 'document', document)
         object.__setattr__(self, 'model', model)
-        object.__setattr__(self, 'api_key', api_key)
-        object.__setattr__(self, 'extra_headers', headers)
-        thinking_format = str(self.thinking_format or '').strip()
-        if len(thinking_format) > 128:
-            raise AgentConfigurationError(
-                'provider thinking_format must be at most 128 characters')
-        object.__setattr__(self, 'thinking_format', thinking_format)
-        if isinstance(self.capabilities, (str, bytes, Mapping)) or not isinstance(
-                self.capabilities, (list, tuple, set, frozenset)):
-            raise AgentConfigurationError(
-                'provider capabilities must be a list of names')
-        capabilities = frozenset(
-            str(value).strip() for value in self.capabilities
-            if str(value).strip())
-        if len(capabilities) > 64 or any(
-                len(value) > 128 for value in capabilities):
-            raise AgentConfigurationError(
-                'provider capabilities contains too many or oversized names')
-        object.__setattr__(self, 'capabilities', capabilities)
+        object.__setattr__(self, 'routing', routing)
+        object.__setattr__(self, 'credential_secrets', secrets)
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> 'ProviderConfig':
-        """Accept the HTTP spelling plus the friendly ``endpoint`` alias."""
+    def from_mapping(cls, value: Mapping[str, Any]) -> 'ModelRoutingConfig':
         if not isinstance(value, Mapping):
-            raise AgentConfigurationError('provider must be an object')
+            raise AgentConfigurationError('model_routing must be an object')
+        document = value.get('model_routing', value.get('document'))
+        if document is None and value.get('contract_version'):
+            document = value
+        if not isinstance(document, Mapping):
+            raise AgentConfigurationError(
+                'model_routing must contain a full tofu.model-routing/v2 document')
+        model = value.get('model')
+        if not isinstance(model, Mapping):
+            raise AgentConfigurationError('model must be a structured object')
         return cls(
-            base_url=str(value.get('base_url') or value.get('endpoint') or ''),
-            api_key=str(value.get('api_key') or ''),
-            model=str(value.get('model') or value.get('model_id') or ''),
-            extra_headers=(value['extra_headers']
-                           if value.get('extra_headers') is not None else {}),
-            thinking_format=str(value.get('thinking_format') or ''),
-            capabilities=(value['capabilities']
-                          if value.get('capabilities') is not None else ()),
+            document=document,
+            model=model,
+            routing=(value.get('routing') or {}),
+            credential_secrets=(value.get('credential_secrets') or {}),
         )
 
     @classmethod
@@ -188,91 +131,39 @@ class ProviderConfig:
         environ: Mapping[str, str] | None = None,
         *,
         required: bool = False,
-        default_model: str = '',
-    ) -> 'ProviderConfig | None':
-        """Load one default provider without importing application settings.
-
-        New headless names win, then the concise aliases, then Tofu's existing
-        ``LLM_*`` variables. If a key is supplied without a URL, the standard
-        OpenAI endpoint is selected. A completely absent provider returns
-        ``None`` unless ``required=True``.
-        """
+    ) -> 'ModelRoutingConfig | None':
+        """Load the exact v2 access envelope from one JSON environment value."""
         source = os.environ if environ is None else environ
-        base_url = _env_first(
-            source,
-            'TOFU_AGENT_PROVIDER_BASE_URL',
-            'TOFU_PROVIDER_BASE_URL',
-            'LLM_BASE_URL',
-        )
-        api_key = _env_first(
-            source,
-            'TOFU_AGENT_PROVIDER_API_KEY',
-            'TOFU_PROVIDER_API_KEY',
-            'LLM_API_KEY',
-        )
-        if not api_key:
-            keys = _env_first(source, 'LLM_API_KEYS')
-            api_key = next(
-                (part.strip() for part in keys.split(',') if part.strip()), '')
-        model = _env_first(
-            source,
-            'TOFU_AGENT_PROVIDER_MODEL',
-            'TOFU_PROVIDER_MODEL',
-            'TOFU_AGENT_MODEL',
-            'LLM_MODEL',
-        ) or str(default_model or '').strip()
-        headers_raw = _env_first(
-            source,
-            'TOFU_AGENT_PROVIDER_EXTRA_HEADERS',
-            'TOFU_PROVIDER_EXTRA_HEADERS',
-        )
-        thinking_format = _env_first(
-            source,
-            'TOFU_AGENT_PROVIDER_THINKING_FORMAT',
-            'TOFU_PROVIDER_THINKING_FORMAT',
-        )
-
-        any_provider_value = bool(
-            base_url or api_key or headers_raw or thinking_format)
-        if not any_provider_value:
+        raw = _env_first(source, 'TOFU_AGENT_MODEL_ROUTING')
+        if not raw:
             if required:
                 raise AgentConfigurationError(
-                    'no provider configured; set base_url, api_key, and model')
+                    'TOFU_AGENT_MODEL_ROUTING is required')
             return None
-        if not base_url and api_key:
-            base_url = 'https://api.openai.com/v1'
-        if not model:
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
             raise AgentConfigurationError(
-                'provider endpoint/key is configured but its model is missing')
-        headers: dict[str, str] = {}
-        if headers_raw:
-            try:
-                decoded = json.loads(headers_raw)
-            except json.JSONDecodeError as exc:
-                raise AgentConfigurationError(
-                    'provider extra headers must be a JSON object') from exc
-            if not isinstance(decoded, dict):
-                raise AgentConfigurationError(
-                    'provider extra headers must be a JSON object')
-            headers = {str(key): str(value)
-                       for key, value in decoded.items()}
-        return cls(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            extra_headers=headers,
-            thinking_format=thinking_format,
-        )
+                'TOFU_AGENT_MODEL_ROUTING must be valid JSON') from exc
+        if not isinstance(decoded, Mapping):
+            raise AgentConfigurationError(
+                'TOFU_AGENT_MODEL_ROUTING must be a JSON object')
+        return cls.from_mapping(decoded)
+
+    @property
+    def model_id(self) -> str:
+        return str(self.model.get('model_id') or self.model.get('offering_id') or '')
 
     def public_dict(self) -> dict[str, Any]:
-        """Return diagnostics safe to log or expose over HTTP."""
+        from lib.model_routing import public_projection
         return {
-            'base_url': self.base_url,
-            'model': self.model,
-            'has_api_key': bool(self.api_key),
-            'extra_header_names': sorted(self.extra_headers),
-            'thinking_format': self.thinking_format,
-            'capabilities': sorted(self.capabilities),
+            'model_routing': public_projection(self.document),
+            'model': dict(self.model),
+            'routing': dict(self.routing),
+            'credential_secret_hints': {
+                reference: ('configured' if value else 'empty')
+                for reference, value in self.credential_secrets.items()
+            },
         }
 
 
@@ -281,8 +172,9 @@ class AgentRequest:
     """One transport-neutral agent invocation."""
 
     messages: list[dict]
-    model: str = ''
-    provider: ProviderConfig | Mapping[str, Any] | None = None
+    model: Mapping[str, str] | None = None
+    routing: dict = field(default_factory=dict)
+    model_routing: ModelRoutingConfig | Mapping[str, Any] | None = None
     config: dict = field(default_factory=dict)
     capabilities: dict = field(default_factory=dict)
     custom_tools: list[dict] = field(default_factory=list)
@@ -302,7 +194,12 @@ class AgentRequest:
             if not str(message.get('role') or '').strip():
                 raise AgentConfigurationError(
                     f'messages[{index}].role is required')
-        self.model = str(self.model or '').strip()
+        if self.model is not None and not isinstance(self.model, Mapping):
+            raise AgentConfigurationError('model must be a structured object')
+        self.model = dict(self.model) if self.model is not None else None
+        if not isinstance(self.routing, Mapping):
+            raise AgentConfigurationError('routing must be an object')
+        self.routing = dict(self.routing)
         if not isinstance(self.config, Mapping):
             raise AgentConfigurationError('config must be an object')
         if not isinstance(self.capabilities, Mapping):
@@ -331,17 +228,17 @@ class AgentRequest:
             raise AgentConfigurationError('timeout_s must be numeric') from exc
         if self.timeout_s <= 0:
             raise AgentConfigurationError('timeout_s must be positive')
-        if self.provider is not None and not isinstance(
-                self.provider, (ProviderConfig, Mapping)):
-            raise AgentConfigurationError('provider must be an object')
-        if self.provider is not None and not isinstance(
-                self.provider, ProviderConfig):
-            provider_value = dict(self.provider)
-            if self.model and not (
-                    provider_value.get('model')
-                    or provider_value.get('model_id')):
-                provider_value['model'] = self.model
-            self.provider = ProviderConfig.from_mapping(provider_value)
+        if self.model_routing is not None and not isinstance(
+                self.model_routing, (ModelRoutingConfig, Mapping)):
+            raise AgentConfigurationError('model_routing must be an object')
+        if self.model_routing is not None and not isinstance(
+                self.model_routing, ModelRoutingConfig):
+            envelope = dict(self.model_routing)
+            if self.model is not None:
+                envelope['model'] = self.model
+            if self.routing:
+                envelope['routing'] = self.routing
+            self.model_routing = ModelRoutingConfig.from_mapping(envelope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,5 +300,5 @@ __all__ = [
     'AgentRuntimeError',
     'AgentTimeoutError',
     'CUSTOM_TOOLS_MODES',
-    'ProviderConfig',
+    'ModelRoutingConfig',
 ]

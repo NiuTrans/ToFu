@@ -91,6 +91,23 @@ def _extract_notranslate_blocks(text):
     return cleaned, blocks
 
 
+def _has_translatable_text(text):
+    """Return whether placeholder-normalized ``text`` still has real content.
+
+    ``_extract_notranslate_blocks`` deliberately leaves ``⟦NT_N⟧`` markers in
+    the body.  Testing ``body.strip()`` therefore mistakes a protected-only
+    segment for translatable prose and spends one model call merely echoing a
+    placeholder.  Strip only the marker vocabulary here; punctuation, code,
+    identifiers, and every other source byte continue through the translation
+    engine's own identity-invariant policy.
+    """
+    if not text:
+        return False
+    without_markers = _NT_PLACEHOLDER_RE.sub('', str(text))
+    without_markers = _NT_PLACEHOLDER_LOOSE_RE.sub('', without_markers)
+    return bool(without_markers.strip())
+
+
 def _reattach_notranslate_blocks_partial(translated, blocks):
     """Restore placeholders already present in an in-flight translation.
 

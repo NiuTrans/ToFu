@@ -148,9 +148,25 @@ class StorageRuntime:
                 self._ready = False
                 self._last_error = f'{type(exc).__name__}: {str(exc)[:200]}'
             raise
+        stopping_after_handshake = False
         with self._lock:
-            self._ready = True
-            self._last_error = ''
+            # A crash-restart thread can finish its health handshake while the
+            # production shutdown owner is concurrently joining it.  Never
+            # publish that late authority as ready after stop() won.
+            if self._stopping.is_set():
+                self._ready = False
+                self._last_error = 'Storage runtime stopped during startup'
+                stopping_after_handshake = True
+            else:
+                self._ready = True
+                self._last_error = ''
+        if stopping_after_handshake:
+            self._supervisor.stop()
+            raise StorageError(
+                'database_unavailable',
+                'Storage runtime stopped during startup',
+                retryable=True,
+            )
         return client
 
     def client(self, *, write: bool = False) -> StorageClient:
@@ -172,6 +188,22 @@ class StorageRuntime:
                 and restart_thread is not threading.current_thread()
                 and restart_thread.is_alive()):
             restart_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if (restart_thread is not None
+                and restart_thread is not threading.current_thread()
+                and restart_thread.is_alive()):
+            # Returning success here used to let the re-exec gate certify the
+            # storage boundary while this daemon could still complete a late
+            # start and reacquire the project lease.  Fail closed: ordinary
+            # process exit releases the owner pipe, and the external manager
+            # starts a fresh generation only after the OS lease disappears.
+            raise StorageError(
+                'database_timeout',
+                'Storage restart worker did not stop before the shutdown deadline',
+                retryable=True,
+            )
+        with self._lock:
+            if self._restart_thread is restart_thread:
+                self._restart_thread = None
 
 
 __all__ = ['StorageRuntime']

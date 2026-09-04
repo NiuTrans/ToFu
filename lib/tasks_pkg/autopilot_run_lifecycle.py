@@ -51,8 +51,10 @@ close-out lifecycle is strictly disjoint from that mutation surface.
   * :func:`conclude_run` — the top-level close-out seam for the paths
     that end a run WITHOUT a clean ``[VU: TASK_DONE]`` (manual Stop,
     toggle-OFF disarm, superseding real user message).
-  * :func:`_emit_run_concluded_event` — the report-free close-out that
-    persists the record AND fires the pulse AND the SSE frame.
+  * :func:`_emit_run_concluded_event` — the close-out that persists the
+    record AND fires the pulse AND the SSE frame. Its fold report comes
+    from the run's own terminal VU verdict (``report=``), not the removed
+    dedicated reporter turn.
 
 The facade module ``lib.tasks_pkg.autopilot`` re-exports every symbol
 identity-preservingly so existing ``from lib.tasks_pkg.autopilot import
@@ -260,13 +262,13 @@ def _emit_run_concluded(
         proj = ((config or {}).get('projectPath') or '').strip()
         if not proj or not conv_id:
             return
-        from lib.conversations.project_feed import emit_project_event
+        from lib.conversations.project_brain import add_narrative
         summary = (text or '').strip().splitlines()[0] if text else ''
-        emit_project_event(
-            proj, conv_id, 'run_concluded',
-            summary or 'Autopilot run concluded',
-            user_id=user_id,
-            payload={'runId': run_id})
+        add_narrative(
+            proj, kind='run_concluded',
+            text=summary or 'Autopilot run concluded',
+            user_id=user_id, conversation_id=conv_id,
+            command_id=f'autopilot-run-concluded:{run_id}')
     except Exception as e:
         logger.debug('[Autopilot] run_concluded feed emit skipped: %s', e)
 
@@ -318,16 +320,19 @@ def conclude_run(
 
 
 def _emit_run_concluded_event(task: dict, conv_id: str, run_id: str,
-                              reason: str = 'task_done') -> dict | None:
+                              reason: str = 'task_done',
+                              report: str = '') -> dict | None:
     """Persist the terminal fold record + emit the run-concluded pulse/SSE.
 
-    The report-free close-out seam. The A-layer close-out REPORT (the LLM
-    reporter turn + its sidecar ``content``) was removed; what remains is the
-    B-layer fold machinery both close-out paths still need:
+    The A-layer close-out REPORT (the dedicated LLM reporter turn) was
+    removed; the fold's report ``content`` is instead sourced from the run's
+    OWN terminal evidence — the last virtual-user verdict, machine tokens
+    stripped, passed here as ``report`` by the Flow lifecycle boundary. What
+    this seam owns is the B-layer fold machinery both close-out paths need:
 
       1. write the BACKEND-AUTHORITATIVE concluded record via
          :func:`_store_run_record` (``status='concluded'``, ``reason``,
-         ``anchorTurnId`` — NO report ``content``);
+         ``anchorTurnId``, plus the ``report`` as ``content`` when given);
       2. emit the project-brain ``run_concluded`` Activity pulse;
       3. emit the ``autopilot_run_concluded`` SSE so a connected client folds
          the run's (VU→assistant)×N transcript immediately.
@@ -344,14 +349,14 @@ def _emit_run_concluded_event(task: dict, conv_id: str, run_id: str,
     tid = task['id'][:8]
     owner_user_id = int(task_user_id(task))
     record = _store_run_record(
-        conv_id, run_id, user_id=owner_user_id, reason=reason)
+        conv_id, run_id, user_id=owner_user_id, reason=reason, text=report)
     if record is None:
         return None
 
     _emit_run_concluded(
         conv_id,
         run_id,
-        '',
+        report,
         task.get('config'),
         user_id=owner_user_id,
     )

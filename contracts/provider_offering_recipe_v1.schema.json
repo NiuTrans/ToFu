@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://tofu.local/contracts/provider_offering_recipe_v1.schema.json",
   "title": "Tofu provider offering recipe v1",
-  "description": "An onboarding recipe for one provider account. Logical identity is model_id; provider wire spellings belong in request_ids. Applying the recipe derives provider.models for legacy consumers.",
+  "description": "A first-run onboarding recipe for one provider account. Logical identity is model_id; provider wire spellings belong in request_ids. The full application imports the staged result into model-routing v2.",
   "type": "object",
   "required": [
     "recipe_version",

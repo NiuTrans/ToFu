@@ -23,13 +23,40 @@ class OrchestrationChatFailurePorts:
     """Side effects required to settle one failed Flow-backed chat task."""
 
     finalize_error: Callable
+    fail_goal_run: Callable | None = None
 
     @classmethod
     def defaults(cls) -> 'OrchestrationChatFailurePorts':
         """Resolve the production chat terminal boundary lazily."""
         from lib.tasks_pkg.manager import finalize_chat_task_error
 
-        return cls(finalize_error=finalize_chat_task_error)
+        from lib.goal_runs.service import GoalRunService
+
+        return cls(
+            finalize_error=finalize_chat_task_error,
+            fail_goal_run=lambda task, reason: GoalRunService().fail(
+                task, reason=reason),
+        )
+
+
+def _settle_started_goal_failure(
+    task: dict,
+    *,
+    reason: str,
+    ports: OrchestrationChatFailurePorts,
+) -> None:
+    if not task.get('_goalRunId') or ports.fail_goal_run is None:
+        return
+    try:
+        ports.fail_goal_run(task, reason)
+    except Exception as goal_error:
+        # The original execution failure remains the user-facing cause.  A
+        # failed durable transition is logged loudly and startup recovery will
+        # retire the still-active physical row; it must not conceal that cause.
+        logger.error(
+            '[FlowChat] GoalRun failure settlement failed task=%s: %s',
+            str(task.get('id') or '')[:8], goal_error, exc_info=True,
+        )
 
 
 def unavailable_selected_flow_reference(config: dict) -> str:
@@ -103,6 +130,8 @@ def finalize_orchestration_chat_flow_exception(
         source='lib.orchestration_chat_flow_runner',
         kind='internal',
     )
+    _settle_started_goal_failure(
+        task, reason='runtime_failure', ports=ports)
     ports.finalize_error(task, envelope, flow_reason='fatal')
     return envelope
 

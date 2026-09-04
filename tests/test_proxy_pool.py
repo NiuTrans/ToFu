@@ -44,6 +44,7 @@ def _isolated_pool():
         dict(proxy._pool_choice),
         dict(proxy._cred_cache),
         dict(proxy._reach_probe_cache),
+        proxy._proxy_topology_epoch,
     )
     proxy._proxy_pool = []
     proxy._pool_health = {}
@@ -59,6 +60,7 @@ def _isolated_pool():
     proxy._proxy_pool, proxy._pool_health = saved[0], saved[1]
     proxy._pool_choice, proxy._cred_cache = saved[2], saved[3]
     proxy._reach_probe_cache = saved[4]
+    proxy._proxy_topology_epoch = saved[5]
     with egress._probe_cache._lock:
         egress._probe_cache._data.clear()
         egress._probe_cache._data.update(saved_probe)
@@ -454,12 +456,12 @@ class TestEgressIntegration(unittest.TestCase):
             return ProbeResult('policy_blocked', 10, 403)
 
         agent = {'agent_id': 'a1', 'name': 'box', 'platform': 'win32',
-                 'capabilities': {'egress': True}, 'user_id': '',
+                 'capabilities': {'egress': True}, 'user_id': '1',
                  'last_seen': time.time()}
         with mock.patch.object(route_manager, '_probe', side_effect=_probe), \
              mock.patch('lib.desktop.online_agents', return_value=[agent]):
             out = egress.route_candidates('https://auth.openai.com/oauth/token',
-                                          user_id='')
+                                          user_id='1')
         # Direct + every pool row race concurrently; all fail before agent.
         self.assertIn('direct', calls)
         self.assertIn('pool:hk', calls)
@@ -877,6 +879,66 @@ def test_proxy_test_rejects_bad_input_400(flask_client):
     resp = flask_client.post('/api/v1/network/proxy-test',
                              json={'url': 'socks5://gw.example.com:1080'})
     assert resp.status_code == 400
+
+
+def test_global_egress_route_specs_keep_direct_pool_and_environment_order():
+    proxy._proxy_pool = [
+        _entry('subscription-only', scope='subscription'),
+        _entry('global-one', scope='global',
+               url='http://pool.example.com:8080'),
+    ]
+    with mock.patch.object(proxy, 'get_proxy_config', return_value={
+            'http_proxy': 'http://env.example.com:8080',
+            'https_proxy': 'http://env.example.com:8080'}):
+        routes = proxy.global_egress_route_specs(
+            'ssh://dev.example.test:3022/', include_bypassed=True)
+    route_ids = [route.route_id for route in routes]
+    assert route_ids[0] == 'direct'
+    assert route_ids[1].startswith('pool:global-one:g')
+    assert route_ids[2].startswith('proxy:environment:g')
+    assert all('subscription-only' not in route.route_id for route in routes)
+
+
+def test_global_egress_route_specs_require_explicit_bypass_challenge():
+    proxy._proxy_pool = [
+        _entry('global-one', scope='global',
+               url='http://pool.example.com:8080'),
+    ]
+    with mock.patch.object(proxy, '_bypass_domains', ('.example.test',)), \
+            mock.patch.object(proxy, 'get_proxy_config', return_value={
+                'http_proxy': '', 'https_proxy': ''}):
+        strict = proxy.global_egress_route_specs(
+            'https://dev.example.test/repo.git')
+        challenged = proxy.global_egress_route_specs(
+            'https://dev.example.test/repo.git', include_bypassed=True)
+    assert [route.route_id for route in strict] == ['direct']
+    assert [route.route_id for route in challenged][0] == 'direct'
+    assert challenged[1].route_id.startswith('pool:global-one:g')
+
+
+def test_global_egress_route_specs_never_proxy_loopback():
+    proxy._proxy_pool = [
+        _entry('global-one', scope='global',
+               url='http://pool.example.com:8080'),
+    ]
+    routes = proxy.global_egress_route_specs(
+        'https://127.0.0.1:8443/', include_bypassed=True)
+    assert [route.route_id for route in routes] == ['direct']
+
+
+def test_global_egress_route_specs_do_not_grant_vault_proxy_to_shell():
+    proxy._proxy_pool = [
+        _entry('credentialed', scope='global',
+               url='http://pool.example.com:8080',
+               credential_vault='proxy_credentialed_auth'),
+    ]
+    with mock.patch.object(proxy, 'get_proxy_config', return_value={
+            'http_proxy': '', 'https_proxy': ''}), \
+            mock.patch.object(proxy, '_resolve_entry') as resolve:
+        routes = proxy.global_egress_route_specs(
+            'https://dev.example.test/repo.git', include_bypassed=True)
+    assert [route.route_id for route in routes] == ['direct']
+    resolve.assert_not_called()
 
 
 if __name__ == '__main__':

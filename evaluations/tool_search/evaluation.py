@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter
+import math
 from statistics import mean
+from time import perf_counter
 from typing import Any, Callable
 
 
@@ -49,6 +51,7 @@ def flatten_episodes(cases: list[dict[str, Any]]) -> list[dict[str, str]]:
                 'target': str(case['target']),
                 'utterance': str(utterance),
                 'query': str(utterance),
+                'original_query': str(utterance),
             })
     return episodes
 
@@ -95,6 +98,10 @@ def evaluate_retrieval(
     """Score exact ground truth; LLMs may propose queries, never verdicts."""
     rows = []
     ranks = []
+    original_ranks = []
+    search_latencies_ms = []
+    retrieval_calls = 0
+    rewritten_queries = 0
     direct = 0
     direct_correct = 0
     for episode in episodes:
@@ -103,8 +110,11 @@ def evaluate_retrieval(
             correct = episode.get('direct_name') == episode['target']
             direct_correct += int(correct)
             rows.append({**episode, 'rank': 1 if correct else None,
+                         'original_intent_rank': 1 if correct else None,
+                         'search_latency_ms': 0.0,
                          'matches': [], 'correct': correct})
             ranks.append(1 if correct else None)
+            original_ranks.append(1 if correct else None)
             continue
         kwargs = {
             'limit': limit,
@@ -112,19 +122,46 @@ def evaluate_retrieval(
         }
         if search_text_by_name is not None:
             kwargs['search_text_by_name'] = search_text_by_name
-        result = search(catalog, episode.get('query') or '', **kwargs)
+        query = episode.get('query') or ''
+        original_query = episode.get('original_query') \
+            or episode.get('utterance') or query
+        rewritten_queries += int(str(query) != str(original_query))
+        started = perf_counter()
+        result = search(catalog, query, **kwargs)
+        elapsed_ms = max(0.0, (perf_counter() - started) * 1000)
+        search_latencies_ms.append(elapsed_ms)
+        retrieval_calls += 1
         matches = [str(item.get('name') or '')
                    for item in result.get('items') or []
                    if isinstance(item, dict)]
         rank = matches.index(episode['target']) + 1 \
             if episode['target'] in matches else None
         ranks.append(rank)
+        original_rank = rank
+        if str(original_query) != str(query):
+            original_result = search(catalog, original_query, **kwargs)
+            retrieval_calls += 1
+            original_matches = [
+                str(item.get('name') or '')
+                for item in original_result.get('items') or []
+                if isinstance(item, dict)
+            ]
+            original_rank = (
+                original_matches.index(episode['target']) + 1
+                if episode['target'] in original_matches else None)
+        original_ranks.append(original_rank)
         rows.append({
             **episode, 'rank': rank, 'matches': matches,
+            'original_intent_rank': original_rank,
+            'search_latency_ms': round(elapsed_ms, 3),
             'correct': rank == 1,
         })
     total = len(rows)
     misses = Counter(row['case_id'] for row in rows if row['rank'] is None)
+    ordered_latencies = sorted(search_latencies_ms)
+    p95_latency = (
+        ordered_latencies[max(0, math.ceil(len(ordered_latencies) * .95) - 1)]
+        if ordered_latencies else 0.0)
     return {
         'episodes': total,
         'recall_at_1': round(sum(rank == 1 for rank in ranks) / total, 4)
@@ -134,11 +171,25 @@ def evaluate_retrieval(
         if total else 0.0,
         'mrr': round(mean((1 / rank) if rank else 0 for rank in ranks), 4)
         if total else 0.0,
+        'original_intent_recall_at_1': round(
+            sum(rank == 1 for rank in original_ranks) / total, 4)
+        if total else 0.0,
+        'original_intent_recall_at_5': round(
+            sum(rank is not None and rank <= 5 for rank in original_ranks)
+            / total, 4) if total else 0.0,
         'empty_result_rate': round(sum(not row['matches']
                                        and row.get('action') != 'direct'
                                        for row in rows) / total, 4)
         if total else 0.0,
         'direct_calls': direct,
+        'retrieval_calls': retrieval_calls,
+        'query_rewrite_rate': round(rewritten_queries / total, 4)
+        if total else 0.0,
+        'search_latency_ms_mean': round(mean(search_latencies_ms), 3)
+        if search_latencies_ms else 0.0,
+        'search_latency_ms_p95': round(p95_latency, 3),
+        'search_latency_ms_max': round(max(search_latencies_ms), 3)
+        if search_latencies_ms else 0.0,
         'direct_accuracy': round(direct_correct / direct, 4) if direct else None,
         'misses_by_case': dict(sorted(misses.items())),
         'rows': rows,

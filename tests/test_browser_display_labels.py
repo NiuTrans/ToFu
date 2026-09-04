@@ -1,15 +1,8 @@
-"""Browser timeline labels, badges, and frontend catalogue parity."""
-
-from pathlib import Path
-import re
+"""Browser timeline labels and badges."""
 
 import pytest
 
 pytestmark = pytest.mark.unit
-
-ROOT = Path(__file__).resolve().parent.parent
-TOOL_ROUNDS = ROOT / 'frontend' / 'src' / 'runtime' / 'sections' / 'ui' / 'tool_rounds.js'
-
 
 def _browser_surface():
     from lib.browser.advanced import ADVANCED_BROWSER_TOOL_NAMES
@@ -107,34 +100,3 @@ def test_badges_cover_the_catalogue_and_classify_failures():
     assert _badge(
         'browser_devtools', 'DevTools script_source · https://example.test'
     ) == 'script source'
-
-
-def _frontend_family():
-    src = TOOL_ROUNDS.read_text(encoding='utf-8')
-    match = re.search(r'_BROWSER_TOOL_FAMILY\s*=\s*\[([^\]]+)\]', src)
-    assert match, '_BROWSER_TOOL_FAMILY list not found'
-    return set(re.findall(r'"([^"]+)"', match.group(1)))
-
-
-def _frontend_icon_map():
-    src = TOOL_ROUNDS.read_text(encoding='utf-8')
-    match = re.search(
-        r'if \(_isRoundBrowser\(round\)\) \{\s*const m = \{(.*?)\};',
-        src,
-        re.S,
-    )
-    assert match, 'browser icon map not found'
-    return dict(re.findall(r'(\w+):\s*"(\w+)"', match.group(1)))
-
-
-def test_frontend_browser_family_and_icons_equal_the_backend_catalogue():
-    assert _frontend_family() == _browser_surface()
-    icon_map = _frontend_icon_map()
-    assert set(icon_map) == _browser_surface()
-
-    src = TOOL_ROUNDS.read_text(encoding='utf-8')
-    svg_block = re.search(r'_browserToolSvg = \{(.*?)\n\};', src, re.S)
-    assert svg_block, '_browserToolSvg block not found'
-    glyphs = set(re.findall(
-        r'^\s*(\w+):\s*\'<svg', svg_block.group(1), re.M))
-    assert set(icon_map.values()) <= glyphs

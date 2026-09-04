@@ -88,6 +88,16 @@ def _install_fakes(monkeypatch, calls, runtime, *, fail_watchdog=False):
                 'stop_event': stop_event,
                 'gate_open_ms': gate_open_ms,
             })))
+    monkeypatch.setattr(
+        lifecycle, '_recover_dispatchable_attempts',
+        lambda created_before_ms: calls.append((
+            'attempt-dispatch-recovery', {
+                'created_before_ms': created_before_ms,
+            })) or {
+                'examined': 0,
+                'recovered': 0,
+                'settledFailed': 0,
+            })
 
 
 def test_loop_owners_start_then_gate_recovery_and_shutdown_every_owner(
@@ -148,6 +158,7 @@ def test_loop_owners_start_then_gate_recovery_and_shutdown_every_owner(
     assert app.extensions['tofu_serving_loop_lifecycle']['status'] == 'stopped'
     assert ('task', 'tofu-orphan-queue-redispatch') in calls
     assert ('task', 'tofu-turn-recovery-backstop') in calls
+    assert ('task', 'tofu-attempt-dispatch-recovery') in calls
     assert ('auto-stop', {'timeout': 2.0}) in calls
     stop_names = [name for name, _ in calls if name.endswith('-stop')]
     assert stop_names == [
@@ -180,6 +191,72 @@ def test_partial_loop_startup_rolls_back_started_owners(monkeypatch):
     assert ('runtime-stop', {}) in calls
     assert ('debug-stop', {}) in calls
     assert app.extensions['tofu_lifecycle']['status'] == 'startup_failed'
+
+
+def test_api_role_does_not_own_attempt_dispatch_recovery(monkeypatch):
+    app = create_base_app('serving-loop-api-role', {'TESTING': True})
+    calls = []
+    runtime = _Runtime(calls)
+    _install_fakes(monkeypatch, calls, runtime)
+    stop = threading.Event()
+    register_serving_loop_lifecycle(
+        app,
+        shutdown_requested=stop,
+        hooks=object(),
+        environ={},
+        process_role='api',
+    )
+
+    async def exercise():
+        async with app.test_app():
+            state = app.extensions['tofu_serving_loop_lifecycle']
+            assert state['process_role'] == 'api'
+            assert state['owns_task_recovery'] is False
+            assert state['owns_task_workers'] is False
+            assert state['owns_attempt_dispatch_recovery'] is False
+            task_names = {
+                details for name, details in calls if name == 'task'
+            }
+            assert task_names.isdisjoint({
+                'tofu-orphan-queue-redispatch',
+                'tofu-turn-recovery-backstop',
+                'tofu-attempt-dispatch-recovery',
+            })
+
+    asyncio.run(exercise())
+
+
+def test_worker_role_owns_attempt_dispatch_recovery(monkeypatch):
+    app = create_base_app('serving-loop-worker-role', {'TESTING': True})
+    calls = []
+    runtime = _Runtime(calls)
+    _install_fakes(monkeypatch, calls, runtime)
+    stop = threading.Event()
+    register_serving_loop_lifecycle(
+        app,
+        shutdown_requested=stop,
+        hooks=object(),
+        environ={},
+        process_role='worker',
+    )
+
+    async def exercise():
+        async with app.test_app():
+            state = app.extensions['tofu_serving_loop_lifecycle']
+            assert state['process_role'] == 'worker'
+            assert state['owns_task_recovery'] is True
+            assert state['owns_task_workers'] is True
+            assert state['owns_attempt_dispatch_recovery'] is True
+            task_names = {
+                details for name, details in calls if name == 'task'
+            }
+            assert {
+                'tofu-orphan-queue-redispatch',
+                'tofu-turn-recovery-backstop',
+                'tofu-attempt-dispatch-recovery',
+            }.issubset(task_names)
+
+    asyncio.run(exercise())
 
 
 def test_server_runtime_factory_shares_one_event_and_handler_order(monkeypatch):

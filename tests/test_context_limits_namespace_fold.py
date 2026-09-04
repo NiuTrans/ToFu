@@ -181,6 +181,71 @@ class TestFoldPersistence:
         assert f'{ACCT}::ghost' not in (
             on_disk.get('model_context_limits_meta') or {})
 
+    def test_pending_only_evidence_survives_restart_and_fold(self, cfg_file):
+        """Strike 1 is durable even before a learned value exists."""
+        pending = {
+            'ts': 200.0,
+            'source': 'pending',
+            'strikes': 1,
+            'pending': 200278,
+        }
+        _write_cfg(
+            cfg_file,
+            limits={},
+            meta={f'{FACE}::m': pending},
+        )
+
+        limits, meta = _load()
+        assert limits == {}
+        assert meta == {f'{ACCT}::m': pending}
+        on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
+        assert on_disk['model_context_limits_meta'] == {
+            f'{ACCT}::m': pending}
+
+    def test_load_repairs_invalid_and_oversized_state(self, cfg_file):
+        from lib.context_limits._store import (
+            _MAX_CONTEXT_LIMIT_COMPONENT_CHARS,
+        )
+
+        too_long = 'p' * (_MAX_CONTEXT_LIMIT_COMPONENT_CHARS + 1) + '::m'
+        _write_cfg(
+            cfg_file,
+            limits={too_long: 100000, f'{ACCT}::good': '100000'},
+            meta={
+                too_long: _meta(ts=float('inf')),
+                f'{ACCT}::good': {
+                    'ts': 'not-a-time', 'source': 'expand', 'strikes': 99},
+            },
+        )
+
+        limits, meta = _load()
+        assert limits == {f'{ACCT}::good': 100000}
+        assert meta == {
+            f'{ACCT}::good': {
+                'ts': 0.0, 'source': 'expand', 'strikes': 0}}
+        on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
+        assert on_disk['model_context_limits'] == limits
+        assert on_disk['model_context_limits_meta'] == meta
+
+    def test_shared_capacity_keeps_newest_learned_and_pending(self):
+        from lib.context_limits._store import _prune_learned_state
+
+        limits = {'old': 100000, 'middle': 200000, 'new': 300000}
+        meta = {
+            'old': _meta(ts=1),
+            'middle': _meta(ts=2),
+            'new': _meta(ts=3),
+            'pending-only': {
+                'ts': 4.0, 'source': 'pending', 'strikes': 1,
+                'pending': 400000},
+        }
+        kept_limits, kept_meta, changed = _prune_learned_state(
+            limits, meta, max_entries=2)
+
+        assert changed is True
+        assert kept_limits == {'new': 300000}
+        assert set(kept_meta) == {'new', 'pending-only'}
+
 
 @pytest.mark.unit
 class TestFoldShapes:

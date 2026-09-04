@@ -19,6 +19,7 @@ import os
 import pytest
 
 from tests._jsdom import JS_DIR, ROOT, node_deps_available, run_harness, skip_or_fail
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 
@@ -29,6 +30,13 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # project.js (deferred). The jsdom harness evals BOTH, in bundle order.
 _PROJECT_STATE_JS = os.path.join(JS_DIR, 'project_state.js')
 _PROJECT_JS = os.path.join(JS_DIR, 'project.js')
+_PROJECT_BROWSE_JS = native_module_path(
+    '.native/project-browse-coordinator-remote-picker.js',
+    os.path.join(
+        PROJECT_ROOT, 'frontend', 'src', 'core',
+        'project-browse-coordinator.ts',
+    ),
+)
 
 
 def _read(path):
@@ -91,12 +99,12 @@ const { check, report } = setup({
     '<div id="projectBarStats"></div><div id="projectBarFolders"></div>' +
     '<div id="remoteDevicesSection"></div>' +
     '</body>',
-  targets: [process.argv[2], process.argv[4]],  // project_state.js + project.js (bundle order)
+  targets: [process.argv[5], process.argv[2], process.argv[4]],
   globals: {
     activeConvId: 'c1',
     conversations: [{ id: 'c1' }],
     debugLog: () => {},
-    saveConversations: () => {},
+    reconcileConversationCatalogMetadata: () => {},
     persistConversationSettings: () => {},
     getActiveConv: () => null,
     _stopScanPoll: () => {},
@@ -172,7 +180,7 @@ def test_remote_picker_behaviour_jsdom():
     run_harness(
         target_js=_PROJECT_STATE_JS,
         body_js=_PICKER_BODY,
-        extra_targets=[_PROJECT_JS],
+        extra_targets=[_PROJECT_JS, _PROJECT_BROWSE_JS],
         min_pass=13,
         label='remote picker',
     )
@@ -211,7 +219,7 @@ def test_NEUTER_strip_shortcircuit_calls_setPaths():
             hf.write(body)
         tmp.append(harness)
         proc = subprocess.run(
-            ['node', harness, npath, ROOT, _PROJECT_JS],
+            ['node', harness, npath, ROOT, _PROJECT_JS, _PROJECT_BROWSE_JS],
             capture_output=True, text=True, timeout=60,
             env={**os.environ,
                  'JSDOM_HARNESS': os.path.join(

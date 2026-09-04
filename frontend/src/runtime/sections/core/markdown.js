@@ -8,10 +8,9 @@
    core.js shell — symbols share `window` scope so no exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-/* Perf: reuse a single temp div for all DOM-based HTML transforms in renderMarkdown.
- * Previously, highlightCodeInHtml + _addApplyButtons + processLongCodeBlocks each created
- * their own temp div and did innerHTML parse → serialize, meaning 3 full DOM round-trips
- * per renderMarkdown call.  Now we parse once, apply all transforms, serialize once. */
+/* Perf: reuse a single temp div for all DOM-based HTML transforms in
+ * renderMarkdown. The retired three-pass pipeline parsed and serialized the
+ * same HTML three times; the active path does each once. */
 let _mdTempDiv = null;
 function _getMdTemp() {
   if (!_mdTempDiv) _mdTempDiv = document.createElement('div');
@@ -19,10 +18,7 @@ function _getMdTemp() {
 }
 /* Perf: skip lang set created once (was re-created every call) */
 const _applySkipLangs = new Set(["bash","shell","sh","console","terminal","cmd","powershell","zsh"]);
-/* Perf: _singlePassDomTransform — one DOM parse, all transforms, one serialize.
- * Replaces the old 3-pass approach (highlightCodeInHtml → _addApplyButtons → processLongCodeBlocks)
- * which each did innerHTML=html, transform, html=temp.innerHTML — 3 full DOM round-trips.
- * Now: 1 parse + 1 serialize = saves ~3-5ms per renderMarkdown call. */
+/* Perf: _singlePassDomTransform — one DOM parse, all transforms, one serialize. */
 function _singlePassDomTransform(html) {
   /* Perf: skip DOM parse entirely when no <pre> blocks — saves ~1-3ms for plain text */
   if (!html.includes('<pre')) return html;
@@ -39,7 +35,7 @@ function _singlePassDomTransform(html) {
     const pre = pres[pi];
     const code = pre.querySelector('code');
     if (!code) continue;
-    /* --- Phase 1: Syntax highlighting (was highlightCodeInHtml) --- */
+    /* --- Phase 1: Syntax highlighting --- */
     if (hasHljs && !_skipHl) {
       const lm = code.className.match(/language-(\w+)/);
       const lang = lm ? lm[1] : null;
@@ -64,7 +60,7 @@ function _singlePassDomTransform(html) {
       } catch (_) {}
       code.classList.add('hljs');
     }
-    /* --- Phase 2: Apply buttons for project mode (was _addApplyButtons) --- */
+    /* --- Phase 2: Apply buttons for project mode --- */
     if (hasProject) {
       const hdr = pre.querySelector('.code-header');
       if (hdr) {
@@ -82,7 +78,7 @@ function _singlePassDomTransform(html) {
         }
       }
     }
-    /* --- Phase 3: Collapse long code blocks (was processLongCodeBlocks) --- */
+    /* --- Phase 3: Collapse long code blocks --- */
     const lc = code.textContent.split('\n').length;
     if (lc > 15) {
       pre.classList.add('code-long');
@@ -99,58 +95,6 @@ function _singlePassDomTransform(html) {
       }
     }
   }
-  return temp.innerHTML;
-}
-/* Legacy wrappers (kept for any external callers) */
-function highlightCodeInHtml(html) {
-  if (typeof hljs === 'undefined') return html;
-  const temp = _getMdTemp();
-  temp.innerHTML = html;
-  temp.querySelectorAll('pre code').forEach((el) => {
-    const lm = el.className.match(/language-(\w+)/);
-    const lang = lm ? lm[1] : null;
-    const text = el.textContent;
-    try {
-      if (lang && hljs.getLanguage(lang))
-        el.innerHTML = hljs.highlight(text, { language: lang }).value;
-      else {
-        el.innerHTML = hljs.highlightAuto(text).value;
-        if (lang && typeof ensureHljsLanguage !== 'undefined') {
-          const pending = el;
-          void ensureHljsLanguage(lang).then((ok) => {
-            if (!ok || !pending.isConnected) return;
-            try {
-              pending.innerHTML = hljs.highlight(pending.textContent || '', { language: lang }).value;
-            } catch (_) {}
-          });
-        }
-      }
-    } catch (e) {}
-    el.classList.add('hljs');
-  });
-  return temp.innerHTML;
-}
-function _addApplyButtons(html) {
-  if (!projectState || !projectState.active) return html;
-  const temp = _getMdTemp();
-  temp.innerHTML = html;
-  temp.querySelectorAll("pre").forEach((pre) => {
-    const hdr = pre.querySelector(".code-header");
-    if (!hdr) return;
-    const langSpan = hdr.querySelector("span");
-    const lang = langSpan ? langSpan.textContent.trim().toLowerCase() : "";
-    if (_applySkipLangs.has(lang)) return;
-    const code = pre.querySelector("code");
-    if (code) {
-      const lines = code.textContent.trim().split("\n");
-      if (lines.length <= 3) return;
-    }
-    const btn = document.createElement("button");
-    btn.className = "apply-btn";
-    btn.textContent = "Apply";
-    btn.setAttribute("data-tofu-action", "openApplyModal(this)");
-    hdr.appendChild(btn);
-  });
   return temp.innerHTML;
 }
 function extractFencedBlocks(text, codeStore) {
@@ -423,7 +367,7 @@ function _cjkFriendlyPreprocess(text) {
     .replace(_CJK_FRIENDLY_AFTER_RE, '$1$2\u200B$3');
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text, options) {
   if (!text) return "";
   if (typeof marked === "undefined" || typeof marked.parse !== "function") {
     return '<pre style="white-space:pre-wrap">' + escapeHtml(text) + "</pre>";
@@ -433,7 +377,11 @@ function renderMarkdown(text) {
    * cached — a later non-streaming caller could otherwise get an unhighlighted
    * hit. The full message is re-rendered (with highlight) at finalizeStreaming. */
   const _noHl = typeof window !== 'undefined' && runtimeScope._streamRenderNoHighlight;
-  const _ck = _mdCacheKey(text);
+  /* Human-authored turns escape raw HTML (see below); the same text can also
+   * appear in an assistant turn that must keep raw HTML, so the option is
+   * part of the cache identity. */
+  const _escapeRawHtml = Boolean(options && options.escapeRawHtml);
+  const _ck = (_escapeRawHtml ? 'E:' : '') + _mdCacheKey(text);
   if (!_noHl && _mdCache.has(_ck)) {
     return _mdCache.get(_ck);
   }
@@ -475,6 +423,17 @@ function renderMarkdown(text) {
     mathStore.push({ tex: t.trim(), display: false });
     return "\x02MATH" + (mathStore.length - 1) + "\x03";
   });
+  /* Human-authored input is plain text, not HTML: escape every '<' so marked
+   * can no longer treat '<tag>' sequences as raw inline HTML (they would be
+   * swallowed — DOMPurify strips unknown tags — or worse, render as markup).
+   * Runs while code spans/fences and math are still \x02 placeholders, so
+   * code content keeps its literal '<' (marked escapes it once inside <code>).
+   * Only '<' is escaped: a bare '>' is harmless text in HTML, and escaping it
+   * would kill the '> quote' blockquote syntax. Pre-typed '&lt;' entities
+   * stay untouched and still render as '<'. */
+  if (_escapeRawHtml) {
+    p = p.replace(/</g, '&lt;');
+  }
   /* FIX: CJK-friendly emphasis — insert U+200B between emphasis delimiters and
    * adjacent CJK punctuation so marked's stock flanking rules detect emphasis.
    * Runs while code/math are still placeholders → code blocks are untouched. */
@@ -519,10 +478,17 @@ function renderMarkdown(text) {
       '$1' + BASE_PATH + '$2'
     );
   }
-  /* Perf: consolidated single-pass DOM transform.
-   * Previously this did 3 separate innerHTML parse→serialize round-trips:
-   *   highlightCodeInHtml (parse→serialize) → regex → _addApplyButtons (parse→serialize) → processLongCodeBlocks (parse→serialize)
-   * Now: one parse, all transforms in-memory, one serialize.  Saves ~3-5ms per renderMarkdown call. */
+  /* Links must not navigate the single-page app away: every markdown link
+   * opens in a new tab (noopener for target=_blank security), except in-page
+   * #anchors (same-tab scroll) and mailto: (a new tab would flash blank).
+   * Anchors that already declare a target (raw-HTML passthrough) keep it. */
+  html = html.replace(/<a\b[^>]*>/g, (tag) => {
+    if (/\starget=/.test(tag)) return tag;
+    const m = tag.match(/\shref="([^"]*)"/);
+    if (!m || m[1].startsWith('#') || m[1].startsWith('mailto:')) return tag;
+    return tag.replace(/^<a\b/, '<a target="_blank" rel="noopener noreferrer"');
+  });
+  /* Perf: one DOM parse, all transforms in-memory, one serialize. */
   html = html.replace(
     /<pre><code class="language-(\w+)[^"]*">/g,
     '<pre><div class="code-header"><span>$1</span><button class="copy-btn" data-tofu-action="copyCode(this)">Copy</button></div><code class="language-$1">',
@@ -582,30 +548,6 @@ function renderMarkdown(text) {
     return '<pre style="white-space:pre-wrap">' + escapeHtml(text) + "</pre>";
   }
 }
-function processLongCodeBlocks(html) {
-  const temp = _getMdTemp();
-  temp.innerHTML = html;
-  temp.querySelectorAll("pre").forEach((pre) => {
-    const code = pre.querySelector("code");
-    if (!code) return;
-    const lc = code.textContent.split("\n").length;
-    if (lc > 15) {
-      pre.classList.add("code-long");
-      pre.setAttribute("data-collapsed", "true");
-      const hdr = pre.querySelector(".code-header");
-      if (hdr) {
-        const sp = hdr.querySelector("span");
-        if (sp) sp.textContent += ` · ${lc} lines`;
-        const btn = document.createElement("button");
-        btn.className = "code-collapse-btn";
-        btn.textContent = "Expand";
-        btn.setAttribute("data-tofu-action", "toggleCodeBlock(this)");
-        hdr.insertBefore(btn, hdr.querySelector(".copy-btn"));
-      }
-    }
-  });
-  return temp.innerHTML;
-}
 function toggleCodeBlock(btn) {
   const pre = btn.closest("pre");
   const c = pre.getAttribute("data-collapsed") === "true";
@@ -660,4 +602,3 @@ function copyTableMarkdown(btn) {
   btn.textContent = "Copied!";
   setTimeout(() => (btn.textContent = "Copy"), 1500);
 }
-

@@ -105,9 +105,11 @@ class TestRunTaskPrepGateWiring(unittest.TestCase):
         import lib.tasks_pkg.orchestrator._run as _run
         return inspect.getsource(_run.run_task)
 
-    def test_gates_present_at_all_four_stage_boundaries(self):
+    def test_gates_present_at_all_expensive_stage_boundaries(self):
         src = self._src()
-        for stage in ('startup', 'tool_setup', 'context_inject', 'prefinal'):
+        for stage in (
+                'startup', 'project_setup', 'tool_setup', 'context_inject',
+                'prefinal'):
             assert f"stage='{stage}'" in src, (
                 f'run_task missing the prep-abort gate at stage={stage}')
 
@@ -120,6 +122,162 @@ class TestRunTaskPrepGateWiring(unittest.TestCase):
     def test_gate_called_through_helper_not_inlined(self):
         src = self._src()
         assert 'handle_abort_during_prep(' in src
+
+    def test_resume_authority_is_validated_before_expensive_prep(self):
+        src = self._src()
+        for prepare_call in (
+            'prepare_resume_state(cfg)',
+            'prepare_continue_tool_history(',
+        ):
+            assert src.index(prepare_call) < src.index('setup_project_context(')
+            assert src.index(prepare_call) < src.index('start_prefetches(')
+            assert src.index(prepare_call) < src.index('run_root_agent_loop(')
+
+
+def _resolved_model_config():
+    return {
+        'model': 'test-model',
+        'thinking_enabled': False,
+        'thinking_depth': 'low',
+        'preset': None,
+        'max_tokens': 128,
+        'temperature': 0,
+        'search_mode': 'off',
+        'response_format': None,
+        'search_enabled': False,
+        'fetch_enabled': False,
+        'project_path': '/unused/project',
+        'project_enabled': True,
+        'code_exec_enabled': False,
+        'memory_enabled': True,
+    }
+
+
+def _exercise_run_task_abort(monkeypatch, *, abort_during: str):
+    """Drive the real orchestration spine with every heavy seam observable."""
+    import lib.tasks_pkg.orchestrator._run as run_mod
+    from lib.log import clear_log_context, set_req_id
+
+    calls = []
+    task = {
+        'id': 'deadbeef-0000-0000-0000-000000000000',
+        'convId': 'conv-abort-prep',
+        '_userId': 1,
+        'config': {'model': 'test-model'},
+        'messages': [{'role': 'user', 'content': 'hello'}],
+        'content': '',
+        'aborted': abort_during == 'startup',
+        '_abort_timestamp': time.time(),
+    }
+
+    monkeypatch.setattr(run_mod, 'check_autopilot_kick', lambda _task: False)
+    monkeypatch.setattr(run_mod, 'snapshot_turn_input', lambda _task: None)
+    monkeypatch.setattr(run_mod, 'log_task_open', lambda _task, _tid: time.time())
+    monkeypatch.setattr(run_mod, 'make_vu_phase', lambda _task: None)
+    monkeypatch.setattr(run_mod, '_emit_startup_phase', lambda *_a, **_k: None)
+    monkeypatch.setattr(run_mod, 'run_turn_prelude',
+                        lambda _task, cfg, _tid: cfg)
+    monkeypatch.setattr(run_mod, 'bind_provider_and_affinity',
+                        lambda *_a, **_k: None)
+    monkeypatch.setattr(run_mod, 'resolve_and_seed_model_config',
+                        lambda *_a, **_k: _resolved_model_config())
+
+    def setup_project(_task, *_args):
+        calls.append('project_setup')
+        if abort_during == 'project_setup':
+            _task['aborted'] = True
+            _task['_abort_timestamp'] = time.time()
+
+    class FakePrefetchExecutor:
+        def shutdown(self, **kwargs):
+            calls.append(('prefetch_shutdown', kwargs))
+
+    def start_prefetch(_task, **_kwargs):
+        calls.append('prefetch_start')
+        _task['_prefetch_project'] = object()
+        return FakePrefetchExecutor()
+
+    def assemble(_cfg, _task, _mcfg):
+        calls.append('tool_setup')
+        if abort_during == 'tool_setup':
+            _task['aborted'] = True
+            _task['_abort_timestamp'] = time.time()
+        return [], False
+
+    monkeypatch.setattr(run_mod, 'setup_project_context', setup_project)
+    monkeypatch.setattr(run_mod, 'start_prefetches', start_prefetch)
+    monkeypatch.setattr(run_mod, 'assemble_round_tools', assemble)
+    for heavy_name in (
+            'maybe_run_memory_prefetch', 'inject_context_and_emit_chips',
+            'inject_continue_tool_history', 'apply_resume_state',
+            'run_root_agent_loop'):
+        monkeypatch.setattr(
+            run_mod,
+            heavy_name,
+            lambda *_a, _name=heavy_name, **_k: calls.append(_name),
+        )
+
+    finalized = {}
+    monkeypatch.setattr(
+        run_mod, 'finalize_after_loop',
+        lambda _task, **kwargs: finalized.update(kwargs),
+    )
+
+    def teardown(_task, *, tid):
+        del _task, tid
+        clear_log_context()
+        set_req_id('')
+
+    monkeypatch.setattr(run_mod, 'finalize_task_lane', teardown)
+    run_mod.run_task(task)
+    return task, calls, finalized
+
+
+def test_preaborted_task_skips_every_heavy_prep_stage(monkeypatch):
+    task, calls, finalized = _exercise_run_task_abort(
+        monkeypatch, abort_during='startup')
+
+    assert calls == []
+    assert finalized['loop_exit_reason'] == 'aborted_during_prep_startup'
+    assert finalized['abort_detected_phase'] == 'prep_startup'
+    assert task.get('_prefetch_project') is None
+
+
+def test_abort_after_project_setup_does_not_start_prefetch_or_tools(monkeypatch):
+    _task, calls, finalized = _exercise_run_task_abort(
+        monkeypatch, abort_during='project_setup')
+
+    assert calls == ['project_setup']
+    assert finalized['loop_exit_reason'] == 'aborted_during_prep_project_setup'
+
+
+def test_abort_during_tool_setup_cancels_prefetch_and_skips_context(monkeypatch):
+    task, calls, finalized = _exercise_run_task_abort(
+        monkeypatch, abort_during='tool_setup')
+
+    assert calls == [
+        'project_setup',
+        'prefetch_start',
+        'tool_setup',
+        ('prefetch_shutdown', {'wait': False, 'cancel_futures': True}),
+    ]
+    assert task.get('_prefetch_project') is None
+    assert finalized['loop_exit_reason'] == 'aborted_during_prep_tool_setup'
+
+
+def test_external_edit_probe_does_no_io_for_preaborted_task(monkeypatch):
+    import lib.tasks_pkg.orchestrator._vu_startup as startup
+
+    called = []
+    monkeypatch.setattr(
+        'lib.file_history.detect_external_edits',
+        lambda *_a, **_k: called.append(True),
+    )
+    startup._probe_external_edits(
+        {'id': 'deadbeef', 'aborted': True, 'status': 'running'},
+        '/unused/project',
+    )
+    assert called == []
 
 
 # ════════════════════════════════════════════════════════════════════

@@ -13,7 +13,7 @@ from lib.api_response import (
     api_ok,
 )
 from lib.log import get_logger
-from lib.paper.arxiv import ArxivQuerySyntaxError, search_arxiv_explained
+from lib.paper.arxiv_errors import ArxivQuerySyntaxError
 from lib.paper.recommend_runtime import (
     _cleanup_stale_recommend_tasks,
     _new_recommend_task,
@@ -30,6 +30,13 @@ from routes.paper_pkg._common import (
     api_v1_paper_bp,
 )
 from routes.api_v1.auth import request_user_id
+
+
+def search_arxiv_explained(*args, **kwargs):
+    """Load search activation and Atom policy for a real query only."""
+    from lib.paper.arxiv import search_arxiv_explained as implementation
+
+    return implementation(*args, **kwargs)
 
 
 def recommend_papers(*args, **kwargs):

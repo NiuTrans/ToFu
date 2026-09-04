@@ -230,7 +230,8 @@ def extract_pdf_text_docling(pdf_bytes: bytes, *,
             md = str(md or '')
 
         if max_chars > 0 and len(md) > max_chars:
-            md = md[:max_chars] + f'\n[…truncated at {max_chars:,} chars]'
+            marker = f'\n[…truncated at {max_chars:,} chars]'
+            md = md[:max(0, max_chars - len(marker))] + marker[:max_chars]
 
         if progress_callback:
             try:

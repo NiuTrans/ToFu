@@ -86,7 +86,8 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 extra_headers=None, api_protocol='openai', oauth='',
                 adapter=None, on_attempt_restart=None,
                 on_first_byte_wait=None,
-                on_stream_wait=None) -> ProviderStreamResult:
+                on_stream_wait=None,
+                owner_user_id=None) -> ProviderStreamResult:
     """Streaming chat completion with callbacks.
 
     Automatically retries on transient connection errors up to
@@ -137,7 +138,8 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 extra_headers=extra_headers, api_protocol=api_protocol,
                 oauth=oauth, adapter=adapter,
                 on_first_byte_wait=on_first_byte_wait,
-                on_stream_wait=on_stream_wait))
+                on_stream_wait=on_stream_wait,
+                owner_user_id=owner_user_id))
             usage = attach_limit_learned(stream_result.usage, _limit_learned)
             return stream_result.with_usage(usage)
         except (RateLimitError, PermissionError_, AbortedError, ContentFilterError, PromptTooLongError, EndpointUnreachableError):
@@ -168,12 +170,16 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                       abort_check=None, log_prefix='', attempt=0,
                       api_key=None, base_url=None, extra_headers=None,
                       api_protocol='openai', oauth='', adapter=None,
-                      on_first_byte_wait=None, on_stream_wait=None):
+                      on_first_byte_wait=None, on_stream_wait=None,
+                      owner_user_id=None):
     """Single attempt at a streaming chat completion (sync transport)."""
+    from lib.llm._transport import transport_owner_scope
+    _owner_scope = transport_owner_scope(owner_user_id)
     plan = prepare_request(
         body, attempt=attempt, log_prefix=log_prefix,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
-        api_protocol=api_protocol, oauth=oauth)
+        api_protocol=api_protocol, oauth=oauth,
+        owner_user_id=_owner_scope)
 
     _network_route = {
         'routeId': 'unresolved',
@@ -229,12 +235,19 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             stream_responses_websocket,
         )
         try:
-            return stream_responses_websocket(
+            websocket_result = stream_responses_websocket(
                 plan, on_thinking=on_thinking, on_content=on_content,
                 on_tool_call_ready=on_tool_call_ready,
                 abort_check=abort_check, log_prefix=log_prefix,
                 on_first_byte_wait=on_first_byte_wait,
                 on_stream_wait=on_stream_wait)
+            if plan.raw_archive_capture is not None:
+                plan.raw_archive_capture.append_response(
+                    json.dumps(websocket_result.message,
+                               ensure_ascii=False).encode('utf-8'))
+                plan.raw_archive_capture.commit(
+                    response_complete=True, status_code=200)
+            return websocket_result
         except ResponsesWebSocketUnavailable as exc:
             # The socket failed before response.create was sent, so the same
             # translated request can safely use the proven SSE transport.
@@ -299,7 +312,7 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                         int(adapter.get('port') or 0),
                         _relay_path, headers=plan.hdrs,
                         body=json.dumps(plan.body).encode(),
-                        log_prefix=log_prefix)
+                        user_id=_owner_scope, log_prefix=log_prefix)
                 except _eg.EgressUnavailable as e:
                     _report_network_outcome(False, 'connect')
                     error = EndpointUnreachableError(
@@ -307,12 +320,15 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                     raise _annotate_network_error(error, 'connect') from e
                 _resp_holder['resp'] = resp
                 if _watchdog.aborted:
-                    raise AbortedError('User aborted while awaiting response headers')
+                    raise AbortedError(
+                        'User aborted while awaiting response headers',
+                        url=plan.url)
                 _network_latency_ms = (
                     time.monotonic() - _conn_t0) * 1000.0
             else:
                 try:
-                    _egress_route = _eg.route_request(plan.url, user_id='')
+                    _egress_route = _eg.route_request(
+                        plan.url, user_id=_owner_scope)
                 except _eg.EgressUnavailable as e:
                     raise EndpointUnreachableError(str(e), base_url=plan.url) from e
                 if _egress_route != 'direct':
@@ -325,7 +341,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                         resp = _eg.open_stream(
                             plan.url, method='POST', headers=plan.hdrs,
                             body=json.dumps(plan.body).encode(),
-                            agent_id=_egress_route, log_prefix=log_prefix)
+                            agent_id=_egress_route, user_id=_owner_scope,
+                            log_prefix=log_prefix)
                     except _eg.EgressUnavailable as e:
                         raise EndpointUnreachableError(str(e), base_url=plan.url) from e
                 else:
@@ -347,12 +364,14 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                                    if _server_route.pool_id else {}),
                             }, subscription_route=_server_route)
                             try:
-                                resp = get_sync_session().post(
-                                    plan.url, headers=plan.hdrs,
-                                    json=plan.body, stream=True,
-                                    timeout=(CONNECT_TIMEOUT, None),
-                                    proxies=_server_route.requests_proxies(),
-                                    allow_redirects=False)
+                                resp = _tp.post_headers_abortable(
+                                    lambda: get_sync_session().post(
+                                        plan.url, headers=plan.hdrs,
+                                        json=plan.body, stream=True,
+                                        timeout=(CONNECT_TIMEOUT, None),
+                                        proxies=_server_route.requests_proxies(),
+                                        allow_redirects=False),
+                                    is_aborted=lambda: _watchdog.aborted)
                             except requests.exceptions.ConnectionError as e:
                                 from lib.subscription_routes import (
                                     is_safe_connect_failure,
@@ -397,16 +416,21 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                         _set_network_route(
                             describe_route(
                                 plan.url, proxies=_generic_proxies))
-                        resp = get_sync_session().post(
-                            plan.url, headers=plan.hdrs, json=plan.body,
-                            stream=True, timeout=(CONNECT_TIMEOUT, None),
-                            proxies=_generic_proxies,
-                            allow_redirects=False)
+                        resp = _tp.post_headers_abortable(
+                            lambda: get_sync_session().post(
+                                plan.url, headers=plan.hdrs, json=plan.body,
+                                stream=True, timeout=(CONNECT_TIMEOUT, None),
+                                proxies=_generic_proxies,
+                                allow_redirects=False),
+                            is_aborted=lambda: _watchdog.aborted)
                 _resp_holder['resp'] = resp
                 if _watchdog.aborted:
-                    # Stop landed while we were blocked pre-headers — the flag
-                    # is all we get (no socket handle to close retroactively).
-                    raise AbortedError('User aborted while awaiting response headers')
+                    # Stop landed in the narrow window between header receipt
+                    # and this check; the header wait itself is covered by
+                    # post_headers_abortable above.
+                    raise AbortedError(
+                        'User aborted while awaiting response headers',
+                        url=plan.url)
                 if _network_latency_ms is None:
                     _network_latency_ms = (
                         time.monotonic() - _conn_t0) * 1000.0
@@ -447,6 +471,11 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                     raise EndpointUnreachableError(str(e), base_url=plan.url) from e
             else:
                 err_body = decode_error_body(resp)
+            if plan.raw_archive_capture is not None:
+                plan.raw_archive_capture.append_response(
+                    str(err_body).encode('utf-8', errors='replace'))
+                plan.raw_archive_capture.commit(
+                    response_complete=True, status_code=resp.status_code)
             if activate_native_tool_search_fallback(
                     resp.status_code, err_body, plan=plan,
                     canonical_body=body):
@@ -466,7 +495,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             try:
                 classify_status_error(
                     resp.status_code, err_body, body=plan.body,
-                    log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
+                    log_prefix=log_prefix, raw_dumper=plan.raw_dumper,
+                    credential_present=plan.credential_present)
             except Exception as error:
                 _annotate_network_error(error, 'provider_response')
                 raise
@@ -484,6 +514,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
         stopped = False
         try:
             for raw_chunk in _iter_response_bytes(resp):
+                if plan.raw_archive_capture is not None:
+                    plan.raw_archive_capture.append_response(raw_chunk)
                 if _watchdog.idle_timed_out:
                     # The watchdog closed the socket after
                     # IDLE_STREAM_TIMEOUT_S of silence. Fall through to
@@ -513,7 +545,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 pass
             elif _watchdog.aborted:
                 raise AbortedError(
-                    'User aborted while waiting on %s' % plan.url) from _iter_e
+                    'User aborted while waiting on %s' % plan.url,
+                    url=plan.url) from _iter_e
             elif isinstance(_iter_e, (
                     RateLimitError, PermissionError_, ContentFilterError,
                     PromptTooLongError, ModelLimitError, RetryableAPIError)):
@@ -547,7 +580,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             # A close() can surface as a CLEAN end of iteration on some
             # urllib3 versions — without this check an aborted attempt would
             # finalize as a silent empty/partial "success".
-            raise AbortedError('User aborted while waiting on %s' % plan.url)
+            raise AbortedError(
+                'User aborted while waiting on %s' % plan.url, url=plan.url)
         acc.fire_final_tool_callback()
         stream_result = ensure_provider_stream_result(
             acc.finalize(resp_trace=resp_trace))
@@ -589,9 +623,18 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
         else:
             usage.pop('_failure_stage', None)
             _report_network_outcome(True)
+        if plan.raw_archive_capture is not None:
+            plan.raw_archive_capture.commit(
+                response_complete=True, status_code=200)
         return stream_result.with_usage(usage)
     finally:
         _watchdog.cancel()
+        if plan.raw_archive_capture is not None:
+            plan.raw_archive_capture.commit(
+                response_complete=False,
+                status_code=(getattr(resp, 'status_code', None)
+                             if resp is not None else None),
+            )
         try:
             if plan.raw_dumper.enabled and plan.raw_dumper._fh is not None:
                 plan.raw_dumper.finish(error=True)

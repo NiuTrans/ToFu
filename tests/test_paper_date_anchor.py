@@ -27,7 +27,7 @@ Run standalone: ``python3 tests/test_paper_date_anchor.py``
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -44,7 +44,36 @@ def _ok(msg): print(' ', _color('✓', '32'), msg)
 def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 
-_TODAY = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+def _utc_date():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+
+def _production_dates(d0, d1):
+    """UTC dates a prompt built between two observations may legitimately
+    carry: midnight may fall between the bracketing reads."""
+    if d0 == d1:
+        return {d0}
+    return {d0, d1}
+
+
+def _recent_dates():
+    """UTC today and yesterday — a prompt produced just before assertion time
+    may legitimately carry either when midnight falls in between."""
+    now = datetime.now(timezone.utc)
+    return {now.strftime('%Y-%m-%d'),
+            (now - timedelta(days=1)).strftime('%Y-%m-%d')}
+
+
+def _assert_carries_today(text, what):
+    cands = _recent_dates()
+    assert any(d in text for d in cands), \
+        f"today's date not in {what}: {sorted(cands)}"
+
+
+def _assert_lacks_today(text, what):
+    cands = _recent_dates()
+    assert not any(d in text for d in cands), \
+        f"today's date still present in {what} with clause no-op"
 
 # A paper whose printed publication date is in the past. The model must NOT
 # treat that date as "now".
@@ -58,8 +87,10 @@ PAPER = (
 
 def test_date_anchor_states_today_en():
     from lib.paper.prompts import date_anchor_clause
+    d0 = _utc_date()
     c = date_anchor_clause('en')
-    assert _TODAY in c, f"today's date {_TODAY!r} not in clause: {c!r}"
+    assert any(d in c for d in _production_dates(d0, _utc_date())), \
+        f"today's date not in clause: {c!r}"
     assert 'PAST' in c and 'now' in c.lower(), 'past-date note missing'
     assert 'web_search' in c, 'clause should steer toward web_search'
     _ok("date_anchor_clause(en) states today's date + past-date note")
@@ -67,8 +98,10 @@ def test_date_anchor_states_today_en():
 
 def test_date_anchor_states_today_zh():
     from lib.paper.prompts import date_anchor_clause
+    d0 = _utc_date()
     c = date_anchor_clause('zh')
-    assert _TODAY in c, f"today's date {_TODAY!r} not in zh clause"
+    assert any(d in c for d in _production_dates(d0, _utc_date())), \
+        f"today's date not in zh clause: {c!r}"
     assert '过去' in c and '现在' in c, 'zh past-date note missing'
     assert 'web_search' in c, 'zh clause should steer toward web_search'
     _ok("date_anchor_clause(zh) states today's date + past-date note")
@@ -150,21 +183,21 @@ def _capture_system_for(lang_key):
 
 def test_route_review_system_carries_today():
     system = _capture_system_for('review:neurips:en')
-    assert _TODAY in system, "today's date not in review system message"
+    _assert_carries_today(system, 'review system message')
     assert 'PAST' in system, 'past-date note not in review system message'
     _ok("route (review): system message carries today's date + past-date note")
 
 
 def test_route_report_system_carries_today():
     system = _capture_system_for('en')
-    assert _TODAY in system, "today's date not in report system message"
+    _assert_carries_today(system, 'report system message')
     assert 'PAST' in system, 'past-date note not in report system message'
     _ok("route (report): system message carries today's date + past-date note")
 
 
 def test_route_report_zh_system_carries_today():
     system = _capture_system_for('zh')
-    assert _TODAY in system, "today's date not in zh report system message"
+    _assert_carries_today(system, 'zh report system message')
     assert '过去' in system, 'zh past-date note not in report system message'
     _ok("route (report, zh): system message carries today's date + past-date note")
 
@@ -190,15 +223,14 @@ def test_source_level_negative_control_clause_noop_drops_date():
     routes_paper.date_anchor_clause = _noop
     try:
         system = _capture_system_for('review:neurips:en')
-        assert _TODAY not in system, \
-            "today's date still present with clause no-op — clause not load-bearing"
+        _assert_lacks_today(system, 'review system message')
     finally:
         prompts_mod.date_anchor_clause = orig_fn
         routes_paper.date_anchor_clause = orig_fn
 
     # Restored: the date returns.
     system2 = _capture_system_for('review:neurips:en')
-    assert _TODAY in system2, 'restore failed — date not reapplied'
+    _assert_carries_today(system2, 'restored review system message')
     assert prompts_mod.date_anchor_clause is orig_fn, 'clause not restored'
     _ok('negative control: clause no-op removes today\'s date from prompt (bug reproduced), restore reapplies it')
 
@@ -221,11 +253,15 @@ def _qa_system_message(lang='en'):
 
 
 def test_qa_system_carries_today_en():
+    d0 = _utc_date()
     system = _qa_system_message('en')
-    assert _TODAY in system, "today's date not in QA system message"
+    cands = _production_dates(d0, _utc_date())
+    assert any(d in system for d in cands), \
+        "today's date not in QA system message"
     assert 'PAST' in system, 'past-date note not in QA system message'
     # Ordering: date anchor precedes the input-safety clause + fenced paper.
-    assert system.index(_TODAY) < system.index('Input safety'), \
+    anchor_at = min(system.index(d) for d in cands if d in system)
+    assert anchor_at < system.index('Input safety'), \
         'date anchor must precede the input-safety clause'
     assert system.index('Input safety') < system.index('BEGIN UNTRUSTED PAPER TEXT'), \
         'input-safety clause must precede the fenced paper block'
@@ -234,7 +270,7 @@ def test_qa_system_carries_today_en():
 
 def test_qa_system_carries_today_zh():
     system = _qa_system_message('zh')
-    assert _TODAY in system, "today's date not in zh QA system message"
+    _assert_carries_today(system, 'zh QA system message')
     assert '\u8fc7\u53bb' in system, 'zh past-date note not in QA system message'
     _ok("QA path (zh): system message carries today's date + past-date note")
 
@@ -254,11 +290,10 @@ def test_source_level_negative_control_qa_clause_noop_drops_date():
     prompts_mod.date_anchor_clause = _noop
     try:
         system = _qa_system_message('en')
-        assert _TODAY not in system, \
-            "today's date still present with QA clause no-op — clause not load-bearing"
+        _assert_lacks_today(system, 'QA system message')
     finally:
         prompts_mod.date_anchor_clause = orig_fn
-    assert _TODAY in _qa_system_message('en'), 'restore failed — date not reapplied'
+    _assert_carries_today(_qa_system_message('en'), 'restored QA system message')
     assert prompts_mod.date_anchor_clause is orig_fn, 'clause not restored'
     _ok('negative control (QA): clause no-op removes date from Q&A prompt (bug reproduced), restore reapplies it')
 

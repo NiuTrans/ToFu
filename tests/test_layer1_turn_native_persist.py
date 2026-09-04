@@ -27,12 +27,22 @@ def test_l1_patches_dirty_settled_turn_projection(monkeypatch):
 
     cold_round = {
         'toolCallId': 'cold-call', 'toolName': 'read_files',
-        'toolContent': 'x' * 4000, 'roundNum': 1,
+        'toolArgs': {}, 'toolContent': 'x' * 4000, 'status': 'done',
+        'roundNum': 1,
     }
     owner = {
         'role': 'assistant', 'content': 'old answer',
         'toolRounds': [cold_round], '_turnId': 'turn-cold',
         '_projectionRevision': 7, '_turnStatus': 'completed',
+        'segments': [{
+            'type': 'tool_use', 'blockId': 'tool:custom-cold-call',
+            'id': 'cold-call', 'name': 'read_files', 'input': {},
+            'result': {
+                'content': 'x' * 4000, 'status': 'done',
+                'artifactId': 'artifact-cold',
+            },
+            'translatedText': '已读取',
+        }],
     }
     store = _TurnNativeStore([owner])
     monkeypatch.setattr(
@@ -42,17 +52,24 @@ def test_l1_patches_dirty_settled_turn_projection(monkeypatch):
         lambda *_a, **_k: 0)
     updates = []
 
-    def _update(conv_id, turn_id, *, projection,
-                expected_projection_revision, user_id=1):
-        updates.append({
-            'conv_id': conv_id, 'turn_id': turn_id,
-            'projection': projection,
-            'revision': expected_projection_revision, 'user_id': user_id,
-        })
-        return {'turn': {'projectionRevision': 8},
-                'conversationRevision': 21}
+    class _TurnClient:
+        def command(self, operation, payload, idempotency_key):
+            updates.append({
+                'operation': operation,
+                'payload': payload,
+                'idempotency_key': idempotency_key,
+            })
+            return {'turn': {'projectionRevision': 8},
+                    'conversationRevision': 21}
 
-    monkeypatch.setattr('lib.turn_lifecycle.update_turn_projection', _update)
+    monkeypatch.setattr(
+        'lib.turn_lifecycle.get_turn',
+        lambda *_a, **_k: {'actor': 'assistant', 'status': 'completed'},
+    )
+    monkeypatch.setattr(
+        'lib.turn_lifecycle._turn_client',
+        lambda *, write=False: _TurnClient(),
+    )
 
     api_messages = [
         {'role': 'assistant', 'content': None, 'tool_calls': [{
@@ -81,9 +98,23 @@ def test_l1_patches_dirty_settled_turn_projection(monkeypatch):
     assert store.load_calls == 1
     assert store.notifications == 1
     assert len(updates) == 1
-    assert updates[0]['turn_id'] == 'turn-cold'
-    assert updates[0]['revision'] == 7
-    assert updates[0]['projection'] is owner
+    assert updates[0]['operation'] == 'turn.projection.update'
+    assert updates[0]['payload']['turn_id'] == 'turn-cold'
+    assert updates[0]['payload']['expected_projection_revision'] == 7
+    persisted = updates[0]['payload']['projection']
+    persisted_tool = next(
+        segment for segment in persisted['segments']
+        if segment['type'] == 'tool_use'
+    )
+    assert persisted_tool['blockId'] == 'tool:custom-cold-call'
+    assert persisted_tool['input'] == {}
+    assert persisted_tool['translatedText'] == '已读取'
+    assert persisted_tool['result'] == {
+        'content': cold_round['toolContent'],
+        'status': 'done',
+        'artifactId': 'artifact-cold',
+    }
+    assert owner['segments'][0]['result']['content'] == 'x' * 4000
     assert cold_round['compactionLayer'] == 'L1'
     assert cold_round['toolContent'].startswith('[read_files result compacted')
     assert owner['_projectionRevision'] == 8
@@ -170,6 +201,62 @@ def test_l1_task_owned_placeholder_does_not_load_transcript(monkeypatch):
     assert store.load_calls == 0
     assert cold_round['compactionLayer'] == 'L1'
     assert cold_round['toolContent'].startswith('[read_files result compacted')
+
+
+def test_l1_duplicate_legacy_id_never_rewrites_an_arbitrary_round(monkeypatch):
+    """Ambiguous positional IDs fail closed at the durable write-back seam."""
+    from lib.tasks_pkg.compaction.api import micro_compact
+
+    first_round = {
+        'toolCallId': 'read_files_0', 'toolName': 'read_files',
+        'toolContent': 'first durable bytes', 'roundNum': 1,
+    }
+    second_round = {
+        'toolCallId': 'read_files_0', 'toolName': 'read_files',
+        'toolContent': 'second durable bytes', 'roundNum': 2,
+    }
+    owner = {
+        'role': 'assistant', 'content': 'old answer',
+        'toolRounds': [first_round, second_round], '_turnId': 'turn-duplicate',
+        '_projectionRevision': 3, '_turnStatus': 'completed',
+    }
+    store = _TurnNativeStore([owner])
+    monkeypatch.setattr(
+        'lib.agent_core.store.get_conversation_store', lambda: store)
+    monkeypatch.setattr(
+        'lib.tasks_pkg.cache_tracking._prefix.get_cache_prefix_count',
+        lambda *_a, **_k: 0)
+    updates = []
+    monkeypatch.setattr(
+        'lib.turn_lifecycle.update_turn_projection',
+        lambda *_a, **_k: updates.append((_a, _k)))
+
+    api_messages = [
+        {'role': 'assistant', 'content': None, 'tool_calls': [{
+            'id': 'read_files_0', 'type': 'function',
+            'function': {'name': 'read_files', 'arguments': '{}'},
+        }]},
+        {'role': 'tool', 'tool_call_id': 'read_files_0',
+         'name': 'read_files', 'content': 'x' * 4000},
+        {'role': 'assistant', 'content': None, 'tool_calls': [{
+            'id': 'hot-call', 'type': 'function',
+            'function': {'name': 'read_files', 'arguments': '{}'},
+        }]},
+        {'role': 'tool', 'tool_call_id': 'hot-call', 'name': 'read_files',
+         'content': 'y' * 4000},
+    ]
+
+    assert micro_compact(
+        api_messages, conv_id='conv-duplicate',
+        task={'_userId': 1, 'model': 'test-model', 'toolRounds': []},
+        constant_overrides={
+            'MICRO_HOT_TAIL': 1,
+            'MICRO_COMPACT_THRESHOLD': 100,
+        }) > 0
+    assert first_round['toolContent'] == 'first durable bytes'
+    assert second_round['toolContent'] == 'second durable bytes'
+    assert updates == []
+    assert store.notifications == 0
 
 
 def test_l1_cold_image_placeholder_is_durable(monkeypatch):

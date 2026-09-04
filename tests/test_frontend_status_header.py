@@ -18,8 +18,12 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 REPO = Path(__file__).resolve().parent.parent
-STATUS_JS = REPO / "static" / "js" / "project-brain-status.js"
+STATUS_JS = REPO / "frontend" / "src" / "runtime" / "sections" / "project-brain-status.js"
 
 
 def _extract_fn(src: str, name: str) -> str:

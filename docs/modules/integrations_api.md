@@ -41,6 +41,18 @@ Outbound adapters resolve the shared synchronous HTTP transport only at the
 actual egress boundary; registering webhook, skill-catalog, or paper routes
 must not initialize `requests`/`urllib3`. Webhook URLs are still checked at
 registration and again immediately before the no-redirect signed delivery.
+Webhook subscription writes are one locked cross-process read-modify-write,
+with explicit process and owner capacities. The synchronous PushHub listener
+uses a one-second, write-through subscription projection instead of parsing
+the JSON store for every streamed event; deletion/disable authority is still
+read uncached immediately before each outbound request. Event JSON is encoded
+once per fan-out and admitted only when both item and retained-byte budgets
+allow it. The immediate queue and single worker-owned retry heap share a
+launch-derived aggregate byte ceiling; retry attempts count only actual HTTP
+requests. One finite subscription-keyed transient-failure gate defers sibling
+events behind the same cooldown without spending their attempts; one request
+probes recovery before the rest resume. Overload checkpoints contain no
+payloads, full capability URLs, or secrets.
 
 ## Native API flow
 
@@ -56,6 +68,11 @@ in the Sidecar. The async HTTP boundary therefore runs token/bridge credential
 lookups, the optional shared open-mode limiter, and amortized usage-file flushes
 on the serving loop's bounded sync executor. Storage deadlines may increase
 one request's latency, but must not stop loop heartbeats or unrelated requests.
+Usage telemetry retains 90 UTC days and bounds each day to 1,024 key buckets
+and each key to 128 model buckets. Excess fan-out is added to `_overflow` and
+`_other`, preserving aggregate counters while keeping the reconstructible JSON
+store and resident cache finite; malformed legacy state is normalized and
+atomically repaired on load.
 
 Schemas and runtime parsers derive from the same contract owner. A route-local
 OpenAPI object is acceptable only as a projection of that owner, not as a

@@ -10,63 +10,13 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 // ══════════════════════════════════════════════════════
-//  Defensive fallback for isChatModel / applyCapabilityTaxonomy
-//
-//  core/model_caps.js is the SSOT for chat-vs-non-chat classification,
-//  and normally loads BEFORE this file. But if the bundle ever ships
-//  without it (stale bundler manifest, minifier regression, CDN partial
-//  fetch, the migrated module graph drift), every model picker that calls the
-//  bare identifier `isChatModel(m)` would throw ReferenceError and
-//  strand the dropdown empty. To keep the dropdown alive we install a
-//  local fallback here — a hardcoded copy of CHAT_EXCLUDED_CAPS from
-//  lib/model_info/capability_taxonomy.py, byte-identical to the
-//  literal in core/model_caps.js. When model_caps.js DID load, that
-//  file's definitions run first and this block is a no-op.
-//
-//  Kept in lock-step with the Python SSOT by
-//  tests/test_frontend_model_caps_bundled.py (parity + neuter).
+//  The ESM prelude installs the typed model-capability controller. Retained
+//  consumers keep only a fail-open boundary; they never recreate taxonomy
+//  state or a second hardcoded exclusion list.
 // ══════════════════════════════════════════════════════
-(function _installModelCapsFallback() {
-  if (typeof window === 'undefined') return;
-  var _FE_CHAT_EXCLUDED_FALLBACK = ['image_gen', 'embedding', 'transcription'];
-  if (typeof runtimeScope.isChatModel !== 'function') {
-    var _set = new Set(_FE_CHAT_EXCLUDED_FALLBACK);
-    runtimeScope.isChatModel = function _isChatModelFallback(m) {
-      if (!m) return true;
-      var caps = m.capabilities;
-      if (!caps || caps.length === 0) return true;
-      for (var i = 0; i < caps.length; i++) if (_set.has(caps[i])) return false;
-      return true;
-    };
-    // Reachable only when core/model_caps.js failed to load — the SSOT
-    // version overrides this at its own IIFE and this branch never fires.
-    try { console.warn('[Tofu] core/model_caps.js absent — using hardcoded chat-filter fallback in main_toolbar_ui.js'); } catch (_) {}
-  }
-  if (typeof runtimeScope.applyCapabilityTaxonomy !== 'function') {
-    // Minimal shim so the /api/server-config ingestion path stays functional
-    // even without model_caps.js — swap in the server's chat_excluded_caps
-    // if provided. Same behavioural contract as the real one, minus the
-    // dispatcher-set bookkeeping (frontend doesn't filter with that anyway).
-    runtimeScope.applyCapabilityTaxonomy = function _applyCapabilityTaxonomyFallback(payload) {
-      if (!payload || typeof payload !== 'object') return;
-      var xs = payload.chat_excluded_caps;
-      if (!Array.isArray(xs) || xs.length === 0) return;
-      var _set2 = new Set(xs);
-      runtimeScope.isChatModel = function _isChatModelFallback2(m) {
-        if (!m) return true;
-        var caps = m.capabilities;
-        if (!caps || caps.length === 0) return true;
-        for (var i = 0; i < caps.length; i++) if (_set2.has(caps[i])) return false;
-        return true;
-      };
-    };
-  }
-})();
-
-/** One-shot console warning when the model-caps SSOT is missing at call time.
+/** One-shot warning when an isolated entry omits the typed capability port.
  *  Kept debounced (per-page-load) so a big model list doesn't spam the console.
- *  Referenced by the guarded filters in this file and in
- *  frontend/src/runtime/settings/visibility_defaults.js. */
+ *  Referenced by guarded filters here and in visibility_defaults.js. */
 var _modelCapsMissingWarned = false;
 function _warnModelCapsMissing() {
   if (_modelCapsMissingWarned) return;
@@ -74,11 +24,6 @@ function _warnModelCapsMissing() {
   try { console.warn('[Tofu] isChatModel unavailable — showing all models unfiltered (non-chat models may appear in the picker)'); } catch (_) {}
 }
 if (typeof window !== 'undefined') runtimeScope._warnModelCapsMissing = _warnModelCapsMissing;
-
-// ── Toggles ──
-function toggleThinking() {
-  thinkingEnabled = !thinkingEnabled;
-}
 
 // ══════════════════════════════════════════════════════
 // Two-tier capability dial (Chat / Studio)
@@ -148,8 +93,8 @@ function _applyChatModeUI(mode) {
 }
 if (typeof window !== 'undefined') runtimeScope._applyChatModeUI = _applyChatModeUI;
 
-/* Open/close the mode popover (upward). Twin of toggleFlowMenu — one popover
- * open at a time; closes on outside click (handler below). */
+/* Open/close the mode popover (upward). Only one mode popover stays open;
+ * the outside-click handler below closes it. */
 function toggleChatModeMenu(e) {
   if (e) e.stopPropagation();
   const menu = document.getElementById('chatModeMenu');
@@ -197,7 +142,7 @@ function setChatMode(mode) {
     // already-attached conv could never change its path (while attaching a
     // fresh one, which skips that bookkeeping, worked). The dial bookkeeping is
     // now best-effort and cannot block the affordance.
-    if (typeof openProjectModal === 'function') openProjectModal();
+    runtimeScope.openProjectModal();
     if (hasProject) {
       try {
         _applyChatModeUI('studio');
@@ -394,6 +339,90 @@ function _deriveChatModeFromFlags(conv) {
   return 'chat';
 }
 if (typeof window !== 'undefined') runtimeScope._deriveChatModeFromFlags = _deriveChatModeFromFlags;
+
+/* Project the owner v2 aggregate into model-first picker rows. Every confirmed
+ * creator+model identity appears once; the Providers that can supply it are a
+ * secondary preference on that row. Pending identities cannot safely join the
+ * cross-provider pool, so they remain Provider-scoped by Offering id. */
+function _modelRoutingDropdownModels(documentValue) {
+  const document = documentValue && documentValue.contract_version === 'tofu.model-routing/v2'
+    ? documentValue : null;
+  if (!document) return [];
+  const providers = new Map((document.providers || []).map(row => [row.provider_id, row]));
+  const accesses = new Map((document.provider_accesses || []).map(row => [row.provider_access_id, row]));
+  const creators = new Map((document.creators || []).map(row => [row.creator_id, row]));
+  const models = new Map((document.models || []).map(row => [
+    row.creator_id + '\u0000' + row.model_id, row,
+  ]));
+  const enabledOfferingIds = new Set(
+    (document.deployments || []).filter(row => row.enabled).map(row => row.offering_id),
+  );
+  const pending = [];
+  const automatic = new Map();
+  for (const offering of (document.offerings || [])) {
+    const access = accesses.get(offering.provider_access_id);
+    const provider = access && providers.get(access.provider_id);
+    if (!provider || !access.enabled || !offering.enabled || offering.stale
+        || !enabledOfferingIds.has(offering.offering_id)) continue;
+    const confirmed = offering.identity_state === 'confirmed' && offering.model;
+    const model = confirmed
+      ? models.get(offering.model.creator_id + '\u0000' + offering.model.model_id)
+      : null;
+    if (!model) {
+      pending.push({
+        model_id: offering.pending_model_id,
+        creator_id: '',
+        creator_name: '',
+        offering_id: offering.offering_id,
+        provider_id: provider.provider_id,
+        provider_name: access.display_name || provider.name || provider.provider_id,
+        capabilities: offering.capabilities || [],
+        thinking_default: (offering.capabilities || []).includes('thinking'),
+        brand: provider.brand || '',
+        routing_v2: true,
+        pending_identity: true,
+      });
+      continue;
+    }
+    const key = model.creator_id + '\u0000' + model.model_id;
+    let row = automatic.get(key);
+    if (!row) {
+      const creator = creators.get(model.creator_id);
+      row = {
+        model_id: model.model_id,
+        creator_id: model.creator_id,
+        creator_name: (creator && (creator.name || creator.display_name)) || model.creator_id,
+        offering_id: '',
+        provider_id: '',
+        provider_name: '自动服务商',
+        provider_options: [],
+        capabilities: [],
+        thinking_default: false,
+        brand: model.creator_id || '',
+        routing_v2: true,
+        pending_identity: false,
+      };
+      automatic.set(key, row);
+    }
+    row.capabilities = Array.from(new Set(
+      row.capabilities.concat(offering.capabilities || []))).sort();
+    row.thinking_default = row.capabilities.includes('thinking');
+    row.provider_options.push({
+      provider_id: provider.provider_id,
+      provider_name: access.display_name || provider.name || provider.provider_id,
+      offering_id: offering.offering_id,
+      brand: provider.brand || '',
+    });
+  }
+  for (const row of automatic.values()) {
+    row.provider_options.sort((left, right) =>
+      left.provider_name.localeCompare(right.provider_name, undefined, {
+        numeric: true, sensitivity: 'base',
+      }));
+  }
+  return [...automatic.values(), ...pending];
+}
+
 /* Populate model dropdown dynamically from the registered models list.
  * Called once at startup from _loadServerConfigAndPopulate(). */
 function _populateModelDropdown(models) {
@@ -402,43 +431,42 @@ function _populateModelDropdown(models) {
    * survive a model-list rebuild. Fall back to the dropdown for older markup. */
   const dropdown = document.getElementById("presetDropdownList")
     || document.getElementById("presetDropdown");
-  if (!dropdown || !models || models.length === 0) return;
+  if (!dropdown || !Array.isArray(models)) return;
   _registeredModels = models;
+  _registeredModelsLoaded = true;
   dropdown.innerHTML = '';
+  if (models.length === 0) {
+    if (typeof _applyImageGenAvailability === 'function') {
+      _applyImageGenAvailability();
+    }
+    return;
+  }
 
   /* Filter out hidden models and non-chat models (but keep current model visible).
-   * isChatModel comes from core/model_caps.js — single source of truth for
+   * isChatModel comes from the typed capability-taxonomy owner — the single rule for
    * "is this model a chat model?", read from the server taxonomy at boot. */
   const visibleModels = models.filter(m => {
     if (m.model_id === config.model) return true;  // always keep current model
     if (_hiddenModels.has(m.model_id)) return false;
-    // Guard: if core/model_caps.js failed to load (stale bundle, minifier
-    // regression, CDN partial fetch, …), fall through to "show everything"
-    // rather than throw ReferenceError and leave the dropdown empty. An ASR
-    // model leaking into the picker is a known small annoyance; a black
-    // dropdown is a hard failure. See tests/test_frontend_model_caps_bundled.py.
+    // An alternate entry that omits the injected port fails open rather than
+    // leaving a black dropdown. Production composition makes this exceptional.
     if (typeof runtimeScope.isChatModel !== 'function') { _warnModelCapsMissing(); return true; }
     return runtimeScope.isChatModel(m);
   });
 
-  /* Group models by the SHARED brand rule (core/model_group.js) — NOT by
-   * provider_id. Grouping by provider leaks the backend's wire detail: the
-   * Meituan gateway serves openai on one face and anthropic on another
-   * (sankuai vs sankuai_anthropic), which the picker would render as TWO
-   * "Meituan" sections. The settings preset tab groups by the same brand
-   * rule, so the two lists can never disagree. Degrade to a per-provider
-   * grouping only if the shared module failed to load (stale bundle). */
-  const _hasGroup = (typeof runtimeScope.modelGroupKey === 'function'
-                     && typeof runtimeScope.modelGroupLabel === 'function');
+  /* v2 is model-first: confirmed Models group by Creator and expose Provider
+   * preference inside the model row. Pending identities get one explicit
+   * quarantine section. Legacy rows retain typed display grouping only during
+   * rolling-upgrade fallback. */
   const grouped = {};  // groupKey → { name, models: [] }
   for (const m of visibleModels) {
     const _entryProvider = { brand: m.brand, name: m.provider_name };
-    const gkey = _hasGroup
-      ? runtimeScope.modelGroupKey(_entryProvider, m)
-      : (m.provider_id || 'default');
-    const gname = _hasGroup
-      ? runtimeScope.modelGroupLabel(gkey, m.provider_name)
-      : (m.provider_name || gkey);
+    const gkey = m.routing_v2
+      ? (m.pending_identity ? '__pending_identity__' : (m.creator_id || '__models__'))
+      : runtimeScope.modelGroupKey(_entryProvider, m);
+    const gname = m.routing_v2
+      ? (m.pending_identity ? '待确认模型' : (m.creator_name || m.creator_id || '模型'))
+      : runtimeScope.modelGroupLabel(gkey, m.provider_name);
     if (!grouped[gkey]) grouped[gkey] = { name: gname, models: [] };
     grouped[gkey].models.push(m);
   }
@@ -453,10 +481,9 @@ function _populateModelDropdown(models) {
    *     differ: `yuju-claude-opus-5-evaDaily` renders as "Claude Opus 5" yet
    *     sorted under 'y'.
    *
-   * The comparator is the shared one from settings/branding.js, so this picker
-   * and the Settings model list can never disagree. Guarded: a stale bundle
-   * missing branding.js leaves the list unsorted rather than throwing and
-   * stranding an empty dropdown (same rationale as the isChatModel guard). */
+   * The comparator comes from the typed model-display owner, so this picker
+   * and the Settings model list cannot drift. The guard keeps isolated
+   * alternate entries usable when they omit that composition port. */
   const _canSort = (typeof _compareModelsByDisplayName === 'function');
   const groupKeys = Object.keys(grouped);
   if (_canSort) {
@@ -467,7 +494,7 @@ function _populateModelDropdown(models) {
     });
   }
   /* ── Row builder (shared by faces, fold members and the recents strip) ──
-   * Icon rule = the SHARED group rule (core/model_group.js). A raw m.brand
+   * Icon rule = the shared typed model-group policy. A raw m.brand
    * of 'oauth' / 'adapter' is a CREDENTIAL KIND, not a vendor — rendered
    * literally it has no _BRAND_ICONS entry and lands on the grey generic
    * box, even though the row sits under the real vendor section the group
@@ -482,15 +509,23 @@ function _populateModelDropdown(models) {
     const _rowCredKind = (_rowBrand === 'oauth' || _rowBrand === 'adapter');
     const brand = (_rowBrand && !_rowCredKind)
       ? _rowBrand
-      : (_rowCredKind && _hasGroup)
+      : _rowCredKind
         ? runtimeScope.modelGroupKey({ brand: m.brand, name: m.provider_name }, m)
         : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');
     const item = document.createElement('div');
     item.className = 'preset-dropdown-item' + (opts.sub ? ' ps-dd-sub-item' : '');
     item.setAttribute('data-value', m.model_id);
+    item.setAttribute('data-route-key', [
+      m.provider_id || 'auto', m.creator_id || '', m.offering_id || '', m.model_id,
+    ].join('::'));
     if (opts.section) item.setAttribute('data-section', opts.section);
-    item.onclick = function() { selectModel(m.model_id); };
-    const isActive = m.model_id === (config.model || serverModel);
+    item.onclick = function() {
+      if (m.routing_v2) selectModelRoute(m);
+      else selectModel(m.model_id);
+    };
+    const isActive = m.model_id === (config.model || serverModel)
+      && (!m.routing_v2 || !m.pending_identity
+        || (m.provider_id || '') === (config.preferredProviderId || ''));
     if (isActive) item.classList.add('active');
     const iconSpan = document.createElement('span');
     iconSpan.className = 'ps-dd-icon';
@@ -508,13 +543,53 @@ function _populateModelDropdown(models) {
     nameSpan.textContent = label;
     nameSpan.title = m.model_id;
     item.setAttribute('data-search',
-      (label + ' ' + m.model_id + ' ' + (opts.extraSearch || '')).toLowerCase());
+      (label + ' ' + m.model_id + ' ' + (m.creator_name || '') + ' ' +
+        (m.provider_options || []).map(option => option.provider_name).join(' ') + ' ' +
+        (opts.extraSearch || '')).toLowerCase());
     item.appendChild(iconSpan);
     item.appendChild(nameSpan);
+    if (m.routing_v2 && !m.pending_identity && Array.isArray(m.provider_options)) {
+      const preference = document.createElement('select');
+      preference.className = 'ps-dd-provider-select';
+      preference.setAttribute('aria-label', label + ' 服务商偏好');
+      preference.title = '服务商偏好；自动模式会在同一模型的可用服务商间轮转';
+      const automaticOption = document.createElement('option');
+      automaticOption.value = '';
+      automaticOption.textContent = '自动服务商';
+      preference.appendChild(automaticOption);
+      for (const option of m.provider_options) {
+        const providerOption = document.createElement('option');
+        providerOption.value = option.provider_id;
+        providerOption.textContent = option.provider_name;
+        preference.appendChild(providerOption);
+      }
+      const selectedProvider = m.model_id === (config.model || serverModel)
+        ? (config.preferredProviderId || '') : '';
+      preference.value = m.provider_options.some(option =>
+        option.provider_id === selectedProvider) ? selectedProvider : '';
+      preference.onclick = event => event.stopPropagation();
+      preference.onkeydown = event => event.stopPropagation();
+      preference.onchange = event => {
+        event.stopPropagation();
+        const option = m.provider_options.find(row => row.provider_id === preference.value);
+        selectModelRoute(option ? {
+          ...m,
+          provider_id: option.provider_id,
+          provider_name: option.provider_name,
+          offering_id: option.offering_id,
+        } : m);
+      };
+      item.appendChild(preference);
+    } else if (m.pending_identity) {
+      const providerTag = document.createElement('span');
+      providerTag.className = 'ps-dd-provider-tag';
+      providerTag.textContent = m.provider_name || m.provider_id;
+      item.appendChild(providerTag);
+    }
     return item;
   };
 
-  /* Render ONE display unit (core/model_fold.js contract). Folded units get
+  /* Render one typed model-display unit. Folded units get
    * a badge (alias mirrors) or an expander row (older versions) whose
    * sub-container starts open when the CURRENT model lives inside — the
    * fold never hides what the user is running. */
@@ -590,14 +665,12 @@ function _populateModelDropdown(models) {
     }
   };
 
-  /* Fold each brand section into display units. Guard: a stale bundle
-   * missing core/model_fold.js degrades to the old flat list (same
-   * rationale as the isChatModel guard above). */
+  /* Fold each brand section through the typed projection. An isolated
+   * fixture that omits the composition port degrades to the old flat list. */
   const _hasFold = (typeof runtimeScope.modelDisplayUnits === 'function');
 
-  /* ── Recent models strip (localStorage, core/model_fold.js) — only worth
-   * the vertical space when the list is actually long. Never shows the
-   * current model (it is already on the toggle). */
+  /* ── Recent models strip (bounded typed persistence) — only worth the
+   * vertical space when the list is long. Never shows the current model. */
   const _recents = (_hasFold && visibleModels.length > 8
     && typeof runtimeScope.recentModels === 'function')
     ? runtimeScope.recentModels().filter(id =>
@@ -628,7 +701,7 @@ function _populateModelDropdown(models) {
       dropdown.appendChild(labelDiv);
     }
 
-    const units = _hasFold
+    const units = (_hasFold && !group.models.some(m => m.routing_v2))
       ? runtimeScope.modelDisplayUnits(group.models)
       : group.models.map(m => ({ kind: 'single', face: m, members: [m] }));
     for (const unit of units) _renderUnit(unit, gkey);
@@ -677,8 +750,8 @@ function _populateModelDropdown(models) {
     hint.onclick = function(e) {
       e.stopPropagation();
       document.getElementById("presetWrapper")?.classList.remove("open");
-      if (typeof openSettings === 'function') openSettings();
-      if (typeof switchSettingsTab === 'function') switchSettingsTab('preset');
+      if (typeof runtimeScope.openSettings === 'function') runtimeScope.openSettings();
+      if (typeof runtimeScope.switchSettingsTab === 'function') runtimeScope.switchSettingsTab('preset');
     };
     dropdown.appendChild(hint);
   }
@@ -733,12 +806,58 @@ function _filterModelDropdown(query) {
   });
 }
 
+/* Validate config.model against the provider list, falling back when the
+ * stored value doesn't exist in this deployment (fresh open-source deploys,
+ * provider removals). Provenance-aware: a PROVISIONAL config.model is a
+ * painted placeholder (hardcoded boot value / server default), not a stored
+ * choice — validating it would "fall back" from a model the user never
+ * picked and warn every boot (the "aws.claude-opus-4.8 I never selected"
+ * loop), so the provisional case validates serverModel instead. */
+function _reconcileConfigModelAvailability(chatModels) {
+  const availableIds = new Set((chatModels || []).map(m => m.model_id));
+  const currentModel = config._modelIsProvisional
+    ? serverModel
+    : (config.model || serverModel);
+  if (!currentModel || availableIds.has(currentModel)) return;
+  let fallback = '';
+  if (serverModel && availableIds.has(serverModel)) {
+    fallback = serverModel;
+  } else if (chatModels && chatModels.length > 0) {
+    /* Pick a random model so different users don't all land on the same one */
+    fallback = chatModels[Math.floor(Math.random() * chatModels.length)].model_id;
+  }
+  if (!fallback) return;
+  console.warn('[Config] Model "%s" not available in providers, falling back to "%s"', currentModel, fallback);
+  config.model = fallback;
+  /* A fallback equal to the server default is still a placeholder: persist
+   * it scrubbed (via _configForPersist) so the next boot flows from the
+   * server default silently. A non-default fallback (server default itself
+   * unavailable) persists explicitly so future boots heal without warning. */
+  config._modelIsProvisional = (fallback === serverModel);
+  try { localStorage.setItem("claude_client_config", JSON.stringify(_configForPersist())); }
+  catch (_e) { /* best-effort */ }
+}
 /* Load the model list from server config and populate the dropdown.
  * Falls back to default models if config doesn't include a models list. */
 function _loadServerConfigAndPopulate() {
   Api.serverConfig.get()
     .then(data => {
-      if (!data) return;
+      if (!data) {
+        void loadFeatureFlags();
+        return;
+      }
+      /* Feature flags share this required first-screen response. Missing data
+       * (older server / optional projection failure) makes the loader use its
+       * dedicated endpoint fallback; unchanged refreshes repaint nothing. */
+      void loadFeatureFlags(data.feature_flags);
+      /* The context rail consumes this compact projection from the same
+       * startup response. It must never fetch full MCP schemas just to count
+       * them; the owner is loaded later in the composed script but registered
+       * before this promise continuation can run. */
+      if (data.mcp_tool_summary
+          && typeof runtimeScope.applyMcpToolSummary === 'function') {
+        runtimeScope.applyMcpToolSummary(data.mcp_tool_summary);
+      }
       let models = data.dropdown_models;
       if (!models || models.length === 0) {
         /* Fallback: use the server model if available */
@@ -747,7 +866,7 @@ function _loadServerConfigAndPopulate() {
       /* Build pricing cache from models data if available.
        * Used ONLY by settings.js to render the model-picker pricing
        * column. Cost-from-usage math is server-authoritative now
-       * (lib/cost.py + POST /api/v1/messages/cost). */
+       * (lib/cost.py + the batched message-cost endpoint). */
       if (data.model_pricing) {
         _modelPricingCache = data.model_pricing;
       }
@@ -779,19 +898,19 @@ function _loadServerConfigAndPopulate() {
       /* Ingest capability taxonomy (SSOT for chat / non-chat capability
        * classification). Applied BEFORE the model-list filters below so
        * isChatModel(m) uses the server's shape, not the hardcoded fallback.
-       * See lib/model_info/capability_taxonomy.py + core/model_caps.js. */
-      if (data.capability_taxonomy && typeof applyCapabilityTaxonomy === 'function') {
-        applyCapabilityTaxonomy(data.capability_taxonomy);
+       * See lib/model_info/capability_taxonomy.py and the typed browser owner. */
+      if (data.capability_taxonomy
+          && typeof runtimeScope.applyCapabilityTaxonomy === 'function') {
+        runtimeScope.applyCapabilityTaxonomy(data.capability_taxonomy);
       }
       /* Load hidden models from server config */
       _hiddenModels = new Set(data.hidden_models || []);
       _hiddenIgModels = new Set(data.hidden_ig_models || []);
-      /* Load IG models now that _hiddenIgModels is populated (avoids race condition
-       * where the old setTimeout(2000) could fire before this config fetch completes,
-       * causing hidden models to still appear in the IG picker). */
-      if (typeof _loadIgModels === 'function') {
-        _igModelsLoaded = true;
-        _loadIgModels();
+      /* Refresh an already-demanded image picker now that hidden-model policy
+       * is authoritative. An unopened image feature stays unloaded and makes
+       * no model-catalogue request on the first screen. */
+      if (typeof runtimeScope._loadIgModels === 'function') {
+        void runtimeScope._loadIgModels();
       }
       /* Sync serverModel with the configured default model from Settings.
        * Without this, _resetToolsToDefaults() (called on new chat) would always
@@ -803,34 +922,43 @@ function _loadServerConfigAndPopulate() {
       }
       _populateModelDropdown(models);
 
-      /* Validate that config.model actually exists among the available models.
-       * On fresh deploys (e.g. open-source), config.model may be a hardcoded default
-       * (like "aws.claude-opus-4.6") that doesn't exist in the user's provider.
-       * If so, fall back to serverModel (from server config) or the first available
-       * chat model — pick randomly to avoid always landing on the same one. */
-      const chatModels = (models || []).filter(m => {
-        if (_hiddenModels.has(m.model_id)) return false;
-        if (typeof runtimeScope.isChatModel !== 'function') { _warnModelCapsMissing(); return true; }
-        return runtimeScope.isChatModel(m);
+      /* Replace the rolling-upgrade fallback rows with the authenticated v2
+       * authority. The fetch is owner-scoped; no public capability endpoint
+       * guesses which user's ProviderAccess pool should be shown. */
+      void Api.modelRouting.get().then((routingResponse) => {
+        const routingDocument = routingResponse && routingResponse.model_routing;
+        const v2Models = _modelRoutingDropdownModels(
+          routingDocument);
+        /* A successful empty v2 authority is authoritative too: clear the
+         * rolling-upgrade/server-default placeholder instead of presenting a
+         * model that this owner cannot run. */
+        models = v2Models;
+        _populateModelDropdown(v2Models);
+        if (v2Models.length) {
+          const selectedRef = config.modelRef;
+          const selected = v2Models.find(row => {
+            if (!selectedRef || typeof selectedRef !== 'object') return false;
+            if (selectedRef.offering_id) {
+              return row.provider_id === selectedRef.provider_id
+                && row.offering_id === selectedRef.offering_id;
+            }
+            return row.creator_id === selectedRef.creator_id
+              && row.model_id === selectedRef.model_id
+              && (row.provider_id || '') === (config.preferredProviderId || '');
+          });
+          if (selected) _applyModelUI(selected.model_id);
+          const routedChatModels = v2Models.filter(row => {
+            if (_hiddenModels.has(row.model_id)) return false;
+            return typeof runtimeScope.isChatModel !== 'function'
+              || runtimeScope.isChatModel(row);
+          });
+          _reconcileConfigModelAvailability(routedChatModels);
+        }
+        _maybeAutoOpenSettings(routingDocument);
+      }).catch((error) => {
+        console.warn('[model-routing] owner picker load failed:', error?.message || error);
+        _maybeAutoOpenSettings(null);
       });
-      const availableIds = new Set(chatModels.map(m => m.model_id));
-      const currentModel = config.model || serverModel;
-      if (currentModel && !availableIds.has(currentModel)) {
-        /* Current model not available — pick a valid one */
-        let fallback = '';
-        if (serverModel && availableIds.has(serverModel)) {
-          fallback = serverModel;
-        } else if (chatModels.length > 0) {
-          /* Pick a random model so different users don't all land on the same one */
-          fallback = chatModels[Math.floor(Math.random() * chatModels.length)].model_id;
-        }
-        if (fallback) {
-          console.warn('[Config] Model "%s" not available in providers, falling back to "%s"', currentModel, fallback);
-          config.model = fallback;
-          try { localStorage.setItem("claude_client_config", JSON.stringify(config)); }
-          catch (_e) { /* best-effort */ }
-        }
-      }
 
       /* Re-apply model UI now that dropdown is populated.
        * Pass null when the current value is only a provisional default, so the
@@ -838,11 +966,10 @@ function _loadServerConfigAndPopulate() {
        * a "user choice" that the write-back sites would then persist. */
       _applyModelUI(config._modelIsProvisional ? null : config.model);
 
-      /* Auto-open settings if ?setup=1 (from bootstrap) or no API keys configured */
-      _maybeAutoOpenSettings(data);
     })
     .catch(e => {
       console.warn('[_loadServerConfigAndPopulate] Failed:', e);
+      void loadFeatureFlags();
       /* Fallback with server model only */
       _populateModelDropdown(
         serverModel ? [{ model_id: serverModel }] : []
@@ -852,15 +979,14 @@ function _loadServerConfigAndPopulate() {
     });
 }
 
-/* Auto-open settings to the API tab if the user just came from bootstrap
- * (?setup=1) or if no API keys are configured at all. Runs once on boot. */
-function _maybeAutoOpenSettings(serverConfigData) {
+/* Auto-open settings for explicit setup or an empty owner v2 authority. */
+function _maybeAutoOpenSettings(modelRoutingDocument) {
   const params = new URLSearchParams(window.location.search);
   const fromBootstrap = params.get('setup') === '1';
-  // Count total API keys across all providers
-  const providers = serverConfigData.providers || [];
-  const totalKeys = providers.reduce((sum, p) => sum + (p.api_keys || []).length, 0);
-  const noKeys = totalKeys === 0;
+  const accesses = modelRoutingDocument?.provider_accesses || [];
+  const credentials = modelRoutingDocument?.credentials || [];
+  const noKeys = !accesses.some(access => access.enabled)
+    || !credentials.some(credential => credential.enabled);
 
   if (fromBootstrap || noKeys) {
     // Clean up the URL so ?setup=1 doesn't persist on reload
@@ -875,16 +1001,20 @@ function _maybeAutoOpenSettings(serverConfigData) {
        * answer (API key vs subscription) and drives the existing surfaces
        * from there. ?setup=1 forces it past the dismissal flag; the no-keys
        * trigger respects it so a skipped wizard never re-nags. */
-      if (typeof maybeShowOnboarding === 'function' &&
-          maybeShowOnboarding({ force: fromBootstrap })) {
+      if (typeof maybeShowOnboarding === 'function') {
+        // The owner exists: either it opened the wizard or the user already
+        // dismissed it. Both outcomes are authoritative. Falling through on
+        // the latter used to reopen the legacy Settings modal after every
+        // reload, contradicting the durable onboarding dismissal.
+        maybeShowOnboarding({ force: fromBootstrap });
         return;
       }
       // Wizard module absent (stale bundle) — the old surface still works.
-      if (typeof openSettings === 'function') {
-        openSettings();
+      if (typeof runtimeScope.openSettings === 'function') {
+        runtimeScope.openSettings();
         // Switch to the API/providers tab
-        if (typeof switchSettingsTab === 'function') {
-          switchSettingsTab('api');
+        if (typeof runtimeScope.switchSettingsTab === 'function') {
+          runtimeScope.switchSettingsTab('api');
         }
         // Show a helpful hint
         const hint = document.getElementById('settingsStatusHint');
@@ -916,19 +1046,51 @@ function togglePresetDropdown(e) {
   }
 }
 function selectModel(modelId) {
+  const registered = _registeredModels.find(m => m.model_id === modelId);
+  if (registered && registered.routing_v2) {
+    return selectModelRoute(registered);
+  }
   _applyModelUI(modelId);
-  /* Record the pick for the picker's recents strip (core/model_fold.js).
-   * Guarded — a stale bundle missing the section just skips the strip. */
+  /* Record the pick through the bounded recent-model controller. An isolated
+   * fixture without the composition port simply omits the recents strip. */
   if (typeof runtimeScope.pushRecentModel === 'function') {
     runtimeScope.pushRecentModel(modelId);
   }
-  try { localStorage.setItem("claude_client_config", JSON.stringify(config)); }
+  try { localStorage.setItem("claude_client_config", JSON.stringify(_configForPersist())); }
   catch (e) { debugLog(`[selectModel] localStorage save failed: ${e.message}`, 'error'); }
   captureActiveConversationSettings();
   const depthSuffix = _isThinkingCapable(config.model) && config.thinkingDepth
     ? ` [${config.thinkingDepth.toUpperCase()}]`
     : '';
   debugLog(`Model: ${config.model}${depthSuffix}`, "success");
+}
+
+function selectModelRoute(modelRow) {
+  if (!modelRow || !modelRow.model_id) return false;
+  if (modelRow.pending_identity) {
+    config.modelRef = {
+      provider_id: modelRow.provider_id,
+      offering_id: modelRow.offering_id,
+    };
+  } else {
+    config.modelRef = {
+      creator_id: modelRow.creator_id,
+      model_id: modelRow.model_id,
+    };
+  }
+  config.preferredProviderId = modelRow.provider_id || '';
+  config.routing = config.preferredProviderId
+    ? { preferred_provider_id: config.preferredProviderId }
+    : {};
+  _applyModelUI(modelRow.model_id);
+  if (typeof runtimeScope.pushRecentModel === 'function') {
+    runtimeScope.pushRecentModel(modelRow.model_id);
+  }
+  try { localStorage.setItem('claude_client_config', JSON.stringify(_configForPersist())); }
+  catch (error) { debugLog(`[selectModelRoute] localStorage save failed: ${error.message}`, 'error'); }
+  captureActiveConversationSettings();
+  debugLog(`服务商: ${modelRow.provider_name || '自动'} · 模型: ${modelRow.model_id}`, 'success');
+  return true;
 }
 function toggleAutoTranslate() {
   autoTranslate = !autoTranslate;
@@ -1045,10 +1207,9 @@ function updateSubmenuCounts() {
 
 /* Hide the AI-drawing toggle(s) when no image-gen model is configured — a
  * button that can't do anything is worse than an absent one. Detection reuses
- * the registered-model list (_registeredModels, populated by
- * _populateModelDropdown from /api/server-config). Best-effort: if the list
- * isn't ready yet we leave the row visible (it re-runs on the next
- * updateSubmenuCounts after config loads). */
+ * the registered-model list (_registeredModels, replaced by the authenticated
+ * v2 projection). Best-effort: if the list isn't ready yet we leave the row
+ * visible; a successfully loaded empty authority is an authoritative absence. */
 function _hasImageGenModel() {
   const models = (typeof _registeredModels !== 'undefined' && _registeredModels) || [];
   for (const m of models) {
@@ -1061,7 +1222,7 @@ if (typeof window !== 'undefined') runtimeScope._hasImageGenModel = _hasImageGen
 
 function _applyImageGenAvailability() {
   const models = (typeof _registeredModels !== 'undefined' && _registeredModels) || [];
-  if (!models.length) return;  // config not loaded yet — don't hide prematurely
+  if (!_registeredModelsLoaded) return;
   const ok = _hasImageGenModel();
   const ids = ['imageGenToggle', 'imageGenModeBtn', 'mobileImageGenToggle', 'mobileImageGenModeBtn'];
   for (const id of ids) {
@@ -1085,86 +1246,6 @@ function cycleSearchMode() {
   debugLog(`Search: ${searchMode}`, "success");
 }
 
-/* ── Browser bridge ──────────────────────────────────────────────
- * The browser bridge no longer has its own toolbar row or its own setup
- * modal. Both it and the desktop agent are reached through the single
- * "Local Control" entry (#localControlToggle → #localControlModal, see
- * frontend/src/runtime/local-control.js): from the user's side "let Tofu act on my
- * machine" is ONE concept, and two rows + two modals + two status dots was
- * strictly more cognitive load than one.
- *
- * The wire flag `browserEnabled` is unchanged and still independent of
- * `desktopEnabled` — only the surface merged. `_applyBrowserUI` (main.js)
- * remains the single painter and is what the merged modal's switch drives.
- *
- * toggleBrowser() is kept as a thin alias because mobile and extension
- * callers still reach the bridge by name. It opens the merged modal instead
- * of flipping blind. */
-function toggleBrowser() {
-  if (typeof openLocalControlModal === 'function') {
-    openLocalControlModal();
-    return;
-  }
-  // Bundle shipped without local-control.js — degrade to a plain flip rather
-  // than making the entry a dead button.
-  _applyBrowserUI(!browserEnabled);
-  captureActiveConversationSettings();
-}
-function downloadBrowserExtension() {
-  // Carry the browser's OWN base (origin + live BASE_PATH, e.g. /proxy/15000
-  // behind a cloud-IDE gateway) so the zip's bridge_preseed pairs the
-  // extension with an address this browser demonstrably reaches — a
-  // server-side request.host_url loses BOTH the external https scheme and
-  // the proxy prefix there, pointing the extension at the gateway's default
-  // route (the 2026-08-04 "HTTP 405" incident). The backend pins the param
-  // to the request's Host, so only scheme/path are ever adopted from it.
-  const base = encodeURIComponent(window.location.origin + BASE_PATH);
-  window.open(apiUrl("/api/browser/download?base=" + base), "_blank");
-}
-
-/* Chrome 142+ ships "Local Network Access" prompts on by default, which fire
- * per-site during multi-tab searches. The extension can't grant this itself,
- * so when the CONNECTED extension reports Chromium >= 142 we surface guidance
- * to disable the prompt at the browser level (flag or managed policy). */
-function _applyBrowserLnaWarning(chromeMajor) {
-  const box = document.getElementById("browserLnaWarning");
-  if (!box) return;
-  if (!chromeMajor || chromeMajor < 142) {
-    box.style.display = "none";
-    return;
-  }
-  box.style.display = "";
-  // Click-to-copy the policy JSON.
-  const pol = document.getElementById("browserLnaPolicy");
-  if (pol && !pol._wired) {
-    pol._wired = true;
-    pol.onclick = function () {
-      if (typeof _safeClipboardWrite === "function") {
-        _safeClipboardWrite(pol.textContent)
-          .then(() => pol.classList.add("copied"))
-          .catch(() => {});
-      }
-    };
-  }
-  // Show the OS-specific managed-policy directory (best-effort, from the UA of
-  // the browser viewing this page — usually the same machine as the bridge).
-  const pathEl = document.getElementById("browserLnaPath");
-  if (pathEl) {
-    const ua = (navigator.userAgent || "").toLowerCase();
-    let dir = "";
-    if (ua.includes("windows")) {
-      dir = "HKLM\\SOFTWARE\\Policies\\Google\\Chrome\\ (via registry / Group Policy)";
-    } else if (ua.includes("mac os") || ua.includes("macintosh")) {
-      dir = "defaults write com.google.Chrome LocalNetworkAccessAllowedForUrls -array '*'";
-    } else {
-      dir = "/etc/opt/chrome/policies/managed/tofu-lna.json";
-    }
-    const label = (typeof t === "function") ? t("browser.lnaPathLabel") : "Place it at:";
-    pathEl.style.display = "";
-    pathEl.innerHTML = label + " <code>" + dir.replace(/</g, "&lt;") + "</code>";
-  }
-}
-
 // ══════════════════════════════════════════════════════
 // Autopilot (Virtual User auto-replies until VU emits TASK_DONE)
 // ══════════════════════════════════════════════════════
@@ -1173,8 +1254,8 @@ function _applyAutopilotUI(enabled) {
     : resolveAgentMode(planMode, false));
 }
 
-/* Turning Autopilot off also clears its durable armed marker. Paint-only
- * restore paths never call this mutating port. */
+/* Turning Goal Mode off cancels its live/queued command and clears legacy
+ * marker state. Paint-only restore paths never call this mutating port. */
 function _disarmAutopilot() {
   const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
   if (conv && typeof Api !== 'undefined' && Api.chat?.disarmAutopilot) {
@@ -1188,25 +1269,14 @@ function _disarmAutopilot() {
   }
 }
 
-function toggleAutopilot() {
-  return setAgentMode(autopilotEnabled ? 'standard' : 'autopilot');
-}
-
 /**
  * Arm autopilot for the active conversation — the explicit "hand it over"
  * gesture (empty send while autopilot is ON).
  *
- * Enqueues a persistent armed-marker (priority 90) into the server-side
- * turn-source queue.  Unlike the old behavior, this works whether or not a
- * reply is currently streaming:
- *   • Streaming    → the in-flight task's config is flipped too, so the VU
- *     takes over at its natural stop without re-sending.
- *   • Idle (done)  → the marker still arms autopilot; it shows in the queue
- *     bar as "Autopilot 待接管" and the user can cancel it.
- * The marker outranks nothing and is outranked by every real message, so a
- * human message the user types later is always processed first.
- *
- * After arming we refresh the queue bar so the cancellable sentinel appears.
+ * While an ordinary reply is streaming, the backend enqueues one explicit
+ * Goal continuation behind that already-accepted turn. It is visible and
+ * cancellable like other queued turns, survives reload, and never mutates the
+ * running task's interpreter. An already-active GoalRun needs no successor.
  */
 function _maybeArmAutopilot() {
   const conv = getActiveConv();
@@ -1214,12 +1284,12 @@ function _maybeArmAutopilot() {
   if (!(typeof Api !== 'undefined' && Api.chat && Api.chat.armAutopilot)) return;
   Api.chat.armAutopilot(conv.id).then((r) => {
     if (r && r.armed) {
-      debugLog("Autopilot armed — virtual user will take over (you can cancel it in the queue bar)", "success");
+      debugLog("Goal Mode armed — continuation is active or queued", "success");
       if (typeof showToast === "function") {
         showToast("", t('autopilot.armedTitle'), t('autopilot.armedBody'), 4000);
       }
     }
-    /* Surface the pending sentinel and dispatchable queue items in the bar. */
+    /* Hydrate the explicit continuation or active state projection. */
     if (typeof _refreshServerQueue === 'function') _refreshServerQueue(conv.id);
   }).catch((e) => console.warn('[Autopilot] arm failed:', e && e.message));
 }
@@ -1228,9 +1298,8 @@ if (typeof window !== 'undefined') runtimeScope._maybeArmAutopilot = _maybeArmAu
 /**
  * Kick autopilot on the active conversation when its reply has ALREADY
  * finished — the "push it forward" gesture (empty-Enter, autopilot ON, not
- * streaming). Spawns a backend carrier task that runs the virtual-user hook
- * directly (no AI worker turn), then connects to its SSE stream so the VU
- * bubble streams in identically to a natural-stop takeover.
+ * streaming). Creates a normal durable continuation turn and starts the same
+ * GoalRun + FlowExecutor path used by an ordinary Goal Mode request.
  *
  * No-op when something is still streaming (the arm path covers that) or when
  * autopilot is off.
@@ -1419,12 +1488,6 @@ function handleAgentModeMenuTriggerKey(event) {
 
 let _flowMenuRenderGeneration = 0;
 
-/* Compatibility names for old cached markup and extensions. New UI uses the
- * unified Agent Mode menu above. */
-function toggleFlowMenu(event) { return toggleAgentModeMenu(event); }
-function handleFlowMenuTriggerKey(event) {
-  return handleAgentModeMenuTriggerKey(event);
-}
 function _closeFlowMenu() {
   return _closeAgentModeMenu();
 }

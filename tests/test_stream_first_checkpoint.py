@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Test #2 of the sync-robustness pass (2026-06-25): the FIRST streaming delta
-checkpoints to DB immediately, closing the pre-first-checkpoint crash-loss window.
+"""Recovery checkpoint sampling at the provider-ingress isolation boundary.
 
-Before: ``stream_llm_response`` initialised ``_last_stream_ckpt = time.time()``,
-so the throttled ``_maybe_checkpoint_during_stream`` could not fire until 5s
-into streaming. A server crash after the first tokens but before the 5s tick
-lost the whole turn. Now it inits to 0.0 → the first content/thinking delta
-triggers a checkpoint, then the 5s cadence resumes.
-
-We drive ``stream_llm_response`` with a stubbed ``dispatch_stream`` that emits
-two content deltas, and a stubbed ``checkpoint_task_partial`` recorder; we
-assert the checkpoint fired on the first delta (not deferred 5s).
+The first content/thinking delta requests a checkpoint immediately, but the DB
+write must not run on the callback stack that drains the upstream model stream.
+``stream_llm_response`` therefore coalesces all in-flight requests and performs
+one checkpoint as soon as that provider dispatch has returned.
 """
 import os
 import sys
@@ -41,7 +35,8 @@ def _make_task():
     }
 
 
-def test_first_delta_checkpoints_immediately(monkeypatch):
+def test_first_delta_requests_checkpoint_settled_at_provider_boundary(
+        monkeypatch):
     import lib.tasks_pkg.manager as m
     import lib.tasks_pkg.manager._stream as st
 
@@ -60,9 +55,12 @@ def test_first_delta_checkpoints_immediately(monkeypatch):
     monkeypatch.setattr(st, 'append_event', lambda task, ev: task['events'].append(ev))
 
     def _fake_dispatch_stream(body, *, on_content=None, on_thinking=None, **kwargs):
-        # Emit a content delta on the very first token — must checkpoint NOW.
+        # The first delta samples recovery immediately, but DB work is isolated
+        # until this provider function has returned.
         on_content('hello ')
+        assert calls == []
         on_content('world')
+        assert calls == []
         # dispatch_stream returns (message_dict, finish_reason, usage).
         return {'content': 'hello world', 'tool_calls': []}, 'stop', {'completion_tokens': 2}
 
@@ -72,15 +70,11 @@ def test_first_delta_checkpoints_immediately(monkeypatch):
     msg, finish, usage = m.stream_llm_response(task, {'model': 'test-model'})
 
     assert task['content'] == 'hello world'
-    # The FIRST delta must have triggered a checkpoint (init=0.0 → fires
-    # immediately). Before the fix, _last_stream_ckpt=time.time() meant zero
-    # checkpoints within the first 5s, so calls would be empty here.
-    assert len(calls) >= 1, 'first streaming delta did not checkpoint immediately'
+    assert len(calls) == 1, 'sampled checkpoint did not settle at provider boundary'
 
 
 def test_checkpoint_throttled_after_first(monkeypatch):
-    """The first delta checkpoints; rapid subsequent deltas within 5s do NOT
-    re-checkpoint (cadence preserved — we didn't turn it into per-delta writes)."""
+    """Rapid deltas coalesce into one post-provider recovery checkpoint."""
     import lib.tasks_pkg.manager as m
     import lib.tasks_pkg.manager._stream as st
 
@@ -92,7 +86,8 @@ def test_checkpoint_throttled_after_first(monkeypatch):
 
     def _fake_dispatch_stream(body, *, on_content=None, on_thinking=None, **kwargs):
         for _ in range(10):
-            on_content('x')   # 10 rapid deltas, all within the same <5s window
+            on_content('x')
+            assert calls == []
         return {'content': 'x' * 10, 'tool_calls': []}, 'stop', {}
 
     monkeypatch.setattr(st, 'dispatch_stream', _fake_dispatch_stream)
@@ -100,8 +95,7 @@ def test_checkpoint_throttled_after_first(monkeypatch):
     task = _make_task()
     m.stream_llm_response(task, {'model': 'test-model'})
 
-    # Exactly one checkpoint: the first delta. The other 9 are throttled by
-    # the 5s interval — we did NOT regress into a per-delta-write storm.
+    # Exactly one checkpoint after provider return; no callback did DB work.
     assert len(calls) == 1, f'expected 1 throttled checkpoint, got {len(calls)}'
 
 

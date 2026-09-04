@@ -20,6 +20,7 @@ Two public entry points
     The model-agnostic, IO-free tail of ``build_body`` — the transforms that
     change the *OpenAI-form messages array* the model receives:
         sort_tool_results → _strip_non_api_fields → (gated) _sanitize_messages
+        → _strip_empty_text_blocks → _fix_tool_call_wire_shape
         → _fix_orphaned_tool_calls → _drop_empty_assistant_messages
         → _merge_consecutive_same_role → _fix_empty_user_messages
     DELIBERATELY OMITS the transport-layer / provider-body steps
@@ -41,9 +42,9 @@ Two public entry points
 Gateway-sanitization parity
 ===========================
 ``_sanitize_messages`` (the gateway-blocked-term replacement) is PROVIDER
-GATED inside ``build_body`` at lib/llm/body.py:511 exactly as::
+GATED inside ``build_body`` exactly as::
 
-    _pid == 'sankuai' or (not _pid and 'sankuai' in lib.LLM_BASE_URL)
+    _pid.startswith('sankuai') or (not _pid and 'sankuai' in lib.LLM_BASE_URL)
 
 The chat main loop builds its body with ``provider_id=''`` (orchestrator.py
 :1533) and the pre-built-body dispatch branch never re-runs sanitization, so
@@ -60,8 +61,10 @@ from lib.llm_sanitize import (
     _drop_empty_assistant_messages,
     _fix_empty_user_messages,
     _fix_orphaned_tool_calls,
+    _fix_tool_call_wire_shape,
     _merge_consecutive_same_role,
     _sanitize_messages,
+    _strip_empty_text_blocks,
     _strip_non_api_fields,
 )
 from lib.log import get_logger
@@ -71,14 +74,15 @@ logger = get_logger(__name__)
 
 
 def _gateway_sanitize_enabled(provider_id: str) -> bool:
-    """Replicate the build_body gate (lib/llm/body.py:511) verbatim.
+    """Replicate the ``build_body`` gateway-family gate verbatim.
 
     Returns True when the real outbound request WOULD run gateway-blocked-term
     sanitization for this provider context, so the wire preview matches and is
     never more aggressive than reality.
     """
     _pid = provider_id.lower() if provider_id else ''
-    return _pid == 'sankuai' or (not _pid and 'sankuai' in getattr(_lib, 'LLM_BASE_URL', ''))
+    return (_pid.startswith('sankuai')
+            or (not _pid and 'sankuai' in getattr(_lib, 'LLM_BASE_URL', '')))
 
 
 def apply_wire_sanitize(messages: list, *, conv_id: str = '',
@@ -97,12 +101,14 @@ def apply_wire_sanitize(messages: list, *, conv_id: str = '',
          results by ``tool_call_id`` (orchestrator.py:1531).
       2. ``_strip_non_api_fields`` — drop frontend display metadata.
       3. ``_sanitize_messages`` — gateway-blocked-term replacement, GATED on
-         ``_gateway_sanitize_enabled`` (verbatim build_body:511 gate).
-      4. ``_fix_orphaned_tool_calls`` — Anthropic orphan tool_use/result repair.
-      5. ``_drop_empty_assistant_messages`` — pure-ghost assistant drop (strict
+         ``_gateway_sanitize_enabled`` (verbatim build-body gate).
+      4. ``_strip_empty_text_blocks`` — remove provider-invalid blank blocks.
+      5. ``_fix_tool_call_wire_shape`` — normalize and occurrence-pair calls.
+      6. ``_fix_orphaned_tool_calls`` — Anthropic orphan tool_use/result repair.
+      7. ``_drop_empty_assistant_messages`` — pure-ghost assistant drop (strict
          providers HTTP 400 on empty assistant content).
-      6. ``_merge_consecutive_same_role`` — consecutive user/assistant merge.
-      7. ``_fix_empty_user_messages`` — empty-content placeholder.
+      8. ``_merge_consecutive_same_role`` — consecutive user/assistant merge.
+      9. ``_fix_empty_user_messages`` — empty-content placeholder.
 
     Args:
         messages: API-form messages (post system-context injection).
@@ -114,11 +120,20 @@ def apply_wire_sanitize(messages: list, *, conv_id: str = '',
     Returns:
         A new list of OpenAI-form messages.
     """
-    work = [dict(m) for m in messages]
+    work = [dict(message) for message in messages
+            if isinstance(message, dict)]
+    dropped_messages = len(messages) - len(work)
+    if dropped_messages:
+        logger.warning(
+            '[wire_messages] Dropped %d malformed non-object message '
+            'carrier(s) before snapshot sanitization', dropped_messages)
     sort_tool_results(work, conv_id=conv_id or '')
-    clean = _strip_non_api_fields(work)
+    clean = _strip_non_api_fields(
+        work, carry_same_role_seam_hints=True)
     if _gateway_sanitize_enabled(provider_id):
         _sanitize_messages(clean)
+    _strip_empty_text_blocks(clean)
+    clean = _fix_tool_call_wire_shape(clean)
     clean = _fix_orphaned_tool_calls(clean)
     clean = _drop_empty_assistant_messages(clean)
     clean = _merge_consecutive_same_role(clean)
@@ -163,15 +178,16 @@ def build_wire_messages(raw_messages: list, config: dict, *,
     from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
     from lib.tasks_pkg.context_composer import compose_task_context
 
-    msgs = _transform_messages([dict(m) for m in raw_messages], config)
+    msgs = _transform_messages(
+        [dict(m) for m in raw_messages], config, user_id=user_id)
 
     if mode == 'live':
         _task = task if task is not None else {}
         _inject_cid = conv_id or (task.get('convId', '') if task else '')
     else:
         # Snapshot mode: throwaway task + empty conv_id → no live prefetch,
-        # no conv-keyed cache writes. Side-effect chips (_appliedPreferences /
-        # _relatedConversations) land on the throwaway and are discarded.
+        # no conv-keyed cache writes. Side-effect chip state
+        # (_appliedPreferences) lands on the throwaway and is discarded.
         _task = {'config': config}
         _inject_cid = ''
 

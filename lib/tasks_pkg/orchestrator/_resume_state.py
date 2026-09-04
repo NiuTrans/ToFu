@@ -1,40 +1,366 @@
-"""Resume-state hydration —  slice 10.
+"""Validate and hydrate an interrupted Turn's resume checkpoint.
 
-Extracted from ``lib/tasks_pkg/orchestrator/_run.py`` (previously inline in
-``run_task`` between the Section 3.5 eligibility-drift guard and the
-local-memory selection/context composition boundary). Bodies are byte-identical to the
-pre-slice inline form — no logic changes.
-
-The block hydrates ``task[]`` (and, when eligible, ``messages``) from the
-continue-checkpoint keys carried on ``cfg``:
-
-  * ``contentPrefix`` — bookkeeping seed for ``task['content']`` so a
-    resumed response displays [preserved text] + [fresh continuation].
-    NEVER re-injected into ``messages`` as a trailing assistant turn
-    (Anthropic Messages API rejects that shape). The freshly generated
-    part begins from the tool-result checkpoint replayed by
-    ``inject_tool_history``.
-
-  * ``resumePrefill`` — the capability-gated exception. Set ONLY when
-    ``routes/chat.py::resume_prefill_from_segments`` already confirmed
-    the target provider TOLERATES a trailing assistant prefill
-    (``model_supports_assistant_prefill`` → False for Claude, so Claude
-    never reaches the append). Injecting the terminal deliverable tail
-    as a trailing assistant turn makes the model CONTINUE the same
-    tokens instead of regenerating from the checkpoint.
-
-  * Four ``checkpoint*`` cfg keys → ``task['_checkpoint*']`` verbatim
-    stashes, merged into the done event and DB persistence by the
-    post-loop finalize block.
+This boundary deliberately has two phases. Every supplied checkpoint field is
+validated and copied first; only then may ``task`` or ``messages`` change. A
+malformed durable snapshot must never be truthiness-repaired into empty state,
+partially applied, or misattributed to the first provider request.
 """
 
 from __future__ import annotations
 
+import copy
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
+from lib.error_envelope import make_envelope
+from lib.llm_errors import RequestScopedError
 from lib.log import get_logger
+from lib.tasks_pkg.conv_message_builder._toolcalls import (
+    _reconstruct_tool_call_messages,
+)
+from lib.tool_round_replay import scan_replayable_tool_round_prefix
+from lib.tools.todo import (
+    TODO_MAX_CONTENT_CHARS,
+    TODO_MAX_HISTORY_ENTRIES,
+    TODO_MAX_ID_CHARS,
+    TODO_MAX_ITEMS,
+    TODO_MAX_STACK_DEPTH,
+    TODO_MAX_STATE_BYTES,
+    TODO_STATE_VERSION,
+    VALID_STATUSES,
+    public_todo_state,
+)
 
 logger = get_logger('tofu.orchestrator')
+
+
+class ContinueResumeStateProtocolError(RequestScopedError):
+    """A Continue snapshot cannot be restored without changing its meaning."""
+
+    def __init__(self, detail: str):
+        super().__init__(detail, status_code=422)
+        self._user_message = make_envelope(
+            'bad_request',
+            message=('Continue resume state is malformed / '
+                     '继续执行恢复状态格式错误'),
+            detail=detail,
+            context='continue-resume-state',
+            source='task-orchestrator',
+            retryable=False,
+            hint=('Regenerate from the Turn or start a fresh turn. No partial '
+                  'resume state was sent to the model. / '
+                  '请从该轮重新生成或新建一轮；后端未向模型发送任何残缺恢复状态。'),
+        )
+
+
+@dataclass(frozen=True)
+class _PreparedResumeState:
+    content_prefix: str
+    thinking_prefix: str
+    resume_prefill: str
+    checkpoint_tool_rounds: tuple[dict[str, Any], ...]
+    checkpoint_messages: tuple[dict[str, Any], ...]
+    checkpoint_todo_state: dict[str, Any] | None
+    checkpoint_usage: dict[str, Any] | None
+    checkpoint_api_rounds: tuple[dict[str, Any], ...]
+    checkpoint_modified_files: int | None
+    checkpoint_modified_file_list: tuple[dict[str, Any] | str, ...]
+
+
+def _protocol_error(field: str, detail: str) -> ContinueResumeStateProtocolError:
+    return ContinueResumeStateProtocolError(f'{field}: {detail}')
+
+
+def _optional_text(cfg: Mapping[str, Any], field: str) -> str:
+    if field not in cfg or cfg.get(field) is None:
+        return ''
+    value = cfg.get(field)
+    if not isinstance(value, str):
+        raise _protocol_error(
+            field, f'must be a string, got {type(value).__name__}')
+    return value
+
+
+def _json_safe_copy(
+    value: Any,
+    field: str,
+    *,
+    max_bytes: int | None = None,
+) -> Any:
+    """Copy one JSON authority without accepting opaque Python values."""
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':'), allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _protocol_error(
+            field, 'must contain only finite JSON values') from exc
+    if max_bytes is not None and len(encoded.encode('utf-8')) > max_bytes:
+        raise _protocol_error(
+            field,
+            f'exceeds {max_bytes} serialized UTF-8 bytes',
+        )
+    return copy.deepcopy(value)
+
+
+def _strict_todo_state(value: Any) -> dict[str, Any]:
+    """Return a canonical todo snapshot, rejecting every lossy repair."""
+    field = 'checkpointTodoState'
+    if not isinstance(value, Mapping):
+        raise _protocol_error(field, 'must be an object')
+    raw = _json_safe_copy(
+        dict(value), field, max_bytes=TODO_MAX_STATE_BYTES)
+
+    version = raw.get('version', TODO_STATE_VERSION)
+    if (isinstance(version, bool) or not isinstance(version, int)
+            or version != TODO_STATE_VERSION):
+        raise _protocol_error(field, f'version must equal {TODO_STATE_VERSION}')
+    stack = raw.get('stack')
+    if not isinstance(stack, list):
+        raise _protocol_error(field, 'stack must be a list')
+    if len(stack) > TODO_MAX_STACK_DEPTH:
+        raise _protocol_error(
+            field, f'stack exceeds {TODO_MAX_STACK_DEPTH} levels')
+    update_count = raw.get('update_count', 0)
+    if (isinstance(update_count, bool) or not isinstance(update_count, int)
+            or update_count < 0):
+        raise _protocol_error(
+            field, 'update_count must be a non-negative integer')
+    root_completed = raw.get('root_completed', False)
+    if not isinstance(root_completed, bool):
+        raise _protocol_error(field, 'root_completed must be a boolean')
+    history = raw.get('history', [])
+    if (not isinstance(history, list)
+            or any(not isinstance(item, Mapping) for item in history)):
+        raise _protocol_error(field, 'history must be a list of objects')
+    if len(history) > TODO_MAX_HISTORY_ENTRIES:
+        raise _protocol_error(
+            field,
+            f'history exceeds {TODO_MAX_HISTORY_ENTRIES} retained entries',
+        )
+    history_dropped = raw.get('history_dropped', 0)
+    if (isinstance(history_dropped, bool)
+            or not isinstance(history_dropped, int)
+            or history_dropped < 0):
+        raise _protocol_error(
+            field, 'history_dropped must be a non-negative integer')
+
+    normalized_stack: list[dict[str, Any]] = []
+    for frame_position, frame in enumerate(stack):
+        frame_field = f'{field}.stack[{frame_position}]'
+        if not isinstance(frame, Mapping):
+            raise _protocol_error(frame_field, 'must be an object')
+        checklist_id = frame.get('checklist_id')
+        if not isinstance(checklist_id, str) or not checklist_id.strip():
+            raise _protocol_error(
+                frame_field, 'checklist_id must be a non-empty string')
+        revision = frame.get('revision')
+        if (isinstance(revision, bool) or not isinstance(revision, int)
+                or revision < 1):
+            raise _protocol_error(
+                frame_field, 'revision must be a positive integer')
+        todos = frame.get('todos')
+        if not isinstance(todos, list) or not todos:
+            raise _protocol_error(frame_field, 'todos must be a non-empty list')
+        if len(todos) > TODO_MAX_ITEMS:
+            raise _protocol_error(
+                frame_field, f'todos exceeds {TODO_MAX_ITEMS} items')
+
+        seen_ids: set[str] = set()
+        in_progress_count = 0
+        normalized_todos: list[dict[str, str]] = []
+        for todo_position, item in enumerate(todos):
+            todo_field = f'{frame_field}.todos[{todo_position}]'
+            if not isinstance(item, Mapping):
+                raise _protocol_error(todo_field, 'must be an object')
+            todo_id = item.get('id')
+            content = item.get('content')
+            status = item.get('status')
+            if not isinstance(todo_id, str) or not todo_id.strip():
+                raise _protocol_error(todo_field, 'id must be a non-empty string')
+            if todo_id.strip() != todo_id:
+                raise _protocol_error(todo_field, 'id must already be normalized')
+            if len(todo_id) > TODO_MAX_ID_CHARS:
+                raise _protocol_error(
+                    todo_field, f'id exceeds {TODO_MAX_ID_CHARS} characters')
+            if todo_id in seen_ids:
+                raise _protocol_error(frame_field, f'duplicate todo id {todo_id!r}')
+            if not isinstance(content, str) or not content.strip():
+                raise _protocol_error(
+                    todo_field, 'content must be a non-empty string')
+            if content.strip() != content:
+                raise _protocol_error(
+                    todo_field, 'content must already be normalized')
+            if len(content) > TODO_MAX_CONTENT_CHARS:
+                raise _protocol_error(
+                    todo_field,
+                    f'content exceeds {TODO_MAX_CONTENT_CHARS} characters',
+                )
+            if status not in VALID_STATUSES:
+                raise _protocol_error(todo_field, 'status is invalid')
+            seen_ids.add(todo_id)
+            in_progress_count += int(status == 'in_progress')
+            normalized_todos.append({
+                'id': todo_id, 'content': content, 'status': status,
+            })
+        if in_progress_count > 1:
+            raise _protocol_error(
+                frame_field, 'has more than one in_progress item')
+
+        parent_todo_id = frame.get('parent_todo_id')
+        if frame_position == 0:
+            if parent_todo_id is not None:
+                raise _protocol_error(
+                    frame_field, 'root frame cannot have parent_todo_id')
+        else:
+            if not isinstance(parent_todo_id, str) or not parent_todo_id:
+                raise _protocol_error(
+                    frame_field, 'child frame needs parent_todo_id')
+            if len(parent_todo_id) > TODO_MAX_ID_CHARS:
+                raise _protocol_error(
+                    frame_field,
+                    f'parent_todo_id exceeds {TODO_MAX_ID_CHARS} characters',
+                )
+            parent_items = normalized_stack[-1]['todos']
+            parent_item = next(
+                (item for item in parent_items
+                 if item['id'] == parent_todo_id),
+                None,
+            )
+            if parent_item is None or parent_item['status'] != 'in_progress':
+                raise _protocol_error(
+                    frame_field,
+                    'parent_todo_id must identify the active parent item',
+                )
+        normalized_stack.append({'todos': normalized_todos})
+
+    if stack:
+        derived_root_completed = (
+            len(stack) == 1
+            and all(item['status'] == 'completed'
+                    for item in normalized_stack[0]['todos'])
+        )
+        if root_completed != derived_root_completed:
+            raise _protocol_error(
+                field, 'root_completed disagrees with stack state')
+    return public_todo_state(raw)
+
+
+def prepare_resume_state(cfg: Any) -> _PreparedResumeState:
+    """Validate and detach all supplied state before the first mutation."""
+    if not isinstance(cfg, Mapping):
+        raise _protocol_error('config', 'must be an object')
+
+    raw_rounds = (
+        cfg.get('checkpointToolRounds')
+        if 'checkpointToolRounds' in cfg else None
+    )
+    if raw_rounds is None:
+        checkpoint_rounds: tuple[dict[str, Any], ...] = ()
+        checkpoint_messages: tuple[dict[str, Any], ...] = ()
+    else:
+        if not isinstance(raw_rounds, list):
+            raise _protocol_error('checkpointToolRounds', 'must be a list')
+        if any(not isinstance(item, Mapping) for item in raw_rounds):
+            raise _protocol_error(
+                'checkpointToolRounds',
+                'every occurrence must be an object',
+            )
+        detached_rounds = _json_safe_copy(
+            raw_rounds, 'checkpointToolRounds')
+        replay_prefix = scan_replayable_tool_round_prefix(detached_rounds)
+        if replay_prefix.blocked_position is not None:
+            raise _protocol_error(
+                'checkpointToolRounds',
+                f'occurrence {replay_prefix.blocked_position} creates a causal '
+                f'gap ({replay_prefix.blocked_reason})',
+            )
+        checkpoint_rounds = tuple(dict(item) for item in detached_rounds)
+        reconstructed = _reconstruct_tool_call_messages(detached_rounds) or []
+        checkpoint_messages = tuple(dict(item) for item in reconstructed)
+
+    raw_todo = (
+        cfg.get('checkpointTodoState')
+        if 'checkpointTodoState' in cfg else None
+    )
+    todo_state = None if raw_todo is None else _strict_todo_state(raw_todo)
+
+    raw_usage = cfg.get('checkpointUsage') \
+        if 'checkpointUsage' in cfg else None
+    if raw_usage is not None and not isinstance(raw_usage, Mapping):
+        raise _protocol_error('checkpointUsage', 'must be an object')
+    checkpoint_usage = (
+        None if raw_usage is None
+        else dict(_json_safe_copy(dict(raw_usage), 'checkpointUsage'))
+    )
+
+    raw_api_rounds = (
+        cfg.get('checkpointApiRounds')
+        if 'checkpointApiRounds' in cfg else None
+    )
+    if raw_api_rounds is not None:
+        if (not isinstance(raw_api_rounds, list)
+                or any(not isinstance(item, Mapping)
+                       for item in raw_api_rounds)):
+            raise _protocol_error(
+                'checkpointApiRounds', 'must be a list of objects')
+        detached_api_rounds = _json_safe_copy(
+            raw_api_rounds, 'checkpointApiRounds')
+        checkpoint_api_rounds = tuple(
+            dict(item) for item in detached_api_rounds)
+    else:
+        checkpoint_api_rounds = ()
+
+    raw_modified_files = (
+        cfg.get('checkpointModifiedFiles')
+        if 'checkpointModifiedFiles' in cfg else None
+    )
+    if raw_modified_files is not None and (
+        isinstance(raw_modified_files, bool)
+        or not isinstance(raw_modified_files, int)
+        or raw_modified_files < 0
+    ):
+        raise _protocol_error(
+            'checkpointModifiedFiles', 'must be a non-negative integer')
+
+    raw_modified_file_list = (
+        cfg.get('checkpointModifiedFileList')
+        if 'checkpointModifiedFileList' in cfg else None
+    )
+    if raw_modified_file_list is not None:
+        if not isinstance(raw_modified_file_list, list):
+            raise _protocol_error(
+                'checkpointModifiedFileList', 'must be a list')
+        for position, item in enumerate(raw_modified_file_list):
+            if not isinstance(item, (Mapping, str)) or not item:
+                raise _protocol_error(
+                    'checkpointModifiedFileList',
+                    f'item {position} must be a non-empty object or string',
+                )
+        detached_file_list = _json_safe_copy(
+            raw_modified_file_list, 'checkpointModifiedFileList')
+        checkpoint_modified_file_list = tuple(
+            dict(item) if isinstance(item, Mapping) else item
+            for item in detached_file_list
+        )
+    else:
+        checkpoint_modified_file_list = ()
+
+    return _PreparedResumeState(
+        content_prefix=_optional_text(cfg, 'contentPrefix'),
+        thinking_prefix=_optional_text(cfg, 'thinkingPrefix'),
+        resume_prefill=_optional_text(cfg, 'resumePrefill'),
+        checkpoint_tool_rounds=checkpoint_rounds,
+        checkpoint_messages=checkpoint_messages,
+        checkpoint_todo_state=todo_state,
+        checkpoint_usage=checkpoint_usage,
+        checkpoint_api_rounds=checkpoint_api_rounds,
+        checkpoint_modified_files=raw_modified_files,
+        checkpoint_modified_file_list=checkpoint_modified_file_list,
+    )
 
 
 def apply_resume_state(
@@ -44,97 +370,113 @@ def apply_resume_state(
     messages: list[dict[str, Any]],
     model: str,
     tid: str,
+    prepared_state: _PreparedResumeState | None = None,
 ) -> None:
-    """Hydrate resume-state onto ``task`` and (when eligible) ``messages``.
+    """Atomically hydrate validated Continue state before provider dispatch."""
+    prepared = (
+        prepared_state
+        if prepared_state is not None else prepare_resume_state(cfg)
+    )
 
-    Never raises: this helper is called on the hot path just before the
-    stream loop opens; any exception it swallowed downstream would be
-    misattributed to a live-model failure. The three sub-blocks here are
-    themselves defensive (guarded by cfg-key presence + provider capability)
-    so raising is not possible in practice; the module-level import lands
-    inside the function to keep import cost off run_task's cold path when
-    resumePrefill is empty (the overwhelmingly common case).
-    """
-    # Apply preserved content prefix from Continue — ensures backend checkpoints
-    #   include text the LLM generated alongside completed tool rounds in the prior
-    #   task, so page-refresh mid-stream doesn't lose that content.
-    #
-    #   ⚠ IMPORTANT: contentPrefix is NEVER re-injected into `messages` as a
-    #   trailing assistant turn.  That would only work against OpenAI-compat
-    #   endpoints — Anthropic Messages API rejects a trailing assistant turn
-    #   ("This model does not support assistant message prefill. The
-    #   conversation must end with a user message.").  Rather than branching
-    #   by provider we keep the universal behaviour: use contentPrefix only
-    #   as a bookkeeping seed for `task['content']` so the resumed response
-    #   displays [preserved text] + [freshly generated continuation].  The
-    #   freshly generated part begins from the tool-result checkpoint, which
-    #   is replayed via `inject_tool_history` above — that shape every
-    #   provider accepts.
-    _content_prefix = cfg.get('contentPrefix') or ''
-    if _content_prefix:
-        with task['content_lock']:
-            task['content'] = _content_prefix
-        logger.debug('[%s] conv=%s Applied contentPrefix (%d chars) from continue checkpoint',
-                     tid, task.get('convId', ''), len(_content_prefix))
-
-    # Resume-prefill (): the capability-gated
-    #   exception to the "never inject contentPrefix as a trailing assistant
-    #   turn" rule above. resumePrefill is set ONLY when routes/chat.py's
-    #   resume_prefill_from_segments already confirmed the target provider
-    #   TOLERATES a trailing assistant prefill (model_supports_assistant_
-    #   prefill → False for Claude, so Claude never reaches here). Injecting
-    #   the terminal deliverable tail as a trailing assistant turn makes the
-    #   model CONTINUE the same tokens (case 2: mid-prose after a tool batch;
-    #   case 3: mid-answer no-tool turn) instead of regenerating from the
-    #   checkpoint. The tool batch (if any) was already replayed by
-    #   inject_tool_history above; the pre-tool prose lives on those
-    #   assistant(tool_calls) turns, so the prefill (terminal deliverable
-    #   only) never double-counts. task['content'] is seeded with the FULL
-    #   prior content (contentPrefix) so display = full + continuation.
-    #
-    #   Defence in depth: even if a dispatcher model-swap routed this to
-    #   Claude after the gate, _strip_trailing_assistant_for_claude() in
-    #   build_body()/dispatch_stream() would neutralise the trailing turn
-    #   (the Claude-4.6 prefill-removal guard) — so a leak degrades to
-    #   today's regenerate-from-checkpoint, never an HTTP 400.
-    _resume_prefill = cfg.get('resumePrefill') or ''
-    if _resume_prefill:
+    supports_prefill = False
+    if prepared.resume_prefill:
         from lib.model_info import model_supports_assistant_prefill
-        if model_supports_assistant_prefill(model):
-            messages.append({'role': 'assistant', 'content': _resume_prefill})
-            task['_resumePrefill'] = _resume_prefill
-            logger.info('[%s] conv=%s Injected resume prefill (%d chars) as trailing '
-                        'assistant turn — model=%s will continue the same tokens',
-                        tid, task.get('convId', ''), len(_resume_prefill), model)
-        else:
-            logger.info('[%s] conv=%s resumePrefill present but model=%s rejects prefill '
-                        '— falling back to regenerate-from-checkpoint (contentPrefix seed only)',
-                        tid, task.get('convId', ''), model)
+        supports_prefill = bool(model_supports_assistant_prefill(model))
 
-    # Stash checkpoint metadata for merging into done event and DB persistence.
-    #   NOTE: we do NOT pre-populate task['toolRounds'] with checkpoint rounds
-    #   because the frontend's state/delta handlers would double-count them
-    #   (frontend does _continueToolRounds.concat(ev.toolRounds)).  Instead,
-    #   checkpoint rounds are merged only when writing to DB and in the done event.
-    _checkpoint_tr = cfg.get('checkpointToolRounds') or []
-    if _checkpoint_tr:
-        task['_checkpointToolRounds'] = list(_checkpoint_tr)
-        logger.debug('[%s] conv=%s Stashed %d checkpoint toolRounds for DB merge',
-                     tid, task.get('convId', ''), len(_checkpoint_tr))
-    if cfg.get('checkpointTodoState'):
-        from lib.tools.todo import public_todo_state
-        _todo_state = public_todo_state(cfg['checkpointTodoState'])
-        task['_todoState'] = _todo_state
-        _todo_stack = _todo_state.get('stack') or []
-        task['_todos'] = (list(_todo_stack[-1].get('todos') or [])
-                          if _todo_stack else [])
-        logger.debug('[%s] conv=%s Restored checklist stack depth=%d on Continue',
-                     tid, task.get('convId', ''), len(_todo_stack))
-    if cfg.get('checkpointUsage'):
-        task['_checkpointUsage'] = cfg['checkpointUsage']
-    if cfg.get('checkpointApiRounds'):
-        task['_checkpointApiRounds'] = cfg['checkpointApiRounds']
-    if cfg.get('checkpointModifiedFiles'):
-        task['_checkpointModifiedFiles'] = cfg['checkpointModifiedFiles']
-    if cfg.get('checkpointModifiedFileList'):
-        task['_checkpointModifiedFileList'] = cfg['checkpointModifiedFileList']
+    # Everything above is read-only. From here on, assignments cannot observe
+    # a malformed later field and leave a half-applied resume snapshot.
+    if prepared.content_prefix:
+        with task['content_lock']:
+            task['content'] = prepared.content_prefix
+        logger.debug(
+            '[%s] conv=%s Applied contentPrefix (%d chars) from continue checkpoint',
+            tid, task.get('convId', ''), len(prepared.content_prefix),
+        )
+
+    if prepared.thinking_prefix:
+        # Display continuity for a lossless continue: the reasoning lane keeps
+        # accumulating from the interrupted tail. New reasoning deltas append
+        # (delta coalescer), and round-base retry truncation restores this
+        # seed rather than blanking the lane.
+        with task['content_lock']:
+            task['thinking'] = prepared.thinking_prefix
+        logger.debug(
+            '[%s] conv=%s Applied thinkingPrefix (%d chars) from continue checkpoint',
+            tid, task.get('convId', ''), len(prepared.thinking_prefix),
+        )
+
+    # A checkpoint-resume excludes the interrupted assistant Turn from the
+    # ordinary conversation projection. Its durable tool rounds therefore
+    # have no other route onto the model wire. Replay them in the exact same
+    # canonical form used when that Turn is later reconstructed as settled
+    # history; otherwise the resumed model loses its observations and the next
+    # user turn expands into a different message prefix, defeating cross-turn
+    # provider caching as well as semantic continuity.
+    if prepared.checkpoint_messages:
+        messages.extend(copy.deepcopy(prepared.checkpoint_messages))
+        logger.info(
+            '[%s] conv=%s Replayed %d checkpoint message(s) from %d durable '
+            'tool round(s) before resume prefill',
+            tid, task.get('convId', ''), len(prepared.checkpoint_messages),
+            len(prepared.checkpoint_tool_rounds),
+        )
+
+    # ``contentPrefix`` remains display bookkeeping only. ``resumePrefill`` is
+    # the separately capability-gated trailing assistant continuation.
+    if prepared.resume_prefill:
+        if supports_prefill:
+            messages.append({
+                'role': 'assistant', 'content': prepared.resume_prefill})
+            task['_resumePrefill'] = prepared.resume_prefill
+            logger.info(
+                '[%s] conv=%s Injected resume prefill (%d chars) as trailing '
+                'assistant turn — model=%s will continue the same tokens',
+                tid, task.get('convId', ''),
+                len(prepared.resume_prefill), model,
+            )
+        else:
+            logger.info(
+                '[%s] conv=%s resumePrefill present but model=%s rejects prefill '
+                '— falling back to regenerate-from-checkpoint '
+                '(contentPrefix seed only)',
+                tid, task.get('convId', ''), model,
+            )
+
+    # Stash checkpoint metadata without polluting this executor's local round
+    # list. ``toolRounds`` stays attempt-local (its counters restart at zero);
+    # the durable Turn projection and persistence boundary merge checkpoint +
+    # current history once and preserve each round's attempt/task identity.
+    if prepared.checkpoint_tool_rounds:
+        task['_checkpointToolRounds'] = [
+            dict(item) for item in prepared.checkpoint_tool_rounds]
+        logger.debug(
+            '[%s] conv=%s Stashed %d checkpoint toolRounds for DB merge',
+            tid, task.get('convId', ''),
+            len(prepared.checkpoint_tool_rounds),
+        )
+    if prepared.checkpoint_todo_state is not None:
+        todo_state = prepared.checkpoint_todo_state
+        todo_stack = todo_state['stack']
+        task['_todoState'] = todo_state
+        task['_todos'] = (
+            copy.deepcopy(todo_stack[-1]['todos']) if todo_stack else [])
+        logger.debug(
+            '[%s] conv=%s Restored checklist stack depth=%d on Continue',
+            tid, task.get('convId', ''), len(todo_stack),
+        )
+    if prepared.checkpoint_usage:
+        task['_checkpointUsage'] = prepared.checkpoint_usage
+    if prepared.checkpoint_api_rounds:
+        task['_checkpointApiRounds'] = list(prepared.checkpoint_api_rounds)
+    if prepared.checkpoint_modified_files is not None:
+        task['_checkpointModifiedFiles'] = prepared.checkpoint_modified_files
+    if prepared.checkpoint_modified_file_list:
+        task['_checkpointModifiedFileList'] = list(
+            prepared.checkpoint_modified_file_list)
+
+
+__all__ = [
+    'ContinueResumeStateProtocolError',
+    'apply_resume_state',
+    'prepare_resume_state',
+]

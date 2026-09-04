@@ -2,7 +2,7 @@
 
 The Sidecar owns backup publication.  This module contains only filesystem
 policy shared by the online backend and the offline maintenance command:
-capacity admission, crash-artifact reclamation, and count-based retention.
+capacity admission, crash-artifact reclamation, and bounded retention/rotation.
 It never opens the authority database.
 """
 
@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat as stat_mode
 import time
 from typing import Any
 
@@ -33,6 +34,11 @@ _MIB = 1024 * 1024
 _MAX_RECOVERY_COPY_BUDGET_MIB = 8 * 1024 * 1024
 _ROLLBACK_ARTIFACT_RE = re.compile(
     r'^tofu\.db\.pre-compact-\d{8}T\d{6}Z$')
+_LEGACY_SNAPSHOT_TEMP_RE = re.compile(
+    r'^\.tofu-\d{8}_\d{6}-(?P<pid>[1-9]\d*)-[0-9a-f]{8}'
+    r'\.sqlite3\.tmp-[0-9a-f]{32}$')
+_LEGACY_SNAPSHOT_SCAN_LIMIT = 256
+_SQLITE_TEMP_COMPANION_SUFFIXES = ('-journal', '-wal', '-shm')
 
 
 def _positive_environment_integer(name: str, default: int) -> int:
@@ -274,8 +280,22 @@ def prune_retained_rollbacks(data_dir: Path, *, preserve: Path) -> dict[str, Any
     }
 
 
-def capacity_preflight(backups: Path, estimated_bytes: int) -> dict[str, int | bool]:
-    """Reject a copy unless both free-space and product-copy budgets fit."""
+def capacity_preflight(
+    backups: Path,
+    estimated_bytes: int,
+    *,
+    allow_verified_rotation: bool = False,
+) -> dict[str, Any]:
+    """Reject a copy unless both free-space and product-copy budgets fit.
+
+    ``allow_verified_rotation`` plans an atomic replacement of older verified
+    backups when the steady-state recovery set fits but the pre-publication
+    peak does not.  It never mutates the directory.  The caller must guarantee
+    zero-copy publication, verify and atomically publish the replacement first,
+    then pass ``retire_verified_artifacts`` to
+    :func:`prune_verified_backups`.  Classic/cross-device copies retain the
+    stricter peak-footprint admission.
+    """
     estimate = max(0, int(estimated_bytes))
     reserve = max(_MIN_RESERVE_BYTES, int(estimate * 0.05))
     reserve = _nonnegative_environment_integer(
@@ -283,18 +303,47 @@ def capacity_preflight(backups: Path, estimated_bytes: int) -> dict[str, int | b
     footprint = recovery_copy_footprint(backups)
     copy_budget = recovery_copy_budget_bytes()
     retained = int(footprint['retained_recovery_bytes'])
-    projected = retained + estimate
-    if projected > copy_budget:
+    peak_projected = retained + estimate
+    projected = peak_projected
+    retire_verified_artifacts: list[str] = []
+    if peak_projected > copy_budget and allow_verified_rotation:
+        # Rollback points are never eligible for automatic backup rotation.
+        # Keep the newest old verified points that fit alongside the incoming
+        # point, up to the configured total-retention target minus that new
+        # point. Everything else may be retired only after publication.
+        rollback_bytes = int(footprint['same_volume_rollback_bytes'])
+        old_backup_budget = copy_budget - rollback_bytes - estimate
+        if old_backup_budget >= 0:
+            inventory = verified_backup_inventory(backups)
+            old_keep_limit = max(0, retention_count() - 1)
+            kept_old_bytes = 0
+            kept_old_count = 0
+            for artifact in inventory['artifacts']:
+                allocated_bytes = int(artifact['allocated_bytes'])
+                if (kept_old_count < old_keep_limit
+                        and kept_old_bytes + allocated_bytes
+                        <= old_backup_budget):
+                    kept_old_bytes += allocated_bytes
+                    kept_old_count += 1
+                else:
+                    retire_verified_artifacts.append(str(artifact['name']))
+            projected = rollback_bytes + estimate + kept_old_bytes
+    rotation_required = bool(
+        peak_projected > copy_budget
+        and retire_verified_artifacts
+        and projected <= copy_budget
+    )
+    if peak_projected > copy_budget and not rotation_required:
         raise StorageError(
             'database_unavailable',
             'SQLite recovery-copy budget exceeded '
-            f'({projected} > {copy_budget} bytes); use an independent backup '
+            f'({peak_projected} > {copy_budget} bytes); use an independent backup '
             'volume or raise the explicit bounded budget',
             retryable=False,
         )
     free = int(shutil.disk_usage(backups).free)
     required = estimate + reserve
-    result: dict[str, int | bool] = {
+    result: dict[str, Any] = {
         'ok': free >= required,
         'free_bytes': free,
         'estimated_bytes': estimate,
@@ -303,8 +352,11 @@ def capacity_preflight(backups: Path, estimated_bytes: int) -> dict[str, int | b
         'recovery_copy_budget_bytes': copy_budget,
         'retained_recovery_bytes': retained,
         'projected_recovery_bytes': projected,
+        'peak_projected_recovery_bytes': peak_projected,
         'same_volume_rollback_bytes': int(
             footprint['same_volume_rollback_bytes']),
+        'budget_rotation_required': rotation_required,
+        'retire_verified_artifacts': retire_verified_artifacts,
     }
     if not result['ok']:
         raise StorageError(
@@ -366,8 +418,132 @@ def cleanup_job_artifacts(temporary: Path) -> None:
     job_manifest_path(temporary).unlink(missing_ok=True)
 
 
+def _reclaim_stale_legacy_snapshot_artifacts(
+    backups: Path,
+    *,
+    ttl_s: int,
+    now: float,
+) -> int:
+    """Reclaim only proven-dead unpublished artifacts of the retired owner.
+
+    The pre-Sidecar backup producer wrote a strict timestamp/PID/UUID name in
+    ``data/db_snapshots`` and promised that its next job would remove an
+    interrupted temporary copy. Migrating the producer retired that next-job
+    cleanup, leaving database-sized partial copies permanently allocated.
+
+    Published ``tofu-*.sqlite3`` recovery points never match. A temporary must
+    be a regular non-symlink file, older than the current temporary TTL, and
+    name a dead PID. A fresh/live valid manifest protects it too; malformed or
+    unsafe manifests and companions fail closed. The shallow scan is bounded
+    independently of directory size.
+    """
+    snapshot_dir = backups.parent / 'db_snapshots'
+    try:
+        entries = os.scandir(snapshot_dir)
+    except OSError:
+        return 0
+
+    removed = 0
+    scanned = 0
+    with entries:
+        for entry in entries:
+            scanned += 1
+            if scanned > _LEGACY_SNAPSHOT_SCAN_LIMIT:
+                break
+            match = _LEGACY_SNAPSHOT_TEMP_RE.fullmatch(entry.name)
+            if match is None:
+                continue
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                initial = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if (
+                now - float(initial.st_mtime) <= ttl_s
+                or _pid_is_alive(match.group('pid'))
+            ):
+                continue
+
+            temporary = snapshot_dir / entry.name
+            manifest = job_manifest_path(temporary)
+            owned_artifacts = [temporary]
+            unsafe = False
+            if manifest.exists() or manifest.is_symlink():
+                try:
+                    manifest_stat = manifest.lstat()
+                    if (
+                        manifest.is_symlink()
+                        or not stat_mode.S_ISREG(manifest_stat.st_mode)
+                    ):
+                        unsafe = True
+                    else:
+                        value = json.loads(manifest.read_text(encoding='utf-8'))
+                        payload = value if isinstance(value, dict) else {}
+                        if (
+                            now - float(manifest_stat.st_mtime) <= ttl_s
+                            or _pid_is_alive(payload.get('pid'))
+                        ):
+                            continue
+                        owned_artifacts.append(manifest)
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    unsafe = True
+            for suffix in _SQLITE_TEMP_COMPANION_SUFFIXES:
+                companion = Path(f'{temporary}{suffix}')
+                if not (companion.exists() or companion.is_symlink()):
+                    continue
+                try:
+                    companion_stat = companion.lstat()
+                except OSError:
+                    unsafe = True
+                    continue
+                if (
+                    companion.is_symlink()
+                    or not stat_mode.S_ISREG(companion_stat.st_mode)
+                ):
+                    unsafe = True
+                    continue
+                owned_artifacts.append(companion)
+            if unsafe:
+                continue
+
+            # Revalidate the large primary after inspecting its sidecars. A
+            # replacement or active write races toward preservation, never an
+            # unlink of a file other than the one proved above.
+            try:
+                current = temporary.lstat()
+            except OSError:
+                continue
+            initial_identity = (
+                int(initial.st_dev), int(initial.st_ino), int(initial.st_size),
+                int(initial.st_mtime_ns),
+            )
+            current_identity = (
+                int(current.st_dev), int(current.st_ino), int(current.st_size),
+                int(current.st_mtime_ns),
+            )
+            if (
+                initial_identity != current_identity
+                or not stat_mode.S_ISREG(current.st_mode)
+            ):
+                continue
+
+            # Companions/manifests go first. If process loss interrupts this
+            # cleanup, the still-present primary is safely rediscovered next
+            # time; deleting the primary is the final publication boundary.
+            for artifact in [*owned_artifacts[1:], temporary]:
+                try:
+                    artifact.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    pass
+    if removed:
+        fsync_directory(snapshot_dir)
+    return removed
+
+
 def reclaim_stale_job_artifacts(backups: Path) -> int:
-    """Remove only expired temporary copies with no live recorded owner."""
+    """Remove expired current and retired temporary copies with dead owners."""
     ttl_s = _positive_environment_integer(
         'TOFU_STORAGE_SQLITE_BACKUP_TEMP_TTL_SECONDS', _DEFAULT_TEMP_TTL_S)
     now = time.time()
@@ -403,11 +579,26 @@ def reclaim_stale_job_artifacts(backups: Path) -> int:
             removed += 1
         except FileNotFoundError:
             pass
+    removed += _reclaim_stale_legacy_snapshot_artifacts(
+        backups,
+        ttl_s=ttl_s,
+        now=now,
+    )
     return removed
 
 
-def prune_verified_backups(backups: Path, *, preserve: Path) -> int:
-    """Bound full copies by count, removing each retired checksum manifest."""
+def prune_verified_backups(
+    backups: Path,
+    *,
+    preserve: Path,
+    retire_names: set[str] | None = None,
+) -> int:
+    """Bound full copies by count/budget after ``preserve`` is published.
+
+    ``retire_names`` must come from a non-mutating capacity plan.  The newly
+    verified ``preserve`` point always wins, so a fault before publication
+    cannot remove the previous recovery point.
+    """
     candidates = sorted(
         (
             path for path in backups.glob(f'{_ARTIFACT_PREFIX}*{_ARTIFACT_SUFFIX}')
@@ -418,9 +609,12 @@ def prune_verified_backups(backups: Path, *, preserve: Path) -> int:
     )
     keep = set(candidates[:retention_count()])
     keep.add(preserve)
+    forced_retire = set(retire_names or ())
     removed = 0
     for artifact in candidates:
-        if artifact in keep:
+        if artifact == preserve:
+            continue
+        if artifact in keep and artifact.name not in forced_retire:
             continue
         artifact.unlink(missing_ok=True)
         artifact.with_name(artifact.name + '.manifest.json').unlink(missing_ok=True)

@@ -3,7 +3,7 @@
    local-control — the SINGLE "let Tofu act on my machine" surface.
 
    Merges what used to be two toolbar rows (#browserToggle + #desktopToggle),
-   one setup modal (#browserModal) and one blind flag flip (toggleDesktop with
+   one setup modal (#browserModal) and one blind desktop flag flip (with
    no status check at all). From the user's side browser-tabs and
    computer-control are one concept; two rows, two modals and two status dots
    were strictly more cognitive load than one.
@@ -44,8 +44,9 @@
    SAME instruction, so they must be ONE authoring. Two copies of it would
    drift, and a drifted floor is a wrong instruction shown first.
 
-   This file is concatenated by Vite's module graph — symbols share the same
-   window scope as every other frontend/src/runtime/*.js file. No imports/exports.
+   This demand-loaded owner contains the modal, probes, downloads and browser
+   relay. The retained local-control-state.js owns only the toolbar badge, so
+   ordinary coding and writing sessions do not parse this workbench.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* Poll cadence while the modal is OPEN. `is_desktop_agent_connected()` is a
@@ -63,6 +64,7 @@ var _lcPollTimer = null;
  * broken. Read by the switch repaint (which would otherwise have to guess) and
  * by the badge. */
 var _lcReach = { browser: null, desktop: null };
+var LocalControlPresentationState = Object.freeze({ reach: _lcReach });
 
 /* Signatures and explicit entry intent used by the setup renderers.
  * `_lcDesktopSigLast = null` forces a desktop render on reopen. Settings can
@@ -860,7 +862,7 @@ function _lcRenderBrowser(d, err) {
 
   _lcReach.browser = connected;
   _lcSetSwitch('lcBrowserSwitch',
-    typeof browserEnabled !== 'undefined' && browserEnabled, connected);
+    LocalControlShellState.browserEnabled, connected);
   _lcUpdateBadge();
   _lcSetAbout('lcBrowserAbout', _lcT('local.browserAbout',
     '读取你已打开的标签页内容，并代你点击、填表单、切换页面。'));
@@ -999,6 +1001,55 @@ function _lcWireExtDownload() {
   }
 }
 
+function downloadBrowserExtension() {
+  // Carry the browser's OWN base (origin + live BASE_PATH, e.g. /proxy/15000
+  // behind a cloud-IDE gateway) so the zip's bridge_preseed pairs the
+  // extension with an address this browser demonstrably reaches. A
+  // server-side request.host_url loses both external https and proxy prefix.
+  var base = encodeURIComponent(window.location.origin + BASE_PATH);
+  window.open(apiUrl('/api/browser/download?base=' + base), '_blank');
+}
+
+/* Chrome 142+ Local Network Access prompts can fire per site during multi-tab
+ * work. Only the Local Control browser card renders this recovery guidance. */
+function _applyBrowserLnaWarning(chromeMajor) {
+  var box = document.getElementById('browserLnaWarning');
+  if (!box) return;
+  if (!chromeMajor || chromeMajor < 142) {
+    box.style.display = 'none';
+    return;
+  }
+  box.style.display = '';
+  var pol = document.getElementById('browserLnaPolicy');
+  if (pol && !pol._wired) {
+    pol._wired = true;
+    pol.onclick = function () {
+      if (typeof _safeClipboardWrite === 'function') {
+        _safeClipboardWrite(pol.textContent)
+          .then(function () { pol.classList.add('copied'); })
+          .catch(function () {});
+      }
+    };
+  }
+  var pathEl = document.getElementById('browserLnaPath');
+  if (pathEl) {
+    var ua = (navigator.userAgent || '').toLowerCase();
+    var dir = '';
+    if (ua.indexOf('windows') >= 0) {
+      dir = 'HKLM\\SOFTWARE\\Policies\\Google\\Chrome\\ (via registry / Group Policy)';
+    } else if (ua.indexOf('mac os') >= 0 || ua.indexOf('macintosh') >= 0) {
+      dir = "defaults write com.google.Chrome LocalNetworkAccessAllowedForUrls -array '*'";
+    } else {
+      dir = '/etc/opt/chrome/policies/managed/tofu-lna.json';
+    }
+    var label = (typeof t === 'function')
+      ? t('browser.lnaPathLabel') : 'Place it at:';
+    pathEl.style.display = '';
+    pathEl.innerHTML = label + ' <code>' +
+      dir.replace(/</g, '&lt;') + '</code>';
+  }
+}
+
 function _lcBrowserDownload() {
   var setup = document.getElementById('lcBrowserSetup');
   if (!setup) return;
@@ -1028,7 +1079,7 @@ function _lcRenderDesktop(d, err) {
               : _lcT('local.notRunning', '未运行'));
   _lcReach.desktop = connected;
   _lcSetSwitch('lcDesktopSwitch',
-    typeof desktopEnabled !== 'undefined' && desktopEnabled, connected);
+    LocalControlShellState.desktopEnabled, connected);
   _lcUpdateBadge();
   _lcSetAbout('lcDesktopAbout', _lcT('local.desktopAbout',
     '浏览与读写本机文件、截屏、打开应用、运行命令（写入与执行需单独授权）。'));
@@ -1322,93 +1373,25 @@ function _lcDownloadLinks(d, kind, suppressPage) {
 function toggleBrowserFromLocalModal() {
   var sw = document.getElementById('lcBrowserSwitch');
   if (sw && sw.disabled) return;   // not connected — turning it on grants nothing
-  if (typeof _applyBrowserUI === 'function') _applyBrowserUI(!browserEnabled);
+  if (typeof _applyBrowserUI === 'function') {
+    _applyBrowserUI(!LocalControlShellState.browserEnabled);
+  }
   if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
-  _lcSetSwitch('lcBrowserSwitch', browserEnabled, _lcReach.browser !== false);
+  _lcSetSwitch('lcBrowserSwitch', LocalControlShellState.browserEnabled,
+    _lcReach.browser !== false);
   _lcUpdateBadge();
 }
 
 function toggleDesktopFromLocalModal() {
   var sw = document.getElementById('lcDesktopSwitch');
   if (sw && sw.disabled) return;   // no agent — turning it on grants nothing
-  if (typeof _applyDesktopUI === 'function') _applyDesktopUI(!desktopEnabled);
+  if (typeof _applyDesktopUI === 'function') {
+    _applyDesktopUI(!LocalControlShellState.desktopEnabled);
+  }
   if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
-  _lcSetSwitch('lcDesktopSwitch', desktopEnabled, _lcReach.desktop !== false);
+  _lcSetSwitch('lcDesktopSwitch', LocalControlShellState.desktopEnabled,
+    _lcReach.desktop !== false);
   _lcUpdateBadge();
-}
-
-/* ONE summary badge on the merged toolbar entry, counting whichever
- * capabilities are on. The merged row is `active` when either is.
- *
- * ── Enabled ≠ working, and the badge must not blur the two ──
- * `_build_browser` / `_build_desktop` return [] when their bridge is not
- * connected, so a flag that is ON while the bridge is down contributes
- * literally zero tools. Counting it the same as a live one restates the very
- * claim this merge exists to stop making — the user closes the modal, sees a
- * confident badge, and reasonably concludes the AI can reach their machine.
- * A capability confirmed unreachable is marked, not hidden: hiding it would
- * lose the fact that the flag is still ON and still travelling to the server.
- * `null` (never probed — the modal has not been opened this session) counts as
- * live, because presenting an unverified capability as broken is its own lie. */
-function _lcUpdateBadge() {
-  var bOn = (typeof browserEnabled !== 'undefined' && browserEnabled);
-  var dOn = (typeof desktopEnabled !== 'undefined' && desktopEnabled);
-  var n = (bOn ? 1 : 0) + (dOn ? 1 : 0);
-  /* In the concatenated production bundle this function declaration is
-   * hoisted across main.js, while local-control.js's `_lcReach = …` assignment
-   * still runs later. updateSubmenuCounts() may therefore call us during boot
-   * with `_lcReach` declared but not initialized. Treat that brief phase as
-   * "not probed" — the same state used before the modal's first poll. */
-  var reach = (typeof _lcReach === 'object' && _lcReach)
-    ? _lcReach : { browser: null, desktop: null };
-  var stale = ((bOn && reach.browser === false) ? 1 : 0)
-            + ((dOn && reach.desktop === false) ? 1 : 0);
-  var badge = document.getElementById('localControlBadge');
-  if (badge) {
-    badge.textContent = n > 0 ? String(n) : '';
-    badge.style.display = n > 0 ? '' : 'none';
-    badge.classList.toggle('visible', n > 0);
-    badge.classList.toggle('lc-badge-stale', stale > 0);
-    if (stale > 0) {
-      badge.title = _lcT('local.badgeStale',
-        '已开启，但当前未连接 —— AI 实际拿不到这些工具。');
-    } else {
-      badge.removeAttribute('title');
-    }
-  }
-  var row = document.getElementById('localControlToggle');
-  if (row) {
-    row.classList.toggle('active', n > 0);
-    row.classList.toggle('lc-row-stale', stale > 0);
-    if (typeof _paintToolExposureState === 'function') {
-      var available = !(reach.browser === false
-                     && reach.desktop === false);
-      _paintToolExposureState(row, n > 0 && stale < n, available);
-    }
-  }
-}
-
-if (typeof window !== 'undefined') {
-  runtimeScope.openLocalControlModal = openLocalControlModal;
-  runtimeScope.closeLocalControlModal = closeLocalControlModal;
-  runtimeScope.toggleBrowserFromLocalModal = toggleBrowserFromLocalModal;
-  runtimeScope.toggleDesktopFromLocalModal = toggleDesktopFromLocalModal;
-  runtimeScope._lcUpdateBadge = _lcUpdateBadge;
-  runtimeScope._lcBrowserSetupState = _lcBrowserSetupState;
-  runtimeScope._lcPaintFloor = _lcPaintFloor;
-  runtimeScope._lcBrowserDownload = _lcBrowserDownload;
-  runtimeScope._lcDownloadLinks = _lcDownloadLinks;
-  runtimeScope._lcResolveArch = _lcResolveArch;
-  runtimeScope._lcSetAbout = _lcSetAbout;
-  runtimeScope._lcRenderBrowser = _lcRenderBrowser;
-  runtimeScope._lcRenderDesktop = _lcRenderDesktop;
-  runtimeScope._lcEnsureAgentRelay = _lcEnsureAgentRelay;
-  runtimeScope._lcAgentRelayLoop = _lcAgentRelayLoop;
-  try {
-    if (window.location && window.location.hash === '#tofu-agent-relay') {
-      setTimeout(function () { _lcEnsureAgentRelay(30 * 60 * 1000); }, 0);
-    }
-  } catch (e) { /* opaque/test location — explicit modal open still starts */ }
 }

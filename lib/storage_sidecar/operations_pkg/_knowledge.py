@@ -32,6 +32,7 @@ _DOCUMENT_SORTS = {
 _ENRICHMENT_STATUSES = frozenset({
     "not_requested", "pending", "running", "ready", "no_vision", "failed",
 })
+_DOCUMENT_SCOPES = frozenset({"draft", "library", "attachment", "shared"})
 _MUTABLE_ASSET_FIELDS = frozenset({
     "caption", "ocr_text", "description", "enrichment_status",
     "enrichment_model", "enrichment_error",
@@ -113,6 +114,20 @@ def _json_array_text(row: Mapping[str, Any], key: str, *, default: str = "[]") -
     except (TypeError, ValueError) as exc:
         raise _protocol_error(f"Invalid knowledge JSON field: {key}") from exc
     if not isinstance(decoded, list):
+        raise _protocol_error(f"Invalid knowledge JSON field: {key}")
+    return value
+
+
+def _json_object_text(
+    row: Mapping[str, Any], key: str, *, default: str = "{}",
+    maximum: int = 100_000,
+) -> str:
+    value = _nested_text(row, key, maximum=maximum, default=default)
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise _protocol_error(f"Invalid knowledge JSON field: {key}") from exc
+    if not isinstance(decoded, dict):
         raise _protocol_error(f"Invalid knowledge JSON field: {key}")
     return value
 
@@ -199,6 +214,8 @@ def _validated_document(payload: Mapping[str, Any]) -> dict:
                 raw_asset, "enrichment_model", maximum=512, default=""),
             "enrichment_error": _nested_text(
                 raw_asset, "enrichment_error", maximum=2000, default=""),
+            "metadata_json": _json_object_text(
+                raw_asset, "metadata_json", maximum=20_000),
             "created_at": _nested_number(raw_asset, "created_at"),
             "updated_at": _nested_number(raw_asset, "updated_at"),
         })
@@ -246,6 +263,9 @@ def _validated_document(payload: Mapping[str, Any]) -> dict:
     chunk_count = _nested_integer(source, "chunk_count")
     if chunk_count != len(chunks):
         raise _protocol_error("Knowledge chunk_count does not match chunks")
+    scope = _nested_text(source, "scope", maximum=32, default="library")
+    if scope not in _DOCUMENT_SCOPES:
+        raise _protocol_error("Invalid knowledge document scope")
     return {
         "id": document_id,
         "sha256": digest,
@@ -258,6 +278,9 @@ def _validated_document(payload: Mapping[str, Any]) -> dict:
         "text_chars": _nested_integer(source, "text_chars"),
         "chunk_count": chunk_count,
         "pages": _nested_integer(source, "pages", default=0),
+        "scope": scope,
+        "media_metadata_json": _json_object_text(
+            source, "media_metadata_json", maximum=100_000),
         "created_at": _nested_number(source, "created_at"),
         "updated_at": _nested_number(source, "updated_at"),
         "chunks": chunks,
@@ -278,6 +301,8 @@ def _document_metadata(row: Mapping[str, Any]) -> dict:
         "text_chars": int(row["text_chars"]),
         "chunk_count": int(row["chunk_count"]),
         "pages": int(row["pages"]),
+        "scope": str(row.get("scope") or "library"),
+        "media_metadata_json": str(row.get("media_metadata_json") or "{}"),
         "created_at": float(row["created_at"]),
         "updated_at": float(row["updated_at"]),
         "asset_count": int(row.get("asset_count") or 0),
@@ -306,6 +331,7 @@ def _asset_from_row(row: Mapping[str, Any]) -> dict:
         "enrichment_status": str(row["enrichment_status"]),
         "enrichment_model": str(row["enrichment_model"]),
         "enrichment_error": str(row["enrichment_error"]),
+        "metadata_json": str(row.get("metadata_json") or "{}"),
         "created_at": float(row["created_at"]),
         "updated_at": float(row["updated_at"]),
     }
@@ -374,7 +400,8 @@ def _insert_document_dependents(
             "user_id,id,document_id,ordinal,kind,stored_name,mime_type,sha256,"
             "size_bytes,width,height,page,pages_json,bbox_json,caption,ocr_text,"
             "description,enrichment_status,enrichment_model,enrichment_error,"
-            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "metadata_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 user_id, asset["id"], document_id, asset["ordinal"],
                 asset["kind"], asset["stored_name"], asset["mime_type"],
@@ -383,7 +410,7 @@ def _insert_document_dependents(
                 asset["bbox_json"], asset["caption"], asset["ocr_text"],
                 asset["description"], asset["enrichment_status"],
                 asset["enrichment_model"], asset["enrichment_error"],
-                asset["created_at"], asset["updated_at"],
+                asset["metadata_json"], asset["created_at"], asset["updated_at"],
             ),
         )
     for chunk in document["chunks"]:
@@ -418,13 +445,14 @@ def _insert_document(session: Session, user_id: int, document: Mapping[str, Any]
     session.execute(
         "INSERT INTO storage_knowledge_documents("
         "user_id,id,sha256,name,stored_name,kind,size_bytes,method,warnings_json,"
-        "text_chars,chunk_count,pages,created_at,updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "text_chars,chunk_count,pages,scope,media_metadata_json,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             user_id, document["id"], document["sha256"], document["name"],
             document["stored_name"], document["kind"], document["size_bytes"],
             document["method"], document["warnings_json"],
             document["text_chars"], document["chunk_count"], document["pages"],
+            document["scope"], document["media_metadata_json"],
             document["created_at"], document["updated_at"],
         ),
     )
@@ -435,14 +463,59 @@ def _knowledge_document_list(session: Session, payload: Mapping[str, Any]) -> An
     user_id = _owner_id(payload)
     return [_document_metadata(row) for row in session.fetch_all(
         _DOCUMENT_WITH_COUNTS
-        + " WHERE d.user_id=? ORDER BY d.created_at DESC, d.id DESC",
+        + " WHERE d.user_id=? AND d.scope IN ('library','shared') "
+        "ORDER BY d.created_at DESC, d.id DESC",
         (user_id,),
     )]
+
+
+def _document_metadata_by_id(
+    session: Session, user_id: int, document_id: str,
+) -> dict | None:
+    """Receipt-safe projection: command responses must stay under the bounded
+    receipt budget, so mutations return metadata instead of chunk bodies."""
+    row = session.fetch_one(
+        _DOCUMENT_WITH_COUNTS + " WHERE d.user_id=? AND d.id=?",
+        (user_id, document_id),
+    )
+    return _document_metadata(row) if row is not None else None
 
 
 def _knowledge_document_get(session: Session, payload: Mapping[str, Any]) -> Any:
     return _load_document(
         session, _owner_id(payload), _required_text(payload, "document_id", 128))
+
+
+def _knowledge_document_metadata(
+    session: Session, payload: Mapping[str, Any],
+) -> Any:
+    """Return bounded source metadata without materializing chunks/assets."""
+    row = session.fetch_one(
+        _DOCUMENT_WITH_COUNTS + " WHERE d.user_id=? AND d.id=?",
+        (_owner_id(payload), _required_text(payload, "document_id", 128)),
+    )
+    return _document_metadata(row) if row is not None else None
+
+
+def _knowledge_document_assets(
+    session: Session, payload: Mapping[str, Any],
+) -> Any:
+    """Page through derived assets for one explicitly addressed document."""
+    user_id = _owner_id(payload)
+    document_id = _required_text(payload, "document_id", 128)
+    offset = _integer(payload, "offset", default=0, minimum=0)
+    limit = _integer(payload, "limit", default=80, minimum=1, maximum=200)
+    exists = session.fetch_one(
+        "SELECT 1 AS present FROM storage_knowledge_documents "
+        "WHERE user_id=? AND id=?", (user_id, document_id))
+    if exists is None:
+        return None
+    rows = session.fetch_all(
+        "SELECT * FROM storage_knowledge_assets WHERE user_id=? "
+        "AND document_id=? ORDER BY ordinal LIMIT ? OFFSET ?",
+        (user_id, document_id, limit, offset),
+    )
+    return [_asset_from_row(row) for row in rows]
 
 
 def _knowledge_document_content(
@@ -503,6 +576,68 @@ def _knowledge_document_content(
     }
 
 
+def _knowledge_document_patch(
+    session: Session, payload: Mapping[str, Any],
+) -> Any:
+    """Patch bounded attachment metadata without replacing indexed evidence."""
+    user_id = _owner_id(payload)
+    document_id = _required_text(payload, "document_id", 128)
+    updates = payload.get("updates")
+    if not isinstance(updates, Mapping) or not updates:
+        raise _protocol_error("Invalid knowledge document update")
+    unknown = set(updates) - {"scope", "media_metadata_json"}
+    if unknown:
+        raise _protocol_error("Knowledge document update contains immutable fields")
+    normalized: dict[str, str] = {}
+    if "scope" in updates:
+        scope = str(updates.get("scope") or "")
+        if scope not in _DOCUMENT_SCOPES:
+            raise _protocol_error("Invalid knowledge document scope")
+        normalized["scope"] = scope
+    if "media_metadata_json" in updates:
+        normalized["media_metadata_json"] = _json_object_text(
+            updates, "media_metadata_json", maximum=100_000)
+    if not normalized:
+        raise _protocol_error("Knowledge document update is empty")
+    session.lock_key("knowledge.document", f"{user_id}:{document_id}")
+    assignments = ",".join(f"{field}=?" for field in normalized)
+    changed = session.execute(
+        f"UPDATE storage_knowledge_documents SET {assignments},updated_at=? "
+        "WHERE user_id=? AND id=?",
+        (*normalized.values(), time.time(), user_id, document_id),
+    )
+    if not changed:
+        return None
+    if normalized.get("scope") in {"library", "shared"}:
+        settings = session.fetch_one(
+            "SELECT visual_enrichment FROM storage_knowledge_settings "
+            "WHERE user_id=?",
+            (user_id,),
+        )
+        if settings is None:
+            session.execute(
+                "INSERT INTO storage_knowledge_settings("
+                "user_id,enabled,visual_enrichment,updated_at) VALUES (?,?,?,?)",
+                (user_id, 1, 0, time.time()),
+            )
+        elif settings["visual_enrichment"]:
+            session.execute(
+                "UPDATE storage_knowledge_assets SET enrichment_status='pending',"
+                "enrichment_error='',updated_at=? WHERE user_id=? "
+                "AND document_id=? AND enrichment_status IN "
+                "('not_requested','no_vision','failed')",
+                (time.time(), user_id, document_id),
+            )
+    elif normalized.get("scope") == "attachment":
+        session.execute(
+            "UPDATE storage_knowledge_assets SET enrichment_status='not_requested',"
+            "updated_at=? WHERE user_id=? AND document_id=? "
+            "AND enrichment_status='pending'",
+            (time.time(), user_id, document_id),
+        )
+    return _knowledge_document_metadata(session, payload)
+
+
 def _knowledge_document_find_digest(
     session: Session, payload: Mapping[str, Any],
 ) -> Any:
@@ -527,14 +662,15 @@ def _knowledge_document_create(session: Session, payload: Mapping[str, Any]) -> 
     if existing is not None:
         return {
             "created": False,
-            "document": _load_document(session, user_id, str(existing["id"])),
+            "document": _document_metadata_by_id(
+                session, user_id, str(existing["id"])),
         }
     _insert_document(session, user_id, document)
     settings = session.fetch_one(
         "SELECT 1 AS present FROM storage_knowledge_settings WHERE user_id=?",
         (user_id,),
     )
-    if settings is None:
+    if settings is None and document["scope"] == "library":
         now = time.time()
         session.execute(
             "INSERT INTO storage_knowledge_settings("
@@ -543,7 +679,8 @@ def _knowledge_document_create(session: Session, payload: Mapping[str, Any]) -> 
         )
     return {
         "created": True,
-        "document": _load_document(session, user_id, str(document["id"])),
+        "document": _document_metadata_by_id(
+            session, user_id, str(document["id"])),
     }
 
 
@@ -578,17 +715,19 @@ def _knowledge_document_replace(session: Session, payload: Mapping[str, Any]) ->
     session.execute(
         "UPDATE storage_knowledge_documents SET sha256=?,name=?,stored_name=?,"
         "kind=?,size_bytes=?,method=?,warnings_json=?,text_chars=?,chunk_count=?,"
-        "pages=?,created_at=?,updated_at=? WHERE user_id=? AND id=?",
+        "pages=?,scope=?,media_metadata_json=?,created_at=?,updated_at=? "
+        "WHERE user_id=? AND id=?",
         (
             document["sha256"], document["name"], document["stored_name"],
             document["kind"], document["size_bytes"], document["method"],
             document["warnings_json"], document["text_chars"],
-            document["chunk_count"], document["pages"], document["created_at"],
+            document["chunk_count"], document["pages"], document["scope"],
+            document["media_metadata_json"], document["created_at"],
             document["updated_at"], user_id, document_id,
         ),
     )
     _insert_document_dependents(session, user_id, document)
-    result = _load_document(session, user_id, document_id)
+    result = _document_metadata_by_id(session, user_id, document_id)
     return {
         **(result or {}),
         "_replaced_asset_names": [str(row["stored_name"]) for row in old_assets],
@@ -599,9 +738,18 @@ def _knowledge_document_delete(session: Session, payload: Mapping[str, Any]) -> 
     user_id = _owner_id(payload)
     document_id = _required_text(payload, "document_id", 128)
     session.lock_key("knowledge.document", f"{user_id}:{document_id}")
-    document = _load_document(session, user_id, document_id)
+    document = _document_metadata_by_id(session, user_id, document_id)
     if document is None:
         return {"deleted": False, "document": None}
+    # The caller unlinks asset files by stored_name; chunk bodies and enriched
+    # asset text are never consumed and would blow the bounded command receipt.
+    asset_names = session.fetch_all(
+        "SELECT stored_name FROM storage_knowledge_assets "
+        "WHERE user_id=? AND document_id=? ORDER BY ordinal",
+        (user_id, document_id),
+    )
+    document["assets"] = [
+        {"stored_name": str(row["stored_name"])} for row in asset_names]
     deleted = session.execute(
         "DELETE FROM storage_knowledge_documents WHERE user_id=? AND id=?",
         (user_id, document_id),
@@ -653,16 +801,20 @@ def _knowledge_settings_patch(session: Session, payload: Mapping[str, Any]) -> A
         session.execute(
             "UPDATE storage_knowledge_assets SET enrichment_status='pending',"
             "enrichment_error='',updated_at=? WHERE user_id=? "
-            "AND enrichment_status IN ('not_requested','no_vision','failed')",
-            (now, user_id),
+            "AND enrichment_status IN ('not_requested','no_vision','failed') "
+            "AND document_id IN (SELECT id FROM storage_knowledge_documents "
+            "WHERE user_id=? AND scope IN ('library','shared'))",
+            (now, user_id, user_id),
         )
     elif payload.get("visual_enrichment") is False:
         # Work which has not started must stop being eligible immediately.
         # A running provider request cannot be unsent, so preserve its state.
         session.execute(
             "UPDATE storage_knowledge_assets SET enrichment_status='not_requested',"
-            "updated_at=? WHERE user_id=? AND enrichment_status='pending'",
-            (now, user_id),
+            "updated_at=? WHERE user_id=? AND enrichment_status='pending' "
+            "AND document_id IN (SELECT id FROM storage_knowledge_documents "
+            "WHERE user_id=? AND scope IN ('library','shared'))",
+            (now, user_id, user_id),
         )
     return current
 
@@ -671,7 +823,8 @@ def _knowledge_availability(session: Session, payload: Mapping[str, Any]) -> Any
     user_id = _owner_id(payload)
     row = session.fetch_one(
         "SELECT s.enabled, EXISTS(SELECT 1 FROM storage_knowledge_documents d "
-        "WHERE d.user_id=s.user_id) AS has_documents "
+        "WHERE d.user_id=s.user_id "
+        "AND d.scope IN ('library','shared')) AS has_documents "
         "FROM storage_knowledge_settings s WHERE s.user_id=?",
         (user_id,),
     )
@@ -696,7 +849,9 @@ def _knowledge_enrichment_activity(session: Session, payload: Mapping[str, Any])
         "THEN 1 ELSE 0 END),0) AS pending_assets,"
         "COALESCE(SUM(CASE WHEN enrichment_status IN ('no_vision','failed') "
         "THEN 1 ELSE 0 END),0) AS asset_issues "
-        "FROM storage_knowledge_assets WHERE user_id=?",
+        "FROM storage_knowledge_assets a JOIN storage_knowledge_documents d "
+        "ON d.user_id=a.user_id AND d.id=a.document_id "
+        "WHERE a.user_id=? AND d.scope IN ('library','shared')",
         (_owner_id(payload),),
     ) or {}
     settings = _knowledge_settings_get(session, payload)
@@ -708,10 +863,18 @@ def _knowledge_enrichment_activity(session: Session, payload: Mapping[str, Any])
 
 
 def _knowledge_enrichment_owners(session: Session, payload: Mapping[str, Any]) -> Any:
-    del payload
+    limit = _integer(payload, "limit", default=512, minimum=1, maximum=512)
     return [int(row["user_id"]) for row in session.fetch_all(
-        "SELECT user_id FROM storage_knowledge_settings "
-        "WHERE visual_enrichment<>0 ORDER BY user_id")]
+        "SELECT s.user_id FROM storage_knowledge_settings s "
+        "WHERE s.visual_enrichment<>0 AND EXISTS ("
+        "SELECT 1 FROM storage_knowledge_assets a "
+        "JOIN storage_knowledge_documents d "
+        "ON d.user_id=a.user_id AND d.id=a.document_id "
+        "WHERE a.user_id=s.user_id "
+        "AND a.enrichment_status IN ('pending','running') "
+        "AND d.scope IN ('library','shared')) "
+        "ORDER BY s.user_id LIMIT ?",
+        (limit,))]
 
 
 def _knowledge_asset_claim(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -724,6 +887,7 @@ def _knowledge_asset_claim(session: Session, payload: Mapping[str, Any]) -> Any:
         "ON d.user_id=a.user_id AND d.id=a.document_id "
         "WHERE a.user_id=? AND (a.enrichment_status='pending' OR "
         "(a.enrichment_status='running' AND a.updated_at<?)) "
+        "AND d.scope IN ('library','shared') "
         "ORDER BY CASE a.kind WHEN 'image' THEN 0 WHEN 'figure' THEN 1 "
         "WHEN 'table' THEN 2 ELSE 3 END,a.created_at,a.document_id,a.ordinal "
         "LIMIT 1",
@@ -832,8 +996,10 @@ def _knowledge_assets_mark_no_vision(
     changed = session.execute(
         "UPDATE storage_knowledge_assets SET enrichment_status='no_vision',"
         "enrichment_error='No configured vision model',updated_at=? "
-        "WHERE user_id=? AND enrichment_status='pending'",
-        (time.time(), user_id),
+        "WHERE user_id=? AND enrichment_status='pending' "
+        "AND document_id IN (SELECT id FROM storage_knowledge_documents "
+        "WHERE user_id=? AND scope IN ('library','shared'))",
+        (time.time(), user_id, user_id),
     )
     return {"changed": int(changed)}
 
@@ -852,7 +1018,7 @@ def _knowledge_catalog(session: Session, payload: Mapping[str, Any]) -> Any:
     if len(query) > 200 or category not in _DOCUMENT_CATEGORIES or sort not in _DOCUMENT_SORTS:
         raise _protocol_error("Invalid knowledge catalogue filter")
 
-    where = ["d.user_id=?"]
+    where = ["d.user_id=?", "d.scope IN ('library','shared')"]
     params: list[Any] = [user_id]
     if query:
         where.append("LOWER(d.name) LIKE ? ESCAPE '!'")
@@ -886,7 +1052,8 @@ def _knowledge_catalog(session: Session, payload: Mapping[str, Any]) -> Any:
         "SELECT COUNT(*) AS documents,COALESCE(SUM(chunk_count),0) AS chunks,"
         "COALESCE(SUM(text_chars),0) AS text_chars,"
         "COALESCE(SUM(size_bytes),0) AS size_bytes "
-        "FROM storage_knowledge_documents WHERE user_id=?",
+        "FROM storage_knowledge_documents WHERE user_id=? "
+        "AND scope IN ('library','shared')",
         (user_id,),
     ) or {}
     asset_totals = session.fetch_one(
@@ -895,12 +1062,15 @@ def _knowledge_catalog(session: Session, payload: Mapping[str, Any]) -> Any:
         "THEN 1 ELSE 0 END),0) AS pending_assets,"
         "COALESCE(SUM(CASE WHEN enrichment_status IN ('no_vision','failed') "
         "THEN 1 ELSE 0 END),0) AS asset_issues "
-        "FROM storage_knowledge_assets WHERE user_id=?",
+        "FROM storage_knowledge_assets a JOIN storage_knowledge_documents d "
+        "ON d.user_id=a.user_id AND d.id=a.document_id "
+        "WHERE a.user_id=? AND d.scope IN ('library','shared')",
         (user_id,),
     ) or {}
     facet_rows = session.fetch_all(
         f"SELECT ({_CATEGORY_SQL}) AS category,COUNT(*) AS count "
         "FROM storage_knowledge_documents d WHERE d.user_id=? "
+        "AND d.scope IN ('library','shared') "
         f"GROUP BY ({_CATEGORY_SQL}) ORDER BY count DESC,category ASC",
         (user_id,),
     )
@@ -946,8 +1116,14 @@ def _knowledge_search_candidates(session: Session, payload: Mapping[str, Any]) -
     if not tokens:
         return []
     limit = _integer(payload, "limit", default=80, minimum=1, maximum=200)
+    document_id = str(payload.get("document_id") or "").strip()
+    if document_id and len(document_id) > 128:
+        raise _protocol_error("Invalid knowledge document id")
     tokens = list(dict.fromkeys(tokens))
     placeholders = ",".join("?" for _ in tokens)
+    scope_clause = (" AND t.document_id=?" if document_id
+                    else " AND d.scope IN ('library','shared')")
+    scope_params: tuple[Any, ...] = (document_id,) if document_id else ()
     candidate_keys = session.fetch_all(
         "SELECT t.document_id,t.chunk_ordinal,COUNT(*) AS matched_terms,"
         "MAX(d.updated_at) AS document_updated_at "
@@ -955,10 +1131,11 @@ def _knowledge_search_candidates(session: Session, payload: Mapping[str, Any]) -
         "JOIN storage_knowledge_documents d "
         "ON d.user_id=t.user_id AND d.id=t.document_id "
         "WHERE t.user_id=? AND t.term IN (" + placeholders + ") "
+        + scope_clause + " "
         "GROUP BY t.document_id,t.chunk_ordinal "
         "ORDER BY matched_terms DESC,document_updated_at DESC,"
         "t.document_id,t.chunk_ordinal LIMIT ?",
-        (user_id, *tokens, limit),
+        (user_id, *tokens, *scope_params, limit),
     )
     if not candidate_keys:
         return []

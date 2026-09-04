@@ -266,7 +266,8 @@ def _salvage_note(content, rel_path):
 #  write_file
 # ═══════════════════════════════════════════════════════
 
-def tool_write_file(base, rel_path, content, description='', conv_id=None, task_id=None):
+def tool_write_file(base, rel_path, content, description='', conv_id=None, task_id=None,
+                    allow_outside=False):
     """Write full content to a file. Creates parent dirs if needed.
 
     Accepts:
@@ -287,7 +288,8 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
                           "FILE path, e.g. path='docs/README.md'."
                           + _salvage_note(content, rel_path))}
     try:
-        target = _resolve_write_path(base, rel_path, conv_id=conv_id)
+        target = _resolve_write_path(base, rel_path, conv_id=conv_id,
+                                     allow_outside=allow_outside)
     except ValueError as e:
         logger.debug('[Tools] write_file path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e) + _salvage_note(content, rel_path),
@@ -688,13 +690,15 @@ def _commit_diff(target, base, rel_path, comp, description='', conv_id=None, tas
         return {'ok': False, 'error': str(e), 'action': 'apply_diff', 'path': rel_path}
 
 
-def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=None, replace_all=False, task_id=None):
+def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=None, replace_all=False, task_id=None,
+                    allow_outside=False):
     """Apply a single search-and-replace to a file.
 
     Accepts project-relative paths and absolute paths under registered roots.
     """
     try:
-        target = _resolve_write_path(base, rel_path, conv_id=conv_id)
+        target = _resolve_write_path(base, rel_path, conv_id=conv_id,
+                                     allow_outside=allow_outside)
     except ValueError as e:
         logger.debug('[Tools] apply_diff path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'apply_diff', 'path': rel_path}
@@ -718,9 +722,11 @@ def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=Non
                         conv_id=conv_id, task_id=task_id)
 
 
-def tool_apply_diff(base, rel_path, search, replace, description='', conv_id=None, replace_all=False, task_id=None):
+def tool_apply_diff(base, rel_path, search, replace, description='', conv_id=None, replace_all=False, task_id=None,
+                    allow_outside=False):
     """Apply a single search-and-replace edit (backward-compatible entry point)."""
-    result = _apply_one_diff(base, rel_path, search, replace, description, conv_id, replace_all=replace_all, task_id=task_id)
+    result = _apply_one_diff(base, rel_path, search, replace, description, conv_id, replace_all=replace_all, task_id=task_id,
+                             allow_outside=allow_outside)
     _log_legacy_edit_efficiency(search, replace, ok=result.get('ok'))
     return result
 
@@ -839,7 +845,8 @@ def _commit_edit_group(target, base, recs, conv_id, task_id):
     return None
 
 
-def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
+def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None,
+                     allow_outside=False):
     """Apply multiple search-and-replace edits in one batch.
 
     Edits are grouped by resolved target: each file is read once, its diffs
@@ -899,7 +906,8 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
     groups = OrderedDict()
     for p in prepared:
         try:
-            target = _resolve_write_path(p['bp'], p['resolved_rp'], conv_id=conv_id)
+            target = _resolve_write_path(p['bp'], p['resolved_rp'], conv_id=conv_id,
+                                         allow_outside=allow_outside)
         except ValueError as e:
             p['resolve_err'] = str(e)
             continue
@@ -1460,7 +1468,8 @@ def _commit_insert(target, base, rel_path, comp, description='', conv_id=None, t
         return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path}
 
 
-def _insert_one(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None):
+def _insert_one(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None,
+                allow_outside=False):
     """Insert content before or after an anchor string in a file.
 
     Args:
@@ -1477,7 +1486,8 @@ def _insert_one(base, rel_path, anchor, content, position='after', description='
         dict with ok, action, path, error (on failure), or ok + line info (on success).
     """
     try:
-        target = _resolve_write_path(base, rel_path, conv_id=conv_id)
+        target = _resolve_write_path(base, rel_path, conv_id=conv_id,
+                                     allow_outside=allow_outside)
     except ValueError as e:
         logger.debug('[Tools] insert_content path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path}
@@ -1501,12 +1511,15 @@ def _insert_one(base, rel_path, anchor, content, position='after', description='
                           conv_id=conv_id, task_id=task_id)
 
 
-def tool_insert_content(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None):
+def tool_insert_content(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None,
+                        allow_outside=False):
     """Insert content before or after an anchor string (single edit entry point)."""
-    return _insert_one(base, rel_path, anchor, content, position, description, conv_id, task_id=task_id)
+    return _insert_one(base, rel_path, anchor, content, position, description, conv_id, task_id=task_id,
+                       allow_outside=allow_outside)
 
 
-def tool_insert_contents(base_path, edits, conv_id=None, task_id=None):
+def tool_insert_contents(base_path, edits, conv_id=None, task_id=None,
+                         allow_outside=False):
     """Apply multiple insert_content edits in one batch."""
     if not edits:
         return 'No edits provided.'
@@ -1550,7 +1563,8 @@ def tool_insert_contents(base_path, edits, conv_id=None, task_id=None):
             fail_count += 1
             results.append(f'[{i}] FAIL {rp}: {_rve}')
             continue
-        result = _insert_one(bp, resolved_rp, anchor, content, position, desc, conv_id, task_id=task_id)
+        result = _insert_one(bp, resolved_rp, anchor, content, position, desc, conv_id, task_id=task_id,
+                             allow_outside=allow_outside)
 
         if result['ok']:
             ok_count += 1
@@ -1590,7 +1604,8 @@ def _log_edit_efficiency(operation, anchor, content, *, ok):
     )
 
 
-def tool_edit_file(base_path, edits, conv_id=None, task_id=None):
+def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
+                   allow_outside=False):
     """Apply a sequential mixed batch of replacements and insertions.
 
     Edits are grouped by resolved target: each file is read once, its edits
@@ -1694,7 +1709,8 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None):
     groups = OrderedDict()
     for p in prepared:
         try:
-            target = _resolve_write_path(p['bp'], p['resolved_rp'], conv_id=conv_id)
+            target = _resolve_write_path(p['bp'], p['resolved_rp'], conv_id=conv_id,
+                                         allow_outside=allow_outside)
         except ValueError as e:
             p['resolve_err'] = str(e)
             continue

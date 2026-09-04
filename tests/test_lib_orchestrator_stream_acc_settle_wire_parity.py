@@ -24,7 +24,7 @@ class TestStreamAccSettleWireParity:
     def test_body_reads_back_tool_round_num(self):
         src = inspect.getsource(_stream_acc_settle.settle_stream_accumulator)
         assert "rs.tool_round_num = stream_acc.tool_round_num" in src
-        assert "if stream_acc.announced_tc_map" in src
+        assert "getattr(stream_acc, 'announced_count', 0)" in src
 
     def test_body_injects_into_cache_when_submitted(self):
         src = inspect.getsource(_stream_acc_settle.settle_stream_accumulator)
@@ -98,3 +98,13 @@ class TestRunTaskDelegation:
         src = inspect.getsource(_run.run_task)
         assert "reconcile_announced_rounds" not in src
         assert "inject_into_cache" not in src
+
+    def test_round_dispatch_closes_prefetch_on_every_exit(self):
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+
+        src = inspect.getsource(_root_agent_loop._RootLoopHooks.dispatch)
+        assert 'finally:' in src
+        assert 'stream_accumulator.close(' in src
+        assert src.index('run_llm_call_with_fallback(') \
+            < src.index('finally:') \
+            < src.index('stream_accumulator.close(')

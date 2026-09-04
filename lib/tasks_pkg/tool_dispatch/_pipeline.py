@@ -39,17 +39,26 @@ from lib.tool_rejection import (
     stamp_tool_rejection,
     tool_rejection_descriptor,
 )
-from lib.tools.result_projection import TOOL_RESULT_PROJECTION_ITEMS_KEY
+from lib.tools.gateway import EXECUTE_TOOLS_NAME, GATEWAY_TOOL_NAMES
+from lib.tools.result_projection import (
+    TOOL_RESULT_PRODUCER_METADATA_KEY,
+    TOOL_RESULT_PROJECTION_ITEMS_KEY,
+)
 
 from lib.tasks_pkg.tool_dispatch._approval import _handle_approval
 from lib.tasks_pkg.tool_dispatch._flags import (
+    _cache_entry_producer_metadata,
     _cache_entry_projection_items,
     _build_cache_hit_meta,
     _call_id_signature,
-    _canonical_call_ids_enabled,
+    _ensure_tool_call_id_receipts,
+    _ensure_tool_result_cache,
+    _publish_execute_gateway_direct_siblings,
     _invalidate_project_cache,
     _make_cache_key,
     _safe_count_tokens,
+    _store_tool_result_cache_entry,
+    _store_tool_call_id_receipt,
     _task_confirmation_tools,
     _task_partitions,
     _unpack_cache_entry,
@@ -58,6 +67,12 @@ from lib.tasks_pkg.tool_dispatch._heartbeat import (
     _SERIAL_BLOCKING_TOOLS,
     _execute_tool_one_in_pool,
     _start_tool_heartbeat,
+)
+from lib.tasks_pkg.tool_dispatch._unchanged import (
+    UnchangedProjection,
+    compact_unchanged_tool_names,
+    maybe_project_unchanged_result,
+    remember_full_result,
 )
 
 logger = get_logger(__name__)
@@ -82,6 +97,16 @@ _ORDERED_STATE_TOOLS = frozenset({'todo_write'})
 _WRITE_SENSITIVE_READ_TOOLS = frozenset({
     'read_files', 'list_dir', 'grep_search', 'find_files', 'inspect_image',
 })
+
+
+def _tool_result_recovery_policy(task: dict[str, Any], tool_name: str) -> str:
+    """Resolve overflow recovery only from the request-owned tool contract."""
+    documents = (task or {}).get('_toolContractDocumentsByName') or {}
+    document = documents.get(tool_name) if isinstance(documents, dict) else None
+    policy = (document.get('resultRecovery')
+              if isinstance(document, dict) else 'artifact')
+    policy = str(policy or 'artifact').strip().lower()
+    return policy if policy in {'artifact', 'source', 'none'} else 'artifact'
 
 
 def _post_tool_snapshot_enabled(task: dict[str, Any]) -> bool:
@@ -112,34 +137,47 @@ def _blocked_multi_agent_write(
             and fn_name in banned_tools else '')
 
 
-def _finalize_call_id_replay(
-    task: dict[str, Any], fn_name: str, tc_id: str, rn: int,
-    round_entry: dict[str, Any] | None, content: Any, *, status: str = 'done',
-) -> None:
-    """Settle the display row for a call-ID replay without executing hooks."""
-    if isinstance(content, str):
-        text = content
-    else:
-        try:
-            text = json.dumps(content, ensure_ascii=False, default=str)
-        except (TypeError, ValueError) as exc:
-            logger.debug('[ToolDispatch] replay display serialization fallback: %s',
-                         exc)
-            text = str(content)
-    if round_entry is not None:
-        # A replayed duplicate inherits the OWNER's verdict — a duplicate of a
-        # FAILED tool must render failed. It settles via this replay path only
-        # (the post-phase skips _idempotentReplay rows, so no tool_complete
-        # follows), making this tool_result frame the ONLY verdict signal.
-        _finalize_tool_round(task, rn, round_entry, [{
-            'type': 'tool_call_replay', 'toolName': fn_name,
-            'content': text, 'badge': 'replayed',
-            'snippet': 'Duplicate call_id — previous result reused',
-        }], query_override=round_entry.get('query', fn_name),
-            status=status if status in (
-                'error', 'rejected', 'aborted') else 'done')
-        round_entry['toolContent'] = text
-        round_entry['_idempotentReplay'] = True
+def _collect_used_tool_call_ids(
+    task: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    current_round_entries: tuple[dict[str, Any], ...] = (),
+    exclude_trailing_assistant: bool = False,
+) -> set[str]:
+    """Index call ids that belong to earlier or enclosing tool occurrences.
+
+    Top-level and nested dispatch both receive their current assistant carrier
+    as the trailing message, while parsing has already appended the current
+    round entries to ``task['toolRounds']``.  Callers performing historical
+    collision detection exclude those exact current objects.  The minting
+    fallback scans everything because a generated id must be globally unique.
+    """
+    seen: set[str] = set()
+    message_limit = len(messages or ())
+    if (exclude_trailing_assistant and message_limit
+            and isinstance(messages[-1], dict)
+            and messages[-1].get('role') == 'assistant'
+            and messages[-1].get('tool_calls')):
+        message_limit -= 1
+    for msg in (messages or ())[:message_limit]:
+        if not isinstance(msg, dict):
+            continue
+        tcid = msg.get('tool_call_id')
+        if tcid:
+            seen.add(str(tcid))
+        for tc in msg.get('tool_calls') or ():
+            if isinstance(tc, dict) and tc.get('id'):
+                seen.add(str(tc.get('id')))
+
+    current_entry_ids = {id(entry) for entry in current_round_entries}
+    for row in (task or {}).get('toolRounds') or ():
+        if (isinstance(row, dict) and id(row) not in current_entry_ids
+                and row.get('toolCallId')):
+            seen.add(str(row.get('toolCallId')))
+    receipts = (task or {}).get('_tool_call_id_receipts')
+    if isinstance(receipts, dict):
+        seen.update(str(call_id) for call_id in receipts)
+    return seen
 
 
 def _mint_fresh_call_id(
@@ -147,6 +185,8 @@ def _mint_fresh_call_id(
     messages: list[dict[str, Any]],
     preferred: str,
     round_num: int,
+    *,
+    used_ids: set[str] | None = None,
 ) -> str:
     """Mint a call id that is globally unique across the conversation.
 
@@ -160,27 +200,99 @@ def _mint_fresh_call_id(
     collide with any id already present in the conversation makes that class
     of rewrite unrepresentable.
     """
-    seen: set[str] = set()
-    for msg in messages or ():
-        if not isinstance(msg, dict):
-            continue
-        tcid = msg.get('tool_call_id')
-        if tcid:
-            seen.add(str(tcid))
-        for tc in msg.get('tool_calls') or ():
-            if isinstance(tc, dict) and tc.get('id'):
-                seen.add(str(tc.get('id')))
-    for row in (task or {}).get('toolRounds') or []:
-        if isinstance(row, dict) and row.get('toolCallId'):
-            seen.add(str(row.get('toolCallId')))
-    for rid in (task or {}).get('_tool_call_id_receipts') or {}:
-        seen.add(str(rid))
+    seen = (used_ids if used_ids is not None
+            else _collect_used_tool_call_ids(task, messages))
 
     base = preferred or 'call'
     while True:
         candidate = f'{base}#r{round_num}#{uuid.uuid4().hex[:8]}'
         if candidate not in seen:
+            seen.add(candidate)
             return candidate
+
+
+def _repair_current_tool_call_identity(
+    task: dict[str, Any],
+    messages: list[dict[str, Any]],
+    parsed_tcs: list[tuple],
+    item_index: int,
+    item: tuple,
+    *,
+    round_num: int,
+    tid: str,
+    receipts: dict[str, dict],
+    historical_used_ids: set[str],
+    used_ids: set[str],
+    claimed_ids: set[str],
+    settled_results: dict[str, Any],
+) -> tuple:
+    """Remint recycled/history and same-response duplicate correlation IDs.
+
+    A positional-ID provider may reuse ``{tool}_{position}`` in every response.
+    Executing under that old ID makes later ID-keyed history reconciliation
+    capable of rewriting an already-cached result.  Every provider occurrence
+    remains a fresh action; receipts describe it but never replay it.
+    """
+    tc, fn_name, tc_id, fn_args, rn, round_entry, parse_error = item
+    call_signature = _call_id_signature(fn_name, fn_args)
+    receipt = receipts.get(tc_id)
+    if tc_id in historical_used_ids:
+        exact_reemit = isinstance(receipt, dict) and (
+            receipt.get('signature') == call_signature
+            and receipt.get('name') == fn_name)
+        settled_results.pop(tc_id, None)
+        pending_envelopes = task.get('_pending_tool_result_envelopes')
+        if isinstance(pending_envelopes, dict):
+            pending_envelopes.pop(tc_id, None)
+
+        original_id = tc_id
+        tc_id = _mint_fresh_call_id(
+            task, messages, original_id, round_num, used_ids=used_ids)
+        tc['id'] = tc_id
+        if isinstance(round_entry, dict):
+            round_entry['toolCallId'] = tc_id
+        item = (
+            tc, fn_name, tc_id, fn_args, rn, round_entry, parse_error)
+        _store_tool_call_id_receipt(task, original_id, {
+            'signature': call_signature,
+            'name': fn_name,
+            'status': 'reissued',
+        })
+        if exact_reemit:
+            logger.info(
+                '[Task %s] call_id re-emit: %s id=%s re-issued with '
+                'identical args — reminted unique id=%s and executing LIVE '
+                '(no receipt replay)', tid, fn_name, original_id[:12],
+                tc_id[-12:])
+        elif isinstance(receipt, dict):
+            logger.warning(
+                '[Task %s] call_id CONFLICT: %s id=%s recycled with new '
+                'args — reminted unique id=%s and executing as a fresh call',
+                tid, fn_name, original_id[:12], tc_id[-12:])
+        else:
+            logger.warning(
+                '[Task %s] historical call_id reuse: %s id=%s had no '
+                'retained signature receipt — reminted unique id=%s and '
+                'executing LIVE', tid, fn_name, original_id[:12], tc_id[-12:])
+
+    if tc_id in claimed_ids:
+        conflicting_id = tc_id
+        tc_id = _mint_fresh_call_id(
+            task, messages, conflicting_id, round_num, used_ids=used_ids)
+        tc['id'] = tc_id
+        if isinstance(round_entry, dict):
+            round_entry['toolCallId'] = tc_id
+        item = (
+            tc, fn_name, tc_id, fn_args, rn, round_entry, parse_error)
+        logger.warning(
+            '[Task %s] duplicate in-batch call_id: %s id=%s reminted as %s '
+            'for an independent response occurrence',
+            tid, fn_name, conflicting_id[:12], tc_id[-12:])
+
+    claimed_ids.add(tc_id)
+    used_ids.add(tc_id)
+    parsed_tcs[item_index] = item
+    return item
 
 
 def _bounded_tool_env_int(name: str, default: int, minimum: int,
@@ -211,6 +323,95 @@ def _parallel_worker_limit(item_count: int, *, programmatic: bool = False
     return max(1, min(configured, max(1, int(item_count))))
 
 
+# ── Per-turn search/fetch accumulator budget ──
+# ``all_search_results_text`` accumulates web_search/fetch_url text across
+# EVERY round of a turn. The no-prose fallback (orchestrator._finalize) joins
+# it into one assistant message when the model returned tools but no prose, so
+# an unbounded list re-sends the whole corpus and blows up memory + context.
+# Bound it in UTF-8 bytes; keep the NEWEST results (closest to the final
+# answer) and head-truncate any single oversized result with a marker. Sits
+# below the per-round aggregate budget (300k chars) because this buffer spans
+# the whole turn, not one round.
+SEARCH_RESULTS_ACCUM_BYTES = 200_000
+
+_SEARCH_RESULTS_FALLBACK_SEPARATOR = '\n\n---\n\n'
+
+_SEARCH_RESULTS_TRUNCATION_MARKER = (
+    '\n… [search-result text truncated to fit the turn accumulator budget]')
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode('utf-8', errors='replace'))
+
+
+def _truncate_to_utf8_bytes(text: str, max_bytes: int) -> str:
+    """Longest prefix of *text* whose UTF-8 encoding is <= *max_bytes*."""
+    if max_bytes <= 0:
+        return ''
+    encoded = text.encode('utf-8', errors='replace')
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode('utf-8', errors='ignore')
+
+
+def _trim_search_results_accumulator(results: list[str]) -> None:
+    """Bound *results* to :data:`SEARCH_RESULTS_ACCUM_BYTES`, newest kept."""
+    if not results:
+        return
+    newest = results[-1]
+    if _utf8_len(newest) > SEARCH_RESULTS_ACCUM_BYTES:
+        marker = _SEARCH_RESULTS_TRUNCATION_MARKER
+        head_budget = max(0, SEARCH_RESULTS_ACCUM_BYTES - _utf8_len(marker))
+        results[:] = [_truncate_to_utf8_bytes(newest, head_budget) + marker]
+        return
+    total = sum(_utf8_len(item) for item in results)
+    while total > SEARCH_RESULTS_ACCUM_BYTES and len(results) > 1:
+        total -= _utf8_len(results.pop(0))
+
+
+def _append_search_result_text(results: list[str], text: str) -> None:
+    """Append one search/fetch result and re-enforce the accumulator budget."""
+    if not isinstance(text, str):
+        text = str(text)
+    results.append(text)
+    _trim_search_results_accumulator(results)
+
+
+def bounded_search_results_text(
+    results: list[str],
+    separator: str = _SEARCH_RESULTS_FALLBACK_SEPARATOR,
+) -> str:
+    """Join search results, keeping the JOINED output within the byte budget.
+
+    Newest results are kept first; the oldest are dropped when the budget is
+    exhausted, and a single result larger than the budget is head-truncated
+    with a marker. Used by the orchestrator's no-prose fallback and sources
+    footer so a list that bypassed the accumulator still cannot re-send an
+    unbounded corpus.
+    """
+    sep_len = _utf8_len(separator)
+    kept: list[str] = []
+    total = 0
+    for item in reversed(results):
+        if not isinstance(item, str):
+            item = str(item)
+        sep_cost = sep_len if kept else 0
+        room = SEARCH_RESULTS_ACCUM_BYTES - total - sep_cost
+        if room <= 0:
+            break
+        if _utf8_len(item) > room:
+            marker = _SEARCH_RESULTS_TRUNCATION_MARKER
+            head_budget = room - _utf8_len(marker)
+            if head_budget > 0:
+                item = _truncate_to_utf8_bytes(item, head_budget) + marker
+            else:
+                item = _truncate_to_utf8_bytes(item, room)
+        kept.append(item)
+        total += sep_cost + _utf8_len(item)
+    kept.reverse()
+    return separator.join(kept)
+
+
 def _register_spilled_artifact_origin(task, round_entry, tool_name, content):
     """Record which tool call a freshly-spilled artifact pointer came from.
 
@@ -227,7 +428,7 @@ def _register_spilled_artifact_origin(task, round_entry, tool_name, content):
         return
     try:
         artifact_ref = str(json.loads(content).get('artifactRef') or '')
-    except Exception:
+    except (json.JSONDecodeError, AttributeError, TypeError):
         return
     if not artifact_ref:
         return
@@ -235,7 +436,8 @@ def _register_spilled_artifact_origin(task, round_entry, tool_name, content):
     register_artifact_provenance(
         task, artifact_ref, tool_name=tool_name,
         display=round_entry.get('query', ''),
-        llm_round=round_entry.get('llmRound'))
+        llm_round=round_entry.get('llmRound'),
+        tool_call_id=round_entry.get('toolCallId', ''))
 
 
 def _settle_tool_result(
@@ -252,6 +454,10 @@ def _settle_tool_result(
     tid: str,
     round_num: int,
     terminal_status: str | None = None,
+    internal_result_sink: Any = None,
+    context_messages: list[dict[str, Any]] | None = None,
+    unchanged_receipt_tools: frozenset[str] = frozenset(),
+    settled_results: dict[str, Any] | None = None,
 ) -> Any:
     """Settle ONE tool call: budget its result, stamp the round, emit
     ``tool_complete``. Returns the final (budgeted) content for the message.
@@ -290,15 +496,23 @@ def _settle_tool_result(
     already-settled content), so the post-phase can call it unconditionally
     without double-emitting for a tool an earlier lane already settled.
     """
-    _settled = task.setdefault('_settled_tool_results', {})
+    # Production dispatch supplies an invocation-local map.  The task fallback
+    # remains for focused direct callers, but no long task needs to retain every
+    # settled body across later LLM rounds or nested gateway pipelines.
+    _settled = (settled_results if settled_results is not None
+                else task.setdefault('_settled_tool_results', {}))
     if tc_id in _settled:
         return _settled[tc_id]
 
     projection_items = (
         round_entry.pop(TOOL_RESULT_PROJECTION_ITEMS_KEY, None)
         if isinstance(round_entry, dict) else None)
+    producer_metadata = (
+        round_entry.pop(TOOL_RESULT_PRODUCER_METADATA_KEY, None)
+        if isinstance(round_entry, dict) else None)
 
     # Post-tool hooks: modify/enrich result after execution.
+    _uses_v2_result_contract = False
     if isinstance(tool_content, str):
         _projection_source = tool_content
         tool_content = run_post_hooks(fn_name, fn_args, tool_content, task)
@@ -313,6 +527,64 @@ def _settle_tool_result(
     if isinstance(tool_content, str):
         tool_content = mark_empty_result(fn_name, tool_content)
 
+    # Local ToolScript gets a separate transient result lane. Capture only
+    # after post-tool hooks (the semantic/redaction boundary) and before model
+    # compaction. The sink owns its hard byte budget and never enters ``task``
+    # or the durable transcript.
+    if internal_result_sink is not None:
+        try:
+            internal_result_sink.capture(tc_id, tool_content)
+        except Exception as exc:
+            logger.warning(
+                '[ToolPipeline] internal program result capture failed for '
+                '%s: %s', tc_id, exc)
+
+    # Mutable control-plane observers execute every time. When a fresh result
+    # is byte-identical and its prior full projection is still literally in
+    # the active context, replace only this new model projection with a short
+    # receipt. The transient program sink above intentionally keeps the full
+    # value. Error settlements are never folded into a success-like receipt.
+    unchanged_projection = UnchangedProjection('', tool_content)
+    fresh_result_content = tool_content
+    fresh_result_chars = (
+        len(tool_content) if isinstance(tool_content, str) else 0)
+    fresh_result_tokens = 0
+    if round_entry and isinstance(tool_content, str):
+        # Count the fresh producer observation before unchanged projection.
+        # ``toolTokens`` below remains the model-paid compact count.
+        fresh_result_tokens = _safe_count_tokens(
+            tool_content, model=task.get('model', '') if task else '')
+        if fresh_result_tokens > 0:
+            round_entry['rawToolTokens'] = fresh_result_tokens
+    unchanged_enabled = fn_name in unchanged_receipt_tools
+    if (isinstance(tool_content, str)
+            and terminal_status is None
+            and unchanged_enabled):
+        unchanged_projection = maybe_project_unchanged_result(
+            task,
+            tool_name=fn_name,
+            arguments=fn_args,
+            tool_content=tool_content,
+            messages=context_messages,
+            enabled=True,
+        )
+        if unchanged_projection.compacted and fresh_result_tokens > 0:
+            receipt_tokens = _safe_count_tokens(
+                unchanged_projection.model_content,
+                model=task.get('model', '') if task else '')
+            paid_baseline_tokens = (
+                unchanged_projection.previous_model_tokens
+                or fresh_result_tokens)
+            if (receipt_tokens <= 0
+                    or receipt_tokens >= paid_baseline_tokens):
+                unchanged_projection = UnchangedProjection(
+                    unchanged_projection.raw_digest, fresh_result_content)
+        tool_content = unchanged_projection.model_content
+        if unchanged_projection.compacted and round_entry is not None:
+            round_entry['compactionLayer'] = 'unchanged'
+            round_entry['compactedFromChars'] = fresh_result_chars
+            round_entry['compactedToChars'] = len(tool_content)
+
     # Layer 0: Budget tool results before they enter context. V2 applies one
     # bounded envelope contract to every tool; legacy mode retains its older
     # per-tool exemptions. Oversized batched read_files results use the
@@ -320,19 +592,13 @@ def _settle_tool_result(
     # Layer 1 (micro_compact) will further compress these once
     # they fall outside the hot tail.
     _l0_pre_chars = len(tool_content) if isinstance(tool_content, str) else 0
-    if round_entry and isinstance(tool_content, str):
-        # Keep only the numeric pre-compaction observation; retaining another
-        # full copy would defeat the context/storage savings being measured.
-        _raw_tokens = _safe_count_tokens(
-            tool_content, model=task.get('model', '') if task else '')
-        if _raw_tokens > 0:
-            round_entry['rawToolTokens'] = _raw_tokens
     if isinstance(tool_content, str):
         _conv_id = task.get('convId', '') if task else ''
         from lib.context_experiment_flags import normalize_context_experiment_flags
         _result_contract = normalize_context_experiment_flags(
             (task or {}).get('config') or {})['tools']['resultEnvelope']
         if _result_contract == 'v2':
+            _uses_v2_result_contract = True
             from lib.tasks_pkg.manager import task_user_id
             tool_content = budget_tool_result_v2(
                 fn_name, tool_content,
@@ -342,23 +608,13 @@ def _settle_tool_result(
                 world_version=str((task or {}).get('_worldVersion') or ''),
                 tool_arguments=fn_args,
                 projection_items=projection_items,
+                producer_metadata=producer_metadata,
+                recovery_policy=_tool_result_recovery_policy(task, fn_name),
             )
         else:
             tool_content = budget_tool_result(fn_name, tool_content,
                                               tool_use_id=tc_id,
                                               conv_id=_conv_id)
-    # If budget_tool_result shrank the content (persisted to disk
-    # or fell back to head+tail truncation), stamp the round so
-    # the frontend can flag this tool call as L0-compacted. Any
-    # length reduction is a signal — budget_tool_result only
-    # mutates content when it exceeds the per-tool budget.
-    if (round_entry
-            and isinstance(tool_content, str)
-            and _l0_pre_chars > len(tool_content)):
-        round_entry['compactionLayer'] = 'L0'
-        round_entry['compactedFromChars'] = _l0_pre_chars
-        round_entry['compactedToChars'] = len(tool_content)
-
     # Deliberately OUTSIDE the shrink check above: structural truncation
     # (>64 items) also mints a pointer, sometimes without shrinking chars.
     _register_spilled_artifact_origin(task, round_entry, fn_name, tool_content)
@@ -378,15 +634,14 @@ def _settle_tool_result(
     # The cache entry was populated with the PRE-budget content (the
     # parallel-phase writer / the streaming prefetch injector), while
     # budgeting above only rewrote the local message copy. Left unsynced, the
-    # full result (e.g. a 680 KB web_search dump) lingers in
-    # ``_tool_result_cache`` — it serializes into the persisted ``raw_state``
-    # (state balloon) AND is replayed verbatim on a later dedup hit,
-    # re-flooding context with content the offloader had already spilled to
-    # disk. Rewrite content[0] to the budgeted string, preserving the rest of
+    # full result (e.g. a 680 KB web_search dump) stays pinned in the live task
+    # and is replayed verbatim on a later dedup hit, re-flooding context with
+    # content the offloader had already spilled to disk. Rewrite content[0]
+    # to the budgeted string, preserving the rest of
     # the entry (is_search / source / display / engine_breakdown / vertical)
-    # so the rich UI-replay path is unchanged. Producer projection slot 8 is
-    # consumed here even if V2 happened to grow a small result: the cache then
-    # owns the final envelope and must not retain a second preview copy.
+    # so the rich UI-replay path is unchanged. Producer sidecars in slots 8–9
+    # are consumed here: the cache then owns the final internal envelope and
+    # must not retain a second preview/omission representation.
     if isinstance(tool_content, str) and fn_name in idempotent_tools:
         _sync_key = _make_cache_key(fn_name, fn_args)
         _cached_entry = cache.get(_sync_key)
@@ -395,12 +650,53 @@ def _settle_tool_result(
                 and len(_cached_entry) >= 1
                 and isinstance(_cached_entry[0], str)):
             _cached_projection = _cache_entry_projection_items(_cached_entry)
+            _cached_producer_metadata = _cache_entry_producer_metadata(
+                _cached_entry)
             if (len(_cached_entry[0]) > len(tool_content)
-                    or _cached_projection is not None):
+                    or _cached_projection is not None
+                    or _cached_producer_metadata is not None):
                 _cache_tail = tuple(_cached_entry)[1:]
-                if _cached_projection is not None:
+                if (_cached_projection is not None
+                        or _cached_producer_metadata is not None):
                     _cache_tail = _cache_tail[:6]
-                cache[_sync_key] = (tool_content, *_cache_tail)
+                _store_tool_result_cache_entry(
+                    task, _sync_key, (tool_content, *_cache_tail))
+
+    # The canonical V2 envelope is server-owned evidence. Keep it only through
+    # the current round's aggregate-budget pass, and place the sparse projection
+    # in messages/events. This prevents byte counters, empty freshness fields,
+    # evidence ids, and contract plumbing from consuming model context.
+    tool_result_evidence = None
+    if _uses_v2_result_contract and isinstance(tool_content, str):
+        from lib.tools.result_envelope import split_tool_result_delivery
+
+        internal_envelope = tool_content
+        delivery = split_tool_result_delivery(internal_envelope)
+        tool_content = delivery.model_text
+        tool_result_evidence = delivery.evidence
+        task.setdefault('_pending_tool_result_envelopes', {})[tc_id] = (
+            internal_envelope)
+
+    # Stamp semantic compaction against the model-visible value, not against
+    # the larger server envelope that never enters provider context. The L0
+    # stamp claims the model never saw the full result, so it requires real
+    # withholding: a truncated V2 envelope (bounded preview / artifactRef
+    # recovery), or any shrink in the legacy/clamp lanes, which only shrink
+    # by replacing content with a placeholder. A complete V2 "ok" envelope
+    # merely re-serializes a structured result (sorted keys, tight
+    # separators); that can shrink chars while losing nothing, and stamping
+    # it renders a false COMPACTED pill. An unparseable envelope
+    # (evidence is None) means the hard clamp mangled it — real loss.
+    _l0_withheld_content = (not _uses_v2_result_contract
+                            or tool_result_evidence is None
+                            or bool(tool_result_evidence.get('truncated')))
+    if (round_entry
+            and isinstance(tool_content, str)
+            and _l0_pre_chars > len(tool_content)
+            and _l0_withheld_content):
+        round_entry['compactionLayer'] = 'L0'
+        round_entry['compactedFromChars'] = _l0_pre_chars
+        round_entry['compactedToChars'] = len(tool_content)
 
     # Emit tool_complete AFTER budgeting so that toolContent
     #   reflects the ACTUAL content given to the model (budgeted/
@@ -419,7 +715,23 @@ def _settle_tool_result(
         #   (toolContent == null → incomplete).
         if round_entry:
             round_entry['toolContent'] = tc_content_str
+            if tool_result_evidence is not None:
+                round_entry['toolResultEvidence'] = dict(
+                    tool_result_evidence)
 
+        # ``spawn_agents`` can finish an entire fast wave before its returned
+        # handle reaches this round. Completion callbacks then had nowhere to
+        # attach their snapshot (no live handle match and no durable round
+        # yet), leaving history with the "details were not persisted" shell.
+        # Settlement is the first guaranteed handle-readable boundary: repair
+        # the exact round from the still-authoritative active session. The
+        # snapshot helper is monotonic/idempotent, so a callback that already
+        # won remains untouched.
+        if fn_name == 'spawn_agents' and round_entry is not None:
+            from lib.swarm.snapshot import (
+                reconcile_spawn_round_from_active_session,
+            )
+            reconcile_spawn_round_from_active_session(task, round_entry)
         # Per-tool token count: gives the frontend an accurate
         # measure of the cost the model actually pays for this
         # result. Falls back to 0 on backend failure; the
@@ -428,6 +740,18 @@ def _settle_tool_result(
                                         model=task.get('model', '') if task else '')
         if round_entry and _tc_tokens > 0:
             round_entry['toolTokens'] = _tc_tokens
+        if isinstance(tool_content, str):
+            remember_full_result(
+                task,
+                tool_name=fn_name,
+                arguments=fn_args,
+                tool_call_id=tc_id,
+                projection=unchanged_projection,
+                final_model_content=tool_content,
+                result_evidence=tool_result_evidence,
+                enabled=unchanged_enabled,
+                final_model_tokens=_tc_tokens,
+            )
 
         # Timing: carry the round's own clocks onto the terminal frame so the
         # row stays self-describing on a cold replay that never saw the
@@ -460,6 +784,8 @@ def _settle_tool_result(
             tStart=_t_start,
             tEnd=_t_end,
         )
+        if tool_result_evidence is not None:
+            _evt['toolResultEvidence'] = dict(tool_result_evidence)
         # Terminal verdict (). A lane that never executed the tool
         #   settles with a NON-SUCCESS verdict. Stamp it on the round so the
         #   spinner stops NOW instead of at the end-of-task dangling sweep, and
@@ -480,6 +806,8 @@ def _settle_tool_result(
             _evt['compactionLayer'] = round_entry['compactionLayer']
             _evt['compactedFromChars'] = round_entry.get('compactedFromChars')
             _evt['compactedToChars'] = round_entry.get('compactedToChars')
+            if round_entry.get('rawToolTokens'):
+                _evt['rawToolTokens'] = round_entry['rawToolTokens']
         append_event(task, _evt)
     except Exception as e:
         logger.warning(
@@ -487,12 +815,11 @@ def _settle_tool_result(
             tid, fn_name, round_num, e, exc_info=True)
 
     _settled[tc_id] = tool_content
-    task.setdefault('_tool_call_id_receipts', {})[tc_id] = {
+    _store_tool_call_id_receipt(task, tc_id, {
         'signature': _call_id_signature(fn_name, fn_args),
         'name': fn_name,
-        'content': tool_content,
         'status': terminal_status or (round_entry or {}).get('status') or 'done',
-    }
+    })
     return tool_content
 
 
@@ -539,6 +866,8 @@ def _apply_round_aggregate_budget(
     parsed_tcs: list[tuple],
     round_results: list[tuple[str, str, str]],
     appended_tool_messages: list[dict[str, Any]],
+    *,
+    settled_results: dict[str, Any] | None = None,
 ) -> None:
     """Compact oversized model-visible results and reconcile their UI rows.
 
@@ -547,10 +876,27 @@ def _apply_round_aggregate_budget(
     would mutate an already-cached result and break the next request prefix.
     """
     if not round_results:
+        pending_envelopes = task.get('_pending_tool_result_envelopes')
+        if isinstance(pending_envelopes, dict):
+            for parsed_call in parsed_tcs:
+                pending_envelopes.pop(parsed_call[2], None)
+            if not pending_envelopes:
+                task.pop('_pending_tool_result_envelopes', None)
         return
 
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    result_contract = normalize_context_experiment_flags(
+        (task or {}).get('config') or {})['tools']['resultEnvelope']
+    pending_envelopes = task.get('_pending_tool_result_envelopes')
+    if not isinstance(pending_envelopes, dict):
+        pending_envelopes = {}
     aggregate_results = {
-        tool_call_id: (content, tool_name, tool_call_id)
+        tool_call_id: (
+            pending_envelopes.get(tool_call_id, content)
+            if result_contract == 'v2' else content,
+            tool_name,
+            tool_call_id,
+        )
         for tool_call_id, content, tool_name in round_results
         if isinstance(content, str)
     }
@@ -560,35 +906,59 @@ def _apply_round_aggregate_budget(
         for tool_call_id, content, _ in round_results
         if isinstance(content, str)
     }
-    from lib.context_experiment_flags import normalize_context_experiment_flags
-    result_contract = normalize_context_experiment_flags(
-        (task or {}).get('config') or {})['tools']['resultEnvelope']
     if result_contract == 'v2':
         from lib.tasks_pkg.manager import task_user_id
+        recovery_by_call_id = {
+            parsed_call[2]: {
+                'policy': _tool_result_recovery_policy(task, parsed_call[1]),
+                'arguments': parsed_call[3],
+            }
+            for parsed_call in parsed_tcs
+            if parsed_call[2] in aggregate_results
+        }
         updated_results = enforce_round_aggregate_budget_v2(
             aggregate_results,
             user_id=task_user_id(task),
             model=(task or {}).get('model', ''),
             observed_at_ms=int((task or {}).get('_observedAtMs') or 0),
+            recovery_by_call_id=recovery_by_call_id,
         )
     else:
         updated_results = enforce_round_aggregate_budget(
             aggregate_results, conv_id=conversation_id)
 
+    parsed_by_call_id = {
+        parsed_call[2]: parsed_call for parsed_call in parsed_tcs
+    }
     for message in appended_tool_messages:
         if message.get('role') != 'tool':
             continue
         tool_call_id = message.get('tool_call_id', '')
         if tool_call_id not in updated_results:
             continue
-        new_content, _, _ = updated_results[tool_call_id]
+        new_internal_content, _, _ = updated_results[tool_call_id]
+        tool_result_evidence = None
+        if result_contract == 'v2' and isinstance(new_internal_content, str):
+            from lib.tools.result_envelope import split_tool_result_delivery
+
+            delivery = split_tool_result_delivery(new_internal_content)
+            new_content = delivery.model_text
+            tool_result_evidence = delivery.evidence
+            pending_envelopes[tool_call_id] = new_internal_content
+        else:
+            new_content = new_internal_content
+
+        parsed_call = parsed_by_call_id.get(tool_call_id)
+        if parsed_call is not None:
+            round_entry = parsed_call[5]
+            if round_entry and tool_result_evidence is not None:
+                round_entry['toolResultEvidence'] = dict(
+                    tool_result_evidence)
         if new_content == message.get('content'):
             continue
         message['content'] = new_content
 
-        for parsed_call in parsed_tcs:
-            if parsed_call[2] != tool_call_id:
-                continue
+        if parsed_call is not None:
             round_entry = parsed_call[5]
             entry_round_num = parsed_call[4]
             tool_name = parsed_call[1]
@@ -606,48 +976,62 @@ def _apply_round_aggregate_budget(
                 round_entry['toolContent'] = content_text
                 original_chars = original_chars_by_call_id.get(tool_call_id, 0)
                 compacted_chars = len(content_text)
-                if original_chars > compacted_chars:
-                    round_entry['compactionLayer'] = 'L0'
-                    round_entry['compactedFromChars'] = original_chars
-                    round_entry['compactedToChars'] = compacted_chars
+                round_entry['compactionLayer'] = 'L0'
+                round_entry['compactedFromChars'] = original_chars
+                round_entry['compactedToChars'] = compacted_chars
 
-                    # Parse new_content, not content_text: the latter may
-                    # carry the 50k continue-context truncation suffix.
-                    _register_spilled_artifact_origin(
-                        task, round_entry, tool_name, new_content)
-                    round_entry['toolTokens'] = _safe_count_tokens(
-                        content_text,
-                        model=task.get('model', '') if task else '',
+                # Parse the internal envelope, not content_text: the latter
+                # may carry the 50k continue-context truncation suffix.
+                _register_spilled_artifact_origin(
+                    task, round_entry, tool_name, new_internal_content)
+                round_entry['toolTokens'] = _safe_count_tokens(
+                    content_text,
+                    model=task.get('model', '') if task else '',
+                )
+                try:
+                    compacted_event = build_event(
+                        EventType.TOOL_COMPACTED,
+                        roundNum=entry_round_num,
+                        toolCallId=tool_call_id,
+                        toolName=tool_name,
+                        compactionLayer='L0',
+                        compactedFromChars=original_chars,
+                        compactedToChars=compacted_chars,
+                        toolTokens=round_entry.get('toolTokens', 0),
+                        compactedContent=content_text,
                     )
-                    try:
-                        append_event(task, build_event(
-                            EventType.TOOL_COMPACTED,
-                            roundNum=entry_round_num,
-                            toolCallId=tool_call_id,
-                            toolName=tool_name,
-                            compactionLayer='L0',
-                            compactedFromChars=original_chars,
-                            compactedToChars=compacted_chars,
-                            toolTokens=round_entry.get('toolTokens', 0),
-                            compactedContent=content_text,
-                        ))
-                        logger.info(
-                            '[L0] tool_compacted emitted: tc_id=%s tool=%s '
-                            'round=%s %dch→%dch (-%.0f%%)',
-                            tool_call_id[:12] if tool_call_id else '?',
-                            tool_name or '?', entry_round_num,
-                            original_chars, compacted_chars,
-                            (1 - compacted_chars / original_chars) * 100
-                            if original_chars else 0,
-                        )
-                    except Exception as event_error:
-                        logger.warning(
-                            '[L0] tool_compacted SSE emit failed: tc_id=%s '
-                            'tool=%s round=%s err=%s',
-                            tool_call_id[:12] if tool_call_id else '?',
-                            tool_name or '?', entry_round_num, event_error,
-                        )
-            break
+                    if tool_result_evidence is not None:
+                        compacted_event['toolResultEvidence'] = dict(
+                            tool_result_evidence)
+                    append_event(task, compacted_event)
+                    logger.info(
+                        '[L0] tool_compacted emitted: tc_id=%s tool=%s '
+                        'round=%s %dch→%dch (%+.0f%% chars)',
+                        tool_call_id[:12] if tool_call_id else '?',
+                        tool_name or '?', entry_round_num,
+                        original_chars, compacted_chars,
+                        (compacted_chars / original_chars - 1) * 100
+                        if original_chars else 0,
+                    )
+                except Exception as event_error:
+                    logger.warning(
+                        '[L0] tool_compacted SSE emit failed: tc_id=%s '
+                        'tool=%s round=%s err=%s',
+                        tool_call_id[:12] if tool_call_id else '?',
+                        tool_name or '?', entry_round_num, event_error,
+                    )
+        settled = (settled_results if settled_results is not None
+                   else task.get('_settled_tool_results'))
+        if isinstance(settled, dict):
+            settled[tool_call_id] = new_content
+
+    # Internal envelopes exist only until the current round's shared-budget
+    # reconciliation. Dedup caches retain their own bounded copy where useful;
+    # this transient map must not grow with a long-running task.
+    for tool_call_id, _, _ in round_results:
+        pending_envelopes.pop(tool_call_id, None)
+    if not pending_envelopes:
+        task.pop('_pending_tool_result_envelopes', None)
 
 
 def _approval_stops_tool_call(
@@ -670,6 +1054,8 @@ def _approval_stops_tool_call(
     idempotent_tools: set[str] | frozenset[str],
     cache: dict[str, Any],
     tid: str,
+    internal_result_sink: Any = None,
+    settled_results: dict[str, Any] | None = None,
 ) -> bool:
     """Apply confirmation/manual-write policy; return true when rejected.
 
@@ -693,7 +1079,9 @@ def _approval_stops_tool_call(
             task, fn_name, tc_id, fn_args, rn, round_entry,
             reject_content, idempotent_tools=idempotent_tools,
             cache=cache, tid=tid, round_num=round_num,
-            terminal_status='rejected')
+            terminal_status='rejected',
+            internal_result_sink=internal_result_sink,
+            settled_results=settled_results)
         return True
 
     needs_approval = requires_confirmation or (
@@ -743,7 +1131,9 @@ def _approval_stops_tool_call(
         task, fn_name, tc_id, fn_args, rn, round_entry,
         reject_content, idempotent_tools=idempotent_tools,
         cache=cache, tid=tid, round_num=round_num,
-        terminal_status='rejected')
+        terminal_status='rejected',
+        internal_result_sink=internal_result_sink,
+        settled_results=settled_results)
     return True
 
 
@@ -758,6 +1148,9 @@ def execute_tool_pipeline(
     all_search_results_text: list[str],
     round_num: int,
     model: str,
+    *,
+    internal_result_sink: Any = None,
+    publish_direct_gateway_siblings: bool = True,
 ) -> bool:
     """Run the full tool-execution pipeline: approval → parallel dispatch → result append.
 
@@ -801,8 +1194,28 @@ def execute_tool_pipeline(
         Current zero-based loop round (for snapshot labels and logging).
     model : str
         Current model identifier (for logging).
+    internal_result_sink : optional
+        Transient, byte-bounded receiver for post-hook/pre-compaction results.
+        Used only by the local ToolScript backend; never retained on ``task``.
+
+    publish_direct_gateway_siblings : bool
+        Publish the direct-call multiset for this provider response. Nested
+        gateway-child pipelines pass ``False`` so they cannot replace their
+        top-level carrier's response-scoped delegation state.
     """
     tid = task['id'][:8]
+    # One dispatch invocation owns one settlement barrier.  In particular, a
+    # nested execute_tools pipeline must not share or retain the outer call's
+    # complete results through the task dict.
+    _settled_results: dict[str, Any] = {}
+    task.pop('_settled_tool_results', None)  # repair pre-C234 live task state
+
+    def _settle_current(*args: Any, **kwargs: Any) -> Any:
+        kwargs['internal_result_sink'] = internal_result_sink
+        kwargs['context_messages'] = messages
+        kwargs['unchanged_receipt_tools'] = unchanged_receipt_tools
+        kwargs['settled_results'] = _settled_results
+        return _settle_tool_result(*args, **kwargs)
     # Auto-apply default (2026-08-21 policy): writes do NOT require approval
     # unless the user explicitly switched this conversation to Manual
     # (autoApply=False then arrives via the request / conv settings). A caller
@@ -833,6 +1246,7 @@ def execute_tool_pipeline(
     # Per-task write/idempotent partitions (base UNION custom env flags).
     _write_tools, _idempotent_tools = _task_partitions(task)
     _confirmation_tools = _task_confirmation_tools(task)
+    unchanged_receipt_tools = compact_unchanged_tool_names()
     # ── Plan Mode read-only authority ──
     # The ban set rides the SAME per-task write partition (incl. the
     # conservative MCP classification + custom-env flags) so Plan Mode can
@@ -852,153 +1266,32 @@ def execute_tool_pipeline(
     # ══════════════════════════════════════════
     # ── Per-task dedup cache for idempotent tools ──
     # Stored on the task dict so it's scoped to one task execution.
-    if '_tool_result_cache' not in task:
-        task['_tool_result_cache'] = {}
-    _cache = task['_tool_result_cache']
-    _call_id_receipts = task.setdefault('_tool_call_id_receipts', {})
-    # Rebuild the id-reuse detector from this task's completed rows when the
-    # transient receipt map was lost (e.g. a mid-task state restore dropped
-    # the underscore key but kept toolRounds). Receipts no longer REPLAY
-    # anything (see the reuse branch below) — they only mark a call id as
-    # already-completed so a reuse triggers the remint + fresh-execute path.
-    # Iterate NEWEST-FIRST: positional-id models (kimi-k3 mints
-    # ``{tool}_{index-in-message}``) recycle ids across rounds, so several
-    # durable rows can share one call id and the receipt must describe the
-    # LATEST call that used it. First-wins would pin the detector to the
-    # oldest call that ever used the id.
-    for _row in reversed(task.get('toolRounds', [])):
-        if not isinstance(_row, dict) or _row.get('toolContent') is None:
-            continue
-        _old_id = str(_row.get('toolCallId') or '')
-        _old_name = str(_row.get('toolName') or '')
-        if not _old_id or not _old_name or _old_id in _call_id_receipts:
-            continue
-        _old_args = _row.get('toolArgs')
-        if isinstance(_old_args, str):
-            try:
-                _old_args = json.loads(_old_args)
-            except (json.JSONDecodeError, TypeError) as exc:
-                logger.debug('[ToolDispatch] malformed recovered tool arguments: %s',
-                             exc)
-                _old_args = {}
-        _call_id_receipts[_old_id] = {
-            'signature': _call_id_signature(_old_name, _old_args),
-            'name': _old_name, 'content': _row.get('toolContent'),
-            'status': str(_row.get('status') or 'done'),
-        }
+    _cache = _ensure_tool_result_cache(task)
+    _call_id_receipts = _ensure_tool_call_id_receipts(task)
+    _current_round_entries = tuple(
+        item[5] for item in parsed_tcs if isinstance(item[5], dict))
+    _historical_used_call_ids = _collect_used_tool_call_ids(
+        task, messages, current_round_entries=_current_round_entries,
+        exclude_trailing_assistant=True)
+    # Minting mutates this working set, so every conflict in this invocation is
+    # O(1) after one O(history) index build instead of re-scanning the complete
+    # long-task transcript for each recycled positional id.
+    _used_call_ids = set(_historical_used_call_ids)
 
     parallel_items = []
-    _claimed_call_ids: dict[str, str] = {}
-    _claim_owners: dict[str, str] = {}
-    _duplicate_waiters: list[tuple] = []
-    # Layer 0 (canonical ids): every call arrives with a harness-minted id, so
-    # the within-message duplicate guard keys on the call SIGNATURE — exact
-    # twins share one execution, while a model id recycled with DIFFERENT args
-    # lands on a different key and simply executes. The conflict-reject branch
-    # below is then unreachable by construction (same key ⇒ same signature);
-    # it stays live for the fallback mode (``TOFU_CANONICAL_CALL_IDS=0``),
-    # where claim keys are the model's own ids.
-    _canonical_ids = _canonical_call_ids_enabled()
+    claimed_model_call_ids: set[str] = set()
+    # A provider response is an ordered occurrence list. Equal tool names and
+    # arguments under different positions are still separate model actions;
+    # only a recycled correlation id is repaired. Content equality is not
+    # evidence that transport delivered one event twice.
     for _item_idx, item in enumerate(parsed_tcs):
+        item = _repair_current_tool_call_identity(
+            task, messages, parsed_tcs, _item_idx, item,
+            round_num=round_num, tid=tid, receipts=_call_id_receipts,
+            historical_used_ids=_historical_used_call_ids,
+            used_ids=_used_call_ids, claimed_ids=claimed_model_call_ids,
+            settled_results=_settled_results)
         tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
-
-        _signature = _call_id_signature(fn_name, fn_args)
-        _receipt = _call_id_receipts.get(tc_id)
-        if isinstance(_receipt, dict):
-            # This call id already COMPLETED once in this task. Two realities
-            # produce the shape:
-            #   1. EXACT re-emit (same id + same name + same args): the model
-            #      DELIBERATELY re-issued the call — re-read a file after an
-            #      edit, re-run a command after a fix, re-apply an edit that
-            #      (truthfully) failed. The pre-2026-08-19 "replay HIT" lane
-            #      answered these from the stored receipt WITHOUT executing:
-            #      edit_file was reported applied but never ran, read_files
-            #      returned pre-edit bytes (receipts bypass the dedup lane's
-            #      FreshGate and are never write-invalidated), run_command
-            #      replayed stale output. The model looped — "edit succeeded
-            #      but the file never changes" (tasks f8149620 / 0c2e3a92 /
-            #      d03690ec, 2026-08-19). Exactly-once replay semantics were
-            #      designed for re-processing a CRASH-INTERRUPTED call, but
-            #      that flow never reaches this lane: recovery merges tool
-            #      rounds at the CONVERSATION level and every turn starts
-            #      with ``task['toolRounds'] = []`` (see _turn.py /
-            #      _resume_state.py), so every call this pipeline ever sees
-            #      is a LIVE model emission that must produce a LIVE result.
-            #   2. Recycled id with DIFFERENT args: a POSITIONAL-ID model
-            #      (kimi-k3 mints ``{tool}_{index-in-message}`` — every first
-            #      call of every message is ``<tool>_0``; the model CANNOT
-            #      mint a fresh id, so "Mint a new call_id and retry" is an
-            #      instruction it is structurally unable to follow).
-            # Both are NEW calls: execute them. Exact idempotent re-reads
-            # stay instant via the per-task dedup cache lane below — which,
-            # unlike a receipt, IS write-invalidated and FreshGated, so a
-            # re-read after a write re-reads the disk.
-            # The settle ledger is tc_id-keyed and idempotent per task — the
-            # recycled id still holds the OLD call's settled result, which
-            # would short-circuit THIS call's settle and hand the model the
-            # stale content. Evict it: this id now names a new call.
-            _exact_reemit = (
-                _receipt.get('signature') == _signature
-                and _receipt.get('name') == fn_name)
-            _settled_map = task.get('_settled_tool_results')
-            if isinstance(_settled_map, dict):
-                _settled_map.pop(tc_id, None)
-            # RE-MINT A GLOBALLY-UNIQUE id (cache-mutation root fix).
-            # Executing under the recycled model id would make ``messages``
-            # carry TWO entries with the same tool_call_id across rounds, and
-            # the id-keyed aggregate-budget apply-back would then rewrite the
-            # OLD (already-cached) result to this round's fresh content every
-            # turn. Rewrite the WIRE tool_call dict AND the round entry to the
-            # fresh id so the assistant tool_call/tool_result pair stays
-            # consistent on the wire, and replace the parsed tuple so the
-            # post-phase appends + budget apply-back key on the unique id.
-            _orig_id = tc_id
-            tc_id = _mint_fresh_call_id(task, messages, _orig_id, round_num)
-            tc['id'] = tc_id
-            if isinstance(round_entry, dict):
-                round_entry['toolCallId'] = tc_id
-            # Reassign the LOOP item too: ``parallel_items`` / ``_serial_items``
-            # / ``_duplicate_waiters`` capture ``item`` AFTER this branch, so
-            # they must all see the reminted id or the post-phase will look up
-            # the new id in a ledger keyed by the old one (Unknown-tool fallback).
-            item = (tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err)
-            parsed_tcs[_item_idx] = item
-            if _exact_reemit:
-                logger.info('[Task %s] call_id re-emit: %s id=%s re-issued '
-                            'with identical args — reminted unique id=%s and '
-                            'executing LIVE (no receipt replay)',
-                            tid, fn_name, _orig_id[:12], tc_id[:12])
-            else:
-                logger.warning('[Task %s] call_id CONFLICT: %s id=%s recycled '
-                               'with new args — reminted unique id=%s and '
-                               'executing as a fresh call (receipt will be '
-                               'replaced)', tid, fn_name, _orig_id[:12],
-                               tc_id[:12])
-
-        # A malformed stream can repeat one call ID inside the same assistant
-        # message before the first copy has produced a receipt. Execute only
-        # the first; identical siblings wait for its result. A conflicting
-        # sibling is rejected immediately.
-        _claim_key = f'sig:{_signature}' if _canonical_ids else tc_id
-        if _claim_key in _claimed_call_ids:
-            if _claimed_call_ids[_claim_key] == _signature:
-                _duplicate_waiters.append((_claim_key, item))
-            else:
-                _conflict = (
-                    'Tool call rejected: duplicate call_id has conflicting '
-                    'tool name or arguments. Mint a new call_id and retry.')
-                stamp_tool_rejection(
-                    round_entry,
-                    {'kind': 'duplicate_call_id_conflict', 'tool': fn_name},
-                    reason=_conflict, retryable=True,
-                )
-                _finalize_call_id_replay(
-                    task, fn_name, tc_id, rn, round_entry, _conflict,
-                    status='rejected')
-                tool_verdicts[tc_id] = 'rejected'
-            continue
-        _claimed_call_ids[_claim_key] = _signature
-        _claim_owners[_claim_key] = tc_id
 
         # JSON parse failure / hallucinated-tool rejection → return error to
         # LLM, skip execution.
@@ -1048,7 +1341,7 @@ def execute_tool_pipeline(
             #   post-phase made a zero-cost refusal wait for the round's slowest
             #   REAL tool. The verdict rides along so the client cannot promote
             #   a rejected hallucination to 'done'.
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry, _parse_err,
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
                 round_num=round_num,
@@ -1075,7 +1368,7 @@ def execute_tool_pipeline(
             )
             tool_results[tc_id] = (_blocked, False)
             tool_verdicts[tc_id] = 'rejected'
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry, _blocked,
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
                 round_num=round_num, terminal_status='rejected')
@@ -1100,7 +1393,7 @@ def execute_tool_pipeline(
             )
             tool_results[tc_id] = (_blocked, False)
             tool_verdicts[tc_id] = 'rejected'
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry, _blocked,
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
                 round_num=round_num, terminal_status='rejected')
@@ -1143,6 +1436,8 @@ def execute_tool_pipeline(
                 cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn, cached_vertical, cached_search_diag = \
                     _unpack_cache_entry(cached)
                 cached_projection_items = _cache_entry_projection_items(cached)
+                cached_producer_metadata = (
+                    _cache_entry_producer_metadata(cached))
                 is_prefetch = cached_source == 'prefetch'
                 # Compute content length for logging without materializing
                 # a massive str() for screenshot dicts (which contain base64)
@@ -1227,6 +1522,9 @@ def execute_tool_pipeline(
                     if cached_projection_items:
                         round_entry[TOOL_RESULT_PROJECTION_ITEMS_KEY] = (
                             cached_projection_items)
+                    if cached_producer_metadata:
+                        round_entry[TOOL_RESULT_PRODUCER_METADATA_KEY] = (
+                            cached_producer_metadata)
                 tool_results[tc_id] = (dedup_content, cached_is_search)
                 # Settle NOW (). A cache/prefetch hit costs ZERO
                 #   time: for a streaming-prefetch hit the tool already ran while
@@ -1235,7 +1533,7 @@ def execute_tool_pipeline(
                 #   FASTEST class of tool in the product the one that waited
                 #   longest — measured: tool_complete(cached) landed after
                 #   tool_complete(slow-sibling).
-                _settle_tool_result(
+                _settle_current(
                     task, fn_name, tc_id, fn_args, rn, round_entry,
                     dedup_content, idempotent_tools=_idempotent_tools,
                     cache=_cache, tid=tid, round_num=round_num)
@@ -1249,6 +1547,8 @@ def execute_tool_pipeline(
             auto_apply=auto_apply, cfg=cfg, project_path=project_path,
             round_num=round_num, model=model, tool_results=tool_results,
             idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+            internal_result_sink=internal_result_sink,
+            settled_results=_settled_results,
         ):
             continue
 
@@ -1262,7 +1562,7 @@ def execute_tool_pipeline(
             #   — so a Stop left a spinner turning on every not-yet-run tool for
             #   the remainder of the turn. 'aborted' (never 'done') is what makes
             #   the row render the static "interrupted" affordance instead.
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry,
                 'Task aborted by user.', idempotent_tools=_idempotent_tools,
                 cache=_cache, tid=tid, round_num=round_num,
@@ -1304,7 +1604,7 @@ def execute_tool_pipeline(
             #   not report ANY tool as finished until the human answered.
             if not (isinstance(tool_content, dict)
                     and tool_content.get('__screenshot__')):
-                _settle_tool_result(
+                _settle_current(
                     task, fn_name, tc_id_ret, fn_args, rn, round_entry,
                     tool_content, idempotent_tools=_idempotent_tools,
                     cache=_cache, tid=tid, round_num=round_num)
@@ -1383,7 +1683,7 @@ def execute_tool_pipeline(
             #   ran, so this round costs zero time. It already carries
             #   status='rejected' above; passing it through keeps the verdict on
             #   the wire so the client cannot promote a BLOCKED tool to 'done'.
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry,
                 _blocked_content, idempotent_tools=_idempotent_tools,
                 cache=_cache, tid=tid, round_num=round_num,
@@ -1412,6 +1712,24 @@ def execute_tool_pipeline(
     # refuses to cache write-sensitive reads in a round that also wrote.
     _has_serial_write = any(it[1] in _write_tools for it in _serial_items)
 
+    # A provider can emit BOTH ``execute_tools`` and one of its calls[] children
+    # as direct siblings. That is one routing error, not two user actions. Build
+    # a response-scoped FIFO multiset after authority/approval/hook filtering,
+    # so a refused direct occurrence cannot absorb a runnable child. Nested
+    # child pipelines have no ``execute_tools`` carrier and cannot overwrite it.
+    if (publish_direct_gateway_siblings
+            and any(item[1] == EXECUTE_TOOLS_NAME for item in parsed_tcs)):
+        _publish_execute_gateway_direct_siblings(
+            task,
+            round_num,
+            [
+                (direct_name, direct_id, direct_args)
+                for (_direct_tc, direct_name, direct_id, direct_args,
+                     _direct_rn, _direct_entry, _direct_parse_error)
+                in (_serial_items + parallel_items)
+                if direct_name not in GATEWAY_TOOL_NAMES
+            ],
+        )
     # ══════════════════════════════════════════
     #  Read pool starts IMMEDIATELY (fix 1)
     # ══════════════════════════════════════════
@@ -1435,13 +1753,18 @@ def execute_tool_pipeline(
             parallel_items = []  # skip the pool entirely
 
     if parallel_items:
-        _has_program_children = any(
-            isinstance(tc.get('caller'), dict)
-            and tc['caller'].get('type') == 'program'
+        _has_bounded_gateway_children = any(
+            (
+                isinstance(tc.get('caller'), dict)
+                and tc['caller'].get('type') == 'program'
+            )
+            or str(tc.get('source') or '') in {
+                'execute_program', 'execute_calls'
+            }
             for tc, _fn, _id, _args, _rn, _entry, _pe in parallel_items
         )
         max_workers = _parallel_worker_limit(
-            len(parallel_items), programmatic=_has_program_children)
+            len(parallel_items), programmatic=_has_bounded_gateway_children)
         _pool = ThreadPoolExecutor(max_workers=max_workers)
         # ── Item 3: long-tool heartbeat ──────────────────────────────────
         # A single blocking tool (a slow web_search on dead hosts, a hung MCP
@@ -1479,7 +1802,7 @@ def execute_tool_pipeline(
             logger.info('[Task %s] Skipping serial write tool %s — task aborted', tid, fn_name)
             tool_results[tc_id] = ('Task aborted by user.', False)
             # Same abort contract as the pre-phase lane ().
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry,
                 'Task aborted by user.', idempotent_tools=_idempotent_tools,
                 cache=_cache, tid=tid, round_num=round_num,
@@ -1532,12 +1855,12 @@ def execute_tool_pipeline(
                 and tool_content.get('__screenshot__')):
             _shot_txt, _ = _screenshot_display_content(
                 model, tool_content)
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id_ret, fn_args, rn, round_entry,
                 _shot_txt, idempotent_tools=_idempotent_tools,
                 cache=_cache, tid=tid, round_num=round_num)
         else:
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id_ret, fn_args, rn, round_entry,
                 tool_content, idempotent_tools=_idempotent_tools,
                 cache=_cache, tid=tid, round_num=round_num)
@@ -1586,7 +1909,10 @@ def execute_tool_pipeline(
                             #   _invalidate_project_cache already ran — caching
                             #   now would leave a stale entry a later
                             #   FreshGate-checked hit serves verbatim.
-                            if (_pi is not None and not (
+                            if (_pi is not None
+                                    and (_pi[5] or {}).get(
+                                        '_cacheableResult', True)
+                                    and not (
                                     _has_serial_write
                                     and fut_fn_name in _WRITE_SENSITIVE_READ_TOOLS)):
                                 _pi_cache_key = _make_cache_key(fut_fn_name, _pi[3])
@@ -1631,7 +1957,8 @@ def execute_tool_pipeline(
                                     _pi_search_diag)
                                 if _pi_projection is not None:
                                     _pi_cache_entry += (_pi_projection,)
-                                _cache[_pi_cache_key] = _pi_cache_entry
+                                _store_tool_result_cache_entry(
+                                    task, _pi_cache_key, _pi_cache_entry)
                         # ── Invalidate project cache after write/exec ops ──
                         elif fut_fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                              'insert_content', 'insert_contents',
@@ -1662,7 +1989,7 @@ def execute_tool_pipeline(
                             if _is_shot:
                                 _settle_arg, _ = _screenshot_display_content(
                                     model, tool_content)
-                            _settle_tool_result(
+                            _settle_current(
                                 task, _pi[1], ret_tc_id, _pi[3],
                                 _pi[4], _pi[5], _settle_arg,
                                 idempotent_tools=_idempotent_tools,
@@ -1740,36 +2067,6 @@ def execute_tool_pipeline(
             # On normal completion wait=True is fine (all futures done).
             _pool.shutdown(wait=not _timed_out, cancel_futures=_timed_out)
 
-    # Identical duplicate calls from the same assistant batch share the first
-    # execution's result and settle their own UI rows now that it is known.
-    # The claim key — tc_id in fallback mode, the call signature under
-    # canonical ids — locates the OWNER's result; the waiter then mirrors it
-    # under its OWN id so the post-phase message append finds a result for
-    # every parsed call.
-    for _claim_key, _dup in _duplicate_waiters:
-        _tc, _name, _id, _args, _rn, _row, _pe = _dup
-        _owner_id = _claim_owners.get(_claim_key, _id)
-        _dup_content, _dup_search = tool_results.get(
-            _owner_id, ('Tool execution did not produce a result.', False))
-        # Verdict lookup: the explicit pipeline verdict map first; the OWNER
-        # round's own stamped status second — a handler that crashed inside
-        # the executor safety net records no tool_verdicts entry, but its
-        # round now carries 'error' (stamped by _finalize_tool_round), and a
-        # duplicate must inherit that failure rather than default to 'done'.
-        _dup_status = tool_verdicts.get(_owner_id)
-        if _dup_status is None:
-            _dup_status = next(
-                (str(_r.get('status')) for _r in task.get('toolRounds', [])
-                 if isinstance(_r, dict) and _r.get('toolCallId') == _owner_id
-                 and _r.get('status')),
-                'done')
-        _finalize_call_id_replay(
-            task, _name, _id, _rn, _row, _dup_content,
-            status=_dup_status)
-        tool_results[_id] = (_dup_content, _dup_search)
-        if _dup_status != 'done':
-            tool_verdicts[_id] = _dup_status
-
     # ══════════════════════════════════════════
     #  Post-phase: Add tool messages in original order
     # ══════════════════════════════════════════
@@ -1799,7 +2096,7 @@ def execute_tool_pipeline(
             tool_content, is_search = (f'Unknown tool: {fn_name}', False)
             tool_verdicts[tc_id] = 'error'
         if is_search:
-            all_search_results_text.append(tool_content)
+            _append_search_result_text(all_search_results_text, tool_content)
 
         # Convert screenshot dict → image_url content block for vision models.
         # The MESSAGE append is what genuinely belongs here ():
@@ -1834,7 +2131,7 @@ def execute_tool_pipeline(
                 if isinstance(tc.get('caller'), dict):
                     messages[-1]['caller'] = dict(tc['caller'])
                 _appended_tool_msgs.append(messages[-1])
-            _settle_tool_result(
+            _settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry, _shot_txt,
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
                 round_num=round_num)
@@ -1854,7 +2151,7 @@ def execute_tool_pipeline(
             #   on Anthropic — that ordering is the reason this phase exists,
             #   and it is NOT what was making the UI wait.
             if not (round_entry or {}).get('_idempotentReplay'):
-                tool_content = _settle_tool_result(
+                tool_content = _settle_current(
                     task, fn_name, tc_id, fn_args, rn, round_entry, tool_content,
                     idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
                     round_num=round_num,
@@ -1869,16 +2166,6 @@ def execute_tool_pipeline(
                 _tool_msg['caller'] = dict(tc['caller'])
             messages.append(_tool_msg)
             _appended_tool_msgs.append(_tool_msg)
-
-        # Account the settled model-visible result once, after clamping and
-        # persistence substitutions. The next round-start gate enforces the
-        # configured aggregate hard ceiling before another provider call.
-        try:
-            from lib.task_budget import account_tool_output
-            account_tool_output(task, tool_content)
-        except Exception as _budget_err:
-            logger.debug('[Task %s] tool-output budget accounting skipped: %s',
-                         tid, _budget_err)
 
         caller = tc.get('caller')
         if isinstance(caller, dict) and caller.get('type') == 'program':
@@ -1895,6 +2182,7 @@ def execute_tool_pipeline(
         parsed_tcs,
         _round_results_for_budget,
         _appended_tool_msgs,
+        settled_results=_settled_results,
     )
 
     # Measure the exact content that the next Responses request will replay.

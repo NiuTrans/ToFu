@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Peer/queue surfaces render a conversation TITLE, never a raw id.
+"""Peer delivery surfaces render a conversation TITLE, never a raw id.
 
 WHY
 ---
@@ -7,28 +7,33 @@ The Project-Brain peer surfaces carried a bare conversation id where a human
 expects a title:
 
   • the ``project_message`` / ``project_intervene`` delivery card showed
-    ``conv mradmzmd`` (an 8-char display id — meaningless to a user), and
-  • a queued peer/operator turn in the input bar was labelled by the same
-    raw id.
+    ``conv mradmzmd`` (an 8-char display id — meaningless to a user).
 
-The fix routes every id→title through one catalog seam, ``convTitleById`` in
-``core/conv_reducers.js``: match the full id, then a UNIQUE prefix
+The fix routes every id→title through the typed catalog query in
+``conversation/application/conversation-catalog-queries.ts``: match the full
+id, then a UNIQUE prefix
 (so an 8-char display id still resolves against the loaded ``conversations``
 list), else fall back to a localized "Untitled chat" — NEVER a bare id. The
-delivery card (``_renderPeerDelivery`` in ``ui/tool_rounds.js``) and the queue
-source line (``renderPendingQueueUI`` in ``main/main_send_pipeline.js``) both
-call it.
+delivery card (``_renderPeerDelivery`` in ``ui/tool_rounds_rich.js``) calls it.
 
-This test EXTRACTS the real shipped ``convTitleById`` + the two real consumers
-and evals them under jsdom with a real ``conversations`` list, asserting the
-resolved TITLE appears (not the id) and the id is demoted to the ``title=``
-tooltip. It closes the coverage gap where ``test_frontend_brain_tool_render.py``
-only passed its ``peermsg_target`` check because ``convTitleById`` was UNDEFINED
-in that harness (the resolution path was never executed).
+The queued peer/operator SOURCE LINE is gone: queued messages now render inline
+in the transcript via ``renderNativeQueueItem``
+(``conversation/ui/classic-conversation-renderers.ts``), which does not resolve
+a conversation title. Those queue-source-line assertions were removed when the
+input-bar queue was deleted in the Vite + storage runtime migration (commit
+``026042a2``); the retained title-resolution consumer is the delivery card.
 
-Poisoned NC: neuter ``convTitleById``'s lookup so it always returns the fallback
-label → both surfaces stop showing the real title, proving the resolution is
-load-bearing (not a tautology of the fallback).
+This test bundles the real typed query and extracts the retained
+delivery-card consumer, then evaluates it with a real ``conversations`` list,
+asserting the resolved TITLE appears (not the id) and the id is demoted to the
+``title=`` tooltip. It closes the coverage gap where
+``test_frontend_brain_tool_render.py`` only passed its ``peermsg_target`` check
+because ``convTitleById`` was UNDEFINED in that harness (the resolution path
+was never executed).
+
+Poisoned NC: inject an empty catalog into the lexical wrapper so it always
+returns the fallback label → the delivery card stops showing the real title,
+proving the resolution is load-bearing (not a tautology of the fallback).
 """
 
 from __future__ import annotations
@@ -41,20 +46,25 @@ import subprocess
 import tempfile
 
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._runtime_sections import (
+    native_module_path,
+    orchestration_legacy_test_root as _legacy_test_root,
+)
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
-# NOTE: convTitleById / _renderPeerDelivery are NOT looked up by hard-coded
-# paths. convTitleById lives in core/conv_reducers.js; _renderPeerDelivery moved
-# from ui/tool_rounds.js to
-# moved to ui/tool_rounds_rich.js (Epic-E splits). A pinned path turns those
-# legitimate refactors into `<sym> not found`, which reads like the seam was
-# deleted. Resolve both by SYMBOL from the production bundle manifests so the
-# next slice carries this guard with it.
-SEND_JS = os.path.join(ROOT, 'static', 'js', 'main', 'main_send_pipeline.js')
+# The title policy is a native module; retained consumers are still resolved by
+# symbol so further section splits do not turn into false product regressions.
+QUERY_OWNER = os.path.join(
+    ROOT,
+    'frontend', 'src', 'conversation', 'application',
+    'conversation-catalog-queries.ts',
+)
+QUERY_BUNDLE = native_module_path(
+    '.native/peer-title-query-contract.js', QUERY_OWNER,
+)
 
 
 def _src_defining(symbol: str) -> str:
@@ -100,21 +110,6 @@ def _node() -> str:
     return node
 
 
-def _extract_queue_block(src: str) -> str:
-    """The queue source/collapse helpers + renderPendingQueueUI as ONE block.
-
-    renderPendingQueueUI now delegates to the source/collapse helpers
-    (``_queueSourceOf``, ``_queueCollapsedNow``, the ``_QUEUE_*`` icon
-    consts, …), so extracting the bare function would ReferenceError under
-    eval. The block spans from the sources marker through the end of the
-    render function (the collapse toggle is defined in between)."""
-    start = src.index('/* ── Queue item sources')
-    m = re.search(r'function\s+renderPendingQueueUI\s*\(', src)
-    assert m and m.start() > start
-    i = src.find('{', m.end())
-    return src[start:_brace_match(src, i)]
-
-
 # The conversations the harness pretends are loaded. The peer ids the backend
 # surfaces are the 8-char display form; the real rows are 14 chars — so a match
 # MUST succeed by unique prefix.
@@ -129,10 +124,6 @@ def _harness(*, extracted: str, driver: str, lang: str = 'en') -> str:
     return f'''
 const _i18nTable = {{
   'toast.untitledConv': {{ zh: '未命名对话', en: 'Untitled chat' }},
-  'queue.fromConv': {{ zh: '来自', en: 'from' }},
-  'queue.fromOperator': {{ zh: '来自操作员', en: 'from operator' }},
-  'queue.messagesQueued': {{ zh: '条消息排队中', en: 'messages queued' }},
-  'queue.clearAll': {{ zh: '全部清空', en: 'Clear all' }},
   'projectBrain.pdMessage': {{ zh: '发送消息', en: 'Message' }},
 }};
 const _lang = {json.dumps(lang)};
@@ -147,36 +138,6 @@ function Icon(name) {{ return '<svg data-ico="' + name + '"></svg>'; }}
 
 // A real "loaded conversations" list — convTitleById reads this global.
 var conversations = {json.dumps(_CONVS)};
-
-// Minimal jsdom-free DOM shim for renderPendingQueueUI: it only needs
-// getElementById + createElement + appendChild + innerHTML.
-const _els = {{}};
-global.document = {{
-  getElementById: (id) => _els[id] || null,
-  createElement: (tag) => {{
-    const el = {{ tagName: tag, _id: '', className: '', _html: '',
-      classList: {{ add() {{}}, remove() {{}} }},
-      // Registering on id-set mirrors "in the DOM, retrievable by id" — the
-      // real renderPendingQueueUI sets container.id='pendingQueueBar' then
-      // relies on getElementById finding it on the next render.
-      get id() {{ return this._id; }},
-      set id(v) {{ this._id = v; if (v) _els[v] = this; }},
-      get innerHTML() {{ return this._html; }},
-      set innerHTML(v) {{ this._html = v; }},
-      appendChild(child) {{ this._child = child; child.parentNode = this; }},
-      parentNode: null }};
-    return el;
-  }},
-}};
-// Pre-create the queue host so appendChild lands somewhere retrievable.
-_els['pendingQueueContainer'] = global.document.createElement('div');
-
-// pendingMessageQueue is the Map renderPendingQueueUI reads.
-var pendingMessageQueue = new Map();
-// renderPendingQueueUI now gates DOM mutations on activeConvId — declare it so
-// the queue-source-line assertions still see the paint. See
-// test_frontend_pending_queue_active_conv_gate.py for the cross-conv guard.
-var activeConvId = 'c1';
 
 {extracted}
 
@@ -198,28 +159,22 @@ def _run(harness: str) -> str:
 
 
 def _extracted(*, poison: bool = False) -> str:
-    """The real convTitleById (+ its _convFindById dependency) +
-    _renderPeerDelivery + renderPendingQueueUI."""
-    conv_src = _read(_src_defining('convTitleById'))
-    send_src = _read(SEND_JS)
-    fn_title = _extract_fn(conv_src, 'convTitleById')
-    if poison:
-        # Neuter the lookup: the resolver must see NO hit, so both consumers
-        # show the localized fallback instead of the real title. Target the
-        # lookup LINE (not a body shape) — the resolver's internals have been
-        # reshaped by the conv_reducers decomposition once already.
-        neutered = fn_title.replace(
-            'const hit = _convFindById(cid);', 'const hit = null;')
-        assert neutered != fn_title, 'NC poison did not apply to convTitleById'
-        fn_title = neutered
-    # convTitleById delegates the match to _convFindById (same file) — the
-    # harness would ReferenceError without it. In the poisoned variant the
-    # delegate is never called, but the binding must still EXIST for eval.
-    fn_find = _extract_fn(conv_src, '_convFindById')
+    """The real typed title query + the retained delivery-card consumer.
+
+    The queue source line (``renderPendingQueueUI`` peer/operator attribution)
+    no longer lives in ``main_send_pipeline.js`` — queued messages render
+    inline in the transcript. Its delivery-card sibling still resolves titles
+    through the typed query and is exercised here.
+    """
+    query_bundle = _read(QUERY_BUNDLE)
+    catalog_expression = '[]' if poison else 'conversations'
+    fn_title = f'''function convTitleById(conversationId) {{
+  return conversationTitleById(
+    {catalog_expression}, conversationId, t('toast.untitledConv'));
+}}'''
     fn_delivery = _extract_fn(
         _read(_src_defining('_renderPeerDelivery')), '_renderPeerDelivery')
-    fn_queue = _extract_queue_block(send_src)
-    return '\n'.join([fn_find, fn_title, fn_delivery, fn_queue])
+    return '\n'.join([query_bundle, fn_title, fn_delivery])
 
 
 # ─────────────────────── delivery card resolves title ───────────────────────
@@ -241,57 +196,6 @@ process.stdout.write(_renderPeerDelivery(pd));
     assert 'title="mradmzmd"' in html
 
 
-# ─────────────────────── queue source line resolves title ───────────────────────
-
-def test_queue_source_line_shows_title_not_id():
-    """renderPendingQueueUI renders 'from «Title»' for a peer turn, not the id."""
-    driver = '''
-pendingMessageQueue.set('c1', [{
-  queueId: 'q1', kind: 'peer_msg', text: 'Done — I shipped the renderer.',
-  isPeerMessage: true, fromConv: 'mradmzmd', isPeerHuman: false,
-  images: [], pdfTexts: [], convRefs: [], replyQuotes: [],
-}]);
-renderPendingQueueUI('c1');
-process.stdout.write(document.getElementById('pendingQueueBar').innerHTML);
-'''
-    html = _run(_harness(extracted=_extracted(), driver=driver))
-    assert 'queue-item-src' in html
-    assert 'from «Segment timeline prefill-resume»' in html
-    # The clean message text is shown in full, no raw framing/id leaked.
-    assert 'Done — I shipped the renderer.' in html
-    assert 'conv mradmzmd' not in html
-
-
-def test_queue_operator_label_and_title():
-    """A human operator nudge uses the 'from operator' label + resolved title."""
-    driver = '''
-pendingMessageQueue.set('c1', [{
-  queueId: 'q1', kind: 'peer_msg', text: 'Please pause and re-check the board.',
-  isPeerMessage: true, fromConv: 'operatorc0nv99', isPeerHuman: true,
-  images: [], pdfTexts: [], convRefs: [], replyQuotes: [],
-}]);
-renderPendingQueueUI('c1');
-process.stdout.write(document.getElementById('pendingQueueBar').innerHTML);
-'''
-    html = _run(_harness(extracted=_extracted(), driver=driver))
-    assert 'from operator «Operator control room»' in html
-
-
-def test_plain_real_message_has_no_source_line():
-    """A normal human queued turn renders no peer source line."""
-    driver = '''
-pendingMessageQueue.set('c1', [{
-  queueId: 'q1', kind: 'real', text: 'just a normal message',
-  images: [], pdfTexts: [], convRefs: [], replyQuotes: [],
-}]);
-renderPendingQueueUI('c1');
-process.stdout.write(document.getElementById('pendingQueueBar').innerHTML);
-'''
-    html = _run(_harness(extracted=_extracted(), driver=driver))
-    assert 'queue-item-src' not in html
-    assert 'just a normal message' in html
-
-
 def test_unknown_conv_falls_back_to_untitled():
     """An id with no loaded conversation resolves to the localized fallback,
     NEVER a bare id."""
@@ -308,10 +212,10 @@ process.stdout.write(_renderPeerDelivery(pd));
 # ─────────────────────────── poisoned NC (load-bearing) ───────────────────────────
 
 def test_nc_neutered_resolver_drops_the_title_everywhere():
-    """Neuter convTitleById's lookup → both the delivery card and the queue
-    source line lose the real title (fall back to 'Untitled chat'), proving the
-    resolution path is load-bearing, not a tautology of the fallback."""
-    # Delivery card.
+    """Neuter convTitleById's lookup → the delivery card loses the real title
+    (falls back to 'Untitled chat'), proving the resolution path is load-bearing,
+    not a tautology of the fallback. (The queue source line moved inline into
+    the transcript renderer and is no longer driven through this section.)"""
     driver_card = '''
 const pd = { tool: 'project_message', toConv: 'mradmzmd', text: 'x', outcome: 'delivered' };
 process.stdout.write(_renderPeerDelivery(pd));
@@ -319,20 +223,6 @@ process.stdout.write(_renderPeerDelivery(pd));
     html_card = _run(_harness(extracted=_extracted(poison=True), driver=driver_card))
     assert 'Segment timeline prefill-resume' not in html_card
     assert 'Untitled chat' in html_card
-
-    # Queue source line.
-    driver_q = '''
-pendingMessageQueue.set('c1', [{
-  queueId: 'q1', kind: 'peer_msg', text: 'msg',
-  isPeerMessage: true, fromConv: 'mradmzmd', isPeerHuman: false,
-  images: [], pdfTexts: [], convRefs: [], replyQuotes: [],
-}]);
-renderPendingQueueUI('c1');
-process.stdout.write(document.getElementById('pendingQueueBar').innerHTML);
-'''
-    html_q = _run(_harness(extracted=_extracted(poison=True), driver=driver_q))
-    assert 'Segment timeline prefill-resume' not in html_q
-    assert 'from «Untitled chat»' in html_q
 
 
 if __name__ == '__main__':

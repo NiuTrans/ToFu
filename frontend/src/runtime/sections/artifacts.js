@@ -30,6 +30,9 @@
   // Content fetched lazily on first open; subsequent opens are instant.
   const _metaCache = new Map();    // id → meta dict
   const _contentCache = new Map(); // id → raw string
+  // A newer snapshot hint must win over an older metadata request that settles
+  // late. Weak keys keep the fence tied to the catalog shell lifecycle.
+  const _hydrateEpoch = new WeakMap();
 
   // The currently open artifact (if any), so SSE updates can refresh.
   let _activeId = null;
@@ -872,11 +875,20 @@
     });
   }
 
-  /** Fetch metadata and replace the active conversation's artifact read model. */
-  async function hydrateConversation(conv) {
+  /** Replace the active conversation's bounded artifact read model. */
+  async function hydrateConversation(conv, hasArtifacts) {
     if (!conv || !conv.id) return;
+    const epoch = (_hydrateEpoch.get(conv) || 0) + 1;
+    _hydrateEpoch.set(conv, epoch);
+    if (hasArtifacts === false) {
+      runtimeScope.ConversationSurfacePresentation?.setArtifacts?.(
+        conv.id, new Map(),
+      );
+      return;
+    }
     try {
       const payload = await Api.artifacts.forConv(conv.id);
+      if (_hydrateEpoch.get(conv) !== epoch) return;
       const rows = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
       const byTurn = new Map();
       for (const meta of rows) {

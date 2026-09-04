@@ -30,18 +30,28 @@ def install_conversation_state(monkeypatch, state: dict) -> None:
         *,
         user_id: int,
         include_messages: bool = True,
+        message_window: int | None = None,
+        before_sequence: int | None = None,
     ):
         if state.get("missing"):
             return None
         settings = _decoded("settings", {})
-        messages = _decoded("messages", []) if include_messages else []
+        all_messages = _decoded("messages", [])
+        messages = all_messages if include_messages else []
+        if include_messages and message_window is not None:
+            end = (
+                len(messages)
+                if before_sequence is None
+                else max(0, min(before_sequence, len(messages)))
+            )
+            messages = messages[max(0, end - message_window):end]
         return ConversationSnapshot(
             metadata={
                 "id": conversation_id,
                 "user_id": user_id,
                 "settings": settings,
                 "rev": int(state.get("rev", 0)),
-                "msg_count": len(messages),
+                "msg_count": len(all_messages),
             },
             messages=[dict(message) for message in messages],
         )

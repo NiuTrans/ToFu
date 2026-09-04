@@ -1,4 +1,4 @@
-"""Behavioural tests for the SYNC ``dispatch_stream`` (lib/llm_dispatch/api.py).
+"""Behavioural tests for the SYNC ``dispatch_stream`` (lib/llm_dispatch/_api_stream.py; facade lib/llm_dispatch/api.py).
 
 The async sibling (``async_dispatch_stream``) already has a behavioural suite in
 ``test_async_dispatch_stream.py``; the sync path only had a signature test.  This
@@ -107,6 +107,53 @@ class TestDispatchStreamSuccess:
         assert usage['_dispatch']['queue_wait_ms'] >= 0
         assert usage['_dispatch']['queue_wait_measurement'] == \
             'dispatcher_backpressure_only'
+
+    def test_distinct_large_conversations_never_cross_gate(
+            self, monkeypatch):
+        """Retired BIG_PREFIX knobs cannot reintroduce cross-conv waiting.
+
+        Under the former default, the third distinct 200k-token prefix on the
+        same selected key waited the residency budget even though selection had
+        already finished and the request could not reroute.
+        """
+        from lib.llm_dispatch import api
+        from lib.llm_dispatch.conv_affinity import conv_affinity
+        from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
+
+        attempts = [_make_slot(key='k0') for _ in range(3)]
+        all_slots = [_make_slot(key='k0'), _make_slot(key='k1')]
+        dispatcher = _FakeDispatcher(attempts, all_slots=all_slots)
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+        monkeypatch.setenv('TOFU_CACHE_SETTLE', '0')
+        monkeypatch.setenv('TOFU_CONV_STICKY_HOLD', '0')
+        monkeypatch.setenv('TOFU_BIG_PREFIX_GATE', '1')
+        monkeypatch.setenv('TOFU_BIG_PREFIX_THRESHOLD_TOKENS', '1')
+        monkeypatch.setenv('TOFU_BIG_PREFIX_RESIDENCY_MAX', '2')
+        monkeypatch.setenv('TOFU_BIG_PREFIX_RESIDENCY_WAIT_MS', '400')
+
+        import lib.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, 'stream_chat',
+            lambda *_args, **_kwargs: (
+                'ok', 'stop', {'completion_tokens': 1}),
+        )
+        body = {
+            'model': 'qwen-plus',
+            'messages': [{'role': 'user', 'content': 'large prompt'}],
+            'max_tokens': 128,
+            'stream': True,
+            ADMITTED_INPUT_TOKENS_KEY: 200_000,
+        }
+
+        started = time.perf_counter()
+        for conv_id in ('conv-a', 'conv-b', 'conv-c'):
+            with conv_affinity(conv_id):
+                assert api.dispatch_stream(body)[0] == 'ok'
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.2, (
+            'distinct conversations regained a retired cross-prefix wait: '
+            f'{elapsed:.3f}s')
 
     def test_semantic_retry_avoids_failed_pair_on_first_pick(self, monkeypatch):
         """A fresh dispatch must apply the prior attempt's rotate hint now.
@@ -269,6 +316,83 @@ class TestDispatchStreamRetry:
         # Quota exhaustion is a HARD attempt with a 'Key balance exhausted'
         # retry notice (distinct from the free 429 path).
         assert any('balance' in (r.get('reason') or '').lower() for r in retries)
+
+    def test_credential_delivery_anomaly_is_gateway_bounded(self, monkeypatch):
+        """Contradictory missing-key 401s rotate briefly, never enter the
+        durable permission exclusion path, and cannot wait forever."""
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+
+        slot = _make_slot(model='kimi-k3', key='kA')
+        dispatcher = _FakeDispatcher([slot, slot, slot, slot], all_slots=[slot])
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+        monkeypatch.setattr(
+            'lib.key_stats.record_gateway_error', lambda *a, **kw: None)
+
+        calls = {'n': 0}
+
+        def _missing_key(_body, **_kwargs):
+            calls['n'] += 1
+            raise RateLimitError(
+                'API HTTP 401: missing api key',
+                is_gateway=True,
+                is_credential_delivery_anomaly=True,
+                reason='credential_delivery_anomaly',
+                status_code=401,
+            )
+
+        monkeypatch.setattr('lib.llm.stream_chat', _missing_key)
+
+        with pytest.raises(RateLimitError) as raised:
+            api.dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}],
+                prefer_model='kimi-k3', strict_model=True,
+                log_prefix='[auth-delivery]',
+            )
+
+        assert calls['n'] == 4
+        assert dispatcher.picks == 4
+        assert raised.value.is_gateway is True
+        assert raised.value.credential_delivery_anomaly_attempts == 4
+        assert raised.value.credential_delivery_anomaly_limit == 4
+        assert slot.gateway_errors == 4
+        assert slot.total_errors == 0
+        assert slot.inflight == 0
+
+    def test_nonstream_credential_delivery_anomaly_uses_same_cap(
+            self, monkeypatch):
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+
+        slot = _make_slot(model='kimi-k3', key='kA')
+        dispatcher = _FakeDispatcher([slot, slot, slot, slot], all_slots=[slot])
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+        monkeypatch.setattr(
+            'lib.key_stats.record_gateway_error', lambda *a, **kw: None)
+
+        def _missing_key(messages, **_kwargs):
+            raise RateLimitError(
+                'API HTTP 401: missing api key',
+                is_gateway=True,
+                is_credential_delivery_anomaly=True,
+                reason='credential_delivery_anomaly',
+                status_code=401,
+            )
+
+        monkeypatch.setattr('lib.llm.chat', _missing_key)
+
+        with pytest.raises(RateLimitError) as raised:
+            api.dispatch_chat(
+                [{'role': 'user', 'content': 'hi'}],
+                prefer_model='kimi-k3', strict_model=True,
+                log_prefix='[auth-delivery-chat]',
+            )
+
+        assert dispatcher.picks == 4
+        assert raised.value.credential_delivery_anomaly_attempts == 4
+        assert slot.gateway_errors == 4
+        assert slot.total_errors == 0
+        assert slot.inflight == 0
 
 
 @pytest.mark.unit
@@ -446,6 +570,28 @@ class TestSettleStreamResultHelper:
         assert recorded[0][1]['cache_profile'] == 'codex'
         assert recorded[0][1]['pending_write'] is True
 
+    def test_generic_warm_small_tail_disarms_visibility_hold(self, monkeypatch):
+        from lib.llm_dispatch import cache_settle
+        from lib.llm_dispatch.api import _settle_stream_result
+
+        recorded = []
+        monkeypatch.setattr(
+            cache_settle, 'record_stream_end',
+            lambda conv_id, **kwargs: recorded.append((conv_id, kwargs)))
+
+        usage = {
+            'prompt_tokens': 100_000,
+            'prompt_tokens_details': {'cached_tokens': 98_000},
+        }
+        _settle_stream_result(
+            _make_slot(model='kimi-k3', key='sankuai-key'), usage,
+            latency=5.0, ttft=None, state=self._state(),
+            cache_conv_id='conv-kimi', tag='[t]')
+
+        assert recorded[0][0] == 'conv-kimi'
+        assert recorded[0][1]['cache_profile'] == ''
+        assert recorded[0][1]['pending_write'] is False
+
     @pytest.mark.parametrize('stream_state', [
         'semantic_progress_timeout',
         'malformed_stream',
@@ -621,8 +767,12 @@ class TestQuotaScopeCallSites:
     def test_every_quota_record_error_passes_account_scope(self):
         from tests._source_scan import strip_comments
 
-        with open('lib/llm_dispatch/api.py', encoding='utf-8') as f:
-            live = strip_comments(f.read(), lang='python')
+        import glob
+
+        live = ''
+        for path in sorted(glob.glob('lib/llm_dispatch/_api_*.py')):
+            with open(path, encoding='utf-8') as f:
+                live += strip_comments(f.read(), lang='python') + '\n'
 
         calls = []
         idx = 0
@@ -645,7 +795,8 @@ class TestQuotaScopeCallSites:
 
         quota_sites = [c for c in calls if 'is_quota_exhausted=' in c]
         assert len(quota_sites) >= 3, (
-            f'expected >=3 quota record_error call sites in api.py, found '
+            f'expected >=3 quota record_error call sites in the dispatch '
+            f'layer (_api_chat.py/_api_stream.py), found '
             f'{len(quota_sites)} — the scan must stay non-vacuous')
         for c in quota_sites:
             assert 'is_account_quota=' in c, (

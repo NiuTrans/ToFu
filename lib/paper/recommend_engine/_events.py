@@ -45,7 +45,7 @@ def iter_recommend_events(description, max_results=6, *, abort=None,
 
     Yields (each a dict with a ``type`` key):
         {'type': 'interpret_done', 'query': str, 'candidateCount': int,
-         'correctionPending': bool}
+         'correctionPending': bool, 'agentUsageV1': dict}
             — research + interpretation complete: the model's proposals are
               parsed. ``candidateCount`` is how many grounding *attempts* will
               run (so the UI can paint that many skeleton cards).
@@ -54,7 +54,7 @@ def iter_recommend_events(description, max_results=6, *, abort=None,
         {'type': 'correction', 'correction': {'note': str, 'paper': <card>|None}}
             — the optional false-premise correction (only when present).
         {'type': 'done', 'query': str, 'resultCount': int,
-         'correctionPresent': bool}
+         'correctionPresent': bool, 'agentUsageV1': dict}
             — terminal success.
         {'type': 'error', 'llmError': bool, 'query': str}
             — terminal failure of the interpretation call (distinct from
@@ -92,6 +92,8 @@ def iter_recommend_events(description, max_results=6, *, abort=None,
                'correctionPresent': False}
         return
 
+    agent_usage = (parsed.pop('_agentUsageV1', None)
+                   if isinstance(parsed, dict) else None)
     candidates = parsed.get('candidates') if isinstance(parsed, dict) else None
     if not isinstance(candidates, list):
         candidates = []
@@ -101,8 +103,13 @@ def iter_recommend_events(description, max_results=6, *, abort=None,
     correction_pending = bool(isinstance(raw_correction, dict)
                               and (raw_correction.get('note') or '').strip())
 
-    yield {'type': 'interpret_done', 'query': description,
-           'candidateCount': len(attempts), 'correctionPending': correction_pending}
+    interpret_event = {
+        'type': 'interpret_done', 'query': description,
+        'candidateCount': len(attempts), 'correctionPending': correction_pending,
+    }
+    if isinstance(agent_usage, dict):
+        interpret_event['agentUsageV1'] = agent_usage
+    yield interpret_event
 
     grounded_count = 0
     seen_ids = set()
@@ -135,8 +142,13 @@ def iter_recommend_events(description, max_results=6, *, abort=None,
                     grounded_count, len(candidates),
                     ' (+correction)' if correction else '', description)
 
-    yield {'type': 'done', 'query': description, 'resultCount': grounded_count,
-           'correctionPresent': bool(correction and correction.get('note'))}
+    done_event = {
+        'type': 'done', 'query': description, 'resultCount': grounded_count,
+        'correctionPresent': bool(correction and correction.get('note')),
+    }
+    if isinstance(agent_usage, dict):
+        done_event['agentUsageV1'] = agent_usage
+    yield done_event
 
 
 def recommend_papers(description, max_results=6, *, user_id=None):
@@ -157,18 +169,22 @@ def recommend_papers(description, max_results=6, *, user_id=None):
           'correction': {'note': str, 'paper': <card>|None} | None,
           'results': [ <card>, ... ],   # each card = search_arxiv shape + why/venue
           'llmError': bool,             # true only when the interpretation call failed
+          'agentUsageV1': dict | None,  # bounded interpretation-loop ledger
         }
         A card is guaranteed to carry a real ``arxiv_id`` (grounded), so the
         frontend can click straight into the existing ``_fetchArxivPaper``.
     """
     query = (description or '').strip()
-    out = {'query': query, 'correction': None, 'results': [], 'llmError': False}
+    out = {'query': query, 'correction': None, 'results': [], 'llmError': False,
+           'agentUsageV1': None}
     event_kwargs = {'user_id': user_id} if user_id is not None else {}
     for ev in iter_recommend_events(
             description, max_results, **event_kwargs):
         etype = ev.get('type')
         if etype == 'candidate':
             out['results'].append(ev['card'])
+        elif etype == 'interpret_done':
+            out['agentUsageV1'] = ev.get('agentUsageV1')
         elif etype == 'correction':
             out['correction'] = ev['correction']
         elif etype == 'error':

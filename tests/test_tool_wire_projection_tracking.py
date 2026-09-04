@@ -9,6 +9,7 @@ without storing full provider schemas or leaking diagnostics onto the wire.
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -30,6 +31,163 @@ def _task():
         'content_lock': threading.Lock(),
         'events_lock': threading.Lock(),
     }
+
+
+def _function_tool(name: str, *, typed: bool = True) -> dict:
+    tool = {
+        'function': {
+            'name': name,
+            'description': f'Use {name}.',
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    }
+    if typed:
+        tool['type'] = 'function'
+    return tool
+
+
+def test_wire_projection_reuses_matching_call_local_schema_evidence(
+    monkeypatch,
+):
+    from lib import context_telemetry
+    from lib.llm._sse_core import prepare_request
+    from lib.tools import gateway
+
+    tools = [_function_tool('read_files'), _function_tool('grep_search')]
+    evidence_source = list(tools)
+    evidence = context_telemetry.build_tool_schema_evidence(
+        evidence_source,
+        1_234,
+        model='gpt-5.6-sol',
+    )
+    expected_fingerprint = gateway.tool_schema_fingerprint(tools)
+    fingerprint_calls = []
+    monkeypatch.setattr(
+        gateway,
+        'tool_schema_tokens',
+        lambda *args, **kwargs: pytest.fail(
+            'unchanged final schemas must reuse admission evidence'),
+    )
+    monkeypatch.setattr(
+        gateway,
+        'tool_schema_fingerprint',
+        lambda final_tools: (
+            fingerprint_calls.append(final_tools) or expected_fingerprint),
+    )
+
+    projections = []
+    for _ in range(2):
+        diagnostics = []
+        plan = prepare_request({
+            'model': 'gpt-5.6-sol',
+            'messages': [{'role': 'user', 'content': 'inspect'}],
+            'tools': tools,
+            '_tool_wire_catalog': evidence_source,
+            context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY: evidence,
+            '_tool_search_mode': 'off',
+            '_programmatic_tool_calling': 'off',
+            '_multi_agent_mode': 'off',
+            '_request_activity_sink': diagnostics.append,
+        }, api_key='secret', base_url='https://example.invalid/v1',
+           api_protocol='openai')
+        projections.append(next(
+            item for item in diagnostics
+            if item.get('kind') == 'wire_projection'))
+        assert context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY not in plan.body
+
+    assert [row['schemaTokens'] for row in projections] == [1_234, 1_234]
+    assert [row['schemaFingerprint'] for row in projections] == [
+        expected_fingerprint, expected_fingerprint]
+    assert len(fingerprint_calls) == 1
+    assert context_telemetry.tool_schema_fingerprint_from_evidence(
+        evidence) == expected_fingerprint
+
+
+def test_wire_projection_recounts_when_preflight_repairs_a_schema(monkeypatch):
+    from lib import context_telemetry
+    from lib.llm._sse_core import prepare_request
+    from lib.tools import gateway
+
+    tools = [_function_tool('read_files', typed=False)]
+    evidence_source = list(tools)
+    evidence = context_telemetry.build_tool_schema_evidence(
+        evidence_source,
+        321,
+        model='gpt-5.6-sol',
+        source_fingerprint='a' * 64,
+    )
+    diagnostics = []
+    counted = []
+    fingerprinted = []
+    monkeypatch.setattr(
+        gateway,
+        'tool_schema_tokens',
+        lambda final_tools, **kwargs: counted.append(final_tools) or 654,
+    )
+    monkeypatch.setattr(
+        gateway,
+        'tool_schema_fingerprint',
+        lambda final_tools: fingerprinted.append(final_tools) or 'b' * 64,
+    )
+
+    plan = prepare_request({
+        'model': 'gpt-5.6-sol',
+        'messages': [{'role': 'user', 'content': 'inspect'}],
+        'tools': tools,
+        '_tool_wire_catalog': evidence_source,
+        context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY: evidence,
+        '_tool_search_mode': 'off',
+        '_programmatic_tool_calling': 'off',
+        '_multi_agent_mode': 'off',
+        '_request_activity_sink': diagnostics.append,
+    }, api_key='secret', base_url='https://example.invalid/v1',
+       api_protocol='openai')
+
+    projection = next(
+        item for item in diagnostics if item.get('kind') == 'wire_projection')
+    assert projection['schemaTokens'] == 654
+    assert projection['schemaFingerprint'] == 'b' * 64
+    assert counted == [plan.body['tools']]
+    assert fingerprinted == [plan.body['tools']]
+    assert plan.body['tools'][0] is not evidence_source[0]
+    assert context_telemetry.tool_schema_fingerprint_from_evidence(
+        evidence) == 'a' * 64
+    assert context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY not in plan.body
+
+
+@pytest.mark.parametrize('protocol', ['responses', 'anthropic'])
+def test_schema_evidence_never_reaches_translated_provider_bodies(
+    monkeypatch,
+    protocol,
+):
+    from lib import context_telemetry
+    from lib.llm._sse_core import prepare_request
+    from lib.tools import gateway
+
+    tools = [_function_tool('read_files')]
+    source = list(tools)
+    evidence = context_telemetry.build_tool_schema_evidence(
+        source,
+        321,
+        model='gpt-5.6-sol',
+    )
+    monkeypatch.setattr(gateway, 'tool_schema_tokens', lambda *a, **k: 654)
+
+    plan = prepare_request({
+        'model': 'gpt-5.6-sol',
+        'messages': [{'role': 'user', 'content': 'inspect'}],
+        'tools': tools,
+        '_tool_wire_catalog': source,
+        context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY: evidence,
+        '_tool_search_mode': 'off',
+        '_programmatic_tool_calling': 'off',
+        '_multi_agent_mode': 'off',
+        '_request_activity_sink': lambda _row: None,
+    }, api_key='secret', base_url='https://example.invalid/v1',
+       api_protocol=protocol)
+
+    assert context_telemetry.TOOL_SCHEMA_EVIDENCE_KEY not in plan.body
+    json.dumps(plan.body)
 
 
 def test_stream_persists_bounded_final_schema_fingerprint(monkeypatch):
@@ -81,4 +239,3 @@ def test_stream_persists_bounded_final_schema_fingerprint(monkeypatch):
     assert projection['schemaFingerprint'] == fingerprint[:64]
     assert projection['schemaTokens'] == 480
     assert '_request_activity_sink' not in body
-

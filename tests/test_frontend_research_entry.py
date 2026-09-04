@@ -32,6 +32,8 @@ import subprocess
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESEARCH_RUNTIME_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'research-runtime.ts')
@@ -63,7 +65,8 @@ const ROOT = process.argv[2];
 const SCENARIO = process.argv[3];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
-  '<!DOCTYPE html><body><div id="paperPdfViewer"></div></body>',
+  '<!DOCTYPE html><body><div id="paperPdfViewer"></div>'
+  + '<div id="researchViewer"></div></body>',
   { url: 'http://localhost/' });
 global.window = global;
 global.document = dom.window.document;
@@ -143,7 +146,7 @@ const nativeSrc = fs.readFileSync(process.argv[4], 'utf8');
       folderId: _researchStream.folderId || '',
     };
   }
-  out.html = document.getElementById('paperPdfViewer').innerHTML;
+  out.html = document.getElementById('researchViewer').innerHTML;
   console.log(JSON.stringify(out));
   // A job still in `running` legitimately keeps its 2s poll timer armed, so
   // node would never exit on its own. Stop the loop the way the product does,
@@ -159,16 +162,13 @@ def _run(scenario):
 
     with tempfile.TemporaryDirectory(prefix='tofu-research-test-') as temp_dir:
         harness = os.path.join(temp_dir, 'research-entry-harness.js')
-        built = os.path.join(temp_dir, 'research-runtime.js')
         with open(harness, 'w', encoding='utf-8') as f:
             f.write(_HARNESS)
-        compiled = subprocess.run(
-            [ESBUILD, RESEARCH_VIEW_TS, '--bundle', '--format=iife',
-             '--platform=browser', f'--outfile={built}'],
-            capture_output=True, text=True, timeout=60)
-        assert compiled.returncode == 0, compiled.stderr
-        r = subprocess.run(['node', harness, ROOT, scenario, built],
-                           capture_output=True, text=True, timeout=90)
+        with compiled_typescript(
+            RESEARCH_VIEW_TS, expose_feature_registry_to_window=True,
+        ) as built:
+            r = subprocess.run(['node', harness, ROOT, scenario, built],
+                               capture_output=True, text=True, timeout=90)
         if r.returncode != 0:
             pytest.fail(f'harness failed ({scenario}):\n{r.stdout}\n{r.stderr}')
         line = [x for x in r.stdout.strip().splitlines() if x.startswith('{')]

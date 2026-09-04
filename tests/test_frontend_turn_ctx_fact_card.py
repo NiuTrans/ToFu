@@ -41,11 +41,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-APP_RUNTIME = os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+INFO_RAIL = runtime_section_path('info-rail.js')
 
 
 def _node_available() -> bool:
@@ -95,15 +97,7 @@ global.Api = { mcp: { toolsList: async () => ({ ok: false }) } };
 global.document = { readyState: 'complete', addEventListener: () => {} };
 
 const SRC_PATH = process.argv[2];
-const BUNDLE_SRC = fs.readFileSync(SRC_PATH, 'utf8');
-const START = '/* ===== migrated source: info-rail.js ===== */';
-const END = '/* ===== migrated source: local-control.js ===== */';
-const startAt = BUNDLE_SRC.indexOf(START);
-const endAt = BUNDLE_SRC.indexOf(END, startAt + START.length);
-if (startAt < 0 || endAt < 0) {
-  throw new Error('migrated info-rail section markers missing');
-}
-const SRC = BUNDLE_SRC.slice(startAt, endAt);
+const SRC = fs.readFileSync(SRC_PATH, 'utf8');
 function loadModule(src){ (0, eval)(src); }
 loadModule(SRC);
 
@@ -241,7 +235,7 @@ def test_turn_ctx_fact_card_and_reconcile():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, APP_RUNTIME],
+            ['node', harness, INFO_RAIL],
             capture_output=True, text=True, timeout=60,
         )
     finally:

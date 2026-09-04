@@ -1,189 +1,8 @@
 /* ===== migrated source: project.js ===== */
-/* Responsibility: deferred Project Co-Pilot panel and folder interactions.
-   Entries: project modal, approvals, stdin/guidance, folder browse and writes.
-   Dependencies: core project_state.js, Api.project/chat, and typed browse owner.
-   Durable project state remains in project_state.js; this file owns panel DOM. */
-let _pendingWriteApprovals = new Map();
-
-async function resolveWriteApproval(approvalId, approved) {
-  try {
-    const data = await Api.project.writeApproval(approvalId, approved);
-    if (!data || data.error) {
-      debugLog("Approval failed: " + ((data && data.error) || "Unknown"), "warn");
-      return;
-    }
-    debugLog(
-      `Write ${approved ? "approved" : "rejected"}: ${approvalId.slice(0, 16)}`,
-      approved ? "success" : "warn",
-    );
-  } catch (e) {
-    debugLog("Approval error: " + e.message, "error");
-  }
-}
-
-// ══════════════════════════════════════════════════════
-//  Interactive Stdin — subprocess waiting for keyboard input
-// ══════════════════════════════════════════════════════
-
-async function submitStdinInput(stdinId, inputText) {
-  if (!stdinId) return;
-  try {
-    const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-    const data = await Api.chat.stdinResponse(stdinId, inputText, false,
-                                              conv && conv.id);
-    if (!data || data.error) {
-      debugLog("Stdin submit failed: " + ((data && data.error) || "Unknown"), "warn");
-      if (typeof showToast === 'function')
-        showToast("", "Stdin Error", (data && data.error) || "Failed to send input", 5000);
-      return;
-    }
-    debugLog(`Stdin input sent: ${stdinId}`, "success");
-  } catch (e) {
-    debugLog("Stdin error: " + e.message, "error");
-    if (typeof showToast === 'function')
-      showToast("", "Stdin Error", e.message, 5000);
-  }
-}
-
-async function submitStdinEof(stdinId) {
-  // Send EOF flag to signal stdin close
-  if (!stdinId) return;
-  try {
-    const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-    const data = await Api.chat.stdinResponse(stdinId, "", true,
-                                              conv && conv.id);
-    if (!data || data.error) {
-      debugLog("Stdin EOF failed: " + ((data && data.error) || "Unknown"), "warn");
-      return;
-    }
-    debugLog(`Stdin EOF sent: ${stdinId}`, "success");
-  } catch (e) {
-    debugLog("Stdin EOF error: " + e.message, "error");
-  }
-}
-
-// ══════════════════════════════════════════════════════
-//  Human Guidance — interactive Q&A during tool use
-// ══════════════════════════════════════════════════════
-
-async function _submitHumanGuidanceResponse(guidanceId, responseText) {
-  try {
-    const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-    const data = await Api.chat.humanResponse(guidanceId, responseText,
-                                              conv && conv.id);
-    if (!data || data.error) {
-      debugLog("Human guidance submit failed: " + ((data && data.error) || "Unknown"), "warn");
-      if (typeof showToast === 'function')
-        showToast(t('project.hgSubmitFailed'), "error");
-      return false;
-    }
-    debugLog(`Human guidance answered: ${guidanceId}`, "success");
-    return true;
-  } catch (e) {
-    debugLog("Human guidance error: " + e.message, "error");
-    /* 404 = the pending request is gone (turn settled / server restarted) —
-     * the question is EXPIRED, not a transport failure. Flip the card to its
-     * read-only expired rendering via an authoritative re-render. */
-    if (e && e.status === 404) {
-      if (typeof showToast === 'function')
-        showToast(t('project.hgExpiredToast'), "warning");
-      const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-      if (conv && typeof runtimeScope !== 'undefined')
-        runtimeScope.requestAuthoritativeConversationRender?.(
-          conv.id, { force: true, forceScroll: false });
-      return false;
-    }
-    if (typeof showToast === 'function')
-      showToast(t('project.hgNetworkError'), "error");
-    return false;
-  }
-}
-
-async function submitHumanGuidanceFreeText(guidanceId) {
-  const textarea = document.getElementById(`hg-input-${guidanceId}`);
-  if (!textarea) return;
-  const text = textarea.value.trim();
-  if (!text) {
-    textarea.classList.add('hg-shake');
-    setTimeout(() => textarea.classList.remove('hg-shake'), 500);
-    return;
-  }
-  const card = textarea.closest('.hg-card');
-  if (card) card.classList.add('hg-submitting');
-
-  // Auto-translate CN→EN: if autoTranslate is ON and text contains Chinese,
-  //   translate before sending to backend — same as sendMessage() flow.
-  const conv = getActiveConv();
-  const _hgAutoTrans = convAutoTranslate(conv);
-  const hasChinese = /[\u4e00-\u9fff\u3400-\u4dbf]/.test(text);
-  let finalText = text;
-
-  if (_hgAutoTrans && hasChinese) {
-    // Show translating state on the submit button
-    const submitBtn = card?.querySelector('.hg-submit-btn');
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.innerHTML = '<span class="hg-spinner"></span> ' + escapeHtml(t('project.hgTranslating'));
-    }
-    try {
-      console.log(`[HG-Submit] Auto-translating user response CN→EN (${text.length} chars)`);
-      finalText = await _callTranslateAPI(text, 'English', 'Chinese');
-      console.log(`[HG-Submit] ✓ Translated: ${text.length}→${finalText.length} chars`);
-    } catch (e) {
-      console.warn(`[HG-Submit] Translation failed, sending original: ${e.message}`);
-      if (typeof showToast === 'function')
-        showToast(t('project.hgTranslateFailed'), 'warning');
-      finalText = text; // fallback to original
-    }
-    if (submitBtn) {
-      submitBtn.disabled = false;
-      submitBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> ' + escapeHtml(t('project.hgSubmit'));
-    }
-  }
-
-  const ok = await _submitHumanGuidanceResponse(guidanceId, finalText);
-  if (!ok && card) card.classList.remove('hg-submitting');
-  if (ok) _collapseHgRoundAfterSubmit(guidanceId, text);
-}
-
-async function submitHumanGuidanceChoice(guidanceId, choiceLabel) {
-  // Find and highlight the selected option card
-  const allBtns = document.querySelectorAll(`button.hg-option-card[data-gid="${guidanceId}"]`);
-  allBtns.forEach(btn => {
-    btn.classList.remove('hg-selected');
-    if (btn.dataset.label === choiceLabel) btn.classList.add('hg-selected');
-    btn.disabled = true;
-  });
-  const card = document.querySelector(`button.hg-option-card[data-gid="${guidanceId}"]`)?.closest('.hg-card');
-  if (card) card.classList.add('hg-submitting');
-  const ok = await _submitHumanGuidanceResponse(guidanceId, choiceLabel);
-  if (!ok) {
-    allBtns.forEach(btn => { btn.disabled = false; btn.classList.remove('hg-selected'); });
-    if (card) card.classList.remove('hg-submitting');
-  }
-  if (ok) _collapseHgRoundAfterSubmit(guidanceId, choiceLabel);
-}
-
-/* translateHumanGuidanceInput removed — auto-translation is now fully automatic:
- * - EN→CN: LLM question & options translated on arrival (_autoTranslateHumanGuidance)
- * - CN→EN: User's free-text reply translated on submit (submitHumanGuidanceFreeText)
- */
-
-/**
- * Immediately collapse the HG card through presentation-local state while the
- * authoritative tool response is still in flight.
- */
-function _collapseHgRoundAfterSubmit(guidanceId, responseText) {
-  const conv = getActiveConv();
-  if (!conv) return;
-  runtimeScope.HumanGuidancePresentation?.patch?.(
-    conv.id, guidanceId, { submittedResponse: responseText },
-  );
-  console.log(`[HG] ✓ Card collapsed: guidance=${guidanceId}, response="${responseText.slice(0, 60)}"`);
-  // Update sidebar: conversation no longer awaiting human (amber dot → streaming dot)
-  renderConversationList();
-}
-
+/* Responsibility: demand-loaded Project workspace and folder interactions.
+   Entries: project modal, local/remote browse, root policy, and folder writes.
+   Dependencies: live core project authority, Api.project, and browse owner.
+   Coding approvals/stdin/apply-code live in execution-interactions.js. */
 // ── Multi-path folder state for the modal ──
 let _mpFolders = []; // array of path strings being edited in the modal
 let _mpReadOnly = new Set(); // subset of _mpFolders the user marked read-only
@@ -191,7 +10,7 @@ let _mpReadOnly = new Set(); // subset of _mpFolders the user marked read-only
 // so the bar's click-to-toggle handler can look an entry up by index.
 
 function _syncFoldersFromState() {
-  /* Build _mpFolders from projectState (single source of truth).
+  /* Build _mpFolders from the live project state (single source of truth).
    * ORDER IS SEMANTIC: index 0 IS the primary root (star + `root` badge, sent
    * to the backend as the primary in setPaths). The primary is pushed FIRST
    * here so the root always lands at the very top of the Workspace list —
@@ -199,12 +18,13 @@ function _syncFoldersFromState() {
    * (_mpReorder) is the ONLY thing allowed to change which path is index 0. */
   _mpFolders = [];
   _mpReadOnly = new Set();
-  if (projectState.path) {
-    _mpFolders.push(projectState.path);
-    if (projectState.readOnly) _mpReadOnly.add(projectState.path);
+  const currentProjectState = ProjectPresentationShellState.projectState;
+  if (currentProjectState.path) {
+    _mpFolders.push(currentProjectState.path);
+    if (currentProjectState.readOnly) _mpReadOnly.add(currentProjectState.path);
   }
-  if (projectState.extraRoots && projectState.extraRoots.length) {
-    for (const r of projectState.extraRoots) {
+  if (currentProjectState.extraRoots && currentProjectState.extraRoots.length) {
+    for (const r of currentProjectState.extraRoots) {
       const p = typeof r === 'string' ? r : r.path;
       if (p && !_mpFolders.includes(p)) {
         _mpFolders.push(p);
@@ -223,6 +43,9 @@ function _mpToggleReadOnly(index) {
 }
 
 function openProjectModal() {
+  _relinkOldPath = "";
+  _gitRootHint = null;
+  _renderProjectModalHint();
   _syncFoldersFromState();
   _mpRenderTags();
   _updateProjectModalStatus();
@@ -249,6 +72,17 @@ function closeProjectModal() {
   _projectBrowseCoordinator.cancel();
 }
 
+// The eager Project state owner uses this optional port only after this chunk
+// has loaded. Clearing a project while the owner is idle must not fetch the
+// workspace merely to reset modal-local draft arrays.
+const ProjectModalPresentation = Object.freeze({
+  resetAfterProjectClear() {
+    _mpFolders = [];
+    _mpReadOnly = new Set();
+    closeProjectModal();
+  },
+});
+
 /* ── Mobile segmented tab toggle (Browse / Workspace) ──
  * Desktop shows both panes side-by-side; on narrow screens the .pm-body
  * is driven by a data-pm-view attribute so only one pane is visible at a
@@ -269,11 +103,11 @@ function _mpRenderTags() {
   if (countEl) countEl.textContent = _mpFolders.length ? `${_mpFolders.length}` : '';
   const mCountEl = document.getElementById("pmMobileCount");
   if (mCountEl) mCountEl.textContent = _mpFolders.length ? `${_mpFolders.length}` : '';
+  const _t = (typeof t === "function") ? t : (k) => k;
   if (!_mpFolders.length) {
-    container.innerHTML = '<div class="mp-empty-hint">No folders yet — type a path or pick one from the browser.</div>';
+    container.innerHTML = '<div class="mp-empty-hint">' + escapeHtml(_t("pm.emptyFolders")) + '</div>';
     return;
   }
-  const _t = (typeof t === "function") ? t : (k) => k;
   const _gripTip = escapeHtml(_t("pm.dragReorder"));
   container.innerHTML = _mpFolders.map((p, i) => {
     const parts = p.split('/').filter(Boolean);
@@ -284,25 +118,27 @@ function _mpRenderTags() {
     // Lock (read-only) / pencil (writable) toggle. Click flips the access
     // policy for this root — sent to the backend as readOnlyPaths.
     const lockIcon = isRO
-      ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
-      : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+      ? PROJECT_PRESENTATION_ASSETS.readOnlyLock
+      : PROJECT_PRESENTATION_ASSETS.writablePencil;
     // 6-dot grip: the drag affordance. The WHOLE row is draggable (the grip is
     // the visual hint), except its buttons — see _attachMpReorder's dragstart.
-    const grip = '<span class="mp-row-grip icon-box" title="' + _gripTip + '" aria-hidden="true"><svg width="11" height="15" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.35"/><circle cx="8" cy="3" r="1.35"/><circle cx="3" cy="8" r="1.35"/><circle cx="8" cy="8" r="1.35"/><circle cx="3" cy="13" r="1.35"/><circle cx="8" cy="13" r="1.35"/></svg></span>';
+    const grip = '<span class="mp-row-grip icon-box" title="' + _gripTip
+      + '" aria-hidden="true">' + PROJECT_PRESENTATION_ASSETS.reorderGrip
+      + '</span>';
     return `<div class="mp-row${isPrimary ? ' mp-row-primary' : ''}${isRO ? ' mp-row-readonly' : ''}" draggable="true" data-mp-idx="${i}" title="${escapeHtml(p)}">
       ${grip}
       <span class="mp-row-icon">${isPrimary
-        ? '<svg width="15" height="15" viewBox="0 0 24 24" fill="#f59e0b" stroke="#f59e0b" stroke-width="1.5" stroke-linejoin="round"><polygon points="12 2 15 9 22 9 16.5 13.5 18.5 21 12 16.5 5.5 21 7.5 13.5 2 9 9 9"/></svg>'
-        : '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.55"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'}</span>
+        ? PROJECT_PRESENTATION_ASSETS.primaryStar
+        : PROJECT_PRESENTATION_ASSETS.workspaceFolder}</span>
       <span class="mp-row-text">
         <span class="mp-row-name">${escapeHtml(name)}</span>
         <span class="mp-row-path">${escapeHtml(short)}</span>
       </span>
-      ${isPrimary ? '<span class="mp-row-badge">root</span>' : ''}
-      ${isRO ? '<span class="mp-row-badge mp-row-badge-ro">read-only</span>' : ''}
-      <button class="mp-row-lock${isRO ? ' active' : ''}" draggable="false" data-tofu-action="_mpToggleReadOnly(${i})" title="${isRO ? 'Read-only — click to allow edits' : 'Writable — click to make read-only'}">${lockIcon}</button>
-      <button class="mp-row-remove" draggable="false" data-tofu-action="_mpRemove(${i})" title="Remove">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      ${isPrimary ? '<span class="mp-row-badge">' + escapeHtml(_t("pm.rootBadge")) + '</span>' : ''}
+      ${isRO ? '<span class="mp-row-badge mp-row-badge-ro">' + escapeHtml(_t("pm.readOnlyBadge")) + '</span>' : ''}
+      <button class="mp-row-lock${isRO ? ' active' : ''}" draggable="false" data-tofu-action="_mpToggleReadOnly(${i})" title="${escapeHtml(isRO ? _t("pm.lockRo") : _t("pm.lockRw"))}">${lockIcon}</button>
+      <button class="mp-row-remove" draggable="false" data-tofu-action="_mpRemove(${i})" title="${escapeHtml(_t("common.remove"))}">
+        ${PROJECT_PRESENTATION_ASSETS.remove}
       </button>
     </div>`;
   }).join('');
@@ -490,10 +326,14 @@ function _mpRemove(index) {
 async function mpApplyFolders() {
   if (!_mpFolders.length) return;
   // Ensure we have an active conversation
-  if (!activeConvId) {
+  if (!ProjectPresentationShellState.activeConversationId) {
     const now = Date.now();
     const conv = {
-      id: generateId(), title: "New Chat",
+      /* Durable titles stay language-neutral; the localized 新对话 label is
+       * a display-only mapping (shell-localization.ts). Persisting the
+       * localized label here defeats the server's first-message title
+       * derivation (command_service only derives when title is empty). */
+      id: generateId(), title: 'New Chat',
       createdAt: now, updatedAt: now, projectPath: "",
       _localOnly: true,
     };
@@ -502,12 +342,12 @@ async function mpApplyFolders() {
      * a folder tab before clicking New Chat → project tool → send message. */
     const _curFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
     if (_curFolderId) conv.folderId = _curFolderId;
-    conversations.unshift(conv);
-    activeConvId = conv.id;
+    ProjectPresentationShellState.conversations.unshift(conv);
+    ProjectPresentationShellState.activeConversationId = conv.id;
     /* Persist the metadata shell locally. The first accepted Turn creates the
      * server conversation; settings changes before then must never PATCH an
      * object that does not exist at the storage authority. */
-    saveConversations(conv.id);
+    reconcileConversationCatalogMetadata(conv.id);
     renderConversationList();
   }
 
@@ -517,7 +357,11 @@ async function mpApplyFolders() {
   const readOnly = folders.filter(p => _mpReadOnly.has(p));
 
   // ── Optimistic apply: paint UI from typed paths and close the modal ──
-  const _prevProjectState = { ...projectState, extraRoots: (projectState.extraRoots || []).slice() };
+  const currentProjectState = ProjectPresentationShellState.projectState;
+  const _prevProjectState = {
+    ...currentProjectState,
+    extraRoots: (currentProjectState.extraRoots || []).slice(),
+  };
   _applyProjectData({
     path: primary,
     readOnly: _mpReadOnly.has(primary),
@@ -525,9 +369,6 @@ async function mpApplyFolders() {
     crossDC: null,
   });
   _saveConvProjectPath(primary, extras, readOnly);
-  for (const p of folders) {
-    if (p) saveRecentProject(p);
-  }
   closeProjectModal();
   const nExtras = extras.length;
   const nRO = readOnly.length;
@@ -542,14 +383,22 @@ async function mpApplyFolders() {
 
   // ── Reconcile with the server in the background ──
   try {
-    const resp = await Api.project.setPaths(folders, readOnly);
+    const resp = await Api.project.setPaths(folders, readOnly, folders);
     const data = resp ? await resp.json().catch(() => ({})) : {};
-    if (!resp || !resp.ok) throw new Error(data.error || "Failed");
+    if (!resp || !resp.ok) throw new Error(data.error || (typeof t === 'function' ? t('pm.applyFailed') : "Failed"));
     _applyProjectData(data);
     _saveConvProjectPath(data.path, _mpFolders.slice(1), readOnly);
+
+    if (typeof showToast === 'function') {
+      showToast(
+        typeof t === 'function' ? t('pm.appliedToast')
+          : 'Workspace updated. New messages and regenerated replies will use it.',
+        'success',
+      );
+    }
   } catch (e) {
     // Revert the optimistic state and reopen the modal so the user can fix it.
-    projectState = _prevProjectState;
+    ProjectPresentationShellState.projectState = _prevProjectState;
     _saveConvProjectPath(_prevProjectState.path || "",
                          (_prevProjectState.extraRoots || []).map(r => typeof r === 'string' ? r : r.path));
     _updateProjectUI();
@@ -571,12 +420,6 @@ async function mpApplyFolders() {
 }
 
 // ── Recent Project Paths (server-side persistence) ──
-
-function saveRecentProject(path) {
-  if (!path) return;
-  Api.project.recentSave(path)
-    .catch(e => debugLog(`[saveRecentProject] ${e.message}`, 'warn'));
-}
 
 let _recentProjects = [];
 let _recentFilter = "";
@@ -625,6 +468,7 @@ function _renderRecentList() {
   const countEl = document.getElementById("recentCount");
   const clearBtn = document.getElementById("recentSearchClear");
   if (!listEl) return;
+  const _t = (typeof t === "function") ? t : (k) => k;
   const q = _recentFilter.trim();
   const filtered = q
     ? _recentProjects.filter(
@@ -642,6 +486,14 @@ function _renderRecentList() {
   listEl.innerHTML = filtered
     .map((item) => {
       const name = _recentName(item.path);
+      if (item.exists === false) {
+        return `<div class="recent-path-item recent-path-missing" data-tofu-action="beginRelinkRecent('${escapeHtml(item.path)}')" title="${escapeHtml(_t("pm.recentMissingTitle", { path: item.path }))}">
+         <span class="recent-path-text">
+           <span class="recent-path-name">${_recentHighlight(name, q)}<span class="recent-missing-badge">${escapeHtml(_t("pm.recentMissing"))}</span></span>
+           <span class="recent-path-full">${_recentHighlight(item.path, q)}</span>
+         </span>
+       </div>`;
+      }
       return `<div class="recent-path-item" data-tofu-action="selectRecentProject('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
          <span class="recent-path-text">
            <span class="recent-path-name">${_recentHighlight(name, q)}</span>
@@ -670,6 +522,9 @@ function _clearRecentSearch() {
 
 function selectRecentProject(path) {
   if (!path) return;
+
+  const _entry = _recentProjects.find((entry) => entry && entry.path === path);
+  if (_entry && _entry.exists === false) { beginRelinkRecent(path); return; }
   // Add the recent project path into the multi-path list and apply
   if (!_mpFolders.includes(path)) {
     _mpFolders.push(path);
@@ -685,27 +540,133 @@ async function clearRecentProjects() {
   renderRecentProjects();
 }
 
-async function rescanProject() {
-  if (!projectState.active) return;
+// ── Project identity: git-root hint + rename relink ──
+// A subdirectory of a repo is usually NOT the workspace the user wants —
+// probe for the enclosing .git root and offer it. A stored recent path that
+// stopped resolving usually means the directory was renamed/moved — relink
+// re-keys the owner's aggregates instead of losing the project's history.
+
+let _gitRootHint = null;   // { forPath, gitRoot } — advisory, per staged add
+let _relinkOldPath = "";  // armed while the user locates the moved directory
+
+function _renderProjectModalHint() {
+  const el = document.getElementById("projectModalHint");
+  if (!el) return;
+  const _t = (typeof t === "function") ? t : (k) => k;
+  if (_relinkOldPath) {
+    el.innerHTML = `<div class="pm-hint pm-hint-relink">
+      <span class="pm-hint-text">${escapeHtml(_t("pm.relinkBanner", { path: _relinkOldPath }))}</span>
+      <button type="button" class="pm-hint-btn" data-tofu-action="cancelRelinkRecent()">${escapeHtml(_t("pm.relinkCancel"))}</button>
+    </div>`;
+    return;
+  }
+  if (_gitRootHint) {
+    el.innerHTML = `<div class="pm-hint pm-hint-gitroot">
+      <span class="pm-hint-text">${escapeHtml(_t("pm.gitRootHint", { root: _gitRootHint.gitRoot }))}</span>
+      <button type="button" class="pm-hint-btn pm-hint-btn-primary" data-tofu-action="useGitRootHint()">${escapeHtml(_t("pm.gitRootUse"))}</button>
+      <button type="button" class="pm-hint-btn" data-tofu-action="dismissGitRootHint()">${escapeHtml(_t("pm.gitRootDismiss"))}</button>
+    </div>`;
+    return;
+  }
+  el.innerHTML = "";
+}
+
+async function _checkGitRootHint(path) {
+  // Advisory probe: remote pseudo-paths and probe failures stay silent.
+  if (!path || path.indexOf("remote:") === 0) return;
+  if (typeof Api === "undefined" || !Api.project || !Api.project.gitRootHint) return;
   try {
-    const resp = await Api.project.rescan();
-    const data = resp ? await resp.json().catch(() => ({})) : {};
-    if (resp && resp.ok) {
-      _applyProjectData(data);
-      debugLog("Project refreshed", "success");
+    const data = await Api.project.gitRootHint(path);
+    const gitRoot = data && data.gitRoot;
+    // Stale guard: the staged folders may have changed while probing.
+    if (gitRoot && gitRoot !== path && _mpFolders.includes(path)
+        && !_mpFolders.includes(gitRoot)) {
+      _gitRootHint = { forPath: path, gitRoot: gitRoot };
+      _renderProjectModalHint();
+    }
+  } catch (_e) { /* advisory only */ }
+}
+
+function useGitRootHint() {
+  if (!_gitRootHint) return;
+  const forPath = _gitRootHint.forPath;
+  const gitRoot = _gitRootHint.gitRoot;
+  const idx = _mpFolders.indexOf(forPath);
+  if (idx >= 0) {
+    if (_mpFolders.includes(gitRoot)) _mpFolders.splice(idx, 1);
+    else _mpFolders[idx] = gitRoot;
+  }
+  _gitRootHint = null;
+  _mpRenderTags();
+  _renderProjectModalHint();
+  _renderBrowseList();
+}
+
+function dismissGitRootHint() {
+  _gitRootHint = null;
+  _renderProjectModalHint();
+}
+
+function beginRelinkRecent(path) {
+  if (!path) return;
+  _relinkOldPath = path;
+  _gitRootHint = null;
+  _renderProjectModalHint();
+  // Land the browser near the old location so the user can spot the
+  // renamed/moved directory, then arm the browser's + as the relink target.
+  const parts = String(path).split("/").filter(Boolean);
+  const parent = parts.length > 1 ? "/" + parts.slice(0, -1).join("/") : "~";
+  browseDirectory(parent);
+}
+
+function cancelRelinkRecent() {
+  _relinkOldPath = "";
+  _renderProjectModalHint();
+}
+
+async function _confirmRelinkRecent(newPath) {
+  const oldPath = _relinkOldPath;
+  if (!oldPath || !newPath || newPath === oldPath) { cancelRelinkRecent(); return; }
+  const _t = (typeof t === "function") ? t : (k) => k;
+  try {
+    const data = await Api.project.relinkRecent(oldPath, newPath);
+    if (!data) throw new Error(_t("pm.relinkFailed"));
+    _relinkOldPath = "";
+    _renderProjectModalHint();
+    if (typeof showToast === "function") {
+      showToast(_t("pm.relinkedToast", { path: newPath }), "success");
+    }
+    renderRecentProjects();
+    // The active workspace follows the move: swap the staged path and
+    // re-apply so the conversation's project pin stops pointing at the
+    // renamed location.
+    const cur = (typeof ProjectPresentationShellState !== "undefined")
+      ? ProjectPresentationShellState.projectState : null;
+    if (cur && cur.path === oldPath) {
+      const idx = _mpFolders.indexOf(oldPath);
+      if (idx >= 0) _mpFolders[idx] = newPath;
+      else _mpFolders.unshift(newPath);
+      mpApplyFolders();
+    } else {
+      _mpRenderTags();
     }
   } catch (e) {
-    debugLog("Rescan failed: " + e.message, "warn");
+    if (typeof showToast === "function") {
+      showToast((e && e.message) || _t("pm.relinkFailed"), "error");
+    }
   }
 }
 
 function _updateProjectModalStatus() {
   const el = document.getElementById("projectModalStatus");
   if (!el) return;
-  if (!projectState.active) { el.innerHTML = ""; return; }
+  if (!ProjectPresentationShellState.projectState.active) {
+    el.innerHTML = "";
+    return;
+  }
   const total = _mpFolders.length;
   el.innerHTML = `<div style="font-size:12px;color:#34d399;margin-bottom:12px">
-    ✓ ${total} folder${total > 1 ? 's' : ''} active
+    ${escapeHtml(typeof t === 'function' ? t('pm.foldersActive', { n: total }) : `${total} folder(s) active`)}
   </div>`;
 }
 
@@ -717,7 +678,14 @@ let _browseState = {
   path: "", dirs: [], parent: null, showHidden: false, truncated: false
 };
 const _projectBrowseCoordinator = createProjectBrowseCoordinator(function () {
-  return runtimeScope.sessionStorage || null;
+  return ProjectPresentationShellState.sessionStorage;
+});
+const _projectDirectoryBrowser = createProjectDirectoryBrowser({
+  escapeHtml: escapeHtml,
+  translate: function (key, values) {
+    return (typeof t === "function") ? t(key, values) : key;
+  },
+  assets: PROJECT_PRESENTATION_ASSETS,
 });
 
 function _applyBrowseData(data) {
@@ -736,6 +704,8 @@ async function browseDirectory(path) {
   const listEl = document.getElementById("browseList");
   if (!listEl) return;
   const requestedPath = String(path || "~");
+  if (_projectDirectoryBrowser.resetForNavigation(
+    _browseState.path, requestedPath)) _syncBrowseFilterUi(false);
   const showHidden = !!_browseState.showHidden;
   const load = _projectBrowseCoordinator.load(
     requestedPath,
@@ -750,7 +720,9 @@ async function browseDirectory(path) {
     _applyBrowseData(cached);
   } else {
     listEl.innerHTML =
-      '<div class="fb-state"><div class="fb-state-spinner"></div><span>Loading…</span></div>';
+      '<div class="fb-state"><div class="fb-state-spinner"></div><span>' +
+      escapeHtml(typeof t === 'function' ? t('common.loading') : 'Loading…') +
+      '</span></div>';
   }
   _renderRemoteDevicesSection();
   const outcome = await load.completion;
@@ -765,61 +737,10 @@ async function browseDirectory(path) {
   _applyBrowseData(outcome.data);
 }
 
-/* Render the browser's directory rows from _browseState (extracted seam —
-   the fetch path AND the optimistic delete-row repaint both ride it, so the
-   row HTML exists exactly once). */
 function _renderBrowseList() {
   const listEl = document.getElementById("browseList");
   if (!listEl) return;
-  if (_browseState.dirs.length === 0) {
-    listEl.innerHTML =
-      '<div class="fb-state"><span>No subdirectories' +
-      (_browseState.filesCount ? " · " + _browseState.filesCount + " files" : "") +
-      "</span></div>";
-    return;
-  }
-
-  const rows = _browseState.dirs
-      .map(function (d) {
-        var badge = d.hasCode
-          ? '<span class="folder-code-badge">code</span>'
-          : "";
-        var hidden = d.hidden ? " folder-hidden" : "";
-        var added = _mpFolders.includes(d.path) ? " folder-added" : "";
-        var items =
-          d.itemCount > 0
-            ? '<span class="folder-item-count">' +
-              (d.itemCount > 100 ? "100+" : d.itemCount) +
-              "</span>"
-            : "";
-        var safePath = d.path.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        var icon = d.hasCode
-          ? '<svg class="fi-folder" width="16" height="16" viewBox="0 0 24 24" fill="rgba(245,158,11,0.14)" stroke="#f59e0b" stroke-width="1.8" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
-          : '<svg class="fi-folder" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" opacity="0.55"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
-        var safeName = d.name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        return (
-          '<div class="folder-item' + hidden + added +
-          '" data-dir-path="' + escapeHtml(d.path) + '"' +
-          ' data-tofu-action="browseDirectory(\'' + safePath + '\')" title="Open ' + escapeHtml(d.name) + '">' +
-          '<span class="folder-icon">' + icon + "</span>" +
-          '<span class="folder-name">' + escapeHtml(d.name) + "</span>" +
-          badge + items +
-          '<button class="folder-del-btn" data-tofu-action="event.stopPropagation();mpDeleteFolder(\'' + safePath + '\',\'' + safeName + '\')" title="Delete folder">' +
-          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>' +
-          '</button>' +
-          '<button class="folder-add-btn" data-tofu-action="event.stopPropagation();mpAddBrowsedPath(\'' + safePath + '\')" title="Add to workspace">' +
-          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
-          '</button>' +
-          '<svg class="folder-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' +
-          "</div>"
-        );
-      })
-      .join("");
-  const truncation = _browseState.truncated
-    ? '<div class="fb-state"><span>Showing the first ' +
-      _browseState.dirs.length + ' folders</span></div>'
-    : '';
-  listEl.innerHTML = rows + truncation;
+  listEl.innerHTML = _projectDirectoryBrowser.render(_browseState, _mpFolders);
 }
 
 /* Render a clickable breadcrumb trail (VS Code style) for the current path.
@@ -836,7 +757,7 @@ function _renderBreadcrumb(path) {
     '<button class="pm-crumb pm-crumb-root" data-tofu-action="browseDirectory(\'' +
     rootPath.replace(/\\/g, "\\\\").replace(/'/g, "\\'") +
     '\')" title="' + escapeHtml(rootPath) + '">' +
-    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>' +
+    PROJECT_PRESENTATION_ASSETS.home +
     '</button>'
   );
   let walk = isAbs ? "" : parts[0] || "";
@@ -861,10 +782,14 @@ function _renderBreadcrumb(path) {
 /* Add a folder shown in the browser straight into the workspace list.
    Re-renders the current directory so the row's "added" state updates. */
 function mpAddBrowsedPath(path) {
-  if (path && !_mpFolders.includes(path)) {
+  if (!path) return;
+  // Relink mode armed: the browser's + names the moved directory's new home.
+  if (_relinkOldPath) { _confirmRelinkRecent(path); return; }
+  if (!_mpFolders.includes(path)) {
     _mpFolders.push(path);
     _mpRenderTags();
     _renderBrowseList();
+    _checkGitRootHint(path);
   }
 }
 
@@ -924,8 +849,32 @@ function browseParent() {
   if (_browseState.parent) browseDirectory(_browseState.parent);
 }
 
+function _syncBrowseFilterUi(focusInput) {
+  const filter = _projectDirectoryBrowser.filterValue();
+  const input = document.getElementById("browseSearchInput");
+  if (input) {
+    input.value = filter;
+    if (focusInput) input.focus();
+  }
+  const clear = document.getElementById("browseSearchClear");
+  if (clear) clear.hidden = !filter;
+}
+
+function _filterBrowseDirs(value) {
+  _projectDirectoryBrowser.setFilter(value);
+  _syncBrowseFilterUi(false);
+  _renderBrowseList();
+}
+
+function _clearBrowseSearch() {
+  _projectDirectoryBrowser.clearFilter();
+  _syncBrowseFilterUi(true);
+  _renderBrowseList();
+}
+
 /* Create a new sub-folder inside the directory the browser is currently
-   showing, then refresh so the new folder appears in the list. */
+   showing, then navigate straight into it (owner directive 2026-08-31) —
+   the parent listing is still invalidated so going back up shows it. */
 async function mpNewFolder() {
   const parent = _browseState.path;
   if (!parent) return;
@@ -943,7 +892,7 @@ async function mpNewFolder() {
     if (resp && resp.ok && data.ok) {
       if (typeof showToast === 'function') showToast(t('folder.created'), 'success');
       _projectBrowseCoordinator.invalidate(parent);
-      browseDirectory(parent);
+      browseDirectory(data.path || (parent.replace(/\/+$/, "") + "/" + clean));
     } else {
       await showAlert((data && data.error) || t('folder.createFailed'),
         { title: t('folder.createFailed') });
@@ -1004,7 +953,9 @@ function toggleHiddenDirs() {
   _browseState.showHidden = !_browseState.showHidden;
   var btn = document.getElementById("browseHiddenBtn");
   btn.classList.toggle("active", _browseState.showHidden);
-  btn.title = _browseState.showHidden ? "Hide hidden dirs" : "Show hidden dirs";
+  btn.title = _browseState.showHidden
+    ? (typeof t === 'function' ? t('pm.hideHidden') : "Hide hidden dirs")
+    : (typeof t === 'function' ? t('pm.showHidden') : "Show hidden dirs");
   browseDirectory(_browseState.path);
 }
 
@@ -1021,136 +972,6 @@ function selectBrowsedFolder() {
   }
   input.value = "";
 }
-
-// ══════════════════════════════════════════════════════
-//  Apply Code to File
-// ══════════════════════════════════════════════════════
-
-let _applyPendingCode = "";
-
-function openApplyModal(btn) {
-  if (!projectState.active) {
-    debugLog("No project set — cannot apply code", "warn");
-    return;
-  }
-  var pre = btn.closest("pre");
-  var code = pre.querySelector("code");
-  if (!code) return;
-  _applyPendingCode = code.textContent;
-
-  var detectedPath = _detectFilePath(pre, code);
-  document.getElementById("applyFilePath").value = detectedPath || "";
-
-  var lines = _applyPendingCode.split("\n");
-  var preview =
-    lines.length > 20
-      ? lines.slice(0, 10).join("\n") +
-        "\n  … (" +
-        (lines.length - 20) +
-        " more lines) …\n" +
-        lines.slice(-10).join("\n")
-      : _applyPendingCode;
-  document.getElementById("applyPreview").innerHTML =
-    '<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:4px">' +
-    lines.length +
-    " lines · " +
-    _applyPendingCode.length.toLocaleString() +
-    " chars</div>" +
-    '<pre style="max-height:300px;overflow:auto;font-size:12px;padding:8px;background:var(--bg-primary);border-radius:6px;margin:0"><code>' +
-    escapeHtml(preview) +
-    "</code></pre>";
-
-  document.getElementById("applyStatus").innerHTML = "";
-  document.getElementById("applyConfirmBtn").disabled = false;
-  document.getElementById("applyConfirmBtn").textContent = "Write File";
-  document.getElementById("applyModal").classList.add("open");
-  setTimeout(function () {
-    document.getElementById("applyFilePath").focus();
-  }, 100);
-}
-
-function closeApplyModal() {
-  document.getElementById("applyModal").classList.remove("open");
-  _applyPendingCode = "";
-}
-
-function _detectFilePath(preEl, codeEl) {
-  var firstLine = (codeEl.textContent || "").split("\n")[0] || "";
-  var fileCommentMatch = firstLine.match(
-    /^(?:#|\/\/|\/\*|<!--)\s*(?:file|path|filename):\s*(.+?)(?:\s*(?:\*\/|-->))?$/i,
-  );
-  if (fileCommentMatch) return fileCommentMatch[1].trim();
-  var node = preEl.previousElementSibling;
-  for (var i = 0; i < 3 && node; i++) {
-    var text = node.textContent || "";
-    var pathMatch = text.match(/`([^`]+\.\w{1,10})`\s*[:：]?\s*$/);
-    if (
-      pathMatch &&
-      (pathMatch[1].indexOf("/") >= 0 || pathMatch[1].indexOf(".") >= 0)
-    ) {
-      return pathMatch[1];
-    }
-    var fileMatch = text.match(
-      /(?:file|文件)[：:]\s*[`"']?([^\s`"']+\.\w{1,10})/i,
-    );
-    if (fileMatch) return fileMatch[1];
-    node = node.previousElementSibling;
-  }
-  return "";
-}
-
-async function confirmApplyCode() {
-  var path = document.getElementById("applyFilePath").value.trim();
-  if (!path) {
-    document.getElementById("applyStatus").innerHTML =
-      '<div style="color:var(--error-text);font-size:12px;margin-top:8px">Please enter a file path</div>';
-    return;
-  }
-  if (!_applyPendingCode) return;
-
-  var btn = document.getElementById("applyConfirmBtn");
-  btn.disabled = true;
-  btn.textContent = "Writing…";
-  document.getElementById("applyStatus").innerHTML = "";
-
-  try {
-    var data = await Api.project.write(path, _applyPendingCode);
-    if (data && data.ok) {
-      var action = data.created ? "Created" : "Updated";
-      document.getElementById("applyStatus").innerHTML =
-        '<div style="color:#34d399;font-size:12px;margin-top:8px">' +
-        action +
-        ": " +
-        escapeHtml(data.path) +
-        " (" +
-        data.lines +
-        " lines)</div>";
-      debugLog(
-        "Applied code to " +
-          data.path +
-          " (" +
-          data.lines +
-          " lines, " +
-          (data.created ? "created" : "updated") +
-          ")",
-        "success",
-      );
-      setTimeout(function () {
-        closeApplyModal();
-      }, 1200);
-    } else {
-      throw new Error(data.error || "Write failed");
-    }
-  } catch (e) {
-    document.getElementById("applyStatus").innerHTML =
-      '<div style="color:var(--error-text);font-size:12px;margin-top:8px">' +
-      escapeHtml(e.message) +
-      "</div>";
-    btn.disabled = false;
-    btn.textContent = "Write File";
-  }
-}
-
 
 /* ═══════════════════════════════════════════════════════
    Drag-and-drop files INTO a project folder (folder browser)
@@ -1181,15 +1002,16 @@ function _clearFolderDropHighlight() {
     .forEach(function (r) { r.classList.remove('fb-drop-row'); });
 }
 
-/** Attached workspace roots (single source of truth: projectState). A drop is
+/** Attached workspace roots (single source of truth: live Project state). A drop is
  *  only accepted inside one of these — the backend save_uploaded_file refuses
  *  anything else, so we mirror that guard client-side for a clear, proactive
  *  message instead of a generic post-hoc "failed to save". */
 function _attachedRootPaths() {
   var roots = [];
-  if (typeof projectState !== 'undefined' && projectState) {
-    if (projectState.path) roots.push(projectState.path);
-    (projectState.extraRoots || []).forEach(function (r) {
+  const currentProjectState = ProjectPresentationShellState.projectState;
+  if (currentProjectState) {
+    if (currentProjectState.path) roots.push(currentProjectState.path);
+    (currentProjectState.extraRoots || []).forEach(function (r) {
       var p = typeof r === 'string' ? r : (r && r.path);
       if (p) roots.push(p);
     });
@@ -1266,9 +1088,12 @@ async function _addDropDirAsRoot(dir) {
   var folders = _attachedRootPaths().slice();
   if (folders.indexOf(dir) === -1) folders.push(dir);
   var readOnly = [];
-  if (typeof projectState !== 'undefined' && projectState) {
-    if (projectState.readOnly && projectState.path) readOnly.push(projectState.path);
-    (projectState.extraRoots || []).forEach(function (r) {
+  const currentProjectState = ProjectPresentationShellState.projectState;
+  if (currentProjectState) {
+    if (currentProjectState.readOnly && currentProjectState.path) {
+      readOnly.push(currentProjectState.path);
+    }
+    (currentProjectState.extraRoots || []).forEach(function (r) {
       if (r && typeof r === 'object' && r.readOnly && r.path) readOnly.push(r.path);
     });
   }

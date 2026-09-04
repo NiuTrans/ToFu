@@ -14,6 +14,7 @@ import json
 import os
 import re
 import stat
+import threading
 import time
 
 import pytest
@@ -322,6 +323,11 @@ def _fake_media(monkeypatch):
         'lib.motion_video.mux_audio_video',
         lambda v, a, output, **kw: _touch(output) or {
             'ok': True, 'output': output, 'duration': 8.0, 'elapsed': 0.1})
+    # Engine concurrency tests exercise the scheduling boundary, not network
+    # installation of the shared craft/font dependencies.
+    monkeypatch.setattr(
+        'lib.motion_video._scene_author.prepare_parallel_author_dependencies',
+        lambda **kwargs: True)
 
 
 def _touch(path):
@@ -750,6 +756,282 @@ def test_engine_compose_passes_task_model_to_author(monkeypatch, tmp_path):
     run_motion_task(task)
     assert task['status'] == 'done', task.get('error')
     assert captured.get('model') == 'm-alpha'
+
+
+def test_engine_reuses_one_lazy_author_prompt_context(monkeypatch, tmp_path):
+    """Every authored scene in one film shares one immutable guide prefix."""
+    from lib.motion_video.engine import run_motion_task
+    from lib.motion_video._template import render_scene_html
+
+    _fake_media(monkeypatch)
+    monkeypatch.setattr('lib.motion_video.engine._scene_gate_findings',
+                        lambda *a, **k: [])
+    context = object()
+    prepared = []
+    received = []
+
+    def fake_prepare(**kwargs):
+        prepared.append(kwargs)
+        return context
+
+    def fake_author(sc, scene_dir, **kwargs):
+        received.append(kwargs.get('prompt_context'))
+        return {
+            'ok': True,
+            'html': render_scene_html(
+                sc, width=kwargs['width'], height=kwargs['height'],
+                duration=kwargs['duration'], scene_index=kwargs['scene_index'],
+                total_scenes=kwargs['total_scenes']),
+            'mode': 'authored', 'rounds': 1, 'tokens': 10, 'detail': '',
+        }
+
+    monkeypatch.setattr(
+        'lib.motion_video._scene_author.prepare_author_prompt_context',
+        fake_prepare)
+    monkeypatch.setattr('lib.motion_video._scene_author.author_scene',
+                        fake_author)
+    scenes = [
+        {'id': 'scene-001', 'start': 0.0, 'end': 3.0, 'text': '一。'},
+        {'id': 'scene-002', 'start': 3.0, 'end': 6.0, 'text': '二。'},
+    ]
+    task = _scenes_only_task(tmp_path, scenes)
+    task['scene_author'] = True
+
+    run_motion_task(task)
+
+    assert task['status'] == 'done', task.get('error')
+    assert prepared == [
+        {'width': 1080, 'height': 1440, 'total_scenes': 2},
+    ]
+    assert received == [context, context]
+
+
+def test_scene_author_worker_limit_respects_the_tighter_image_budget(
+        monkeypatch):
+    from lib.motion_video import engine
+
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_FANOUT', '2')
+    monkeypatch.setenv('TOFU_PRODUCTION_IMAGE_FANOUT', '1')
+
+    assert engine._scene_author_worker_limit() == 1
+
+
+def test_scene_author_window_is_work_conserving_and_commits_on_caller_thread():
+    from lib.motion_video import engine
+
+    caller_thread = threading.get_ident()
+    third_started = threading.Event()
+    accepted = []
+
+    def run_author(job):
+        if job['index'] == 1:
+            assert third_started.wait(2), (
+                'a completed sibling did not admit the third scene while '
+                'the first scene was still running')
+        elif job['index'] == 3:
+            third_started.set()
+        return {'index': job['index']}
+
+    def accept_result(job, result):
+        accepted.append((job['index'], result['index'],
+                         threading.get_ident()))
+
+    aborted = engine._run_bounded_scene_authors(
+        [{'index': 1}, {'index': 2}, {'index': 3}], max_workers=2,
+        run_author=run_author, accept_result=accept_result,
+        abort_check=lambda: False)
+
+    assert aborted is False
+    assert sorted((job, result) for job, result, _thread in accepted) == [
+        (1, 1), (2, 2), (3, 3),
+    ]
+    assert {thread for _job, _result, thread in accepted} == {caller_thread}
+
+
+def test_engine_scene_authors_use_bounded_two_worker_window(
+        monkeypatch, tmp_path):
+    from lib.motion_video.engine import run_motion_task
+    from lib.motion_video._template import render_scene_html
+
+    _fake_media(monkeypatch)
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_FANOUT', '2')
+    monkeypatch.setenv('TOFU_PRODUCTION_IMAGE_FANOUT', '2')
+    monkeypatch.setattr('lib.motion_video.engine._scene_gate_findings',
+                        lambda *a, **k: [])
+    lock = threading.Lock()
+    release = threading.Event()
+    state = {'active': 0, 'peak': 0, 'started': []}
+
+    def fake_author(sc, scene_dir, **kwargs):
+        with lock:
+            state['active'] += 1
+            state['peak'] = max(state['peak'], state['active'])
+            state['started'].append(sc['id'])
+            if len(state['started']) >= 2:
+                release.set()
+        assert release.wait(2), 'a second author was never admitted'
+        time.sleep(0.02)
+        try:
+            return {
+                'ok': True,
+                'html': render_scene_html(
+                    sc, width=kwargs['width'], height=kwargs['height'],
+                    duration=kwargs['duration'],
+                    scene_index=kwargs['scene_index'],
+                    total_scenes=kwargs['total_scenes']),
+                'mode': 'authored', 'rounds': 1, 'tokens': 10,
+                'craft_reads': [], 'detail': '',
+            }
+        finally:
+            with lock:
+                state['active'] -= 1
+
+    monkeypatch.setattr('lib.motion_video._scene_author.author_scene',
+                        fake_author)
+    scenes = [
+        {'id': f'scene-{index:03d}', 'start': float(index - 1) * 3,
+         'end': float(index) * 3, 'text': f'{index}。'}
+        for index in range(1, 5)
+    ]
+    task = _scenes_only_task(tmp_path, scenes)
+    task['scene_author'] = True
+
+    run_motion_task(task)
+
+    assert task['status'] == 'done', task.get('error')
+    assert state['peak'] == 2
+    assert sorted(state['started']) == [scene['id'] for scene in scenes]
+
+
+def test_unready_shared_dependencies_force_serial_scene_authors(
+        monkeypatch, tmp_path):
+    from lib.motion_video.engine import run_motion_task
+    from lib.motion_video._template import render_scene_html
+
+    _fake_media(monkeypatch)
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_FANOUT', '2')
+    monkeypatch.setenv('TOFU_PRODUCTION_IMAGE_FANOUT', '2')
+    monkeypatch.setattr(
+        'lib.motion_video._scene_author.prepare_parallel_author_dependencies',
+        lambda **kwargs: False)
+    monkeypatch.setattr('lib.motion_video.engine._scene_gate_findings',
+                        lambda *a, **k: [])
+    lock = threading.Lock()
+    state = {'active': 0, 'peak': 0}
+
+    def fake_author(sc, scene_dir, **kwargs):
+        with lock:
+            state['active'] += 1
+            state['peak'] = max(state['peak'], state['active'])
+        time.sleep(0.03)
+        try:
+            return {
+                'ok': True,
+                'html': render_scene_html(
+                    sc, width=kwargs['width'], height=kwargs['height'],
+                    duration=kwargs['duration'],
+                    scene_index=kwargs['scene_index'],
+                    total_scenes=kwargs['total_scenes']),
+                'mode': 'authored', 'rounds': 1, 'tokens': 10,
+                'craft_reads': [], 'detail': '',
+            }
+        finally:
+            with lock:
+                state['active'] -= 1
+
+    monkeypatch.setattr('lib.motion_video._scene_author.author_scene',
+                        fake_author)
+    scenes = [
+        {'id': f'scene-{index:03d}', 'start': float(index - 1) * 3,
+         'end': float(index) * 3, 'text': f'{index}。'}
+        for index in range(1, 4)
+    ]
+    task = _scenes_only_task(tmp_path, scenes)
+    task['scene_author'] = True
+
+    run_motion_task(task)
+
+    assert task['status'] == 'done', task.get('error')
+    assert state['peak'] == 1
+
+
+def test_scene_author_abort_stops_queued_admission(monkeypatch, tmp_path):
+    from lib.motion_video.engine import run_motion_task
+    from lib.motion_video._template import render_scene_html
+
+    _fake_media(monkeypatch)
+    monkeypatch.setenv('TOFU_PRODUCTION_LLM_FANOUT', '2')
+    monkeypatch.setenv('TOFU_PRODUCTION_IMAGE_FANOUT', '2')
+    calls = []
+    lock = threading.Lock()
+    both_started = threading.Event()
+    scenes = [
+        {'id': f'scene-{index:03d}', 'start': float(index - 1) * 3,
+         'end': float(index) * 3, 'text': f'{index}。'}
+        for index in range(1, 5)
+    ]
+    task = _scenes_only_task(tmp_path, scenes)
+    task['scene_author'] = True
+
+    def aborting_author(sc, scene_dir, **kwargs):
+        with lock:
+            calls.append(sc['id'])
+            if len(calls) == 2:
+                task['abort_event'].set()
+                both_started.set()
+        assert both_started.wait(2)
+        return {
+            'ok': True,
+            'html': render_scene_html(
+                sc, width=kwargs['width'], height=kwargs['height'],
+                duration=kwargs['duration'], scene_index=kwargs['scene_index'],
+                total_scenes=kwargs['total_scenes']),
+            'mode': 'template', 'rounds': 1, 'tokens': 0,
+            'craft_reads': [], 'detail': 'aborted',
+        }
+
+    monkeypatch.setattr('lib.motion_video._scene_author.author_scene',
+                        aborting_author)
+
+    run_motion_task(task)
+
+    assert sorted(calls) == ['scene-001', 'scene-002']
+    assert not list((tmp_path / 'job' / 'scenes').glob('*/index.html'))
+
+
+def test_engine_stops_before_commit_or_render_after_author_abort(
+        monkeypatch, tmp_path):
+    """A Stop landing in author dispatch must not spend post-author work."""
+    from lib.motion_video.engine import run_motion_task
+    from lib.motion_video._template import render_scene_html
+
+    _fake_media(monkeypatch)
+    render_calls = []
+    monkeypatch.setattr(
+        'lib.motion_video.render_project',
+        lambda *args, **kwargs: render_calls.append(args))
+    scenes = [{'id': 'scene-001', 'start': 0.0, 'end': 3.0, 'text': '一。'}]
+    task = _scenes_only_task(tmp_path, scenes)
+    task['scene_author'] = True
+
+    def aborting_author(sc, scene_dir, **kwargs):
+        task['abort_event'].set()
+        return {
+            'ok': True,
+            'html': render_scene_html(
+                sc, width=1080, height=1440, duration=3.0,
+                scene_index=1, total_scenes=1),
+            'mode': 'template', 'rounds': 1, 'tokens': 0,
+            'craft_reads': [], 'detail': 'aborted',
+        }
+
+    monkeypatch.setattr(
+        'lib.motion_video._scene_author.author_scene', aborting_author)
+    run_motion_task(task)
+
+    assert render_calls == []
+    assert not os.path.exists(
+        os.path.join(task['workdir'], 'scenes', 'scene-001', 'index.html'))
 
 
 def test_paper_video_lookup(flask_client):

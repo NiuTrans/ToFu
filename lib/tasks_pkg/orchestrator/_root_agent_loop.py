@@ -5,7 +5,7 @@ Responsibility
 The shared runner owns the ReAct lifecycle: round numbering, all loop control
 sites, abort placements, timeout counting, and checkpoint placement.  This
 module supplies only root-chat policy and wire projections (request assembly,
-stream analysis, task budgets, tool events, and semantic progress guards).
+stream analysis, tool events, and semantic progress guards).
 
 Entry point
 -----------
@@ -28,6 +28,7 @@ from lib.agent_loop import (
     run_agent_loop,
 )
 from lib.llm.stream_result import ProviderStreamResult
+from lib.log import get_logger
 from lib.tasks_pkg.orchestrator._abort_before_tools import (
     handle_abort_before_tools,
 )
@@ -42,10 +43,6 @@ from lib.tasks_pkg.orchestrator._llm_round_call import (
 )
 from lib.tasks_pkg.orchestrator._round_checkpoint import (
     run_round_checkpoint_and_close,
-)
-from lib.tasks_pkg.orchestrator._round_gates import (
-    check_round_gates,
-    check_task_resource_budget,
 )
 from lib.tasks_pkg.orchestrator._round_message_hygiene import (
     run_round_message_hygiene,
@@ -65,14 +62,16 @@ from lib.tasks_pkg.orchestrator._tool_call_prelude import (
 )
 from lib.tasks_pkg.orchestrator._tool_dispatch_round import run_tool_dispatch
 from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
+    finish_after_background_task_acceptance,
     handle_tool_loop_circuit_breaker,
 )
 from lib.tasks_pkg.orchestrator._tool_timeout_breaker import (
     handle_tool_timeout_circuit_breaker,
 )
-from lib.task_budget import resolve_task_budget_config
 
 __all__ = ['RootLoopRequest', 'RootLoopResult', 'run_root_agent_loop']
+
+logger = get_logger(__name__)
 
 _MAX_CONSECUTIVE_TOOL_TIMEOUTS = 3
 
@@ -114,6 +113,10 @@ class _RootLoopHooks:
         self.premature_retry_count = 0
         self.prepared_tool_round = -1
         self.round_context: dict[str, Any] = {}
+        self._admission_tool_schema_source: Any = None
+        self._admission_tool_schema_model = ''
+        self._admission_tool_schema_tokens: int | None = None
+        self._admission_tool_schema_fingerprint = ''
 
     @property
     def task(self) -> dict[str, Any]:
@@ -127,14 +130,6 @@ class _RootLoopHooks:
     def messages(self) -> list[dict[str, Any]]:
         return self.request.messages
 
-    def before_round(self, round_num: int) -> str | None:
-        self.round_num = round_num
-        if check_task_resource_budget(
-                self.task, self.state, round_num=round_num,
-                cfg=self.request.cfg, messages=self.messages):
-            return self.state.exit_reason
-        return None
-
     def dispatch(
         self,
         round_num: int,
@@ -144,24 +139,64 @@ class _RootLoopHooks:
         request = self.request
         state = self.state
         emit_round_open(self.task, state, round_num)
-        try:
-            remaining_api_rounds = max(
-                0,
-                int(request.cfg.get('maxApiRounds') or 0)
-                - len(state.api_rounds),
-            )
-        except (TypeError, ValueError, OverflowError):
-            remaining_api_rounds = None
         run_round_message_hygiene(
             self.task, self.messages,
             round_num=round_num, tid=request.tid,
+            model=state.model,
             project_path=request.project_path,
             project_enabled=request.project_enabled,
-            remaining_api_rounds=remaining_api_rounds,
         )
         drain_and_inject_inbox(
             task=self.task, messages=self.messages,
             round_num=round_num, tid=request.tid)
+
+        # Final fail-closed boundary: inbox/tool-surface injections happen
+        # after the ordinary compaction pipeline, so measure the complete
+        # provider prompt here before constructing or dispatching the body.
+        from lib.tasks_pkg.compaction._prompt_admission import (
+            enforce_dispatch_prompt_limit,
+        )
+        from lib.context_telemetry import (
+            TOOL_SCHEMA_EVIDENCE_KEY,
+            tool_schema_fingerprint_from_evidence,
+            validated_tool_schema_token_count,
+        )
+        from lib.token_counter.base import (
+            REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY,
+        )
+        reusable_schema_evidence = (
+            round_tools is self._admission_tool_schema_source
+            and state.model == self._admission_tool_schema_model
+        )
+        reusable_schema_tokens = (
+            self._admission_tool_schema_tokens
+            if reusable_schema_evidence else None)
+        reusable_schema_fingerprint = (
+            self._admission_tool_schema_fingerprint
+            if reusable_schema_evidence else None)
+        prompt_admission = enforce_dispatch_prompt_limit(
+            self.messages,
+            round_tools,
+            self.task,
+            round_num=round_num,
+            model=state.model,
+            precomputed_tool_schema_tokens=reusable_schema_tokens,
+        )
+        measured_schema_tokens = validated_tool_schema_token_count(
+            round_tools, prompt_admission.get('toolSchemaTokens'))
+        if measured_schema_tokens is not None:
+            if not reusable_schema_evidence:
+                self._admission_tool_schema_fingerprint = ''
+            self._admission_tool_schema_source = round_tools
+            self._admission_tool_schema_model = state.model
+            self._admission_tool_schema_tokens = measured_schema_tokens
+        else:
+            self._admission_tool_schema_source = None
+            self._admission_tool_schema_model = ''
+            self._admission_tool_schema_tokens = None
+            self._admission_tool_schema_fingerprint = ''
+        # Pop the identity map into this one synchronous call: it must not live
+        # in admission evidence or survive body preparation into the stream.
         tools_this_round, body = build_round_request(
             self.task, state, self.messages, round_tools,
             round_num=round_num, tid=request.tid,
@@ -169,6 +204,12 @@ class _RootLoopHooks:
             temperature=request.temperature,
             max_tokens=request.max_tokens,
             response_format=request.response_format,
+            admitted_input_tokens=prompt_admission.get('totalTokens'),
+            admitted_tool_schema_tokens=prompt_admission.get(
+                'toolSchemaTokens'),
+            admitted_tool_schema_fingerprint=reusable_schema_fingerprint,
+            reusable_text_token_counts_by_identity=prompt_admission.pop(
+                REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY, None),
         )
         stream_accumulator = build_stream_accumulator(
             self.task, state, request.cfg, round_num,
@@ -178,23 +219,37 @@ class _RootLoopHooks:
             'stream_accumulator': stream_accumulator,
             'llm_action': 'proceed',
         }
-        llm_action = run_llm_call_with_fallback(
-            self.task, state, body, self.messages, round_tools,
-            stream_accumulator,
-            round_num=round_num, tid=request.tid,
-            max_tokens=request.max_tokens)
-        self.round_context['llm_action'] = llm_action
-        if llm_action != 'break':
-            stamp_round_cache_accounting(
-                self.task,
-                round_num=round_num, tid=request.tid, model=state.model,
-                tools=tools_this_round, usage=state.last_usage,
-                assistant_msg=state.assistant_msg,
-                api_rounds=state.api_rounds, messages=self.messages,
-            )
-            settle_stream_accumulator(
-                stream_accumulator, self.task, state,
-                tid=request.tid, round_num=round_num)
+        try:
+            llm_action = run_llm_call_with_fallback(
+                self.task, state, body, self.messages, round_tools,
+                stream_accumulator,
+                round_num=round_num, tid=request.tid,
+                max_tokens=request.max_tokens)
+            measured_schema_fingerprint = (
+                tool_schema_fingerprint_from_evidence(
+                    body.get(TOOL_SCHEMA_EVIDENCE_KEY)))
+            if (measured_schema_fingerprint
+                    and round_tools is self._admission_tool_schema_source
+                    and state.model == self._admission_tool_schema_model):
+                self._admission_tool_schema_fingerprint = (
+                    measured_schema_fingerprint)
+            self.round_context['llm_action'] = llm_action
+            if llm_action != 'break':
+                stamp_round_cache_accounting(
+                    self.task,
+                    round_num=round_num, tid=request.tid, model=state.model,
+                    tools=tools_this_round, usage=state.last_usage,
+                    assistant_msg=state.assistant_msg,
+                    api_rounds=state.api_rounds, messages=self.messages,
+                )
+                settle_stream_accumulator(
+                    stream_accumulator, self.task, state,
+                    tid=request.tid, round_num=round_num)
+        finally:
+            # Normal cache injection closes after harvesting. Provider break,
+            # abort, and exception paths skip that seam, so reclaim their
+            # bounded speculative queue here without masking the root error.
+            stream_accumulator.close(cancel_futures=True, wait=False)
         stream_result = getattr(state, 'last_stream_result', None)
         if isinstance(stream_result, ProviderStreamResult):
             return stream_result
@@ -232,16 +287,17 @@ class _RootLoopHooks:
             return LoopDirective.stop(state.exit_reason)
         if stream_action == 'continue':
             return LoopDirective.continue_round()
+        _round_content = len(
+            (state.assistant_msg or {}).get('content', '') or '')
+        _round_tcs = len((state.assistant_msg or {}).get('tool_calls', []))
+        logger.info(
+            '[%s] conv=%s Round %d result: finish_reason=%s model=%s '
+            'content=%dchars tool_calls=%d → proceeding to tool execution',
+            request.tid, self.task.get('convId', ''), round_num + 1,
+            state.last_finish_reason, state.model,
+            _round_content, _round_tcs)
         if stream_action == 'program_continue':
-            if check_round_gates(
-                    self.task, state, round_num=round_num,
-                    tid=request.tid, cfg=request.cfg):
-                return LoopDirective.halt(state.exit_reason)
             return LoopDirective.continue_round()
-        if check_round_gates(
-                self.task, state, round_num=round_num,
-                tid=request.tid, cfg=request.cfg):
-            return LoopDirective.halt(state.exit_reason)
         return LoopDirective.proceed()
 
     def open_tool_round(self, round_num: int, _message: dict) -> None:
@@ -303,6 +359,10 @@ class _RootLoopHooks:
         _message: dict,
         _note: dict | None,
     ) -> LoopDirective | None:
+        if finish_after_background_task_acceptance(
+                self.task, self.state, round_num=round_num,
+                tid=self.request.tid):
+            return LoopDirective.halt(self.state.exit_reason)
         if handle_tool_loop_circuit_breaker(
                 self.task, self.state, messages=self.messages,
                 round_num=round_num, tid=self.request.tid):
@@ -337,7 +397,6 @@ class _RootLoopHooks:
 
 def run_root_agent_loop(request: RootLoopRequest) -> RootLoopResult:
     """Run the root chat/tool lifecycle on the shared agent-loop chassis."""
-    request.cfg = resolve_task_budget_config(request.cfg)
     hooks = _RootLoopHooks(request)
     outcome = run_agent_loop(
         abort=AbortSignal.from_task_flag(request.task),
@@ -350,7 +409,6 @@ def run_root_agent_loop(request: RootLoopRequest) -> RootLoopResult:
         max_consecutive_tool_timeouts=_MAX_CONSECUTIVE_TOOL_TIMEOUTS,
         on_tool_timeout_state=hooks.observe_timeout_state,
         after_tools=hooks.after_tools,
-        before_round=hooks.before_round,
         on_round_end=hooks.close_round,
         on_abort=hooks.observe_abort,
     )

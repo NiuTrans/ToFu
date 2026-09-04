@@ -1,15 +1,14 @@
 """Storage-free public composition of Tofu's production agent kernel.
 
 ``AgentRuntime`` creates normal orchestrator tasks with a structured principal,
-but marks them transient before the first event. The full app and this package
-therefore share one agent loop while database, billing, frontend, and route
-modules stay outside the embed/headless lifecycle.
+but marks them transient before the first event.  Its in-memory repository
+implements the same model-routing v2 authority used by the full application;
+only durable storage, billing, and the full Tofu lifecycle remain outside.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 import uuid
@@ -31,7 +30,7 @@ from tofu_agent.models import (
     AgentRequest,
     AgentResult,
     AgentTimeoutError,
-    ProviderConfig,
+    ModelRoutingConfig,
 )
 
 logger = get_logger(__name__)
@@ -281,7 +280,7 @@ class AgentExecution:
 
 
 class AgentRuntime:
-    """Embeddable Tofu runtime with no database or ChatUI frontend lifecycle.
+    """Embeddable Tofu runtime with no database or full Tofu frontend lifecycle.
 
     Use :meth:`local` for the personal composition. Enterprise adapters should
     construct the class with an authenticated :class:`PrincipalContext`.
@@ -291,26 +290,22 @@ class AgentRuntime:
         self,
         *,
         principal: PrincipalContext,
-        provider: ProviderConfig | Mapping[str, Any] | None = None,
-        provider_source: str = 'runtime',
-        default_model: str = '',
+        model_routing: ModelRoutingConfig | Mapping[str, Any] | None = None,
+        model_routing_source: str = 'runtime',
         max_inflight: int = 4,
         max_retained_runs: int = 1024,
     ) -> None:
         if not isinstance(principal, PrincipalContext):
             raise TypeError('AgentRuntime principal must be PrincipalContext')
         principal.require_owner(context='AgentRuntime')
-        if provider is not None and not isinstance(provider, ProviderConfig):
-            provider = ProviderConfig.from_mapping(provider)
+        if model_routing is not None and not isinstance(
+                model_routing, ModelRoutingConfig):
+            model_routing = ModelRoutingConfig.from_mapping(model_routing)
         self.principal = principal
-        self.provider = provider
-        self.provider_source = str(provider_source or 'runtime')
-        self.default_model = str(
-            default_model
-            or (provider.model if provider else '')
-            or os.environ.get('TOFU_AGENT_MODEL', '')
-            or os.environ.get('LLM_MODEL', '')
-        ).strip()
+        self.model_routing = model_routing
+        self.model_routing_source = str(model_routing_source or 'runtime')
+        self.default_model = (
+            dict(model_routing.model) if model_routing is not None else None)
         self._gate = _CapacityGate(max_inflight)
         self._max_retained_runs = max(16, int(max_retained_runs))
         self._executions: dict[str, AgentExecution] = {}
@@ -322,16 +317,15 @@ class AgentRuntime:
     def local(
         cls,
         *,
-        provider: ProviderConfig | Mapping[str, Any] | None = None,
-        provider_source: str = 'runtime',
+        model_routing: ModelRoutingConfig | Mapping[str, Any] | None = None,
+        model_routing_source: str = 'runtime',
         owner_user_id: int = PERSONAL_USER_ID,
         subject_id: str = 'local:developer',
-        default_model: str = '',
         max_inflight: int = 4,
     ) -> 'AgentRuntime':
-        """Compose a personal runtime, auto-loading the simple provider env."""
-        if provider is None:
-            provider = ProviderConfig.from_env(default_model=default_model)
+        """Compose a personal runtime, loading only the complete v2 envelope."""
+        if model_routing is None:
+            model_routing = ModelRoutingConfig.from_env()
         principal = PrincipalContext.user(
             subject_id=subject_id,
             owner_user_id=owner_user_id,
@@ -339,9 +333,8 @@ class AgentRuntime:
         )
         return cls(
             principal=principal,
-            provider=provider,
-            provider_source=provider_source,
-            default_model=default_model,
+            model_routing=model_routing,
+            model_routing_source=model_routing_source,
             max_inflight=max_inflight,
         )
 
@@ -358,32 +351,35 @@ class AgentRuntime:
         with self._lock:
             return self._closed
 
-    def configure_provider(
+    def configure_model_routing(
         self,
-        provider: ProviderConfig | Mapping[str, Any] | None,
+        model_routing: ModelRoutingConfig | Mapping[str, Any] | None,
         *,
         source: str = 'runtime',
     ) -> None:
-        """Atomically replace the default Provider for subsequently started runs.
+        """Atomically replace the v2 access aggregate for subsequent runs.
 
         Every admitted execution already owns an ephemeral dispatch slot, so a
         control-panel update cannot retarget work that is currently in flight.
         """
-        if provider is not None and not isinstance(provider, ProviderConfig):
-            provider = ProviderConfig.from_mapping(provider)
+        if model_routing is not None and not isinstance(
+                model_routing, ModelRoutingConfig):
+            model_routing = ModelRoutingConfig.from_mapping(model_routing)
         with self._lock:
             if self._closed:
                 raise AgentClosedError('AgentRuntime is closed')
-            self.provider = provider
-            self.default_model = provider.model if provider is not None else ''
-            self.provider_source = str(source or 'runtime')
+            self.model_routing = model_routing
+            self.default_model = (
+                dict(model_routing.model) if model_routing is not None else None)
+            self.model_routing_source = str(source or 'runtime')
 
     def _coerce_request(
         self,
         messages: list[dict] | AgentRequest,
         *,
-        model: str = '',
-        provider: ProviderConfig | Mapping[str, Any] | None = None,
+        model: Mapping[str, str] | None = None,
+        routing: dict | None = None,
+        model_routing: ModelRoutingConfig | Mapping[str, Any] | None = None,
         config: dict | None = None,
         capabilities: dict | None = None,
         custom_tools: list[dict] | None = None,
@@ -394,22 +390,17 @@ class AgentRuntime:
         timeout_s: float = 600.0,
     ) -> AgentRequest:
         if isinstance(messages, AgentRequest):
-            if any((model, provider, config, capabilities, custom_tools,
+            if any((model, routing, model_routing, config, capabilities, custom_tools,
                     trajectory, conversation_id, request_id)) \
                     or custom_tools_mode != 'augment' or timeout_s != 600.0:
                 raise AgentConfigurationError(
                     'an AgentRequest cannot be combined with keyword overrides')
             return messages
-        provider_value = provider
-        if isinstance(provider_value, Mapping) and not (
-                provider_value.get('model')
-                or provider_value.get('model_id')):
-            provider_value = dict(provider_value)
-            provider_value['model'] = model or self.default_model
         return AgentRequest(
             messages=messages,
             model=model,
-            provider=provider_value,
+            routing=routing or {},
+            model_routing=model_routing,
             config=config or {},
             capabilities=capabilities or {},
             custom_tools=custom_tools or [],
@@ -424,8 +415,9 @@ class AgentRuntime:
         self,
         messages: list[dict] | AgentRequest,
         *,
-        model: str = '',
-        provider: ProviderConfig | Mapping[str, Any] | None = None,
+        model: Mapping[str, str] | None = None,
+        routing: dict | None = None,
+        model_routing: ModelRoutingConfig | Mapping[str, Any] | None = None,
         config: dict | None = None,
         capabilities: dict | None = None,
         custom_tools: list[dict] | None = None,
@@ -439,7 +431,8 @@ class AgentRuntime:
         request = self._coerce_request(
             messages,
             model=model,
-            provider=provider,
+            routing=routing,
+            model_routing=model_routing,
             config=config,
             capabilities=capabilities,
             custom_tools=custom_tools,
@@ -452,19 +445,26 @@ class AgentRuntime:
         with self._lock:
             if self._closed:
                 raise AgentClosedError('AgentRuntime is closed')
-            runtime_provider = self.provider
+            runtime_model_routing = self.model_routing
             runtime_default_model = self.default_model
 
-        selected_provider = request.provider or runtime_provider
-        selected_model = str(
-            request.model
-            or (selected_provider.model if selected_provider else '')
-            or runtime_default_model
-        ).strip()
-        if not selected_model:
+        selected_access = request.model_routing or runtime_model_routing
+        selected_model_ref = request.model or runtime_default_model
+        if selected_access is None or selected_model_ref is None:
             raise AgentConfigurationError(
-                'no model configured; pass model=... or set '
-                'TOFU_AGENT_PROVIDER_MODEL')
+                'no v2 model access configured; pass model_routing=... or set '
+                'TOFU_AGENT_MODEL_ROUTING')
+        from lib.model_routing import parse_native_model_selection
+        try:
+            selection = parse_native_model_selection({
+                'model': selected_model_ref,
+                'routing': request.routing or selected_access.routing,
+            })
+        except ValueError as exc:
+            raise AgentConfigurationError(str(exc)) from exc
+        selected_model = (
+            selection.model.model_id if selection.model is not None
+            else selection.provider_offering.offering_id)
 
         if request.trajectory:
             from lib.trajectory import AVAILABLE_FORMATS
@@ -480,22 +480,31 @@ class AgentRuntime:
 
         cfg = apply_storage_free_runtime_policy(build_agent_config(
             selected_model, request.config, request.capabilities))
-        provider_handle = None
+        route_group = None
         tool_env = None
         owner_tag = self.principal.subject_id
         try:
-            if selected_provider is not None:
-                from lib.llm_dispatch.ephemeral import mint_ephemeral_slot
-                provider_handle = mint_ephemeral_slot(
-                    base_url=selected_provider.base_url,
-                    api_key=selected_provider.api_key,
-                    model_id=selected_model,
-                    owner=owner_tag,
-                    extra_headers=dict(selected_provider.extra_headers),
-                    thinking_format=selected_provider.thinking_format,
-                    capabilities=(set(selected_provider.capabilities)
-                                  if selected_provider.capabilities else None),
+            from lib.model_routing import (
+                InMemoryModelRoutingRepository, OwnerBoundary,
+                mint_routed_slot_group,
+            )
+            repository = InMemoryModelRoutingRepository()
+            boundary = OwnerBoundary.create(
+                self.principal.require_owner(context='AgentRuntime.start'))
+            repository.compare_and_swap(
+                boundary, selected_access.document, expected_revision=0)
+            for secret_reference, secret_value in (
+                    selected_access.credential_secrets.items()):
+                repository.put_secret(
+                    boundary, secret_value,
+                    secret_reference=secret_reference,
                 )
+            route_group = mint_routed_slot_group(
+                repository,
+                boundary,
+                selection,
+                owner_tag=owner_tag,
+            )
             if request.custom_tools:
                 from lib.tools.tool_env import mint_tool_env
                 tool_env = mint_tool_env(
@@ -508,13 +517,13 @@ class AgentRuntime:
                     # task-local catalog and no host built-ins.
                     cfg['_explicitToolSchemas'] = list(tool_env.schemas)
         except Exception:
-            if provider_handle is not None:
-                from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
-                dispose_ephemeral_slot(provider_handle)
+            if route_group is not None:
+                from lib.model_routing import dispose_routed_slot_group
+                dispose_routed_slot_group(route_group)
             raise
 
         if not self._gate.try_acquire():
-            self._dispose_resources(provider_handle, tool_env)
+            self._dispose_resources(route_group, tool_env)
             raise AgentOverloadedError(
                 f'AgentRuntime is at capacity ({self.capacity} in flight)')
 
@@ -531,7 +540,7 @@ class AgentRuntime:
             )
         except Exception:
             self._gate.release()
-            self._dispose_resources(provider_handle, tool_env)
+            self._dispose_resources(route_group, tool_env)
             raise
 
         task['_api_v1'] = True
@@ -541,15 +550,15 @@ class AgentRuntime:
             task['_requestId'] = request.request_id
         if tool_env is not None:
             task['_tool_env'] = tool_env
-        if provider_handle is not None:
-            task['_pinned_provider_id'] = provider_handle.slot.provider_id
+        task['_pinned_provider_id'] = route_group.pin_id
+        task['_requestedModelRef'] = dict(selected_model_ref)
 
         execution = AgentExecution(
             self,
             task,
             request,
             model=selected_model,
-            public_provider_id=('inline' if provider_handle else ''),
+            public_provider_id=route_group.candidates[0].provider_id,
         )
         task['_transientEventNotifier'] = execution._nudge.set
         cleaned = {'value': False}
@@ -564,7 +573,7 @@ class AgentRuntime:
             execution._nudge.set()
             task.pop('_transientEventNotifier', None)
             self._gate.release()
-            self._dispose_resources(provider_handle, tool_env)
+            self._dispose_resources(route_group, tool_env)
 
         from lib.agent_core.admission import on_terminal
         on_terminal(task['id'], _cleanup)
@@ -589,13 +598,14 @@ class AgentRuntime:
         return execution
 
     @staticmethod
-    def _dispose_resources(provider_handle, tool_env) -> None:
-        if provider_handle is not None:
+    def _dispose_resources(route_group, tool_env) -> None:
+        if route_group is not None:
             try:
-                from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
-                dispose_ephemeral_slot(provider_handle)
+                from lib.model_routing import dispose_routed_slot_group
+                dispose_routed_slot_group(route_group)
             except Exception as exc:
-                logger.error('provider cleanup failed: %s', exc, exc_info=True)
+                logger.error('model-routing cleanup failed: %s', exc,
+                             exc_info=True)
         if tool_env is not None:
             try:
                 from lib.tools.tool_env import dispose_tool_env

@@ -21,7 +21,25 @@ RepairLog = list[tuple[str, str]]  # [(json_path, pattern_name), ...]
 
 
 def _schema_owner_modules():
-    """Return the explicit built-in modules that own wire tool schemas."""
+    """Return the explicit built-in modules that own wire tool schemas.
+
+    Every module exposing static ``{'type': 'function'}`` schemas belongs
+    here; an omission leaves those tools fail-closed contract-validated with
+    zero repair (conv ``mtdqz4bkuyitzj`` — ``todo_write`` sat unregistered
+    for months). ``tests/test_tool_input_repair.py`` walks ``lib/`` and pins
+    this list, so adding a schema-owning module without registering it fails
+    the suite loudly.
+
+    Deliberately exempt: ``lib.mcp.*`` (server-dynamic schemas with their
+    own coercion in ``lib/mcp/client/_coerce.py``) and ``lib.paper.tools``
+    (per-vertical shim schemas that would clobber the canonical
+    ``web_search`` / ``fetch_url`` index entries).
+    """
+    import lib.knowledge.tool as knowledge_tool
+    import lib.memory.tools as memory_tools
+    import lib.scheduler.tool_defs as scheduler_tool_defs
+    import lib.skills.tools as skills_tools
+    import lib.swarm.tools as swarm_tools
     import lib.tools.browser as browser
     import lib.tools.code_exec as code_exec
     import lib.tools.conversation as conversation
@@ -29,8 +47,10 @@ def _schema_owner_modules():
     import lib.tools.image_edit as image_edit
     import lib.tools.image_gen as image_gen
     import lib.tools.motion_video as motion_video
+    import lib.tools.produce as produce
     import lib.tools.project as project
     import lib.tools.search as search
+    import lib.tools.todo as todo
     import lib.tools.tool_result_artifacts as tool_result_artifacts
 
     return (
@@ -40,9 +60,16 @@ def _schema_owner_modules():
         human_guidance,
         image_edit,
         image_gen,
+        knowledge_tool,
+        memory_tools,
         motion_video,
+        produce,
         project,
+        scheduler_tool_defs,
+        skills_tools,
         search,
+        swarm_tools,
+        todo,
         tool_result_artifacts,
     )
 

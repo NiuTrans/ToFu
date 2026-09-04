@@ -37,7 +37,6 @@ def test_now_ms_exported():
 @pytest.mark.parametrize('modname', [
     'lib.artifacts.core',
     'lib.swarm.persistence',
-    'lib.conversations.project_board',
 ])
 def test_consumers_reuse_shared_now_ms(modname):
     """Every consolidated consumer must delegate to timeutil.now_ms, not define its own."""

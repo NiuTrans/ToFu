@@ -56,6 +56,8 @@ def test_apply_todo_write_normalizes_and_summarizes():
     assert '1/3 completed' in text
     assert 'in progress' in text
     assert '[x] Read config' in text
+    assert 'reuse each id exactly in later sync calls' in text
+    assert 'id="1"' in text
 
 
 def test_apply_todo_write_drops_malformed_and_defaults_status():
@@ -145,6 +147,25 @@ def test_sync_cannot_drop_unfinished_but_replan_can_with_reason():
     assert audit['kind'] == 'replan'
     assert audit['reason'] == 'Requirement changed'
     assert {x['id'] for x in audit['superseded']} == {'keep', 'drop'}
+
+
+def test_rejected_sync_repeats_authoritative_ids_for_model_repair():
+    task = {'id': 'todo-id-repair'}
+    todo.apply_todo_write_to_task(task, {'todos': [
+        {'id': 'spec', 'content': 'Add regression', 'status': 'in_progress'},
+        {'id': 'verify', 'content': 'Run tests', 'status': 'pending'},
+    ]})
+
+    todos, text, outcome = todo.apply_todo_write_to_task(task, {'todos': [
+        {'id': 'test', 'content': 'Add regression', 'status': 'in_progress'},
+        {'id': 'validate', 'content': 'Run tests', 'status': 'pending'},
+    ]})
+
+    assert outcome['rejected'] is True
+    assert 'sync cannot remove unfinished items (spec, verify)' in text
+    assert 'id="spec"' in text and 'id="verify"' in text
+    assert 'id="test"' not in text and 'id="validate"' not in text
+    assert [item['id'] for item in todos] == ['spec', 'verify']
 
 
 def test_child_completion_auto_pops_and_completes_parent_item():
@@ -247,6 +268,71 @@ def test_replay_compacts_todo_revisions_but_keeps_audit_input_unchanged():
     assert len(rounds) == 4
 
 
+def test_replay_never_treats_failed_todo_execution_as_effective_state():
+    rounds = [
+        {
+            'toolName': 'todo_write', 'toolCallId': 'accepted',
+            'status': 'done',
+            'results': [{'todoNoop': False, 'todoRejected': False}],
+        },
+        {
+            'toolName': 'todo_write', 'toolCallId': 'failed',
+            'status': 'error',
+            'results': [{'type': 'error', 'content': 'handler crashed'}],
+        },
+    ]
+
+    projected = todo.compact_todo_rounds_for_replay(rounds)
+
+    assert [row['toolCallId'] for row in projected] == [
+        'accepted', 'failed',
+    ]
+    assert [row['toolCallId'] for row in rounds] == ['accepted', 'failed']
+
+
+def test_replay_recognizes_legacy_error_result_without_round_status():
+    rounds = [
+        {
+            'toolName': 'todo_write', 'toolCallId': 'accepted',
+            'results': [{'todoNoop': False, 'todoRejected': False}],
+        },
+        {
+            'toolName': 'todo_write', 'toolCallId': 'legacy-failed',
+            'results': [{'type': 'error', 'content': 'handler crashed'}],
+        },
+    ]
+
+    projected = todo.compact_todo_rounds_for_replay(rounds)
+
+    assert [row['toolCallId'] for row in projected] == [
+        'accepted', 'legacy-failed',
+    ]
+
+
+def test_replay_drops_old_failure_after_a_new_accepted_revision():
+    rounds = [
+        {
+            'toolName': 'todo_write', 'toolCallId': 'accepted-old',
+            'status': 'done',
+            'results': [{'todoNoop': False, 'todoRejected': False}],
+        },
+        {
+            'toolName': 'todo_write', 'toolCallId': 'failed',
+            'status': 'error',
+            'results': [{'type': 'error', 'content': 'handler crashed'}],
+        },
+        {
+            'toolName': 'todo_write', 'toolCallId': 'accepted-new',
+            'status': 'done',
+            'results': [{'todoNoop': False, 'todoRejected': False}],
+        },
+    ]
+
+    projected = todo.compact_todo_rounds_for_replay(rounds)
+
+    assert [row['toolCallId'] for row in projected] == ['accepted-new']
+
+
 def test_wire_replay_contains_only_latest_effective_todo_revision():
     from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
@@ -288,6 +374,178 @@ def test_continue_resume_restores_authoritative_checklist_stack():
     assert task['_todos'][0]['id'] == 'child'
 
 
+def test_continue_resume_rejects_malformed_authority_before_any_mutation():
+    from lib.tasks_pkg.orchestrator._resume_state import (
+        ContinueResumeStateProtocolError,
+        apply_resume_state,
+    )
+
+    malformed_todo = {
+        'version': todo.TODO_STATE_VERSION,
+        'stack': [{
+            'checklist_id': 'root',
+            'revision': 'not-an-integer',
+            'parent_todo_id': None,
+            'todos': [{
+                'id': 'one', 'content': 'Keep this work visible',
+                'status': 'in_progress',
+            }],
+        }],
+        'history': [],
+        'update_count': 1,
+        'root_completed': False,
+    }
+    invalid_fields = [
+        ('contentPrefix', False),
+        ('resumePrefill', []),
+        ('checkpointToolRounds', {'0': 'not-a-list'}),
+        ('checkpointToolRounds', [{
+            'toolCallId': 'orphan', 'toolName': 'run_command',
+            'toolArgs': '{}',
+        }]),
+        ('checkpointTodoState', malformed_todo),
+        ('checkpointUsage', []),
+        ('checkpointApiRounds', {}),
+        ('checkpointModifiedFiles', True),
+        ('checkpointModifiedFileList', {}),
+    ]
+
+    for field, value in invalid_fields:
+        task = {
+            'convId': 'atomic',
+            'content': 'original',
+            'content_lock': threading.Lock(),
+            '_sentinel': object(),
+        }
+        original_task = dict(task)
+        messages = [{'role': 'user', 'content': 'continue'}]
+        original_messages = [dict(message) for message in messages]
+        config = {
+            'contentPrefix': 'must-not-apply',
+            'resumePrefill': 'must-not-append',
+            field: value,
+        }
+
+        with pytest.raises(ContinueResumeStateProtocolError) as raised:
+            apply_resume_state(
+                task=task,
+                cfg=config,
+                messages=messages,
+                model='gpt-4o',
+                tid='atomic',
+            )
+
+        assert raised.value.status_code == 422
+        assert task == original_task
+        assert messages == original_messages
+
+
+def test_continue_resume_accepts_oversized_checkpoint_without_size_ceiling():
+    # Beyond the retired 4096-round / 8 MB resume caps: snapshots are folded
+    # by working-set compaction downstream, never rejected at this boundary.
+    from lib.tasks_pkg.orchestrator._resume_state import prepare_resume_state
+
+    rounds = [{
+        'toolCallId': f'call-{index}', 'toolName': 'run_command',
+        'toolArgs': '{}', 'toolContent': 'y' * 2048, 'status': 'done',
+        'llmRound': index,
+    } for index in range(4097)]
+
+    prepared = prepare_resume_state({'checkpointToolRounds': rounds})
+
+    assert len(prepared.checkpoint_tool_rounds) == 4097
+    assert len(prepared.checkpoint_messages) > 0
+
+
+def test_continue_resume_preserves_equal_tool_occurrences_by_position():
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+
+    duplicate = {
+        'toolCallId': 'provider-recycled-id',
+        'toolName': 'run_command',
+        'toolArgs': '{"command":"pwd"}',
+        'toolContent': 'same receipt',
+        'status': 'done',
+    }
+    task = {'convId': 'c', 'content': '', 'content_lock': threading.Lock()}
+    apply_resume_state(
+        task=task,
+        cfg={'checkpointToolRounds': [dict(duplicate), dict(duplicate)]},
+        messages=[], model='test-model', tid='testtask',
+    )
+
+    assert len(task['_checkpointToolRounds']) == 2
+    assert task['_checkpointToolRounds'][0] == duplicate
+    assert task['_checkpointToolRounds'][1] == duplicate
+    assert task['_checkpointToolRounds'][0] is not task['_checkpointToolRounds'][1]
+
+
+def test_continue_resume_tolerates_display_rows_in_checkpoint_rounds():
+    """Identity-free display carriers never block, never reach the wire."""
+    from lib.tasks_pkg.orchestrator._resume_state import prepare_resume_state
+
+    rounds = [
+        {'toolName': 'execute_tools', 'toolArgs': {'calls': []},
+         'status': 'done'},
+        {'toolCallId': 'call-1', 'toolName': 'run_command',
+         'toolArgs': '{}', 'toolContent': 'ok', 'status': 'done',
+         'llmRound': 0},
+    ]
+
+    prepared = prepare_resume_state({'checkpointToolRounds': rounds})
+
+    assert len(prepared.checkpoint_tool_rounds) == 2
+    # Only the execution receipt becomes wire messages; the display carrier
+    # is transparent to protocol reconstruction.
+    assert [message['role'] for message in prepared.checkpoint_messages] == [
+        'assistant', 'tool',
+    ]
+
+
+def test_checkpoint_resume_replays_the_same_bytes_as_next_turn_history():
+    """Checkpoint facts must be on-wire now and prefix-stable next turn."""
+    import json
+
+    from lib.tasks_pkg.conv_message_builder._toolcalls import (
+        _reconstruct_tool_call_messages,
+    )
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+
+    checkpoint = [{
+        'roundNum': 1,
+        'llmRound': 0,
+        'attemptId': 'attempt-before-restart',
+        'taskId': 'task-before-restart',
+        'toolCallId': 'call-before-restart',
+        'toolName': 'search_tools',
+        'toolArgs': '{"query":"durable fact"}',
+        'toolContent': 'the durable answer',
+        'assistantContent': 'I will recover the fact.',
+        'status': 'done',
+    }]
+    messages = [{'role': 'user', 'content': 'finish the interrupted task'}]
+    task = {'convId': 'c', 'content': '', 'content_lock': threading.Lock()}
+
+    apply_resume_state(
+        task=task,
+        cfg={'checkpointToolRounds': checkpoint},
+        messages=messages,
+        model='test-model',
+        tid='resume',
+    )
+
+    reconstructed_next_turn = _reconstruct_tool_call_messages(checkpoint)
+    assert reconstructed_next_turn
+    resumed_suffix = messages[1:]
+    canonical_bytes = lambda value: json.dumps(
+        value, ensure_ascii=False, separators=(',', ':'), sort_keys=False,
+    ).encode('utf-8')
+    assert canonical_bytes(resumed_suffix) == canonical_bytes(
+        reconstructed_next_turn)
+    assert task['_checkpointToolRounds'] == checkpoint
+    assert task['_checkpointToolRounds'] is not checkpoint
+
+
 def test_live_task_metadata_exposes_todo_state_and_blocked_verdict():
     from lib.tasks_pkg.manager import build_result_meta
 
@@ -317,6 +575,8 @@ def test_compaction_attachment_carries_child_stack_breadcrumb_and_deduplicates()
         messages, task=task, round_num=4, conv_id='nested-todo')
     assert len(attachments) == 1
     assert 'Checklist path: Root task > Build feature' in attachments[0]
+    assert 'reuse each id exactly in later sync calls' in attachments[0]
+    assert 'id="child"' in attachments[0]
     inject_attachments(messages, attachments)
     assert compute_turn_attachments(
         messages, task=task, round_num=5, conv_id='nested-todo') == []
@@ -377,6 +637,7 @@ def test_enforcer_redrive_on_incomplete_todos(monkeypatch):
     assert messages[-2]['content'] == 'Final answer here.'
     # A reminder user-message was injected carrying the incomplete item.
     assert messages[-1]['role'] == 'user'
+    assert messages[-1]['_isMeta'] is True
     assert 'TODO CONTINUATION' in messages[-1]['content']
     assert 'unfinished item' in messages[-1]['content']
 

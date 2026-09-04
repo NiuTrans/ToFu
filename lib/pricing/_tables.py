@@ -232,6 +232,8 @@ MODEL_PRICING = {
     # kimi-k3 (2026-07-17): ¥20/¥100 per 1M → $2.76/$13.81 @ 7.24; 1M context
     'kimi-k3':                   {'input': 2.76, 'output': 13.81,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K3'},
     'kimi-k2.6':                 {'input': 0.60, 'output': 2.80, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K2.6'},
+    # ── Tencent Hunyuan ── hy4-preview (2026-08-28): ¥6/¥18 per 1M, cache hit ¥0.3 → $0.829/$2.486 @ 7.24
+    'hy4-preview':               {'input': 0.829,'output': 2.486,'cacheWriteMul': 1.00, 'cacheReadMul': 0.05, 'name': 'Hunyuan HY4 Preview'},
     # ── Tencent Hunyuan ── cheapest tier (≤16K): ¥1.2/¥4 per 1M = $0.166/$0.553 @ 7.24
     'hy3-preview':               {'input': 0.166,'output': 0.553,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Hunyuan HY3 Preview'},
 }
@@ -271,6 +273,8 @@ QWEN_PRICING_CNY = {
     # Tencent Hunyuan HY3 — tiered pricing on 16K / 32K / 256K context boundaries
     'hy3-preview':              {'input': [(16_000, 1.2), (32_000, 1.6), (256_000, 2.0)],
                                  'output': [(16_000, 4.0), (32_000, 6.4), (256_000, 8.0)]},
+    # Tencent Hunyuan HY4 Preview — flat ¥6/¥18 per 1M regardless of context
+    'hy4-preview':              {'input': [(1_000_000, 6.0)],  'output': [(1_000_000, 18.0)]},
     'deepseek-r1':      {'input': [(1_000_000, 4.0)],  'output': [(1_000_000, 16.0)]},
     'glm-5v-turbo':     {'input': [(32_000, 5.0), (1_000_000, 7.0)],  'output': [(32_000, 22.0), (1_000_000, 26.0)]},
     '_default':         {'input': [(128_000, 0.8), (256_000, 2.0), (1_000_000, 4.0)], 'output': [(128_000, 4.8), (256_000, 12.0), (1_000_000, 24.0)]},

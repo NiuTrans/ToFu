@@ -20,6 +20,8 @@ import io
 import os
 import subprocess
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -112,6 +114,46 @@ def test_frame_ceiling_parity():
     from lib.model_info._video import _EXTRACTION_CEILING
     from lib.video_analysis import FRAME_CEILING
     assert _EXTRACTION_CEILING == FRAME_CEILING
+
+
+def test_processing_reservation_is_bounded_until_worker_release(monkeypatch):
+    import lib.video_analysis._pipeline as pipe
+
+    monkeypatch.setattr(
+        pipe, '_PROCESSING_SLOTS', threading.BoundedSemaphore(1))
+    first = pipe.reserve_processing_slot()
+    assert first is not None
+    assert pipe.reserve_processing_slot() is None
+
+    release_from_worker = first.handoff()
+    first.release()  # Route cleanup cannot steal a worker-owned slot.
+    assert pipe.reserve_processing_slot() is None
+    release_from_worker()
+
+    final = pipe.reserve_processing_slot()
+    assert final is not None
+    final.release()
+
+
+def test_stale_video_scratch_is_reclaimed_in_a_bounded_namespace(
+        tmp_path, monkeypatch):
+    from lib.video_analysis import _config
+
+    monkeypatch.setenv('TOFU_VIDEO_SCRATCH_TTL_S', '3600')
+    root = tmp_path / 'tofu-video-analysis'
+    stale = root / 'job_stale'
+    fresh = root / 'job_fresh'
+    unrelated = root / 'operator-file'
+    stale.mkdir(parents=True)
+    fresh.mkdir()
+    unrelated.mkdir()
+    now = time.time()
+    os.utime(stale, (now - 7200, now - 7200))
+
+    assert _config.reclaim_stale_scratch(str(root), now_s=now) == 1
+    assert not stale.exists()
+    assert fresh.is_dir()
+    assert unrelated.is_dir()
 
 
 def test_video_frame_budget_vision_gate(monkeypatch):
@@ -393,15 +435,45 @@ def test_transcribe_track_happy(tmp_path, monkeypatch):
     assert captured['filename'].endswith(('.mp3', '.ogg'))
 
 
+def test_transcribe_track_forwards_owner_to_v2_stt(monkeypatch):
+    import lib.transcription as stt
+    import lib.video_analysis._audio as audio
+    from lib.transcription import TranscriptionResult
+
+    captured = {}
+    monkeypatch.setattr(
+        audio, '_extract_audio', lambda *_args: (b'audio-bytes', 'mp3'))
+
+    def _available(**kwargs):
+        captured['available'] = kwargs
+        return True
+
+    def _transcribe(_data, _filename, _content_type, **kwargs):
+        captured['transcribe'] = kwargs
+        return TranscriptionResult(
+            text='owner transcript', model='owner-stt', provider_id='p1')
+
+    monkeypatch.setattr(stt, 'transcription_available', _available)
+    monkeypatch.setattr(stt, 'transcribe', _transcribe)
+
+    result = audio.transcribe_track(
+        '/video.mp4', '/scratch', 2.0,
+        owner_user_id=73, tenant_id='tenant-a')
+
+    assert result['text'] == 'owner transcript'
+    assert captured['available'] == {
+        'owner_user_id': 73, 'tenant_id': 'tenant-a'}
+    assert captured['transcribe'] == {
+        'owner_user_id': 73, 'tenant_id': 'tenant-a'}
+
+
 def test_pipeline_end_to_end(tmp_path, monkeypatch):
-    """Full pipeline on a real synthetic clip: probe → persist → frames →
-    (stubbed) transcript → registry record ready with durable frame URLs."""
+    """Full pipeline extracts once and commits only a durable attachment ref."""
     import lib.video_analysis._pipeline as pipe
     import lib.video_analysis._store as store
 
     monkeypatch.setattr(store, '_registry_path',
                         lambda: str(tmp_path / 'registry.json'))
-    monkeypatch.setattr(pipe, 'uploads_root', lambda: str(tmp_path / 'uploads'))
     monkeypatch.setattr(pipe, 'transcribe_track',
                         lambda *a, **k: {'text': 'fake words', 'status': 'ok',
                                          'model': 'whisper-1'})
@@ -409,6 +481,23 @@ def test_pipeline_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(cap, 'storyboard_for_frames',
                         lambda *a, **k: {'text': '- [00:00] red screen\nOverall: demo',
                                          'status': 'ok', 'model': 'vl-test'})
+    import lib.media_attachments as media
+    committed = {}
+    monkeypatch.setattr(media, 'set_phase', lambda *a, **k: None)
+    monkeypatch.setattr(media, 'mark_failed', lambda *a, **k: None)
+
+    def _complete(attachment_id, **payload):
+        committed.update(payload)
+        return {
+            'attachmentId': attachment_id,
+            'kind': 'video', 'name': 'clip.mp4', 'status': 'ready',
+            'sourceUrl': f'/api/v1/media/attachments/{attachment_id}/source',
+            'durationSeconds': float(payload['probe']['duration']),
+            'frameCount': len(payload['frames']),
+            'transcriptStatus': payload['transcript_status'],
+        }
+
+    monkeypatch.setattr(media, 'complete_video', _complete)
 
     video = _make_video(tmp_path / 'job' / 'upload.mp4', seconds=2.0,
                         with_audio=True)
@@ -424,25 +513,16 @@ def test_pipeline_end_to_end(tmp_path, monkeypatch):
     assert store.get_record('v_test_e2e', user_id=2) is None
     assert rec['status'] == 'ready', rec.get('error')
     assert rec['phase'] == 'done'
-    assert rec['duration_s'] == pytest.approx(2.0, abs=0.3)
-    assert rec['frame_count'] >= 8
-    assert rec['transcript'] == 'fake words'
-    assert rec['transcript_status'] == 'ok'
-    assert rec['storyboard_status'] == 'ok'
-    assert 'Overall: demo' in rec['storyboard']
-    assert rec['storyboard_model'] == 'vl-test'
-    assert rec['video_url'].startswith('/api/videos/')
-    # Frames persisted under the (tmp) uploads store with durable URLs.
-    for fr in rec['frames']:
-        assert fr['url'].startswith('/api/images/')
-        fname = fr['url'].rsplit('/', 1)[-1]
-        assert os.path.isfile(tmp_path / 'uploads' / 'images' / fname)
-    # The original was copied into the durable videos dir.
-    stored = rec['video_url'].rsplit('/', 1)[-1]
-    assert os.path.isfile(tmp_path / 'uploads' / 'videos' / stored)
-    assert store.resolve_owned_video_asset(stored, user_id=1) == str(
-        tmp_path / 'uploads' / 'videos' / stored)
-    assert store.resolve_owned_video_asset(stored, user_id=2) == ''
+    assert rec['durationSeconds'] == pytest.approx(2.0, abs=0.3)
+    assert rec['frameCount'] >= 8
+    assert rec['attachmentId'] == 'v_test_e2e'
+    assert rec['attachment']['attachmentId'] == 'v_test_e2e'
+    assert 'frames' not in rec and 'transcript' not in rec
+    assert committed['transcript'] == 'fake words'
+    assert committed['transcript_status'] == 'ok'
+    assert committed['storyboard_status'] == 'ok'
+    assert 'Overall: demo' in committed['storyboard']
+    assert committed['storyboard_model'] == 'vl-test'
 
 
 def test_pipeline_rejects_too_long(tmp_path, monkeypatch):
@@ -452,6 +532,9 @@ def test_pipeline_rejects_too_long(tmp_path, monkeypatch):
     monkeypatch.setattr(store, '_registry_path',
                         lambda: str(tmp_path / 'registry.json'))
     monkeypatch.setattr(pipe, 'video_max_duration_s', lambda: 1.0)
+    import lib.media_attachments as media
+    monkeypatch.setattr(media, 'set_phase', lambda *a, **k: None)
+    monkeypatch.setattr(media, 'mark_failed', lambda *a, **k: None)
     video = _make_video(tmp_path / 'job' / 'upload.mp4', seconds=3.0)
     store.create_record(
         'v_long', name='long.mp4', size_bytes=1, user_id=1)
@@ -506,12 +589,26 @@ def test_upload_route_happy_and_status(client, tmp_path, monkeypatch):
 
     started = {}
 
-    def _fake_start(video_id, scratch_path, name, *, user_id):
+    def _fake_start(
+        video_id, scratch_path, name, *, user_id, reservation=None,
+    ):
         started['video_id'] = video_id
         started['user_id'] = user_id
         import shutil
         shutil.rmtree(os.path.dirname(scratch_path), ignore_errors=True)
     monkeypatch.setattr(va, 'start_processing', _fake_start)
+    import lib.media_attachments as media
+    canonical = {
+        'attachmentId': 'media-video-1', 'kind': 'video',
+        'name': 'clip.mp4', 'status': 'processing',
+        'sourceUrl': '/api/v1/media/attachments/media-video-1/source',
+        'sizeBytes': len(_fake_mp4_bytes()),
+    }
+    monkeypatch.setattr(
+        media, 'create_video', lambda *a, **k: (dict(canonical), False))
+    monkeypatch.setattr(
+        media, 'get_attachment',
+        lambda _id, *, user_id: dict(canonical) if user_id == 1 else None)
 
     async def go():
         form, files = _multipart_video(_fake_mp4_bytes())
@@ -541,6 +638,37 @@ def test_upload_route_happy_and_status(client, tmp_path, monkeypatch):
         return await client.get(f'/api/v1/videos/{vid}')
 
     assert _run_async(get_as_foreign_owner()).status_code == 404
+
+
+def test_upload_route_rejects_when_analysis_capacity_is_full(
+        client, monkeypatch):
+    import lib.video_analysis as va
+
+    monkeypatch.setattr(va, 'reserve_processing_slot', lambda: None)
+
+    async def go():
+        form, files = _multipart_video(_fake_mp4_bytes())
+        response = await client.post(
+            '/api/v1/videos/upload', form=form, files=files)
+        assert response.status_code == 503
+        payload = await response.get_json()
+        assert payload['ok'] is False
+        assert 'capacity' in payload['error'].lower()
+
+    _run_async(go())
+
+
+@pytest.mark.auth_mode('private')
+def test_video_upload_status_and_legacy_source_require_auth(client):
+    async def go():
+        upload = await client.post('/api/v1/videos/upload')
+        status = await client.get('/api/v1/videos/not-owned')
+        source = await client.get('/api/videos/not-owned.mp4')
+        assert upload.status_code == 401
+        assert status.status_code == 401
+        assert source.status_code == 401
+
+    _run_async(go())
 
 
 def test_video_file_route_requires_durable_asset_owner(
@@ -593,6 +721,10 @@ def test_upload_route_rejects_magic_mismatch(client, tmp_path, monkeypatch):
     _run_async(go())
 
 
+# Saturation-bound: red 3/3 in the full -n 4 unit lane (503 instead of 404
+# under whole-host storage-sidecar contention), always green solo/small-lane;
+# see test_server_async.py for the shared note.
+@pytest.mark.serial
 def test_status_route_404(client, tmp_path, monkeypatch):
     import lib.video_analysis._store as store
     monkeypatch.setattr(store, '_registry_path',
@@ -654,6 +786,42 @@ def test_storyboard_happy_message_shape(monkeypatch):
     assert len(imgs) == 2  # thinned 6 → 2
     assert blocks[-1]['type'] == 'text' and 'visual storyboard' in blocks[-1]['text']
     assert any(b.get('text') == '[frame at 00:00]' for b in blocks)
+
+
+def test_storyboard_owner_route_is_pinned_and_disposed(monkeypatch):
+    from types import SimpleNamespace
+
+    import lib.llm_dispatch as dispatch
+    import lib.model_routing as routing
+    import lib.video_analysis._caption as cap
+    from lib.llm_dispatch.provider_pin import get_pinned_provider
+
+    group = SimpleNamespace(pin_id='owner-vision-group')
+    observed = {'pins': [], 'disposed': [], 'mint': []}
+
+    def _mint(*_args, **kwargs):
+        observed['mint'].append(kwargs)
+        return 'owner-vision', group
+
+    def _dispatch(*_args, **_kwargs):
+        observed['pins'].append(get_pinned_provider())
+        return ('- [00:00] frame\nOverall: demo', {})
+
+    monkeypatch.setattr(routing, 'mint_capability_slot_group', _mint)
+    monkeypatch.setattr(
+        routing, 'dispose_routed_slot_group', observed['disposed'].append)
+    monkeypatch.setattr(cap, '_vision_slot_models', lambda: ['owner-vision'])
+    monkeypatch.setattr(dispatch, 'dispatch_chat', _dispatch)
+
+    result = cap.storyboard_for_frames(
+        [{'url': '/api/images/a.jpg', 't': 0, 'bytes': 1}],
+        owner_user_id=73,
+    )
+
+    assert result['status'] == 'ok'
+    assert observed['pins'] == ['owner-vision-group']
+    assert observed['disposed'] == [group]
+    assert observed['mint'][0]['max_candidates'] == 8
 
 
 def test_storyboard_dispatch_failure_degrades(monkeypatch):

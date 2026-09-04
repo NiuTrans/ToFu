@@ -120,6 +120,21 @@ def run_llm_call_with_fallback(
         rs.preset = llm_result['preset']
         rs.thinking_enabled = llm_result['thinking_enabled']
 
+        # Narrative cursor advancement is an acknowledgement of model
+        # consumption, not request construction.  Only the first successful
+        # provider return can confirm the pending Project Context page.
+        if task.get('_projectNarrativeDelivery'):
+            pending_delivery = task.pop('_projectNarrativeDelivery')
+            try:
+                from lib.agent_core.store import get_conversation_store
+                get_conversation_store().confirm_project_context_delivery(
+                    pending_delivery)
+            except Exception as exc:
+                # Lost confirmation intentionally means replay next turn.
+                logger.debug(
+                    '[Task %s] project narrative confirmation failed: %s',
+                    tid, exc)
+
         # ── Flush DEFERRED peer + steer inbox ( slice 12) ──
         #   The LLM call above just succeeded, so the peer and
         #   human-steer messages injected into ``messages`` earlier

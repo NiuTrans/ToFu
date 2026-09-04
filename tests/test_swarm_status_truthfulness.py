@@ -398,3 +398,17 @@ class TestSwarmStatusPersistenceFallback(unittest.TestCase):
             self.key,
             user_id=_TEST_OWNER_USER_ID,
         ))
+
+    def test_malformed_persisted_owner_fails_closed_without_route_error(self):
+        self.p.save_session(
+            self.key, conv_id=self.key, task_id='t-invalid-owner',
+            specs=[{'id': 'p3', 'role': 'coder', 'objective': 'Z'}],
+            config={'user_id': 'not-a-number'}, status='running')
+        self.p.save_agent(
+            self.key, 'p3', role='coder', objective='Z', status='running',
+            messages=[], rounds_used=1)
+
+        self.assertIsNone(get_swarm_status(
+            self.key,
+            user_id=_TEST_OWNER_USER_ID,
+        ))

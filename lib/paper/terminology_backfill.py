@@ -22,7 +22,8 @@ backfill that ran but did not shrink the gap set is NOT a success — it returns
 Design (mirrors ``insight_engine`` deliberately — reuse, don't hand-roll):
   * PURE BODY CONTEXT: the terms are used *in the report*, so their definitions
     should be derivable from the report. No agentic search, no ``run_agent_loop``,
-    no arXiv grounding, no pymupdf/thread exposure — one ``dispatch_chat`` call.
+    no arXiv grounding, and no pymupdf exposure. Definition calls are a finite
+    batch behind the shared production fan-out.
   * temp=0.45 + one repair-reask at temp=0 on strict-JSON parse failure (the
     same reliability recipe the insight pass uses).
   * SEPARATE-KEY persistence (``termfill:<ui>``) + cache-reopen merge, so the
@@ -39,6 +40,7 @@ import uuid
 
 from lib.llm_json import extract_json
 from lib.log import get_logger
+from lib.paper.report_artifact_keys import termfill_lang_key
 
 from .terminology_audit._acronyms import _extract_acronyms, _strip_code
 from .terminology_audit.audit import build_terminology_audit
@@ -52,7 +54,6 @@ __all__ = [
     'run_report_termfill',
 ]
 
-_TERMFILL_LANG_PREFIX = 'termfill'
 # The addendum header intentionally contains "glossary" so the audit's
 # _GLOSSARY_HDR_RE treats it as a glossary section: its rows then count as
 # DEFINED (enabling the re-audit to see closed gaps) AND its own cells are NOT
@@ -67,7 +68,9 @@ _ADDENDUM_HEADER_ZH = '## 📖 补充术语定义（术语表补全）'
 # 70-term request → 0 parseable defs, 15-term request → 15 defs). Chunking keeps
 # every reply small enough to close cleanly; the re-audit gate then runs ONCE
 # over the merged result.
-_MAX_TERMS_PER_CALL = 10
+_MAX_TERMS_PER_CALL = 15
+_MAX_TERMS = 60
+_MAX_PARALLEL_CHUNKS = 8
 
 
 def termfill_globally_disabled() -> bool:
@@ -82,16 +85,6 @@ def termfill_globally_disabled() -> bool:
     """
     return os.environ.get('TOFU_PAPER_TERMFILL', '').strip().lower() in (
         '0', 'off', 'false', 'no')
-
-
-def termfill_lang_key(ui_lang: str) -> str:
-    """Composite ``paper_reports.lang`` key for a persisted backfill addendum.
-
-    ``termfill:<ui_lang>`` — a separate row from the plain report, mirroring
-    ``insight:<ui>`` / ``review:<venue>:<uilang>``, so persisting the addendum
-    NEVER overwrites the fidelity report.
-    """
-    return f'{_TERMFILL_LANG_PREFIX}:{ui_lang or "en"}'
 
 
 def _gap_terms(audit: dict) -> set[str]:
@@ -111,34 +104,38 @@ def _backfill_prompt(report_text: str, gap_terms: list[str], ui_lang: str) -> li
     ``{term: definition}``.
     """
     zh = ui_lang == 'zh'
-    terms_line = ', '.join(gap_terms)
     if zh:
         sys = (
             '你在校对一篇论文讲解报告的术语自洽性。报告正文用到了下列术语，但术语表里没有'
             '（或其定义又引用了未定义的术语）。请**仅依据报告正文如何使用这些术语**，为每个'
             '术语写一句自洽的定义：定义本身**不得引入新的未定义缩写/术语**，要让完全没读过'
-            '原文的读者也能看懂。无法从正文可靠推断的术语就省略，不要臆造。\n\n'
-            f'需要定义的术语：{terms_line}\n\n'
-            '只返回 STRICT JSON（无散文、无代码围栏），形如 '
-            '{"术语": "一句定义", ...}，作为你的最后一条消息。'
+            '原文的读者也能看懂。无法从正文可靠推断的术语就省略，不要臆造。你会先收到'
+            '报告，再收到本批需要定义的精确术语。只返回 STRICT JSON（无散文、无代码围栏），'
+            '形如 {"术语": "一句定义", ...}，作为你的最后一条消息。'
         )
+        request = '本批需要定义的术语：' + ', '.join(gap_terms)
     else:
         sys = (
             'You are checking the terminology self-containment of a paper '
-            'explainer report. The body uses the terms below, but they are '
+            'explainer report. The body uses requested terms, but they are '
             'missing from the glossary (or a glossary definition leans on them). '
             'Define each term using ONLY how the report itself uses it, in ONE '
             'self-contained sentence that introduces NO further undefined '
             'acronym/jargon, understandable to a reader who never saw the '
-            'original paper. Omit any term you cannot reliably infer from the '
-            'body — never invent.\n\n'
-            f'Terms to define: {terms_line}\n\n'
-            'Respond with STRICT JSON ONLY (no prose, no code fences), shaped '
-            '{"TERM": "one-sentence definition", ...}, as your final message.'
+            'original paper. You will receive the report first and the exact '
+            'terms for this batch last. Omit any term you cannot reliably infer '
+            'from the body — never invent. Respond with STRICT JSON ONLY (no '
+            'prose or code fences), shaped {"TERM": "one-sentence definition", '
+            '...}, as your final message.'
         )
+        request = 'Terms to define: ' + ', '.join(gap_terms)
+    # Keep the large prefix byte-identical across chunks. Providers with prompt
+    # caching can reuse the warmed report prefix; only this final short request
+    # varies by chunk.
     user = ('Report:\n\n' + (report_text or ''))[:60000]
     return [{'role': 'system', 'content': sys},
-            {'role': 'user', 'content': user}]
+            {'role': 'user', 'content': user},
+            {'role': 'user', 'content': request}]
 
 
 def _parse_json_obj(text: str) -> dict:
@@ -164,12 +161,14 @@ def _collect_usage(usage_sink, usage):
 
 
 def _generate_definitions(report_text, gap_terms, ui_lang, model, dispatch,
-                          usage_sink=None) -> dict:
+                          usage_sink=None, max_429_attempts=None) -> dict:
     """Call the LLM once (temp 0.45) + one repair-reask (temp 0) → {term: def}."""
     messages = _backfill_prompt(report_text, gap_terms, ui_lang)
     try:
         content, _usage = dispatch(messages, max_tokens=1500, temperature=0.45,
                                    prefer_model=model, strict_model=bool(model),
+                                   max_retries=2,
+                                   max_429_attempts=max_429_attempts,
                                    log_prefix='[Paper:TermFill]')
         _collect_usage(usage_sink, _usage)
     except Exception as e:
@@ -185,7 +184,9 @@ def _generate_definitions(report_text, gap_terms, ui_lang, model, dispatch,
                              'Your reply was not valid JSON. Reply with ONLY the '
                              'JSON object {"TERM": "definition", ...}.'}],
                 max_tokens=1500, temperature=0, prefer_model=model,
-                strict_model=bool(model), log_prefix='[Paper:TermFill:repair]')
+                strict_model=bool(model), max_retries=2,
+                max_429_attempts=max_429_attempts,
+                log_prefix='[Paper:TermFill:repair]')
             _collect_usage(usage_sink, _usage2)
             obj = _parse_json_obj(content2)
         except Exception as e:
@@ -194,6 +195,52 @@ def _generate_definitions(report_text, gap_terms, ui_lang, model, dispatch,
     # Normalise: keep str→str, non-empty.
     return {str(k).strip(): str(v).strip()
             for k, v in obj.items() if str(k).strip() and str(v).strip()}
+
+
+def _generate_definition_chunks(report_text, chunks, ui_lang, model, dispatch,
+                                usage_sink=None) -> dict:
+    """Warm one common prompt prefix, then run remaining chunks with a bound."""
+    chunks = [list(chunk) for chunk in chunks if chunk]
+    if not chunks:
+        return {}
+    from runtime_guards import resolve_resource_budget
+    max_429_attempts = resolve_resource_budget(
+        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', maximum=64)
+
+    def _one(chunk):
+        local_usage = []
+        definitions = _generate_definitions(
+            report_text, chunk, ui_lang, model, dispatch,
+            usage_sink=local_usage,
+            max_429_attempts=max_429_attempts)
+        return definitions, local_usage
+
+    # The first call makes the shared system+report prefix cacheable before
+    # other chunks begin. This keeps the ordinary one/two-chunk case cheap and
+    # lets larger reports overlap only their remaining independent calls.
+    results = [_one(chunks[0])]
+    remaining = chunks[1:]
+    if remaining:
+        workers = min(
+            len(remaining),
+            resolve_resource_budget(
+                'TOFU_PRODUCTION_LLM_FANOUT', maximum=_MAX_PARALLEL_CHUNKS),
+        )
+        if workers == 1:
+            results.extend(_one(chunk) for chunk in remaining)
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(
+                    max_workers=workers,
+                    thread_name_prefix='paper-termfill') as pool:
+                results.extend(pool.map(_one, remaining))
+
+    offered = {}
+    for definitions, local_usage in results:
+        offered.update(definitions)
+        if usage_sink is not None:
+            usage_sink.extend(local_usage)
+    return offered
 
 
 def _definition_adds_new_gap(definition: str, known_terms_ci: set[str]) -> bool:
@@ -298,27 +345,33 @@ def build_backfill_addendum(report_text, audit, ui_lang='en', *,
     # The exact term strings to define (prefer the original casing from the audit).
     want = []
     seen = set()
-    for m in (audit.get('missing') or []):
-        t = m.get('term')
-        if t and t.upper() not in seen:
-            want.append(t); seen.add(t.upper())
-    for d in (audit.get('dangling') or []):
-        t = d.get('referencedTerm')
-        if t and t.upper() not in seen:
-            want.append(t); seen.add(t.upper())
+    sources = ((audit.get('missing') or [], 'term'),
+               (audit.get('dangling') or [], 'referencedTerm'))
+    for rows, field in sources:
+        for row in rows:
+            term = row.get(field)
+            if term and term.upper() not in seen:
+                want.append(term)
+                seen.add(term.upper())
+                if len(want) >= _MAX_TERMS:
+                    break
+        if len(want) >= _MAX_TERMS:
+            break
     if not want:
         return ''
+    if len(gap_ci) > len(want):
+        logger.warning(
+            '[Paper:TermFill] capped %d unique gaps to %d; remaining gaps stay '
+            'visible in the terminology warning', len(gap_ci), len(want))
 
     # Generate in bounded chunks so each strict-JSON reply stays parseable
     # (a single all-terms request truncates to 0 defs on gappy reports), then
     # merge before the single re-audit gate.
-    offered = {}
-    for i in range(0, len(want), _MAX_TERMS_PER_CALL):
-        chunk = want[i:i + _MAX_TERMS_PER_CALL]
-        got = _generate_definitions(report_text, chunk, ui_lang, model, dispatch,
-                                    usage_sink=usage_sink)
-        if got:
-            offered.update(got)
+    chunks = [want[index:index + _MAX_TERMS_PER_CALL]
+              for index in range(0, len(want), _MAX_TERMS_PER_CALL)]
+    offered = _generate_definition_chunks(
+        report_text, chunks, ui_lang, model, dispatch,
+        usage_sink=usage_sink)
     if not offered:
         logger.info('[Paper:TermFill] LLM offered no parseable definitions '
                     '(%d terms across %d chunk(s))', len(want),

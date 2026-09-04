@@ -135,6 +135,43 @@ def test_concurrent_feature_updates_preserve_distinct_flags(
     }
 
 
+def test_feature_flag_snapshot_is_live_plugin_safe_and_bounded(monkeypatch):
+    import lib
+    from lib import feature_registry, features_store
+
+    monkeypatch.setattr(lib, 'PPTX_TRANSLATE_ENABLED', True)
+    monkeypatch.setattr(lib, 'CACHE_EXTENDED_TTL', False)
+    monkeypatch.setattr(lib, 'DEBUG_MODE', True)
+    monkeypatch.setattr(lib, 'OPTIMIZER_ENABLED', False)
+    monkeypatch.setattr(lib, 'ARTIFACTS_ENABLED', True)
+    monkeypatch.setattr(lib, 'PLUGIN_LIVE', True, raising=False)
+    plugin_flags = [
+        feature_registry.FeatureFlag('PLUGIN_LIVE', 'plugin_live', False),
+        feature_registry.FeatureFlag('PLUGIN_BAD', 'Bad-Key', True),
+        feature_registry.FeatureFlag('PLUGIN_RESERVED', 'ok', False),
+        feature_registry.FeatureFlag('PLUGIN_COLLISION', 'debug_mode', False),
+    ]
+    plugin_flags.extend(
+        feature_registry.FeatureFlag(
+            f'PLUGIN_{index}', f'plugin_{index}', bool(index % 2))
+        for index in range(300)
+    )
+    monkeypatch.setattr(feature_registry, 'registered_flags',
+                        lambda: plugin_flags)
+
+    snapshot = features_store.feature_flags_snapshot()
+
+    assert len(snapshot) == 256
+    assert snapshot['pptx_translate_enabled'] is True
+    assert snapshot['cache_extended_ttl'] is False
+    assert snapshot['debug_mode'] is True
+    assert snapshot['optimizer_enabled'] is False
+    assert snapshot['artifacts_enabled'] is True
+    assert snapshot['plugin_live'] is True
+    assert 'Bad-Key' not in snapshot
+    assert 'ok' not in snapshot
+
+
 def test_failed_feature_update_preserves_old_file_and_live_value(
         feature_store, feature_admin_principal):
     import lib

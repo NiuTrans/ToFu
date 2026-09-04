@@ -1,12 +1,10 @@
-"""Tests for the auto-escaping `safeHtml` tagged-template helper and the
-chat-render interpolation lint rule.
+"""Public contracts for the typed HTML-safety owner and interpolation lint.
 
 Two concerns:
 
-1. **Behavior** — `static/js/core/safe_html.js` must escape interpolations
-   by default, pass `raw()` through verbatim, join arrays, and compose
-   nested `safeHtml` results without double-escaping. We exercise the real
-   JS via Node so the test tracks the shipped implementation.
+1. **Behavior** — the typed owner must escape interpolations by default, pass
+   `raw()` through verbatim, join arrays, and compose nested `safeHtml`
+   results without double-escaping. We exercise its browser bundle via Node.
 
 2. **Lint** — once a render function adopts `safeHtml`, future edits must
    not silently reintroduce a bare template-string sink for user/model
@@ -18,6 +16,7 @@ Two concerns:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import shutil
 import subprocess
 
@@ -25,10 +24,16 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
-ROOT = _legacy_test_root()
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+from tests._runtime_sections import (
+    native_module_path,
+    runtime_section_names,
+    runtime_sections_dir,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+OWNER = ROOT / 'frontend/src/html-safety.ts'
+OWNER_JS = Path(native_module_path('.native/html-safety.js', OWNER))
+JS_DIR = runtime_sections_dir()
 
 
 def _node_available() -> bool:
@@ -39,9 +44,7 @@ def _node_available() -> bool:
 
 _HARNESS = r"""
 const fs = require('fs');
-function load(p){ return fs.readFileSync(p,'utf8'); }
-eval(load(process.argv[2]));   // escape_html.js
-eval(load(process.argv[3]));   // safe_html.js
+(0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
 
 const out = [];
 function check(name, got, want) {
@@ -51,6 +54,10 @@ function check(name, got, want) {
 
 // escapes by default
 check('escape_default', safeHtml`<b>${'<script>'}</b>`, '<b>&lt;script&gt;</b>');
+check('direct_escape_full_set', escapeHtml(`&<>"'`), '&amp;&lt;&gt;&quot;&#39;');
+check('direct_falsy_compat', escapeHtml(0) === '' && escapeHtml(false) === '', true);
+check('typed_text_preserves_false_and_zero',
+  escapeHtmlText(false) === 'false' && escapeHtmlText(0) === '0', true);
 // raw passes through
 check('raw_passthrough', safeHtml`<x>${raw('<i>ok</i>')}</x>`, '<x><i>ok</i></x>');
 // null/undefined → ''
@@ -77,47 +84,40 @@ console.log(out.join('\n'));
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_safe_html_behavior():
-    harness = os.path.join(HERE, '_safe_html_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness,
-             os.path.join(JS_DIR, 'core', 'escape_html.js'),
-             os.path.join(JS_DIR, 'core', 'safe_html.js')],
-            capture_output=True, text=True, timeout=30,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+    proc = subprocess.run(
+        ['node', '-e', _HARNESS, str(OWNER_JS)],
+        capture_output=True, text=True, timeout=30,
+    )
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'safeHtml behavior failures:\n' + '\n'.join(fails)
     # Sanity: we actually ran the checks.
-    assert output.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{output}'
+    assert output.count('PASS') == 12, f'expected 12 PASS lines, got:\n{output}'
 
 
-# ── 2. safe_html.js must be wired into the bundler + dev-mode tags ──
+# ── 2. The typed owner must be wired once at the composition boundary ──
 
-def test_safe_html_in_bundler():
-    from lib.js_bundler import _BUNDLE_FILES
-    assert 'core/safe_html.js' in _BUNDLE_FILES, (
-        'core/safe_html.js missing from _BUNDLE_FILES — it would load as a '
-        'silent no-op in production (CLAUDE.md §3.2.1).'
-    )
-    # Must come after escape_html.js (it calls escapeHtml at module scope-ish).
-    assert (_BUNDLE_FILES.index('core/safe_html.js')
-            > _BUNDLE_FILES.index('core/escape_html.js')), (
-        'safe_html.js must be bundled AFTER escape_html.js.'
-    )
+def test_html_safety_owner_replaces_ordered_classic_sections():
+    names = runtime_section_names()
+    assert 'core/escape_html.js' not in names
+    assert 'core/safe_html.js' not in names
+
+
+def test_typed_features_have_no_registry_or_fallback_escape_policy():
+    offenders = []
+    for path in (ROOT / 'frontend/src/features').rglob('*.ts'):
+        source = path.read_text(encoding='utf-8')
+        if ('escapeHtml?:' in source
+                or '.escapeHtml' in source
+                or 'function escapeHtml(' in source
+                or 'function escape(' in source):
+            offenders.append(path.relative_to(ROOT).as_posix())
+    assert offenders == []
 
 
 def test_safe_html_is_not_a_raw_index_script():
-    with open(os.path.join(ROOT, 'index.html'), encoding='utf-8') as f:
-        html = f.read()
+    html = (ROOT / 'index.html').read_text(encoding='utf-8')
     assert 'static/js/core/safe_html.js' not in html
     assert '<!-- TOFU_APP_ASSETS -->' in html
 

@@ -101,6 +101,26 @@ def _run_runtime(*args, timeout=90, env=None):
         capture_output=True, text=True, timeout=timeout, cwd=ROOT, env=env)
 
 
+def _install_prefix():
+    """install.sh source up to the backend fork (no network/uv/conda run)."""
+    source = open(INSTALL_SH, encoding='utf-8').read()
+    return source[:source.index('#  Step 0.6: Choose install backend')]
+
+
+def _fake_uname(bin_dir, arch):
+    """A `uname` shim that reports Linux + the requested machine arch."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    path = bin_dir / 'uname'
+    path.write_text(
+        '#!/bin/bash\n'
+        'case "$1" in\n'
+        '  -s) echo Linux ;;\n'
+        '  -m) echo %s ;;\n'
+        '  *) /usr/bin/uname "$@" ;;\n'
+        'esac\n' % arch)
+    path.chmod(0o755)
+
+
 # ── Behavioural (failing-first: pre-change, --runtime ran the dev lint and
 #    never printed these lines) ────────────────────────────────────────
 
@@ -373,6 +393,48 @@ git() {
     assert 'Repository cloned' in logs[0].read_text(encoding='utf-8')
     assert 'Install log moved to:' in result.stdout
     assert not list(tmp_path.glob('.install-*.pending'))
+
+
+def test_arch_whitelist_rejects_unsupported_arch(tmp_path):
+    """riscv64/s390x/ppc64le must fail fast with a Docker pointer, not fall
+    through to a misleading Miniforge-mirror failure."""
+    bin_dir = tmp_path / 'bin'
+    _fake_uname(bin_dir, 'riscv64')
+    target = tmp_path / 'empty-target'
+    target.mkdir()
+    env = dict(os.environ, HOME=str(tmp_path),
+               PATH=f"{bin_dir}:{os.environ['PATH']}")
+    result = subprocess.run(
+        ['bash', '-s', '--', '--dir', str(target)],
+        input=_install_prefix(), cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert 'Unsupported architecture: riscv64' in result.stdout + result.stderr
+    assert 'Docker image' in result.stdout + result.stderr
+    assert 'Miniforge mirrors failed' not in result.stdout + result.stderr
+
+
+def test_disk_preflight_fails_below_threshold(tmp_path):
+    """A nearly-full install-dir parent must fail before any download, with a
+    clear message, instead of ENOSPC surfacing deep in uv/conda."""
+    bin_dir = tmp_path / 'bin'
+    _fake_uname(bin_dir, 'x86_64')
+    df = bin_dir / 'df'
+    df.write_text(
+        '#!/bin/bash\n'
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf '/dev/sda1 1000000 999000 1000 100%% /\\n'\n")
+    df.chmod(0o755)
+    target = tmp_path / 'empty-target'
+    target.mkdir()
+    env = dict(os.environ, HOME=str(tmp_path),
+               PATH=f"{bin_dir}:{os.environ['PATH']}")
+    result = subprocess.run(
+        ['bash', '-s', '--', '--dir', str(target)],
+        input=_install_prefix(), cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert 'Not enough free disk space' in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(

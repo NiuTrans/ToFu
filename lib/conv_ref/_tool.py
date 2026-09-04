@@ -37,13 +37,15 @@ def raw_requested(fn_args):
     return bool(val)
 
 
-def _paging_int(value, name):
-    """Coerce a paging arg to a positive int; ``(value, error)``.
+def _paging_int(value, name, *, zero_means_default=False):
+    """Coerce one paging arg to an integer cursor; ``(value, error)``.
 
     Models emit JSON numbers as strings, so ``'40'`` is honoured like ``40``.
-    Everything unusable (``'abc'``, ``0``, ``-5``, booleans, floats with a
-    fraction) returns an ``Error:`` string — silently ignoring it would hand
-    back the default window indistinguishably.
+    Everything unusable (``'abc'``, ``-5``, booleans, floats with a fraction)
+    returns an ``Error:`` string. ``before=0`` is the one compatibility
+    sentinel: it has no valid exclusive-cursor meaning and is normalized to
+    omitted/default instead of spending a model repair round. The provider
+    schema still advertises a positive minimum so new calls do not learn it.
     """
     if value is None:
         return None, None
@@ -64,6 +66,8 @@ def _paging_int(value, name):
         n = int(s)
     else:
         return None, bad
+    if n == 0 and zero_means_default:
+        return None, None
     if n < 1:
         return None, bad
     return n, None
@@ -102,14 +106,16 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
                 return "Error: conversation_id is required."
             include_details = fn_args.get('include_tool_details', True)
             raw = raw_requested(fn_args)
-            # Paging args are VALIDATED before forwarding: the schema exposes
-            # them, so a bad value must be reported, not silently ignored —
-            # an ignored cursor hands back the same window and the caller
-            # cannot tell why (the original defect the contract pins).
+            # Paging args are validated before forwarding. The sole tolerant
+            # repair is before=0 -> omitted: zero cannot identify a page and
+            # production traces show it is emitted as the default-page
+            # sentinel. Negative/malformed cursors and limit=0 still fail.
             limit, err = _paging_int(fn_args.get('limit'), 'limit')
             if err:
                 return err
-            before, err = _paging_int(fn_args.get('before'), 'before')
+            before, err = _paging_int(
+                fn_args.get('before'), 'before', zero_means_default=True,
+            )
             if err:
                 return err
             return get_conversation(

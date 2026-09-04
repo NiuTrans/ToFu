@@ -6,7 +6,8 @@ and standardises the read-modify-write pattern across the project.
 
 Public API
 ----------
-  read_json(path, default=None, jsonc=False)  → dict | list | default
+  read_json(path, default=None, jsonc=False, max_bytes=None)
+      → dict | list | default
   write_json_atomic(path, data, fsync=True, indent=2, mode=0o644)
   update_json_atomic(path, mutator, default=None, jsonc=False, ...)
 
@@ -46,6 +47,7 @@ import threading
 from typing import Any, Callable
 
 from lib.log import get_logger
+from lib.weak_lock_pool import WeakLockPool
 
 logger = get_logger(__name__)
 
@@ -56,19 +58,15 @@ class JsonStoreReadError(RuntimeError):
 
 # ── Per-path locks for read-modify-write atomicity ──────────────────
 
-_PATH_LOCKS: dict[str, threading.Lock] = {}
-_PATH_LOCKS_MUTEX = threading.Lock()
+# Active callers hold the strong references. The shared weak lock primitive
+# prevents a long-lived server that visits many projects from retaining one
+# lock object per historical path forever.
+_PATH_LOCKS = WeakLockPool[str, Any](threading.Lock)
 
 
 def _path_lock(path: str) -> threading.Lock:
     """Get a per-path lock keyed by absolute path. Created lazily."""
-    key = os.path.abspath(path)
-    with _PATH_LOCKS_MUTEX:
-        lk = _PATH_LOCKS.get(key)
-        if lk is None:
-            lk = threading.Lock()
-            _PATH_LOCKS[key] = lk
-        return lk
+    return _PATH_LOCKS.lock_for(os.path.abspath(path))
 
 
 # ── Inter-process lock (sidecar flock) ──────────────────────────────
@@ -215,7 +213,7 @@ def _strip_jsonc(text: str) -> str:
 # ── Reads ──────────────────────────────────────────────────────────
 
 def read_json(path: str, default: Any = None, *, jsonc: bool = False,
-              strict: bool = False) -> Any:
+              strict: bool = False, max_bytes: int | None = None) -> Any:
     """Read and parse a JSON file. Returns ``default`` on any error.
 
     Parameters
@@ -227,14 +225,38 @@ def read_json(path: str, default: Any = None, *, jsonc: bool = False,
     jsonc : bool
         If True, strip ``//`` line comments, ``/* */`` block comments,
         and trailing commas before parsing.
+    strict : bool
+        Raise :class:`JsonStoreReadError` instead of returning ``default``
+        when an existing store is unreadable or invalid.
+    max_bytes : int | None
+        Optional positive byte ceiling. The reader consumes at most one byte
+        beyond the limit, so a concurrently growing file cannot bypass a
+        separate size check and cause an unbounded allocation.
     """
+    if (max_bytes is not None
+            and (isinstance(max_bytes, bool)
+                 or not isinstance(max_bytes, int)
+                 or max_bytes <= 0)):
+        raise ValueError("max_bytes must be a positive integer or None")
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            text = f.read()
+        if max_bytes is None:
+            with open(path, 'r', encoding='utf-8') as f:
+                text = f.read()
+        else:
+            with open(path, 'rb') as f:
+                raw = f.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                message = (
+                    f'existing JSON store exceeds {max_bytes} bytes: {path}')
+                if strict:
+                    raise JsonStoreReadError(message)
+                logger.warning('[json_store] %s — returning default', message)
+                return default
+            text = raw.decode('utf-8')
     except FileNotFoundError as _e_audit:
         logger.debug('[json_store] read_json caught %s: %s', type(_e_audit).__name__, _e_audit)
         return default
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         if strict:
             raise JsonStoreReadError(
                 f'failed to read existing JSON store {path}') from e

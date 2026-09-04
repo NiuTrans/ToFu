@@ -38,6 +38,18 @@ import tempfile
 import time
 import unittest
 
+import pytest
+
+from tests.support.model_routing import (
+    allow_native_test_endpoint,
+    clear_test_model_routing,
+    native_test_model,
+    reset_native_test_model_route,
+)
+
+
+pytestmark = pytest.mark.unit
+
 
 def _new_loop_run(coro):
     loop = asyncio.new_event_loop()
@@ -50,6 +62,7 @@ def _new_loop_run(coro):
 class _TerminalSettleBase(unittest.TestCase):
 
     USER_ID = ''
+    ROUTING_OWNER_ID = 0
 
     @classmethod
     def setUpClass(cls):
@@ -93,6 +106,7 @@ class _TerminalSettleBase(unittest.TestCase):
             password='terminal-settle-test',
         )
         cls.USER_ID = account.id
+        cls.ROUTING_OWNER_ID = account.owner_user_id
         from lib.api_keys import create_key
         _row, cls.token = create_key(
             owner_user_id=account.owner_user_id,
@@ -103,9 +117,13 @@ class _TerminalSettleBase(unittest.TestCase):
         # Fund the wallet generously so reserve() never 402s.
         from lib.billing import deposit
         deposit(cls.USER_ID, 10_000_000, kind='topup', ref_id='boot_fund')
+        cls._endpoint_allowance = allow_native_test_endpoint()
+        cls._endpoint_allowance.__enter__()
 
     @classmethod
     def tearDownClass(cls):
+        clear_test_model_routing(owner_user_id=cls.ROUTING_OWNER_ID)
+        cls._endpoint_allowance.__exit__(None, None, None)
         cls._pricing_patch.stop()
         for name, val in (('TOFU_RELAY_BILLING', cls._orig_billing),
                           ('TOFU_EPHEMERAL_PREFLIGHT', cls._orig_preflight)):
@@ -116,6 +134,10 @@ class _TerminalSettleBase(unittest.TestCase):
         cls._tmp.cleanup()
 
     def setUp(self):
+        reset_native_test_model_route(
+            owner_user_id=self.ROUTING_OWNER_ID,
+            model_id='gpt-4o-mini',
+        )
         import lib.runtime_state_store as rss
         rss.reset_for_test()
         from lib.idempotency import _cache as _id_cache
@@ -199,10 +221,13 @@ class BlockingTimeoutSettleTest(_TerminalSettleBase):
             f'terminated (settle not bound to the terminal event)')
 
     def test_agent_run_blocking_timeout_late_finish_settles(self):
-        self._run_late_finish('/api/v1/agent/run', 'gpt-4o-mini')
+        self._run_late_finish(
+            '/api/v1/agent/run', native_test_model(model_id='gpt-4o-mini'))
 
     def test_chat_blocking_timeout_late_finish_settles(self):
-        self._run_late_finish('/api/v1/chat/completions', 'gpt-4o-mini')
+        self._run_late_finish(
+            '/api/v1/chat/completions',
+            native_test_model(model_id='gpt-4o-mini'))
 
 
 class StreamDisconnectSettleTest(_TerminalSettleBase):
@@ -279,10 +304,13 @@ class StreamDisconnectSettleTest(_TerminalSettleBase):
             f'disconnect skipped settlement (settle not bound to terminal)')
 
     def test_agent_run_stream_disconnect_settles_on_terminal(self):
-        self._run_disconnect('/api/v1/agent/run', 'gpt-4o-mini')
+        self._run_disconnect(
+            '/api/v1/agent/run', native_test_model(model_id='gpt-4o-mini'))
 
     def test_chat_stream_disconnect_settles_on_terminal(self):
-        self._run_disconnect('/api/v1/chat/completions', 'gpt-4o-mini')
+        self._run_disconnect(
+            '/api/v1/chat/completions',
+            native_test_model(model_id='gpt-4o-mini'))
 
 
 class SettleIdempotencyTest(_TerminalSettleBase):
@@ -345,7 +373,7 @@ class ReaperSettleTest(_TerminalSettleBase):
                 r = await cli.post(
                     '/api/v1/agent/run',
                     headers={'Authorization': f'Bearer {self.token}'},
-                    json={'model': 'gpt-4o-mini',
+                    json={'model': native_test_model(model_id='gpt-4o-mini'),
                           'messages': [{'role': 'user', 'content': 'hi'}],
                           'timeout_s': 0.4})
                 self.assertEqual(r.status_code, 500)

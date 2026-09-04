@@ -21,7 +21,7 @@ runtimeScope._onReady = _onReady;
 function _featureLoadError(name, error) {
   console.error('[feature-bridge] required owner ' + name + ' failed:', error);
   try {
-    if (typeof toast === 'function') toast(t('feature.loadFailed'), 'error');
+    if (typeof showToast === 'function') showToast(t('feature.loadFailed'), 'error');
   } catch (_) { /* the console error remains authoritative */ }
 }
 
@@ -64,12 +64,18 @@ const _FEATURE_ENTRY_POINTS = [
   'openOrchestration', 'openTaskMode', 'togglePaperMode',
  'toggleResearchMode',
   'enterImageGenMode', 'exitImageGenMode', 'generateImageDirect',
-  'selectIgAspect', 'selectIgCount', 'selectIgResolution', 'toggleIgModelDropdown',
-  'openProjectBrain', 'toggleProjectBrain', 'openProjectBrainInfluence',
+  'selectIgAspect', 'selectIgCount', 'selectIgModel', 'selectIgResolution',
+  'toggleIgModelDropdown', '_igCancelGeneration', '_igRetryGenerationTurn',
+  'openProjectBrain', 'toggleProjectBrain',
   '_wireConvSyncPush',
   'openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate',
   'openKnowledgeBase', 'closeKnowledgeBase',
   'openProjectModal', 'closeProjectModal',
+  'openLocalControlModal', 'closeLocalControlModal',
+  'toggleBrowserFromLocalModal', 'toggleDesktopFromLocalModal',
+  'toggleDebug', 'closeDebug', 'copyDebugContent',
+  'openRequestInspectorForTask', 'openToolDebugPanel',
+  'openCompactionViewer',
   'resolveWriteApproval', 'submitStdinInput', 'submitStdinEof',
   'submitHumanGuidanceChoice', 'submitHumanGuidanceFreeText',
   'openApplyModal', 'closeApplyModal', 'confirmApplyCode',
@@ -77,11 +83,13 @@ const _FEATURE_ENTRY_POINTS = [
   'openUpdateDialog', 'toggleTimerPanel', 'toggleOptimizerPanel',
   'toggleMemory', 'openMemoryModal', 'closeMemoryModal',
   'toggleMemoryAddForm', 'toggleMemoryFromModal',
+  'installSkillFromFileInput', '_openSkillsStoreFromMemory',
   '_populateSkillsTab', '_populatePreferencesTab', '_renderSettingsUpdatePill',
-  'closeUpdateModal', '_skillsSetScope', '_skillsFilter',
-  'openMemoryCreateForm', 'refreshPreferences', 'savePreferences',
+  'closeUpdateModal', '_skillsSetScope', '_skillsFilter', '_skillsInstallFromInput',
+  'refreshPreferences', 'savePreferences',
   'populateToolsInventory', 'searchToolsInventory',
   'openSettings', 'closeSettings', 'saveSettings', 'switchSettingsTab',
+  '_oauthLogin',
 ];
 
 _FEATURE_ENTRY_POINTS.forEach(_installFeatureStub);

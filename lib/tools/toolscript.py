@@ -18,6 +18,8 @@ MAX_TOOL_CALLS = 16
 MAX_CONCURRENT_CALLS = 8
 MAX_OUTPUT_BYTES = 1_048_576
 MAX_NESTING = 32
+MAX_SYNTAX_REPAIRS = 8
+MAX_COLLECTION_ITEMS = 10_000
 
 _FORBIDDEN_MEMBERS = frozenset({
     '__proto__', 'prototype', 'constructor', '__class__', '__dict__',
@@ -164,6 +166,7 @@ class Parser:
         self.pos = 0
         self.nodes = 0
         self.depth = 0
+        self.syntax_repairs: list[dict[str, Any]] = []
 
     def _node(self, kind: str, *values: Any) -> tuple:
         self.nodes += 1
@@ -354,8 +357,34 @@ class Parser:
                                               f'forbidden key {key.value!r}')
                     self.take(':')
                     pairs.append((key.value, self.expression()))
-                    if not self.match(','):
-                        break
+                    if self.match(','):
+                        # JavaScript permits a trailing object-member comma.
+                        if self.peek('}'):
+                            break
+                        continue
+                    # Models occasionally omit a comma between two object
+                    # members. Recover only when the next two tokens are the
+                    # unambiguous ``key:`` shape; no expression, value, tool
+                    # name, or authority decision is guessed. The repair is
+                    # bounded and returned in execution stats for audit/replay.
+                    next_token = self.peek()
+                    following = (self.tokens[self.pos + 1]
+                                 if self.pos + 1 < len(self.tokens) else None)
+                    if (next_token.kind in ('ident', 'string')
+                            and following is not None
+                            and following.value == ':'):
+                        if len(self.syntax_repairs) >= MAX_SYNTAX_REPAIRS:
+                            raise ToolScriptError(
+                                'syntax_error',
+                                'too many automatic ToolScript syntax repairs',
+                                offset=next_token.offset,
+                                limit=MAX_SYNTAX_REPAIRS)
+                        self.syntax_repairs.append({
+                            'kind': 'missing_object_comma',
+                            'offset': next_token.offset,
+                        })
+                        continue
+                    break
             self.take('}')
             return self._node('object', pairs)
         raise ToolScriptError('syntax_error',
@@ -431,6 +460,7 @@ class Interpreter:
         self.tool_calls = 0
         self.env: dict[str, Any] = {
             'catalog': _Namespace('catalog'), 'tools': _Namespace('tools'),
+            'JSON': _Namespace('JSON'), 'Object': _Namespace('Object'),
         }
         self.last = None
 
@@ -584,6 +614,34 @@ class Interpreter:
                                   limit=MAX_TOOL_CALLS)
         self.tool_calls += count
 
+    def _bounded_collection(self, values: list[Any], *, operation: str
+                            ) -> list[Any]:
+        if len(values) > MAX_COLLECTION_ITEMS:
+            raise ToolScriptError(
+                'collection_limit',
+                f'{operation} exceeds the ToolScript collection limit',
+                limit=MAX_COLLECTION_ITEMS)
+        self.step(len(values))
+        return values
+
+    @staticmethod
+    def _slice_index(value: Any, default: int | None) -> int | None:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        raise ToolScriptError('type_error', 'slice indexes must be numbers')
+
+    @staticmethod
+    def _bounded_text(value: str, *, operation: str) -> str:
+        if len(value.encode('utf-8')) > MAX_OUTPUT_BYTES:
+            raise ToolScriptError(
+                'output_limit', f'{operation} output exceeds 1 MiB',
+                limit=MAX_OUTPUT_BYTES)
+        return value
+
     def invoke(self, callee: Any, args: list[Any]) -> Any:
         self.step()
         if isinstance(callee, _Lambda):
@@ -609,9 +667,50 @@ class Interpreter:
                     execution = ('parallel' if name == 'parallel' else
                                  (str(args[1]) if len(args) > 1 else 'auto'))
                     return self.call_many(calls, execution)
+            if isinstance(owner, _Namespace) and owner.name == 'JSON':
+                if name == 'parse':
+                    if not args or not isinstance(args[0], str):
+                        raise ToolScriptError(
+                            'type_error', 'JSON.parse expects a string')
+                    raw = args[0]
+                    if len(raw.encode('utf-8')) > MAX_OUTPUT_BYTES:
+                        raise ToolScriptError(
+                            'input_limit', 'JSON.parse input exceeds 1 MiB',
+                            limit=MAX_OUTPUT_BYTES)
+                    try:
+                        return json.loads(raw)
+                    except json.JSONDecodeError as exc:
+                        raise ToolScriptError(
+                            'json_error', f'JSON.parse failed: {exc.msg}',
+                            offset=exc.pos)
+                if name == 'stringify':
+                    try:
+                        encoded = json.dumps(
+                            args[0] if args else None, ensure_ascii=False,
+                            separators=(',', ':'), default=str)
+                    except (TypeError, ValueError) as exc:
+                        raise ToolScriptError(
+                            'type_error', f'JSON.stringify failed: {exc}')
+                    return self._bounded_text(
+                        encoded, operation='JSON.stringify')
+            if isinstance(owner, _Namespace) and owner.name == 'Object' \
+                    and name in ('keys', 'values'):
+                value = args[0] if args else None
+                if not isinstance(value, dict):
+                    raise ToolScriptError(
+                        'type_error', f'Object.{name} expects an object')
+                projected = (list(value.keys()) if name == 'keys'
+                             else list(value.values()))
+                return self._bounded_collection(
+                    projected, operation=f'Object.{name}')
             if isinstance(owner, list) and name in ('map', 'filter', 'reduce'):
                 if not args or not isinstance(args[0], _Lambda):
                     raise ToolScriptError('type_error', f'{name} requires a lambda')
+                if len(owner) > MAX_COLLECTION_ITEMS:
+                    raise ToolScriptError(
+                        'collection_limit',
+                        f'{name} exceeds the ToolScript collection limit',
+                        limit=MAX_COLLECTION_ITEMS)
                 fn = args[0]
                 if name == 'map':
                     return [self._apply_lambda(fn, [value, i, owner])
@@ -630,8 +729,28 @@ class Interpreter:
                     accumulator = self._apply_lambda(
                         fn, [accumulator, owner[i], i, owner])
                 return accumulator
-            if isinstance(owner, list) and name == 'length': return len(owner)
-            if isinstance(owner, str) and name == 'length': return len(owner)
+            if isinstance(owner, list) and name == 'slice':
+                start = self._slice_index(args[0] if args else None, 0)
+                end = self._slice_index(args[1] if len(args) > 1 else None,
+                                        None)
+                return self._bounded_collection(
+                    owner[start:end], operation='Array.slice')
+            if isinstance(owner, list) and name == 'join':
+                separator = str(args[0]) if args else ','
+                joined = separator.join(str(value) for value in owner)
+                self.step(len(owner))
+                return self._bounded_text(joined, operation='Array.join')
+            if isinstance(owner, list) and name == 'push':
+                if len(owner) + len(args) > MAX_COLLECTION_ITEMS:
+                    raise ToolScriptError(
+                        'collection_limit',
+                        'Array.push exceeds the ToolScript collection limit',
+                        limit=MAX_COLLECTION_ITEMS)
+                owner.extend(args)
+                self.step(len(args))
+                return len(owner)
+            if isinstance(owner, list) and name == 'includes':
+                return (args[0] if args else None) in owner
             if isinstance(owner, str) and name in ('includes', 'startsWith', 'endsWith'):
                 needle = str(args[0] if args else '')
                 return {'includes': needle in owner,
@@ -639,6 +758,24 @@ class Interpreter:
                         'endsWith': owner.endswith(needle)}[name]
             if isinstance(owner, str) and name in ('toLowerCase', 'toUpperCase'):
                 return owner.lower() if name == 'toLowerCase' else owner.upper()
+            if isinstance(owner, str) and name == 'trim':
+                return owner.strip()
+            if isinstance(owner, str) and name == 'slice':
+                start = self._slice_index(args[0] if args else None, 0)
+                end = self._slice_index(args[1] if len(args) > 1 else None,
+                                        None)
+                return owner[start:end]
+            if isinstance(owner, str) and name == 'split':
+                if not args:
+                    parts = [owner]
+                else:
+                    separator = str(args[0])
+                    if separator == '':
+                        parts = list(owner[:MAX_COLLECTION_ITEMS + 1])
+                    else:
+                        parts = owner.split(separator, MAX_COLLECTION_ITEMS)
+                return self._bounded_collection(
+                    parts, operation='String.split')
         raise ToolScriptError('unsafe_call', 'function is not an allowed ToolScript builtin')
 
 
@@ -649,9 +786,15 @@ def execute_toolscript(
     call: Callable[[str, Any, str | None], Any],
     call_many: Callable[[Any, str], Any],
     aborted: Callable[[], bool] | None = None,
-) -> tuple[Any, dict[str, int]]:
+) -> tuple[Any, dict[str, Any]]:
+    parser = Parser(tokenize(str(source or '')))
     try:
-        ast = Parser(tokenize(str(source or ''))).parse()
+        ast = parser.parse()
+    except ToolScriptError as exc:
+        if parser.syntax_repairs:
+            exc.detail.setdefault(
+                'syntax_repairs', list(parser.syntax_repairs))
+        raise
     except RecursionError:
         raise ToolScriptError('nesting_limit',
                               'ToolScript nesting exceeds 32 levels',
@@ -663,9 +806,14 @@ def execute_toolscript(
     interpreter = Interpreter(search=search, call=call, call_many=call_many,
                               aborted=aborted)
     result = interpreter.run(ast)
-    return result, {'ast_nodes': ParserNodeCounter.count(ast),
-                    'steps': interpreter.steps,
-                    'tool_calls': interpreter.tool_calls}
+    stats: dict[str, Any] = {
+        'ast_nodes': ParserNodeCounter.count(ast),
+        'steps': interpreter.steps,
+        'tool_calls': interpreter.tool_calls,
+    }
+    if parser.syntax_repairs:
+        stats['syntax_repairs'] = list(parser.syntax_repairs)
+    return result, stats
 
 
 class ParserNodeCounter:
@@ -689,7 +837,8 @@ class ParserNodeCounter:
 
 
 __all__ = [
-    'MAX_AST_NODES', 'MAX_CONCURRENT_CALLS', 'MAX_NESTING',
-    'MAX_OUTPUT_BYTES', 'MAX_SOURCE_BYTES', 'MAX_STEPS', 'MAX_TOOL_CALLS',
-    'ToolScriptError', 'execute_toolscript', 'tokenize',
+    'MAX_AST_NODES', 'MAX_COLLECTION_ITEMS', 'MAX_CONCURRENT_CALLS', 'MAX_NESTING',
+    'MAX_OUTPUT_BYTES', 'MAX_SOURCE_BYTES', 'MAX_STEPS',
+    'MAX_SYNTAX_REPAIRS', 'MAX_TOOL_CALLS', 'ToolScriptError',
+    'execute_toolscript', 'tokenize',
 ]

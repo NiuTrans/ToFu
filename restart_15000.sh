@@ -157,13 +157,54 @@ LOG="server_${PORT}.log"
 # server present at collection can disappear before execution, making the
 # script take its intentional dead-server recovery path and launch a real Tofu
 # with pytest's temporary DB/data environment.  Retargeted, defanged test
-# COPIES may opt in only after they set TOFU_ALLOW_LIFECYCLE_TEST=1.
-if { [ -n "${PYTEST_CURRENT_TEST:-}" ] \
-     || [ "${TOFU_TESTING:-}" = "1" ]; } \
-   && [ "${TOFU_ALLOW_LIFECYCLE_TEST:-}" != "1" ]; then
-  echo "[lifecycle-gate] REFUSING production restart_15000.sh from a test process."
-  echo "                 Use a retargeted, defanged script copy on an isolated port."
+# COPIES may opt in only with a complete, mechanically checked isolation
+# declaration. A boolean escape hatch alone is not authority: that exact gap
+# once let an inherited production PORT override a retargeted test copy.
+_lifecycle_test_refuse() {
+  echo "[lifecycle-gate] REFUSING restart_15000.sh from an unisolated test process."
+  echo "                 Test copies require a private pytest root, project/data paths"
+  echo "                 beneath it, and an explicit non-production port."
   exit 3
+}
+
+_LIFECYCLE_TEST_MODE=0
+if [ -n "${PYTEST_CURRENT_TEST:-}" ] \
+   || [ "${TOFU_TESTING:-}" = "1" ] \
+   || [ "${TOFU_ALLOW_LIFECYCLE_TEST:-}" = "1" ]; then
+  _LIFECYCLE_TEST_MODE=1
+  [ "${TOFU_ALLOW_LIFECYCLE_TEST:-}" = "1" ] || _lifecycle_test_refuse
+  [ -n "${TOFU_PYTEST_RUN_ROOT:-}" ] || _lifecycle_test_refuse
+  [ -n "${TOFU_LIFECYCLE_TEST_ROOT:-}" ] || _lifecycle_test_refuse
+  [ -n "${TOFU_LIFECYCLE_TEST_PORT:-}" ] || _lifecycle_test_refuse
+  [ -n "${TOFU_LIFECYCLE_TEST_TARGET_PID:-}" ] || _lifecycle_test_refuse
+  [ -n "${TOFU_DATA_DIR:-}" ] || _lifecycle_test_refuse
+
+  _TEST_RUN_ROOT="$(cd -- "${TOFU_PYTEST_RUN_ROOT}" 2>/dev/null && pwd -P)" \
+    || _lifecycle_test_refuse
+  _TEST_ROOT="$(cd -- "${TOFU_LIFECYCLE_TEST_ROOT}" 2>/dev/null && pwd -P)" \
+    || _lifecycle_test_refuse
+  _TEST_DATA_ROOT="$(cd -- "${TOFU_DATA_DIR}" 2>/dev/null && pwd -P)" \
+    || _lifecycle_test_refuse
+  [ "${_TEST_RUN_ROOT}" != "/" ] || _lifecycle_test_refuse
+  case "${_TEST_ROOT}/" in
+    "${_TEST_RUN_ROOT}/"*) ;;
+    *) _lifecycle_test_refuse ;;
+  esac
+  case "${SCRIPT_PATH}/" in
+    "${_TEST_ROOT}/"*) ;;
+    *) _lifecycle_test_refuse ;;
+  esac
+  case "${PROJ}/" in
+    "${_TEST_ROOT}/"*) ;;
+    *) _lifecycle_test_refuse ;;
+  esac
+  case "${_TEST_DATA_ROOT}/" in
+    "${_TEST_ROOT}/"*) ;;
+    *) _lifecycle_test_refuse ;;
+  esac
+  [ "${TOFU_LIFECYCLE_TEST_PORT}" = "${PORT}" ] \
+    || _lifecycle_test_refuse
+  [ "${PORT}" != "15000" ] || _lifecycle_test_refuse
 fi
 
 # ── Headless-Chromium libs from LOCAL disk, never the FUSE conda env. ──
@@ -199,6 +240,22 @@ listener_pids() {
   ss -ltnp 2>/dev/null \
     | awk -v pat=":${PORT}\$" '$4 ~ pat {print}' \
     | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+}
+
+_test_target_identity_matches() {
+  [ "${_LIFECYCLE_TEST_MODE}" = "1" ] || return 0
+  [ "${TOFU_LIFECYCLE_TEST_TARGET_PID}" != "none" ] || return 1
+  local target_cwd target_start
+  target_cwd="$(readlink -f "/proc/${TOFU_LIFECYCLE_TEST_TARGET_PID}/cwd" 2>/dev/null)" \
+    || return 1
+  case "${target_cwd}/" in
+    "${_TEST_ROOT}/"*) ;;
+    *) return 1 ;;
+  esac
+  target_start="$(awk '{print $22}' \
+    "/proc/${TOFU_LIFECYCLE_TEST_TARGET_PID}/stat" 2>/dev/null)"
+  [ -n "${target_start}" ] \
+    && [ "${target_start}" = "${_LIFECYCLE_TEST_TARGET_START:-}" ]
 }
 
 # ── [pre/5] MUTEX GUARD — refuse to run if supervisord already OWNS tofu. ──
@@ -309,6 +366,22 @@ fi
 # ── Guard: refuse to run if THIS shell is a descendant of a :PORT listener. ──
 # Killing that PID would terminate this very shell (self-plug-pull).
 LPIDS_INIT="$(listener_pids)"
+if [ "${_LIFECYCLE_TEST_MODE}" = "1" ]; then
+  case "${TOFU_LIFECYCLE_TEST_TARGET_PID}" in
+    none)
+      [ -z "${LPIDS_INIT}" ] || _lifecycle_test_refuse
+      ;;
+    ''|*[!0-9]*) _lifecycle_test_refuse ;;
+    *)
+      [ "${LPIDS_INIT}" = "${TOFU_LIFECYCLE_TEST_TARGET_PID}" ] \
+        || _lifecycle_test_refuse
+      _LIFECYCLE_TEST_TARGET_START="$(awk '{print $22}' \
+        "/proc/${TOFU_LIFECYCLE_TEST_TARGET_PID}/stat" 2>/dev/null)"
+      [ -n "${_LIFECYCLE_TEST_TARGET_START}" ] || _lifecycle_test_refuse
+      _test_target_identity_matches || _lifecycle_test_refuse
+      ;;
+  esac
+fi
 if [ -n "${LPIDS_INIT}" ]; then
   up=$$
   for _ in 1 2 3 4 5 6 7 8; do
@@ -431,7 +504,16 @@ fi
 # ── [1/5] Stop whatever is listening on :PORT (by exact PID). ──
 echo "[1/5] Stopping current server on :${PORT} ..."
 LPIDS="$(listener_pids)"
-if [ -z "${LPIDS}" ]; then
+if [ "${_LIFECYCLE_TEST_MODE}" = "1" ]; then
+  if [ "${TOFU_LIFECYCLE_TEST_TARGET_PID}" = "none" ]; then
+    [ -z "${LPIDS}" ] || _lifecycle_test_refuse
+    LPIDS=""
+  else
+    [ "${LPIDS}" = "${TOFU_LIFECYCLE_TEST_TARGET_PID}" ] \
+      && _test_target_identity_matches \
+      || _lifecycle_test_refuse
+  fi
+elif [ -z "${LPIDS}" ]; then
   # Fallback: no listener socket found (e.g. mid-crash) — match the real
   # launch command. NOTE: matches `python server.py`, NOT a --port substring.
   LPIDS="$(pgrep -f 'server\.py' 2>/dev/null | tr '\n' ' ')"
@@ -456,7 +538,16 @@ for i in $(seq 1 20); do
 done
 if [ "${freed}" != "1" ]; then
   echo "      WARNING: :${PORT} still bound after 20s — escalating to SIGKILL."
-  KPIDS="$(listener_pids)"; [ -z "${KPIDS}" ] && KPIDS="$(pgrep -f 'server\.py' 2>/dev/null | tr '\n' ' ')"
+  KPIDS="$(listener_pids)"
+  if [ "${_LIFECYCLE_TEST_MODE}" = "1" ]; then
+    if [ -n "${KPIDS}" ]; then
+      [ "${KPIDS}" = "${TOFU_LIFECYCLE_TEST_TARGET_PID}" ] \
+        && _test_target_identity_matches \
+        || _lifecycle_test_refuse
+    fi
+  elif [ -z "${KPIDS}" ]; then
+    KPIDS="$(pgrep -f 'server\.py' 2>/dev/null | tr '\n' ' ')"
+  fi
   for lp in ${KPIDS}; do kill -9 "${lp}" 2>/dev/null && echo "      SIGKILL -> ${lp}"; done
   sleep 2
   if ss -ltn 2>/dev/null | grep -q ":${PORT} "; then
@@ -493,7 +584,14 @@ if [ -n "${LPIDS}${KPIDS:-}" ]; then
   done
   if [ "${all_gone}" != "1" ]; then
     echo "      WARNING: old process still alive 30s after port-free — SIGKILL."
-    for lp in ${LPIDS} ${KPIDS:-}; do kill -9 "${lp}" 2>/dev/null && echo "      SIGKILL -> ${lp}"; done
+    for lp in ${LPIDS} ${KPIDS:-}; do
+      if [ "${_LIFECYCLE_TEST_MODE}" = "1" ]; then
+        [ "${lp}" = "${TOFU_LIFECYCLE_TEST_TARGET_PID}" ] \
+          && _test_target_identity_matches \
+          || _lifecycle_test_refuse
+      fi
+      kill -9 "${lp}" 2>/dev/null && echo "      SIGKILL -> ${lp}"
+    done
     sleep 2
   fi
 fi

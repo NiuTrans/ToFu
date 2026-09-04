@@ -210,7 +210,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "object": "list",
             "data": [{
                 "id": "kimi-k3", "object": "model", "created": 0,
-                "owned_by": "meituan",
+                "owned_by": "eval",
             }],
         })
 

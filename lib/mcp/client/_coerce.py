@@ -1,8 +1,8 @@
 """lib/mcp/client/_coerce.py — tool-argument coercion + annotation extraction.
 
 Best-effort coercion of LLM-shaped argument values to a tool's declared JSON
-schema types, plus extraction of the MCP ``readOnlyHint`` annotation. Pure
-leaf module.
+schema types, plus extraction of the MCP tool annotations and ``outputSchema``.
+Pure leaf module.
 """
 
 from __future__ import annotations
@@ -102,6 +102,42 @@ def _coerce_args_to_schema(
     return out
 
 
+# MCP ToolAnnotations behavioural hints: (wire camelCase, v2 SDK snake_case).
+# The execution partition (read vs write) continues to key off readOnlyHint
+# alone — see lib/tasks_pkg/tool_dispatch/_flags.py — so exposing the other
+# hints here must never widen that partition.
+_ANNOTATION_HINTS = (
+    ('readOnlyHint', 'read_only_hint'),
+    ('destructiveHint', 'destructive_hint'),
+    ('idempotentHint', 'idempotent_hint'),
+    ('openWorldHint', 'open_world_hint'),
+)
+
+
+def _read_annotation_hint(annotations: Any, camel: str, snake: str) -> bool:
+    """Read one ToolAnnotations boolean hint across dict and model spellings.
+
+    The WIRE name is always camelCase.  The PYTHON ATTRIBUTE name is not: MCP
+    SDK v1 exposes ``readOnlyHint`` etc. directly, while v2 moved every model
+    field to snake_case and kept camelCase only as a serialization alias.
+    Accepts both spellings; only an explicit ``True`` is trusted (missing,
+    False, or truthy junk all stay False) so a rename can never flip a safety
+    default.
+    """
+    if isinstance(annotations, dict):
+        # Raw wire object: camelCase is canonical, snake_case accepted too.
+        value = annotations.get(camel)
+        if value is None:
+            value = annotations.get(snake)
+        return value is True
+    # Parsed model: attribute name differs by SDK major.
+    for attr in (camel, snake):
+        value = getattr(annotations, attr, None)
+        if value is not None:
+            return value is True
+    return False
+
+
 def _extract_read_only_hint(tool: Any) -> bool:
     """Return the MCP ``annotations.readOnlyHint`` for *tool* (default False).
 
@@ -136,20 +172,47 @@ def _extract_read_only_hint(tool: Any) -> bool:
     if annotations is None:
         return False
     try:
-        if isinstance(annotations, dict):
-            # Raw wire object: camelCase is the only correct key, but accept
-            # the snake_case spelling too rather than silently reading False.
-            hint = annotations.get('readOnlyHint')
-            if hint is None:
-                hint = annotations.get('read_only_hint')
-            return hint is True
-        # Parsed model: attribute name differs by SDK major (see docstring).
-        for attr in ('readOnlyHint', 'read_only_hint'):
-            hint = getattr(annotations, attr, None)
-            if hint is not None:
-                return hint is True
-        return False
+        return _read_annotation_hint(
+            annotations, 'readOnlyHint', 'read_only_hint')
     except Exception as e:
         logger.debug('[MCP] readOnlyHint extraction failed for %s: %s',
                      getattr(tool, 'name', '?'), e)
         return False
+
+
+def _extract_annotations(tool: Any) -> dict[str, bool]:
+    """Return the tool's MCP annotations as a camelCase-keyed bool dict.
+
+    Emits all four ``ToolAnnotations`` hints (``readOnlyHint`` /
+    ``destructiveHint`` / ``idempotentHint`` / ``openWorldHint``) with ``False``
+    for any field the server omits, matching MCP's own defaults.  This is a
+    superset of :func:`_extract_read_only_hint`; the read/write execution
+    partition still keys off ``read_only_hint`` alone.
+    """
+    annotations = getattr(tool, 'annotations', None)
+    if annotations is None:
+        return {camel: False for camel, _ in _ANNOTATION_HINTS}
+    try:
+        return {
+            camel: _read_annotation_hint(annotations, camel, snake)
+            for camel, snake in _ANNOTATION_HINTS
+        }
+    except Exception as e:
+        logger.debug('[MCP] annotation extraction failed for %s: %s',
+                     getattr(tool, 'name', '?'), e)
+        return {camel: False for camel, _ in _ANNOTATION_HINTS}
+
+
+def _extract_output_schema(tool: Any) -> dict[str, Any]:
+    """Return the tool's MCP ``outputSchema`` across SDK spellings ({} absent).
+
+    The wire name is ``outputSchema``; the v2 SDK model field is
+    ``output_schema`` — the same rename hazard as ``annotations.readOnlyHint``.
+    Non-dict / absent values normalise to ``{}`` so callers never branch on a
+    missing field.
+    """
+    for attr in ('output_schema', 'outputSchema'):
+        schema = getattr(tool, attr, None)
+        if schema is not None:
+            return schema if isinstance(schema, dict) else {}
+    return {}

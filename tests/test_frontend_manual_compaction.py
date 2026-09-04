@@ -460,14 +460,16 @@ def test_gauge_legacy_path_neuter(tmp_path):
     presented raw again (the fake-100% bug returns). Proves the guard is
     load-bearing."""
     src = open(os.path.join(JS_DIR, 'context-bar.js'), encoding='utf-8').read()
-    anchor = ('        const n = (Array.isArray(m.apiRounds) && m.apiRounds.length)\n'
-              '                  || 0;\n'
+    anchor = ("        const n = typeof agentApiRoundCount === 'function'\n"
+              '          ? agentApiRoundCount(m.apiRounds)\n'
+              '          : (Array.isArray(m.apiRounds) && m.apiRounds.length) || 0;\n'
               '        if (t > 0 && n > 0) return n > 1 ? Math.round(t / n) : t;')
     assert anchor in src, 'legacy-path guard anchor not found (fix regressed?)'
     neutered = src.replace(
         anchor,
-        ('        const n = (Array.isArray(m.apiRounds) && m.apiRounds.length)\n'
-         '                  || 1;  // NEUTER\n'
+        ("        const n = typeof agentApiRoundCount === 'function'\n"
+         '          ? agentApiRoundCount(m.apiRounds)\n'
+         '          : (Array.isArray(m.apiRounds) && m.apiRounds.length) || 1;  // NEUTER\n'
          '        if (t > 0 && n > 0) return n > 1 ? Math.round(t / n) : t;'), 1)
     assert neutered != src
     nfile = tmp_path / 'context-bar-legacy-neutered.js'
@@ -841,6 +843,16 @@ delete CONV._testTurns[1]._liveLastRoundUsage;
 //     previous turn's number): tokensIn 0 falls through to apiRounds.
 CONV._testTurns[1].lastRoundUsage = { round:0, model:'', tag:'', tokensIn:0, tokensOut:0 };
 check('zero_tokensIn_falls_through_to_apiRounds', used() === 30000);
+
+// (E) Historical settled projection: an internal compaction accounting row
+//     may trail the response-authoring API row. It must not become the gauge's
+//     prompt reading (the same classification drives finish-route display).
+delete CONV._testTurns[1].lastRoundUsage;
+CONV._testTurns[1].apiRounds = [
+  { tag:'R3', usage:{ prompt_tokens: 30000 } },
+  { kind:'compaction', tag:'COMPACTION-L2', usage:{ prompt_tokens: 4000 } },
+];
+check('trailing_compaction_is_not_agent_prompt', used() === 30000);
 console.log(out.join('\n'));
 """
 
@@ -858,7 +870,8 @@ def test_gauge_v2_live_last_round_usage():
     for want in ('PASS v2_live_lastRoundUsage_drives_gauge',
                  'PASS v2_lastRoundUsage_beats_stale_apiRounds',
                  'PASS v1_live_reading_outranks_projection_reading',
-                 'PASS zero_tokensIn_falls_through_to_apiRounds'):
+                 'PASS zero_tokensIn_falls_through_to_apiRounds',
+                 'PASS trailing_compaction_is_not_agent_prompt'):
         assert want in output, f'missing {want}\n{output}'
 
 

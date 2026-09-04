@@ -1,54 +1,227 @@
-"""Render-contract guard for the write-gate REFUSAL card (tool_rounds.js).
+"""Behavior and retained-wiring contracts for write-gate refusal presentation."""
 
-The shared-worktree guards (read-before-edit + write-freshness) refuse a
-write tool call with a raw developer badge token — 'stale', 'read first',
-'partial: …', 'ref failed' — that used to render VERBATIM on the card,
-leaving users guessing. The renderer now upgrades them: a localized amber
-badge (`.ptool-badge-warn.ptool-badge-gate`, blink off — a terminal
-interception, not a transient warning) carrying the reason as tooltip,
-plus an explanation card (`.ptool-gate-note`) naming the file(s) and the
-automatic next step (re-read + re-issue, no user action).
-
-Drives the REAL ``renderToolRoundsHTML`` under jsdom (same harness
-discipline as tests/test_frontend_tool_rounds_render.py — the swarm
-panel target loads first, mirroring bundle order) and pins:
-
-  1. structured meta.refusal (new rounds) → badge + notice per kind;
-  2. LEGACY badge-only rounds (persisted history, no meta.refusal) →
-     same upgrade via the badge-string fallback;
-  3. non-write tools whose badge happens to equal a refusal token stay
-     RAW (no misfire), and an ordinary failed write keeps its plain red
-     'failed' badge;
-  4. NEUTER: with the three notice-injection splices amputated, the
-     notice checks for ALL THREE write blocks go red — the injections
-     are load-bearing, not decoration.
-
-A Python-side static guard closes the i18n loop: every ``tool.gate*``
-key referenced by tool_rounds.js must exist in i18n.js with both zh and
-en — a missing key renders the raw key name, the exact bug class this
-feature removes.
-
-Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q \\
-       tests/test_frontend_gate_refusal_render.py
-"""
 from __future__ import annotations
 
 import os
-import json
-import re
-import tempfile
+from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
-from tests._jsdom import HERE, JS_DIR, node_deps_available, run_harness
+from tests._jsdom import JS_DIR, run_harness
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 
+ROOT = Path(__file__).resolve().parents[1]
+OWNER = ROOT / 'frontend/src/conversation/presentation/write-gate-refusal.ts'
+OWNER_JS = Path(native_module_path('.native/write-gate-refusal-contract.js', OWNER))
 TOOL_ROUNDS = os.path.join(JS_DIR, 'ui', 'tool_rounds.js')
 
-_BODY = r"""
+_OWNER_HARNESS = r"""
+eval(process.env.OWNER_SOURCE);
+
+const checks = [];
+function check(name, condition) {
+  checks.push((condition ? 'PASS ' : 'FAIL ') + name);
+}
+
+const messages = {
+  'tool.gateStaleBadge': 'changed on disk',
+  'tool.gateReadFirstBadge': 'must read first',
+  'tool.gatePartialStaleBadge': 'partial · changed',
+  'tool.gatePartialReadFirstBadge': 'partial · unread',
+  'tool.gateContentRefBadge': 'content ref failed',
+  'tool.gateTargetGeneric': 'The target file',
+  'tool.gateStaleTitle': 'Write blocked — file changed on disk',
+  'tool.gateStaleText': '{paths} changed; re-read the file and re-issue.',
+  'tool.gateReadFirstTitle': 'Edit blocked — file not read yet',
+  'tool.gateReadFirstText': 'Read {paths} with read_files before editing.',
+  'tool.gatePartialStaleTitle': '{skipped} edit(s) blocked — changed',
+  'tool.gatePartialStaleText':
+    '{paths}: {skipped} edit(s) blocked; the other {proceeded} edit(s) ran normally.',
+  'tool.gatePartialReadFirstTitle': '{skipped} edit(s) blocked — unread',
+  'tool.gatePartialReadFirstText':
+    '{paths}: {skipped} edit(s) blocked; the other {proceeded} edit(s) ran normally.',
+  'tool.gateContentRefTitle': 'Write not executed — content reference failed',
+  'tool.gateContentRefText': 'The content_ref has no result; retry explicit content.',
+};
+function translate(key, params) {
+  let value = messages[key] || key;
+  if (!params || typeof params !== 'object') return value;
+  return value.replace(/\{([A-Za-z0-9_]+)\}/g, (token, name) => (
+    Object.prototype.hasOwnProperty.call(params, name)
+      ? String(params[name]) : token
+  ));
+}
+function iconHtml(name, size) {
+  return '<i data-icon="' + name + '" data-size="' + size + '"></i>';
+}
+
+const presentation = createWriteGateRefusalPresentation({ translate, iconHtml });
+check('immutable_public_port', Object.isFrozen(presentation));
+check('narrow_public_surface',
+  typeof presentation.resolveRefusal === 'function'
+  && typeof presentation.renderBadgeHtml === 'function'
+  && typeof presentation.renderNoticeHtml === 'function'
+  && Object.keys(presentation).length === 3);
+
+const frozenRound = Object.freeze({ toolName: 'apply_diffs' });
+const frozenMetadata = Object.freeze({
+  badge: 'stale',
+  refusal: Object.freeze({
+    kind: 'stale',
+    paths: Object.freeze(['docs/JOURNAL.md']),
+  }),
+});
+const before = JSON.stringify([frozenRound, frozenMetadata]);
+const stale = presentation.resolveRefusal(frozenRound, frozenMetadata);
+check('structured_refusal_is_normalized_and_frozen',
+  stale && stale.kind === 'stale'
+  && JSON.stringify(stale.paths) === JSON.stringify(['docs/JOURNAL.md'])
+  && Object.isFrozen(stale) && Object.isFrozen(stale.paths));
+check('projection_is_not_mutated',
+  JSON.stringify([frozenRound, frozenMetadata]) === before);
+
+const staleBadge = presentation.renderBadgeHtml(stale);
+check('stale_badge_is_terminal_localized_warning',
+  staleBadge.includes('ptool-badge-warn ptool-badge-gate')
+  && staleBadge.includes('changed on disk')
+  && staleBadge.includes('Write blocked — file changed on disk')
+  && !staleBadge.includes('>stale<'));
+const staleNotice = presentation.renderNoticeHtml(stale);
+check('stale_notice_names_path_and_remedy',
+  staleNotice.includes('ptool-gate-note')
+  && staleNotice.includes('title="docs/JOURNAL.md"')
+  && staleNotice.includes('>JOURNAL.md</code>')
+  && staleNotice.includes('re-read the file and re-issue'));
+check('notice_uses_trusted_shared_icon_port',
+  staleNotice.includes('<i data-icon="shield" data-size="13"></i>'));
+
+const legacyCases = [
+  ['stale', 'stale', 'changed on disk'],
+  ['read first', 'read_first', 'must read first'],
+  ['partial: stale', 'partial_stale', 'partial · changed'],
+  ['partial: read first', 'partial_read_first', 'partial · unread'],
+  ['ref failed', 'content_ref', 'content ref failed'],
+];
+check('legacy_badges_map_only_for_write_tools', legacyCases.every(
+  ([badge, kind, label]) => {
+    const refusal = presentation.resolveRefusal(
+      { toolName: 'write_file' },
+      { badge },
+    );
+    return refusal && refusal.kind === kind
+      && presentation.renderBadgeHtml(refusal).includes(label);
+  },
+));
+const legacyStale = presentation.resolveRefusal(
+  { toolName: 'write_file' },
+  { badge: 'stale' },
+);
+check('legacy_notice_uses_generic_target',
+  presentation.renderNoticeHtml(legacyStale).includes('The target file'));
+check('badge_collision_and_ordinary_failure_fail_closed',
+  presentation.resolveRefusal({ toolName: 'list_dir' }, { badge: 'stale' }) === null
+  && presentation.resolveRefusal(
+    { toolName: 'apply_diff' }, { badge: 'failed', writeOk: false },
+  ) === null);
+
+const readFirst = presentation.resolveRefusal(
+  { toolName: 'apply_diff' },
+  { refusal: { kind: 'read_first', paths: ['src/a.py'] } },
+);
+check('read_first_notice_explains_required_read',
+  presentation.renderNoticeHtml(readFirst).includes('read_files')
+  && presentation.renderBadgeHtml(readFirst).includes('must read first'));
+const partial = presentation.resolveRefusal(
+  { toolName: 'apply_diffs' },
+  {
+    refusal: {
+      kind: 'partial_stale', paths: ['src/c.py'], skipped: 1, proceeded: 2,
+    },
+  },
+);
+const partialNotice = presentation.renderNoticeHtml(partial);
+check('partial_refusal_interpolates_typed_counts',
+  partial && partial.skipped === 1 && partial.proceeded === 2
+  && presentation.renderBadgeHtml(partial).includes('partial · changed')
+  && partialNotice.includes('1 edit(s) blocked')
+  && partialNotice.includes('the other 2 edit(s) ran normally'));
+const contentReference = presentation.resolveRefusal(
+  { toolName: 'write_file' },
+  { refusal: { kind: 'content_ref' } },
+);
+check('content_reference_has_dedicated_copy',
+  presentation.renderBadgeHtml(contentReference).includes('content ref failed')
+  && presentation.renderNoticeHtml(contentReference).includes('retry explicit content'));
+
+const fallbackFromMalformedStructured = presentation.resolveRefusal(
+  { toolName: 'edit_file' },
+  { badge: 'stale', refusal: { kind: 42 } },
+);
+check('malformed_structured_value_can_use_legacy_fallback',
+  fallbackFromMalformedStructured
+  && fallbackFromMalformedStructured.kind === 'stale');
+const invalidCounts = presentation.resolveRefusal(
+  { toolName: 'apply_diffs' },
+  {
+    refusal: {
+      kind: 'partial_stale',
+      paths: ['ok.py', 42, '', null],
+      skipped: -1,
+      proceeded: 1.5,
+    },
+  },
+);
+check('invalid_paths_and_counts_fail_closed',
+  invalidCounts
+  && JSON.stringify(invalidCounts.paths) === JSON.stringify(['ok.py'])
+  && invalidCounts.skipped === 0 && invalidCounts.proceeded === 0);
+
+const future = presentation.resolveRefusal(
+  { toolName: 'write_file' },
+  { refusal: { kind: 'future<script>' } },
+);
+check('unknown_kind_is_safe_and_forward_visible',
+  presentation.renderBadgeHtml(future).includes('future&lt;script&gt;')
+  && presentation.renderNoticeHtml(future) === '');
+const hostilePath = presentation.resolveRefusal(
+  { toolName: 'write_file' },
+  { refusal: { kind: 'stale', paths: ['dir/<script>"x.py'] } },
+);
+const hostilePathNotice = presentation.renderNoticeHtml(hostilePath);
+check('path_markup_is_escaped',
+  !hostilePathNotice.includes('<script>')
+  && hostilePathNotice.includes('&lt;script&gt;&quot;x.py'));
+
+const hostileCopy = createWriteGateRefusalPresentation({
+  translate: () => '<img src=x onerror=alert(1)>',
+  iconHtml,
+});
+const hostileInfo = hostileCopy.resolveRefusal(
+  { toolName: 'write_file' },
+  { refusal: { kind: 'stale' } },
+);
+const hostileCopyHtml = hostileCopy.renderBadgeHtml(hostileInfo)
+  + hostileCopy.renderNoticeHtml(hostileInfo);
+check('translated_copy_is_escaped_but_icon_markup_is_trusted',
+  !hostileCopyHtml.includes('<img src=x')
+  && hostileCopyHtml.includes('&lt;img src=x')
+  && hostileCopyHtml.includes('<i data-icon="shield"'));
+
+check('invalid_inputs_are_empty',
+  presentation.resolveRefusal(null, null) === null
+  && presentation.renderBadgeHtml(null) === ''
+  && presentation.renderNoticeHtml(null) === '');
+
+console.log(checks.join('\n'));
+"""
+
+_WIRING_HARNESS = r"""
 const { setup } = require(process.env.JSDOM_HARNESS);
-const { document, check, report } = setup({
+const { check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="chatInner"></div></body>',
   targets: [process.argv[4], process.argv[2]],
@@ -56,269 +229,121 @@ const { document, check, report } = setup({
     _convRenderFingerprint: () => 0,
     conversations: [],
     activeConvId: null,
-    /* The shared stub echoes the KEY; override so _t(k, enDefault) returns
-     * the English copy — assertions then pin the real fallback text AND
-     * the {placeholder} interpolation, not just the key name. */
-    t: (k, d) => d,
+    t: (key, params) => {
+      const values = {
+        'tool.gateStaleBadge': 'changed on disk',
+        'tool.gateReadFirstBadge': 'must read first',
+        'tool.gatePartialStaleBadge': 'partial · changed',
+        'tool.gateTargetGeneric': 'The target file',
+        'tool.gateStaleTitle': 'Write blocked',
+        'tool.gateReadFirstTitle': 'Edit blocked',
+        'tool.gatePartialStaleTitle': '{skipped} edit(s) blocked',
+        'tool.gateStaleText': '{paths} changed',
+        'tool.gateReadFirstText': 'Read {paths} first',
+        'tool.gatePartialStaleText':
+          '{paths}: {skipped} blocked; {proceeded} proceeded',
+      };
+      let value = values[key] || key;
+      if (!params || typeof params !== 'object') return value;
+      return value.replace(/\{(\w+)\}/g, (token, name) => (
+        Object.prototype.hasOwnProperty.call(params, name)
+          ? String(params[name]) : token
+      ));
+    },
   },
 });
-function frag(html) { const d = document.createElement('div'); d.innerHTML = html; return d; }
 
-if (typeof renderToolRoundsHTML !== 'function') {
-  console.log('FAIL entry_exposed renderToolRoundsHTML missing');
-  report();
-  return;
-}
-check('entry_exposed', true);
+check('entry_exposed', typeof renderToolRoundsHTML === 'function');
 
-// ── 1. full stale refusal (structured meta.refusal) on apply_diffs ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'apply_diffs', status: 'done',
-      query: 'Patch JOURNAL.md (2 edits)',
-      toolArgs: JSON.stringify({ edits: [
-        { path: 'JOURNAL.md', search: 'a', replace: 'b', description: 'one' },
-        { path: 'JOURNAL.md', search: 'c', replace: 'd', description: 'two' },
-      ] }),
-      results: [{ toolName: 'apply_diffs', badge: 'stale', writeOk: false,
-        refusal: { kind: 'stale', paths: ['JOURNAL.md'] },
-        editSummaries: [
-          { path: 'JOURNAL.md', description: 'one', status: 'fail', detail: '' },
-          { path: 'JOURNAL.md', description: 'two', status: 'fail', detail: '' },
-        ] }] },
-  ], false);
-  const d = frag(html);
-  const badge = d.querySelector('.ptool-badge');
-  check('stale_badge_warn_class', !!(badge && badge.classList.contains('ptool-badge-warn')));
-  check('stale_badge_gate_class', !!(badge && badge.classList.contains('ptool-badge-gate')));
-  check('stale_badge_localized', !!(badge && badge.textContent === 'changed on disk'));
-  check('stale_badge_not_raw_token', !!(badge && badge.textContent.trim() !== 'stale'));
-  check('stale_badge_tooltip', !!(badge && (badge.getAttribute('title') || '').includes('Write blocked')));
-  const note = d.querySelector('.ptool-gate-note');
-  check('stale_notice_present', !!note);
-  check('stale_notice_title', !!(note && note.querySelector('.ptool-gate-note-title')
-    .textContent.includes('Write blocked — file changed on disk')));
-  check('stale_notice_names_file', !!(note && note.querySelector('.ptool-gate-note-path')
-    && note.querySelector('.ptool-gate-note-path').textContent === 'JOURNAL.md'));
-  check('stale_notice_remedy', !!(note && note.querySelector('.ptool-gate-note-text')
-    .textContent.includes('re-read the file and re-issue')));
-}
+const writeHtml = renderToolRoundsHTML([{
+  roundNum: 1, toolName: 'write_file', status: 'done',
+  query: 'Write JOURNAL.md',
+  toolArgs: JSON.stringify({ path: 'JOURNAL.md', content: '# hi\n' }),
+  results: [{ badge: 'stale', writeOk: false }],
+}], false);
+check('write_file_wires_badge_and_notice',
+  writeHtml.includes('ptool-badge-gate')
+  && writeHtml.includes('ptool-gate-note'));
 
-// ── 2. LEGACY badge-only stale round (persisted history) on write_file ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'write_file', status: 'done',
-      query: 'Write JOURNAL.md',
-      toolArgs: JSON.stringify({ path: 'JOURNAL.md', content: '# hi\n' }),
-      results: [{ toolName: 'write_file', badge: 'stale', writeOk: false }] },
-  ], false);
-  const d = frag(html);
-  const badge = d.querySelector('.ptool-badge');
-  check('legacy_badge_upgraded', !!(badge && badge.textContent === 'changed on disk'));
-  check('legacy_notice_present', !!d.querySelector('.ptool-gate-note'));
-  const text = d.querySelector('.ptool-gate-note-text');
-  check('legacy_notice_generic_target', !!(text && text.textContent.includes('The target file')));
-}
+const singleDiffHtml = renderToolRoundsHTML([{
+  roundNum: 2, toolName: 'apply_diff', status: 'done',
+  query: 'Patch a.py',
+  toolArgs: JSON.stringify({ path: 'a.py', search: 'x', replace: 'y' }),
+  results: [{
+    badge: 'read first', writeOk: false,
+    refusal: { kind: 'read_first', paths: ['a.py'] },
+  }],
+}], false);
+check('single_diff_wires_notice',
+  singleDiffHtml.includes('ptool-gate-note')
+  && singleDiffHtml.includes('must read first'));
 
-// ── 3. read_first refusal on single apply_diff ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'apply_diff', status: 'done',
-      query: 'Patch a.py',
-      toolArgs: JSON.stringify({ path: 'a.py', search: 'x', replace: 'y' }),
-      results: [{ toolName: 'apply_diff', badge: 'read first', writeOk: false,
-        refusal: { kind: 'read_first', paths: ['a.py'] } }] },
-  ], false);
-  const d = frag(html);
-  const badge = d.querySelector('.ptool-badge');
-  check('readfirst_badge', !!(badge && badge.textContent === 'must read first'));
-  const note = d.querySelector('.ptool-gate-note');
-  check('readfirst_notice_title', !!(note && note.querySelector('.ptool-gate-note-title')
-    .textContent.includes('not read in this conversation')));
-  check('readfirst_notice_mentions_read_files', !!(note &&
-    note.querySelector('.ptool-gate-note-text').textContent.includes('read_files')));
-}
+const batchHtml = renderToolRoundsHTML([{
+  roundNum: 3, toolName: 'apply_diffs', status: 'done',
+  query: 'Patch files',
+  toolArgs: JSON.stringify({ edits: [
+    { path: 'a.py', search: 'x', replace: 'y', description: 'one' },
+    { path: 'c.py', search: 'm', replace: 'n', description: 'two' },
+  ] }),
+  results: [{
+    badge: 'partial: stale', writeOk: true,
+    refusal: { kind: 'partial_stale', paths: ['b.py'], skipped: 1, proceeded: 2 },
+    editSummaries: [
+      { path: 'a.py', description: 'one', status: 'ok', detail: '' },
+      { path: 'c.py', description: 'two', status: 'ok', detail: '' },
+    ],
+  }],
+}], false);
+check('batch_diff_wires_notice',
+  batchHtml.includes('ptool-gate-note')
+  && batchHtml.includes('1 edit(s) blocked'));
 
-// ── 4. partial_stale interpolates skipped/proceeded counts ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'apply_diffs', status: 'done',
-      query: 'Patch a.py, b.py (2 edits)',
-      toolArgs: JSON.stringify({ edits: [
-        { path: 'a.py', search: 'x', replace: 'y', description: 'ok one' },
-        { path: 'b.py', search: 'x', replace: 'y', description: 'ok two' },
-      ] }),
-      results: [{ toolName: 'apply_diffs', badge: 'partial: stale', writeOk: true,
-        refusal: { kind: 'partial_stale', paths: ['c.py'], skipped: 1, proceeded: 2 },
-        editSummaries: [
-          { path: 'a.py', description: 'ok one', status: 'ok', detail: '' },
-          { path: 'b.py', description: 'ok two', status: 'ok', detail: '' },
-        ] }] },
-  ], false);
-  const d = frag(html);
-  const badge = d.querySelector('.ptool-badge');
-  check('partial_badge', !!(badge && badge.textContent === 'partial · changed'));
-  const note = d.querySelector('.ptool-gate-note');
-  check('partial_title_count', !!(note && note.querySelector('.ptool-gate-note-title')
-    .textContent.includes('1 edit(s) blocked')));
-  check('partial_text_proceeded', !!(note && note.querySelector('.ptool-gate-note-text')
-    .textContent.includes('the other 2 edit(s) ran normally')));
-  check('partial_names_skipped_path', !!(note && note.querySelector('.ptool-gate-note-path')
-    && note.querySelector('.ptool-gate-note-path').textContent === 'c.py'));
-}
-
-// ── 5. content_ref refusal on write_file ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'write_file', status: 'done',
-      query: 'Write out.md',
-      toolArgs: JSON.stringify({ path: 'out.md', content: 'x' }),
-      results: [{ toolName: 'write_file', badge: 'ref failed', writeOk: false,
-        refusal: { kind: 'content_ref' } }] },
-  ], false);
-  const d = frag(html);
-  const badge = d.querySelector('.ptool-badge');
-  check('contentref_badge', !!(badge && badge.textContent === 'content ref failed'));
-  const note = d.querySelector('.ptool-gate-note');
-  check('contentref_notice', !!(note && note.querySelector('.ptool-gate-note-title')
-    .textContent.includes('content reference failed')));
-}
-
-// ── 6. a NON-write tool whose badge collides with a refusal token stays raw ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'list_dir', status: 'done', query: 'list_dir .',
-      results: [{ toolName: 'list_dir', badge: 'stale' }] },
-  ], false);
-  const d = frag(html);
-  const badge = d.querySelector('.ptool-badge');
-  check('nonwrite_badge_raw', !!(badge && badge.textContent.trim() === 'stale'));
-  check('nonwrite_no_notice', !d.querySelector('.ptool-gate-note'));
-}
-
-// ── 7. an ordinary failed apply_diff keeps its plain red 'failed' badge ──
-{
-  const html = renderToolRoundsHTML([
-    { roundNum: 1, toolName: 'apply_diff', status: 'done', query: 'Patch a.py',
-      toolArgs: JSON.stringify({ path: 'a.py', search: 'x', replace: 'y' }),
-      results: [{ toolName: 'apply_diff', badge: 'failed', writeOk: false }] },
-  ], false);
-  const d = frag(html);
-  const badge = d.querySelector('.ptool-badge');
-  check('ordinary_fail_badge_raw', !!(badge && badge.textContent.trim() === 'failed'));
-  check('ordinary_fail_err_class', !!(badge && badge.classList.contains('ptool-badge-err')));
-  check('ordinary_fail_no_notice', !d.querySelector('.ptool-gate-note'));
-}
+const nonWriteHtml = renderToolRoundsHTML([{
+  roundNum: 4, toolName: 'list_dir', status: 'done', query: 'list',
+  results: [{ badge: 'stale' }],
+}], false);
+check('non_write_badge_does_not_misfire',
+  nonWriteHtml.includes('>stale</span>')
+  && !nonWriteHtml.includes('ptool-gate-note'));
 
 report();
 """
 
 
-def test_gate_refusal_render():
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_write_gate_refusal_owner_contract() -> None:
+    source = OWNER.read_text(encoding='utf-8')
+    assert 'runtimeScope' not in source
+    assert 'globalThis' not in source
+    assert 'window.' not in source
+    assert 'document.' not in source
+
+    process = subprocess.run(
+        [shutil.which('node'), '-e', _OWNER_HARNESS],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            **os.environ,
+            'OWNER_SOURCE': OWNER_JS.read_text(encoding='utf-8'),
+        },
+    )
+    assert process.returncode == 0, process.stderr
+    failures = [
+        line for line in process.stdout.splitlines() if line.startswith('FAIL ')
+    ]
+    assert not failures, process.stdout
+    passes = [
+        line for line in process.stdout.splitlines() if line.startswith('PASS ')
+    ]
+    assert len(passes) == 19, process.stdout
+
+
+def test_retained_write_blocks_delegate_refusal_markup() -> None:
     run_harness(
         target_js=TOOL_ROUNDS,
-        body_js=_BODY,
+        body_js=_WIRING_HARNESS,
         extra_targets=[os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')],
-        min_pass=27,
-        label='gate refusal render',
+        min_pass=5,
+        label='write-gate refusal wiring',
     )
-
-
-def _run_raw(target_js: str) -> str:
-    """Run the harness without asserting — NEUTER arm inspects FAIL lines
-    on a deliberately-broken scratch copy."""
-    import subprocess
-
-    if not node_deps_available():
-        pytest.skip('node + jsdom dev-deps not installed (run `npm install`)')
-    with tempfile.NamedTemporaryFile(
-        'w', suffix='.js', dir=HERE, delete=False, encoding='utf-8'
-    ) as fh:
-        harness_path = fh.name
-        fh.write(_BODY)
-    try:
-        proc = subprocess.run(
-            ['node', harness_path, target_js,
-             os.path.normpath(os.path.join(HERE, '..')),
-             os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')],
-            capture_output=True, text=True, timeout=60,
-            env={**os.environ,
-                 'JSDOM_HARNESS': os.path.join(HERE, '_jsdom_harness.js')},
-        )
-    finally:
-        try:
-            os.remove(harness_path)
-        except OSError:
-            pass
-    return proc.stdout or ''
-
-
-_NEUTER_ANCHOR = 'const gateNoticeHtml = _renderGateNotice(_refusalInfo(round, meta));'
-
-
-def test_NEUTER_notice_injection_is_load_bearing():
-    """NEUTER: blank all THREE notice-injection splices (write_file /
-    single-diff / batch blocks share the same one-liner) — the notice
-    checks for every block shape MUST go red while the badge checks
-    (driven by _computeToolBadgeHtml, untouched) stay green."""
-    src = open(TOOL_ROUNDS, encoding='utf-8').read()
-    assert src.count(_NEUTER_ANCHOR) == 3, (
-        f'expected exactly 3 notice-injection sites, found '
-        f'{src.count(_NEUTER_ANCHOR)} — the guard no longer matches the '
-        f'code; re-check the refactor.')
-    neutered = src.replace(_NEUTER_ANCHOR, 'const gateNoticeHtml = "";')
-    assert neutered != src
-    with tempfile.NamedTemporaryFile(
-        'w', suffix='.js', dir=HERE, delete=False, encoding='utf-8'
-    ) as fh:
-        scratch = fh.name
-        fh.write(neutered)
-    try:
-        output = _run_raw(scratch)
-    finally:
-        try:
-            os.remove(scratch)
-        except OSError:
-            pass
-    for name in ('stale_notice_present',      # batch block
-                 'legacy_notice_present',     # write_file block
-                 'readfirst_notice_title',    # single-diff block
-                 'partial_title_count'):
-        assert f'FAIL {name}' in output, (
-            f'NEUTER ineffective: {name} did not go red without the '
-            f'injection — it would pass on notice-less code too:\n{output}')
-    # The badge upgrade lives in _computeToolBadgeHtml (not amputated) —
-    # it must still pass, proving the neuter hit only the notice seam.
-    assert 'PASS stale_badge_localized' in output, output
-
-
-def test_gate_i18n_keys_defined():
-    """Every tool.gate* key referenced in tool_rounds.js must exist in
-    i18n.js with BOTH zh and en — a missing key renders the raw key
-    name, the exact bug class this feature removes."""
-    js = open(TOOL_ROUNDS, encoding='utf-8').read()
-    referenced = set(re.findall(r'"(tool\.gate[A-Za-z]+)"', js))
-    assert referenced, 'no tool.gate* keys referenced — guard lost its anchor'
-    locale_dir = os.path.join(os.path.dirname(HERE), 'frontend', 'src', 'i18n', 'locales')
-    with open(os.path.join(locale_dir, 'zh.json'), encoding='utf-8') as fh:
-        zh = json.load(fh)
-    with open(os.path.join(locale_dir, 'en.json'), encoding='utf-8') as fh:
-        en = json.load(fh)
-    missing = []
-    for key in sorted(referenced):
-        if key not in zh or key not in en:
-            missing.append(key)
-    assert not missing, (
-        f'tool.gate* keys referenced but not fully defined in i18n.js '
-        f'(need zh + en): {missing}')
-
-
-if __name__ == '__main__':
-    for fn in (test_gate_refusal_render,
-               test_NEUTER_notice_injection_is_load_bearing,
-               test_gate_i18n_keys_defined):
-        try:
-            fn()
-            print('  PASS', fn.__name__)
-        except Exception as e:  # noqa: BLE001
-            print('  RED ', fn.__name__, '::', str(e)[:400])

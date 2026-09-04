@@ -1,7 +1,7 @@
-"""tests/test_provider_pin.py — Hard thread-scoped provider isolation.
+"""tests/test_provider_pin.py — Hard execution-context provider isolation.
 
 Reproduces the 429 / no-fallback cross-tenant leak and verifies the fix:
-an inline-provider / BYO ephemeral slot, once pinned on a thread, is the
+an inline-provider / BYO ephemeral slot, once pinned for execution, is the
 ONLY slot the dispatcher may pick — even when an operator-curated slot
 for the same model name has a far better score().
 
@@ -10,6 +10,7 @@ memory for the full rationale.
 """
 
 import os
+import asyncio
 import unittest
 
 
@@ -130,6 +131,33 @@ class ProviderPinTest(unittest.TestCase):
     def test_context_manager_restores_previous_pin(self):
         from lib.llm_dispatch.provider_pin import (
             get_pinned_provider, provider_pin)
+        self.assertIsNone(get_pinned_provider())
+
+    def test_async_tasks_keep_distinct_provider_contexts(self):
+        from lib.llm_dispatch.provider_pin import (
+            get_pinned_provider, provider_pin)
+
+        async def scenario():
+            both_entered = asyncio.Event()
+            entered = 0
+            lock = asyncio.Lock()
+
+            async def observe(pin):
+                nonlocal entered
+                with provider_pin(pin):
+                    async with lock:
+                        entered += 1
+                        if entered == 2:
+                            both_entered.set()
+                    await asyncio.wait_for(both_entered.wait(), timeout=1.0)
+                    await asyncio.sleep(0)
+                    return get_pinned_provider()
+
+            return await asyncio.gather(
+                observe('route:first'), observe('route:second'))
+
+        self.assertEqual(
+            asyncio.run(scenario()), ['route:first', 'route:second'])
         self.assertIsNone(get_pinned_provider())
         with provider_pin('ephemeral:outer'):
             self.assertEqual(get_pinned_provider(), 'ephemeral:outer')

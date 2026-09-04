@@ -93,10 +93,29 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win.t = global.t = (k) => k;
 
-const calls = { report: [], translateStart: 0, translateCache: 0 };
+const calls = { report: [], translateStart: 0, translateCache: 0, translateAborts: [] };
+let holdReviewPoll = false;
+let releaseReviewPoll;
+let holdReportResolve = false;
+let releaseReportResolve;
 global.Api = win.Api = { paper: {
   libraryList: async () => ({ ok: true, papers: [{ id: 'paper-1', title: 'P', paperHash: 'phash-1' }] }),
   reportLookup: async () => ({ ok: false }),
+  reportResolve: async (_hash, lang) => {
+    if (!holdReportResolve) return { ok: false };
+    if (lang === 'zh') {
+      return {
+        ok: true, cached: true, lang: 'zh', paper_hash: 'phash-1',
+        report: 'FRESH_ZH_REPORT', meta: null,
+      };
+    }
+    return new Promise((resolve) => {
+      releaseReportResolve = () => resolve({
+        ok: true, cached: true, lang: 'en', paper_hash: 'phash-1',
+        report: 'STALE_EN_REPORT', meta: null,
+      });
+    });
+  },
   reportCache:  async () => ({ ok: false }),
   reportStart:  async (body) => { calls.report.push(body); return { ok: true, task_id: 'rpt_1', paper_hash: 'phash-1' }; },
   reportPoll:   async () => ({ ok: true, status: 'done', report: 'NEW', next_cursor: 0, events: [] }),
@@ -104,14 +123,23 @@ global.Api = win.Api = { paper: {
   // Review translation path.
   translateCache: async () => { calls.translateCache++; return { ok: false }; },
   translateStart: async () => { calls.translateStart++; return { ok: true, task_id: 'tr_1', paper_hash: 'phash-1' }; },
-  translatePoll:  async () => ({ ok: true, status: 'done', next_cursor: 1,
-                                 json: async () => ({ ok: true, status: 'done', next_cursor: 1,
-                                                      events: [{ type: 'done', text: '中文译文' }] }) }),
-  translateAbort: async () => ({ ok: true }),
+  translatePoll:  async () => {
+    const response = (text) => ({ ok: true, status: 200,
+      json: async () => ({ ok: true, status: 'done', next_cursor: 1,
+                           events: [], text }) });
+    if (holdReviewPoll) {
+      return new Promise((resolve) => {
+        releaseReviewPoll = () => resolve(response('过期译文'));
+      });
+    }
+    return response('中文译文');
+  },
+  translateAbort: async (taskId) => { calls.translateAborts.push(taskId); return { ok: true }; },
 }};
 
 localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
+localStorage.setItem('tofu_ui_lang', 'en');
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (report/review fns)
 if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
@@ -126,7 +154,9 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 // Stub helpers touching unrelated subsystems.
 _getActivePaperEntry = () => null;
 _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
-_renderFinalReport = (c, text) => { if (c) c.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>'; };
+win._renderFinalReport = _renderFinalReport = (c, text) => {
+  if (c) c.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>';
+};
 _populatePaperReportModelDropdown = () => {};
 _teardownReadingTracker = () => {};
 
@@ -141,17 +171,20 @@ _paperReportModel = 'm';
 _paperReviewModel = 'm';
 _paperReviewVenue = 'neurips';
 _activePaperId = 'paper-1';
+win._activePaperId = _activePaperId;
 _i18nLang = 'en';   // deliberately English UI — the review toggle must STILL work
 
 (async () => {
   for (let i = 0; i < 10; i++) { await new Promise(r => setTimeout(r, 0)); }
   _activePaperId = 'paper-1';
+  win._activePaperId = _activePaperId;
 
   // ── REPORT: default lang = UI (en) ──
   check('report_default_en', _activeReportLang() === 'en');
 
   // ── REPORT: switch to zh from the report tab → persist + generate in zh ──
   _paperActiveTab = 'report';
+  win._paperActiveTab = _paperActiveTab;
   const startsBeforeZh = calls.report.length;
   _setReportLang('zh', 'report');
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 0)); }
@@ -200,6 +233,17 @@ _i18nLang = 'en';   // deliberately English UI — the review toggle must STILL 
   check('report_toggle_back_repaints_snapshot',
         document.getElementById('paperReportContent').innerHTML.indexOf('ZH_SNAPSHOT_BODY') !== -1);
 
+  // Reconstructible report snapshots are a small LRU rather than a
+  // session-length mirror of every language/paper artifact.
+  _resetReportSnapshots();
+  for (let i = 0; i < 13; i++) {
+    _rememberReportSnapshot({ langKey: () => 'snapshot-' + i }, 'BODY-' + i, null);
+  }
+  check('report_snapshot_oldest_evicted',
+        _getReportSnapshot({ langKey: () => 'snapshot-0' }) === null);
+  check('report_snapshot_latest_retained',
+        _getReportSnapshot({ langKey: () => 'snapshot-12' }).report === 'BODY-12');
+
   // ── REVIEW: default reading lang = en (English canonical) ──
   check('review_default_en', _activeReviewLang() === 'en');
 
@@ -208,6 +252,7 @@ _i18nLang = 'en';   // deliberately English UI — the review toggle must STILL 
   const reportCallsBeforeReview = calls.report.length;
   _paperReviewCache = 'ENGLISH REVIEW BODY';   // a review exists
   _paperActiveTab = 'review';
+  win._paperActiveTab = _paperActiveTab;
   await _setReviewLang('zh');
   for (let i = 0; i < 30; i++) { await new Promise(r => setTimeout(r, 0)); }
   check('review_now_zh', _activeReviewLang() === 'zh');
@@ -228,6 +273,59 @@ _i18nLang = 'en';   // deliberately English UI — the review toggle must STILL 
   const revHtml2 = document.getElementById('paperReviewContent').innerHTML;
   check('review_restores_english', revHtml2.indexOf('ENGLISH REVIEW BODY') !== -1);
 
+  // A language change cancels paid work and fences a late terminal response.
+  win.__tofuTestFeatureRegistry._paperReviewTranslatedText = '';
+  holdReviewPoll = true;
+  const staleTranslation = _setReviewLang('zh');
+  for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+  check('review_race_poll_entered', typeof releaseReviewPoll === 'function');
+  await _setReviewLang('en');
+  if (typeof releaseReviewPoll === 'function') releaseReviewPoll();
+  await staleTranslation;
+  check('review_race_aborts_paid_task', calls.translateAborts.includes('tr_1'));
+  check('review_race_keeps_newer_english',
+        _activeReviewLang() === 'en'
+        && document.getElementById('paperReviewContent').innerHTML.includes('ENGLISH REVIEW BODY')
+        && !document.getElementById('paperReviewContent').innerHTML.includes('过期译文'));
+
+  // A same-paper language switch fences an older fused lookup response. The
+  // stale English cache must not overwrite the newer Chinese view.
+  localStorage.setItem('paper_report_lang_by_id', JSON.stringify({ 'paper-1': 'en' }));
+  _paperReportCache = '';
+  _paperActiveTab = 'report';
+  win._paperActiveTab = _paperActiveTab;
+  holdReportResolve = true;
+  const staleReportLoad = _loadOrGenerateReport(_reportView('report'));
+  for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+  check('report_race_old_lookup_entered', typeof releaseReportResolve === 'function');
+  _setReportLang('zh', 'report');
+  for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0));
+  if (typeof releaseReportResolve === 'function') releaseReportResolve();
+  await staleReportLoad;
+  holdReportResolve = false;
+  check('report_race_keeps_newer_language',
+        _activeReportLang() === 'zh'
+        && document.getElementById('paperReportContent').innerHTML.includes('FRESH_ZH_REPORT')
+        && !document.getElementById('paperReportContent').innerHTML.includes('STALE_EN_REPORT'));
+
+  // Reconstructible reading preferences have a finite local-storage lifetime.
+  const oversizedMap = {};
+  for (let i = 0; i < 2050; i++) oversizedMap['old-' + i] = 'en';
+  localStorage.setItem('paper_review_lang_by_id', JSON.stringify(oversizedMap));
+  await _setReviewLang('en');
+  const boundedMap = JSON.parse(localStorage.getItem('paper_review_lang_by_id'));
+  check('review_language_preferences_bounded',
+        Object.keys(boundedMap).length <= 2048 && boundedMap['paper-1'] === 'en');
+
+  const oversizedReportMap = {};
+  for (let i = 0; i < 2050; i++) oversizedReportMap['old-' + i] = 'en';
+  localStorage.setItem('paper_report_lang_by_id', JSON.stringify(oversizedReportMap));
+  _persistReportLang('paper-1', 'zh');
+  const boundedReportMap = JSON.parse(localStorage.getItem('paper_report_lang_by_id'));
+  check('report_language_preferences_bounded',
+        Object.keys(boundedReportMap).length <= 2048
+        && boundedReportMap['paper-1'] === 'zh');
+
   console.log(out.join('\n'));
   process.exit(0);
 })();
@@ -239,7 +337,10 @@ def _run():
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+        with compiled_typescript(
+            REPORT_RUNTIME_TS,
+            expose_feature_registry_to_window=True,
+        ) as runtime_js:
             proc = subprocess.run(
                 ['node', harness,
                  os.path.join(JS_DIR, 'paper', 'report.js'), ROOT,
@@ -255,7 +356,7 @@ def _run():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'paper lang-toggle failures:\n' + output
-    assert output.count('PASS') >= 16, f'expected >=16 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 29, f'expected >=29 PASS lines, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

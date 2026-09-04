@@ -114,7 +114,6 @@ MUST_STAY_READ_ONLY = {
     'browser_get_cookies', 'browser_get_history',
     'schedule_list', 'await_task',
     'search_memories',
-    'project_charter_read', 'project_board_read', 'project_peer_status',
     'list_conversations', 'get_conversation',
 }
 
@@ -129,25 +128,6 @@ class TestProvidesCoverage:
 
     def test_memory_spec_declares_its_tools(self):
         assert _memory_names() <= _declared_provides()
-
-    def test_withdrawn_charter_commit_stays_undeclared(self):
-        """REVERSED IN PLACE 2026-08-01 (pt_c31cd8f3 — drift, not product).
-
-        v1 (0cc0aee1) asserted commit IS in provides — correct while the tool
-        was live. The 2026-07-30 withdrawal (6c28925c, owner-ratified: the
-        charter is human-reviewed) deliberately undeclared it EVERYWHERE:
-        not in the schema (CHARTER_TOOLS), not in provides, not in
-        write_tools. The handler survives ONLY as a refusal stub so a model
-        that learned the name from an old transcript gets redirected to
-        project_charter_propose instead of a phantom-tool error — and the
-        withdrawal guard (test_project_watch_lane::test_the_agent_toolset_
-        cannot_write_the_charter) already pins both exclusions, because
-        provides feeds the collision-check / inventory surfaces the model
-        can see. The full-coverage ratchet carries the one structural
-        exemption (EXEMPT below) so the refusal stub stays legal.
-        """
-        assert 'project_charter_commit' not in _declared_provides()
-        assert 'project_charter_commit' not in _declared_write_tools()
 
     def test_no_spec_declares_a_name_twice(self):
         """Two specs claiming one name makes the owning spec ambiguous."""
@@ -188,14 +168,6 @@ class TestFullCoverageRatchet:
         # so it is not a tool name the model can call. See
         # ToolSpec.handler_special / @tool_registry.special.
         '__code_exec__',
-        # WITHDRAWN 2026-07-30 (human-only charter, owner-ratified): the
-        # handler is kept ONLY as a refusal stub — old-transcript calls get
-        # redirected to project_charter_propose instead of a phantom-tool
-        # error. Declaration is deliberately FORBIDDEN by the withdrawal
-        # guard (test_project_watch_lane), so this name can never satisfy
-        # the ratchet; exempting it here is what keeps the two guards from
-        # contradicting each other.
-        'project_charter_commit',
         # RETIRED 2026-08-26 (run_command read-only compat layer): the
         # handler stays dispatchable ONLY for conversation-latched legacy
         # schemas; new tool epochs omit the name and route simple ls/find
@@ -287,7 +259,6 @@ class TestApprovalMetaCoverage:
         'browser_devtools',
         'browser_type', 'browser_press_key', 'browser_menu_click',
         'schedule_create', 'schedule_manage', 'timer_create',
-        'project_charter_commit',
     ])
     def test_enricher_exists(self, tool):
         from lib.tasks_pkg.tool_dispatch._approval import _APPROVAL_META_ENRICHERS
@@ -315,11 +286,9 @@ class TestApprovalMetaCoverage:
         inside the approval path (that would abort the gate itself)."""
         from lib.tasks_pkg.tool_dispatch._approval import _APPROVAL_META_ENRICHERS
         completed = []
-        for tool in ('browser_execute_js', 'browser_devtools', 'schedule_create',
-                     'project_charter_commit'):
+        for tool in ('browser_execute_js', 'browser_devtools', 'schedule_create'):
             _APPROVAL_META_ENRICHERS[tool]({}, {})
             completed.append(tool)
         # An enricher raising on missing args would abort the loop — the
         # completion list is the no-exception contract made assertable.
-        assert completed == ['browser_execute_js', 'browser_devtools', 'schedule_create',
-                             'project_charter_commit']
+        assert completed == ['browser_execute_js', 'browser_devtools', 'schedule_create']

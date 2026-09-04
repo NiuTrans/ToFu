@@ -55,7 +55,7 @@ _BREAKER_PY = os.path.join(_ORCH_PKG, '_tool_timeout_breaker.py')
 _EVENTS_PY = os.path.join(_ROOT, 'lib/agent_core/events.py')
 # Closed enumeration of sanctioned ROUND_END reasons (registry-synced).
 _SANCTIONED_REASONS = {'tools', 'final', 'aborted', 'budget', 'error',
-                       'tool_timeout', 'tool_loop'}
+                       'tool_timeout', 'tool_loop', 'success_poll'}
 
 
 def _read(path):

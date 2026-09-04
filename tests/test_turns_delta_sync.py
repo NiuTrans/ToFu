@@ -130,6 +130,776 @@ def _materialize_conversation_search(
     _finalize_conversation_in_session(session, identity, token)
 
 
+def test_python_projection_patch_applier_matches_the_wire_contract():
+    from lib.turn_projection_patch import (
+        ProjectionPatchError,
+        apply_projection_patch,
+        build_projection_patch,
+    )
+
+    before = {
+        'content': 'abc',
+        'items': [{'status': 'running'}, 2, 3],
+        'removeMe': True,
+    }
+    after = {
+        'content': 'abcdef',
+        'items': [{'status': 'done'}, 2],
+        'added': {'ok': True},
+    }
+    patch = build_projection_patch(
+        before, after, base_revision=7, target_revision=8)
+
+    assert apply_projection_patch(before, patch) == after
+    assert before == {
+        'content': 'abc',
+        'items': [{'status': 'running'}, 2, 3],
+        'removeMe': True,
+    }
+
+    appended = {'content': 'abcdef', 'items': [*after['items'], 4]}
+    append_patch = build_projection_patch(
+        after, appended, base_revision=8, target_revision=9)
+    assert apply_projection_patch(after, append_patch) == appended
+
+    with pytest.raises(ProjectionPatchError, match='out of bounds'):
+        apply_projection_patch(before, {
+            'version': 1,
+            'baseRevision': 7,
+            'targetRevision': 8,
+            'operations': [{'op': 'set', 'path': ['items', 99], 'value': 0}],
+        })
+
+
+def test_turn_event_record_applies_only_revision_checked_projection_patch(
+        session):
+    from lib.storage.errors import StorageError
+    from lib.storage_sidecar.operations_pkg._common import _load
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+        _turn_get,
+    )
+    from lib.turn_projection_patch import build_projection_patch
+    from lib.turn_projection_segments import projection_with_stable_segments
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'projection-patch-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('projection-patch-task', attempt_id),
+    )
+    before_row = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    before = projection_with_stable_segments(
+        _load(before_row['projection_json']),
+        actor='assistant',
+        status='pending',
+    )
+    after = {
+        **before,
+        'content': 'answer',
+        'thinking': '',
+        'toolRounds': [{
+            'roundNum': 1,
+            'toolCallId': 'patch-call',
+            'toolName': 'read_files',
+            'toolArgs': '{}',
+            'status': 'searching',
+        }],
+    }
+    patch = build_projection_patch(
+        before,
+        after,
+        base_revision=before_row['projection_revision'],
+        target_revision=before_row['projection_revision'] + 1,
+    )
+    result = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'projection-patch-task',
+        'status': 'running',
+        'terminal': False,
+        'projection_patch': patch,
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'tool_start'},
+    })
+
+    assert result['applied'] is True
+    stored = session.fetch_one(
+        "SELECT projection_json,projection_revision,"
+        "projection_checkpoint_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(stored['projection_json']) == {}
+    assert stored['projection_revision'] == before_row['projection_revision'] + 1
+    assert stored['projection_checkpoint_revision'] == stored['projection_revision']
+    checkpoint = session.fetch_one(
+        "SELECT projection_json FROM storage_turn_projection_checkpoints "
+        "WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(checkpoint['projection_json']) == after
+    assert _turn_get(session, {
+        'conversation_id': 'conv-d', 'user_id': 1, 'turn_id': turn_id,
+    })['projection'] == after
+    assert result['_conversationSyncAttemptEvents'][0]['payload'][
+        'projectionPatch']['operations']
+
+    unchanged = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'projection-patch-task',
+        'status': 'running',
+        'terminal': False,
+        'slim': True,
+        'content': 'answer',
+        'thinking': '',
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'unchanged-heartbeat'},
+    })
+    assert unchanged['applied'] is True
+    checkpoint_head = session.fetch_one(
+        "SELECT projection_revision,projection_checkpoint_revision,"
+        "projection_materialized_revision,projection_patch_count "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert checkpoint_head['projection_revision'] == (
+        before_row['projection_revision'] + 2)
+    assert checkpoint_head['projection_checkpoint_revision'] == (
+        before_row['projection_revision'] + 1)
+    assert checkpoint_head['projection_materialized_revision'] == (
+        before_row['projection_revision'] + 1)
+    assert checkpoint_head['projection_patch_count'] == 1
+    assert _turn_get(session, {
+        'conversation_id': 'conv-d', 'user_id': 1, 'turn_id': turn_id,
+    })['projection'] == after
+
+    with pytest.raises(StorageError) as stale:
+        _turn_event_record(session, {
+            'attempt_id': attempt_id,
+            'user_id': 1,
+            'task_id': 'projection-patch-task',
+            'status': 'running',
+            'terminal': False,
+            'projection_patch': patch,
+            'event_type': 'projection_updated',
+            'event_payload': {'updateKind': 'tool_start'},
+        })
+    assert stale.value.code == 'turn_projection_stale'
+
+
+def test_turn_event_record_reuses_revision_cache_and_incoming_replay_patch(
+        session, monkeypatch):
+    import lib.storage_sidecar.operations_pkg._turns_events as event_operations
+    import lib.storage_sidecar.turn_projection_write as projection_write_operations
+    from lib.storage_sidecar.operations_pkg._common import _load
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+        _turn_get,
+    )
+    from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
+    from lib.turn_projection_patch import build_projection_patch
+    from lib.turn_projection_segments import projection_with_stable_segments
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'projection-cache-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('projection-cache-task', attempt_id),
+    )
+    before_row = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    before = projection_with_stable_segments(
+        _load(before_row['projection_json']),
+        actor='assistant',
+        status='pending',
+    )
+    first = projection_with_stable_segments(
+        {**before, 'content': 'first'}, actor='assistant', status='running')
+    second = projection_with_stable_segments(
+        {**first, 'content': 'second'}, actor='assistant', status='running')
+    first_patch = build_projection_patch(
+        before,
+        first,
+        base_revision=before_row['projection_revision'],
+        target_revision=before_row['projection_revision'] + 1,
+    )
+    second_patch = build_projection_patch(
+        first,
+        second,
+        base_revision=before_row['projection_revision'] + 1,
+        target_revision=before_row['projection_revision'] + 2,
+    )
+
+    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    session.turn_projection_cache = cache
+    projection_selects = []
+    real_fetch_one = session.fetch_one
+
+    def tracked_fetch_one(sql, params=()):
+        if sql.startswith('SELECT projection_json FROM storage_conversation_turns'):
+            projection_selects.append(sql)
+        return real_fetch_one(sql, params)
+
+    monkeypatch.setattr(session, 'fetch_one', tracked_fetch_one)
+
+    def unexpected_projection_diff(*_args, **_kwargs):
+        raise AssertionError('validated incoming patch should be reused')
+
+    monkeypatch.setattr(
+        event_operations, 'build_projection_patch', unexpected_projection_diff)
+
+    def record(patch, update_kind):
+        return _turn_event_record(session, {
+            'attempt_id': attempt_id,
+            'user_id': 1,
+            'task_id': 'projection-cache-task',
+            'status': 'running',
+            'terminal': False,
+            'projection_patch': patch,
+            'projection_segments_stable': True,
+            'event_type': 'projection_updated',
+            'event_payload': {'updateKind': update_kind},
+        })
+
+    assert record(first_patch, 'tool_start')['applied'] is True
+
+    real_projection_dump = projection_write_operations._dump
+
+    def dump_without_full_target(value):
+        if value == second:
+            raise AssertionError(
+                'deferred projection writes must not encode the full target')
+        return real_projection_dump(value)
+
+    monkeypatch.setattr(
+        projection_write_operations, '_dump', dump_without_full_target)
+    assert record(second_patch, 'tool_result')['applied'] is True
+
+    assert len(projection_selects) == 1
+    assert cache.stats()['hits'] == 1
+    assert cache.stats()['misses'] == 1
+    head_row = session.fetch_one(
+        "SELECT projection_json,projection_revision,"
+        "projection_checkpoint_revision,"
+        "projection_materialized_revision,projection_patch_count,"
+        "projection_patch_bytes FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(head_row['projection_json']) == {}
+    assert head_row['projection_checkpoint_revision'] == (
+        before_row['projection_revision'] + 1)
+    assert head_row['projection_materialized_revision'] == (
+        before_row['projection_revision'] + 1)
+    assert head_row['projection_revision'] == before_row['projection_revision'] + 2
+    assert head_row['projection_patch_count'] == 1
+    assert head_row['projection_patch_bytes'] > 0
+    checkpoint = session.fetch_one(
+        "SELECT projection_json,projection_revision,projection_bytes "
+        "FROM storage_turn_projection_checkpoints WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(checkpoint['projection_json']) == first
+    assert checkpoint['projection_revision'] == (
+        before_row['projection_revision'] + 1)
+    assert checkpoint['projection_bytes'] == len(checkpoint['projection_json'])
+    assert _turn_get(session, {
+        'conversation_id': 'conv-d', 'user_id': 1, 'turn_id': turn_id,
+    })['projection'] == second
+
+    monkeypatch.setattr(
+        projection_write_operations, '_dump', real_projection_dump)
+    monkeypatch.setattr(
+        event_operations, 'build_projection_patch', build_projection_patch)
+    final = projection_with_stable_segments(
+        {**second, 'content': 'final'}, actor='assistant', status='completed')
+    final_patch = build_projection_patch(
+        second,
+        final,
+        base_revision=before_row['projection_revision'] + 2,
+        target_revision=before_row['projection_revision'] + 3,
+    )
+    terminal = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'projection-cache-task',
+        'status': 'completed',
+        'terminal': True,
+        'projection_patch': final_patch,
+        'projection_segments_stable': True,
+        'settlement': {'outcome': 'completed', 'resumeOptions': []},
+        'event_type': 'terminal_settlement',
+        'event_payload': {'status': 'completed'},
+    })
+    assert terminal['applied'] is True
+    assert len(projection_selects) == 1
+    assert cache.stats()['entries'] == 0
+
+    stored = session.fetch_one(
+        "SELECT projection_json,projection_checkpoint_revision,"
+        "projection_materialized_revision,"
+        "projection_patch_count,projection_patch_bytes "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(stored['projection_json']) == final
+    assert stored['projection_checkpoint_revision'] is None
+    assert stored['projection_materialized_revision'] is None
+    assert stored['projection_patch_count'] == 0
+    assert stored['projection_patch_bytes'] == 0
+    assert session.fetch_one(
+        "SELECT COUNT(*) AS n FROM storage_turn_projection_checkpoints "
+        "WHERE turn_id=?",
+        (turn_id,),
+    )['n'] == 0
+
+
+def test_activity_and_trash_resolve_durable_projection_head(session):
+    """Secondary readers and recoverable delete never expose the slim hot row."""
+    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+    from lib.storage_sidecar.operations_pkg._common import _load
+    from lib.storage_sidecar.operations_pkg._conversations import (
+        _conversation_activity_dates,
+        _conversation_delete,
+        _conversation_restore,
+    )
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+    )
+    from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
+    from lib.turn_projection_patch import build_projection_patch
+    from lib.turn_projection_segments import projection_with_stable_segments
+
+    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    authority = SQLiteSession(session._conn, turn_projection_cache=cache)
+    created = _turn_create_pair(authority, {
+        'conversation_id': 'conv-d',
+        'user_id': 1,
+        'command_id': 'projection-trash-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    authority.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('projection-trash-task', attempt_id),
+    )
+    before_row = authority.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    before = projection_with_stable_segments(
+        _load(before_row['projection_json']),
+        actor='assistant',
+        status='pending',
+    )
+    checkpoint_projection = {
+        **before,
+        'content': 'checkpoint content',
+        'timestamp': 150,
+    }
+    head_projection = {
+        **checkpoint_projection,
+        'content': 'head content',
+        'timestamp': 250,
+    }
+    first_patch = build_projection_patch(
+        before,
+        checkpoint_projection,
+        base_revision=before_row['projection_revision'],
+        target_revision=before_row['projection_revision'] + 1,
+    )
+    second_patch = build_projection_patch(
+        checkpoint_projection,
+        head_projection,
+        base_revision=before_row['projection_revision'] + 1,
+        target_revision=before_row['projection_revision'] + 2,
+    )
+
+    def record(patch, update_kind):
+        return _turn_event_record(authority, {
+            'attempt_id': attempt_id,
+            'user_id': 1,
+            'task_id': 'projection-trash-task',
+            'status': 'running',
+            'terminal': False,
+            'projection_patch': patch,
+            'projection_segments_stable': True,
+            'event_type': 'projection_updated',
+            'event_payload': {'updateKind': update_kind},
+        })
+
+    assert record(first_patch, 'tool_start')['applied'] is True
+    assert record(second_patch, 'tool_result')['applied'] is True
+    head = authority.fetch_one(
+        "SELECT projection_checkpoint_revision,"
+        "projection_materialized_revision,projection_patch_count "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert head['projection_checkpoint_revision'] is not None
+    assert head['projection_materialized_revision'] is not None
+    assert head['projection_patch_count'] == 1
+
+    cache.clear()
+    activity = _conversation_activity_dates(authority, {
+        'user_id': 1,
+        'updated_at_gte': 0,
+        'day_boundaries_ms': [100, 200, 300],
+        'limit': 10,
+    })
+    assert activity == {'candidate_count': 1, 'counts': [0, 1]}
+    assert cache.stats()['entries'] == 1
+
+    cache.clear()
+    deleted = _conversation_delete(
+        authority, {'conv_id': 'conv-d', 'user_id': 1})
+    assert deleted['deleted'] is True
+    trashed = authority.fetch_one(
+        "SELECT status,projection_json FROM storage_conversation_trash_turns "
+        "WHERE conversation_id=? AND user_id=? AND turn_id=?",
+        ('conv-d', 1, turn_id),
+    )
+    assert trashed['status'] == 'interrupted'
+    assert _load(trashed['projection_json']) == head_projection
+    assert authority.fetch_one(
+        "SELECT COUNT(*) AS n FROM storage_turn_projection_checkpoints "
+        "WHERE turn_id=?",
+        (turn_id,),
+    )['n'] == 0
+    assert cache.stats()['entries'] == 0
+
+    restored = _conversation_restore(
+        authority, {'conv_id': 'conv-d', 'user_id': 1})
+    assert restored['restored'] is True
+    restored_turn = authority.fetch_one(
+        "SELECT status,projection_json,projection_checkpoint_revision,"
+        "projection_materialized_revision,projection_patch_count "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert restored_turn['status'] == 'interrupted'
+    assert _load(restored_turn['projection_json']) == head_projection
+    assert restored_turn['projection_checkpoint_revision'] is None
+    assert restored_turn['projection_materialized_revision'] is None
+    assert restored_turn['projection_patch_count'] == 0
+
+
+def test_turn_event_record_does_not_trust_unattested_segment_stability(session):
+    from lib.storage_sidecar.operations_pkg._common import _load
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+    )
+    from lib.storage_sidecar.turn_projection_cache import (
+        TurnProjectionCache,
+        projection_cache_key,
+    )
+    from lib.turn_projection_patch import build_projection_patch
+    from lib.turn_projection_segments import projection_with_stable_segments
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'projection-cache-evidence-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('projection-cache-evidence-task', attempt_id),
+    )
+    before_row = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    before = projection_with_stable_segments(
+        _load(before_row['projection_json']),
+        actor='assistant',
+        status='pending',
+    )
+    # Deliberately change a segment input without updating its mirror.  This
+    # models an old or non-canonical private producer that cannot attest the
+    # target shape.
+    unstabilized = {**before, 'content': 'unattested'}
+    patch = build_projection_patch(
+        before,
+        unstabilized,
+        base_revision=before_row['projection_revision'],
+        target_revision=before_row['projection_revision'] + 1,
+    )
+    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    session.turn_projection_cache = cache
+
+    result = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'projection-cache-evidence-task',
+        'status': 'running',
+        'terminal': False,
+        'projection_patch': patch,
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'legacy-producer'},
+    })
+
+    key = projection_cache_key(
+        session.backend, 1, 'conv-d', turn_id, attempt_id)
+    entry = cache.get(key, revision=result['projection_revision'])
+    assert entry is not None
+    assert entry.stable_segments is False
+
+
+def test_turn_recover_materializes_durable_projection_head_after_cache_loss(
+        session, monkeypatch):
+    import lib.storage_sidecar.turn_projection_head as projection_head_module
+    from lib.storage_sidecar.operations_pkg._common import _load
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+        _turn_events_prune,
+        _turn_recover,
+    )
+    from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
+    from lib.turn_projection_patch import build_projection_patch
+    from lib.turn_projection_segments import projection_with_stable_segments
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'projection-head-recovery-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('projection-head-recovery-task', attempt_id),
+    )
+    before_row = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    before = projection_with_stable_segments(
+        _load(before_row['projection_json']),
+        actor='assistant',
+        status='pending',
+    )
+    first = projection_with_stable_segments(
+        {**before, 'content': 'first durable value'},
+        actor='assistant',
+        status='running',
+    )
+    second = projection_with_stable_segments(
+        {**first, 'content': 'latest durable value'},
+        actor='assistant',
+        status='running',
+    )
+    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    session.turn_projection_cache = cache
+    for index, (source, target) in enumerate(
+        ((before, first), (first, second)), start=0,
+    ):
+        revision = before_row['projection_revision'] + index
+        result = _turn_event_record(session, {
+            'attempt_id': attempt_id,
+            'user_id': 1,
+            'task_id': 'projection-head-recovery-task',
+            'status': 'running',
+            'terminal': False,
+            'projection_patch': build_projection_patch(
+                source,
+                target,
+                base_revision=revision,
+                target_revision=revision + 1,
+            ),
+            'projection_segments_stable': True,
+            'event_type': 'projection_updated',
+            'event_payload': {'updateKind': f'recovery-{index}'},
+        })
+        assert result['applied'] is True
+    head = session.fetch_one(
+        "SELECT projection_checkpoint_revision,"
+        "projection_materialized_revision,projection_patch_count "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert head['projection_materialized_revision'] is not None
+    assert head['projection_checkpoint_revision'] is not None
+    assert head['projection_patch_count'] == 1
+
+    third = projection_with_stable_segments(
+        {**second, 'content': 'checkpoint rollover value'},
+        actor='assistant',
+        status='running',
+    )
+    monkeypatch.setattr(
+        projection_head_module, 'PROJECTION_HEAD_MAX_PATCHES', 1)
+    rollover = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'projection-head-recovery-task',
+        'status': 'running',
+        'terminal': False,
+        'projection_patch': build_projection_patch(
+            second,
+            third,
+            base_revision=before_row['projection_revision'] + 2,
+            target_revision=before_row['projection_revision'] + 3,
+        ),
+        'projection_segments_stable': True,
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'checkpoint-rollover'},
+    })
+    assert rollover['applied'] is True
+    rolled = session.fetch_one(
+        "SELECT projection_json,projection_revision,"
+        "projection_checkpoint_revision,projection_materialized_revision,"
+        "projection_patch_count,projection_patch_bytes "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(rolled['projection_json']) == {}
+    assert rolled['projection_checkpoint_revision'] == rolled['projection_revision']
+    assert rolled['projection_materialized_revision'] is None
+    assert rolled['projection_patch_count'] == 0
+    assert rolled['projection_patch_bytes'] == 0
+    rolled_checkpoint = session.fetch_one(
+        "SELECT projection_json FROM storage_turn_projection_checkpoints "
+        "WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(rolled_checkpoint['projection_json']) == third
+
+    session.execute(
+        "UPDATE storage_generation_attempts SET status='completed',settled_at=1 "
+        "WHERE attempt_id=?",
+        (attempt_id,),
+    )
+    event_count_before_prune = session.fetch_one(
+        "SELECT COUNT(*) AS n FROM storage_attempt_events WHERE attempt_id=?",
+        (attempt_id,),
+    )['n']
+    prune_result = _turn_events_prune(session, {
+        'settled_before_ms': 2,
+        'max_attempts': 8,
+        'max_rows': 64,
+    })
+    assert prune_result['deleted_rows'] == 0
+    assert session.fetch_one(
+        "SELECT COUNT(*) AS n FROM storage_attempt_events WHERE attempt_id=?",
+        (attempt_id,),
+    )['n'] == event_count_before_prune
+    session.execute(
+        "UPDATE storage_generation_attempts SET status='running',settled_at=NULL "
+        "WHERE attempt_id=?",
+        (attempt_id,),
+    )
+
+    cache.clear()
+    recovered = _turn_recover(session, {
+        'max_rows': 8,
+        'max_bytes': 16 * 1024 * 1024,
+    })
+    assert recovered['recovered'] == 1
+    stored = session.fetch_one(
+        "SELECT status,projection_json,projection_checkpoint_revision,"
+        "projection_materialized_revision,"
+        "projection_patch_count,projection_patch_bytes "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert stored['status'] == 'interrupted'
+    assert _load(stored['projection_json']) == third
+    assert stored['projection_checkpoint_revision'] is None
+    assert stored['projection_materialized_revision'] is None
+    assert stored['projection_patch_count'] == 0
+    assert stored['projection_patch_bytes'] == 0
+    assert session.fetch_one(
+        "SELECT COUNT(*) AS n FROM storage_turn_projection_checkpoints "
+        "WHERE turn_id=?",
+        (turn_id,),
+    )['n'] == 0
+    assert cache.stats()['entries'] == 0
+
+
+def test_first_event_projection_fence_failure_raises_for_transaction_rollback(
+        session, monkeypatch):
+    from lib.storage.errors import StorageError
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+    )
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'projection-cache-fence-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('projection-cache-fence-task', attempt_id),
+    )
+    real_fetch_one = session.fetch_one
+
+    def missing_projection_after_attempt_start(sql, params=()):
+        if (
+            sql.startswith('SELECT projection_json FROM storage_conversation_turns')
+            and 'current_attempt_id' in sql
+        ):
+            return None
+        return real_fetch_one(sql, params)
+
+    monkeypatch.setattr(
+        session, 'fetch_one', missing_projection_after_attempt_start)
+    with pytest.raises(StorageError) as conflict:
+        _turn_event_record(session, {
+            'attempt_id': attempt_id,
+            'user_id': 1,
+            'task_id': 'projection-cache-fence-task',
+            'status': 'running',
+            'terminal': False,
+            'projection_patch': {
+                'version': 1,
+                'baseRevision': 0,
+                'targetRevision': 1,
+                'operations': [],
+            },
+            'event_type': 'projection_updated',
+            'event_payload': {'updateKind': 'fence-test'},
+        })
+    assert conflict.value.code == 'database_conflict'
+
+
 @pytest.fixture()
 def session(tmp_path):
     from lib.storage_sidecar.schema import initialize_schema
@@ -419,6 +1189,206 @@ def _search_ids(session, query):
     })]
 
 
+def test_turn_event_record_skips_unchanged_projection_blob_assignment(session):
+    """A diagnostic frame may advance replay without rewriting a large BLOB."""
+    from lib.storage_sidecar.operations_pkg._common import _load
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+    )
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'unchanged-projection-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('unchanged-projection-task', attempt_id),
+    )
+    before = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    projection = _load(before['projection_json'])
+
+    executed_sql = []
+    original_execute = session.execute
+
+    def capture_execute(sql, params=()):
+        executed_sql.append(sql)
+        return original_execute(sql, params)
+
+    session.execute = capture_execute
+    result = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'unchanged-projection-task',
+        'status': 'running',
+        'terminal': False,
+        'projection': projection,
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'phase'},
+    })
+
+    assert result['applied'] is True
+    turn_updates = [
+        sql for sql in executed_sql
+        if sql.startswith('UPDATE storage_conversation_turns SET')
+    ]
+    assert len(turn_updates) == 1
+    assert 'projection_json' not in turn_updates[0]
+    after = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(after['projection_json']) == projection
+    assert after['projection_revision'] == before['projection_revision'] + 1
+    stored_event = session.fetch_one(
+        "SELECT payload_json FROM storage_attempt_events "
+        "WHERE attempt_id=? ORDER BY sequence DESC LIMIT 1",
+        (attempt_id,),
+    )
+    assert _load(stored_event['payload_json'])['payload'][
+        'projectionPatch']['operations'] == []
+
+
+def test_turn_event_record_skips_unchanged_slim_projection_blob_assignment(
+        session):
+    """Text-only cadence frames avoid JSON mutation when both fields match."""
+    from lib.storage_sidecar.operations_pkg._common import _load
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+    )
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'unchanged-slim-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('unchanged-slim-task', attempt_id),
+    )
+    before = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+
+    executed_sql = []
+    original_execute = session.execute
+
+    def capture_execute(sql, params=()):
+        executed_sql.append(sql)
+        return original_execute(sql, params)
+
+    session.execute = capture_execute
+    result = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'unchanged-slim-task',
+        'status': 'running',
+        'terminal': False,
+        'projection': {'content': '', 'thinking': ''},
+        'slim': True,
+        'content': '',
+        'thinking': '',
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'tool_progress'},
+    })
+
+    assert result['applied'] is True
+    turn_updates = [
+        sql for sql in executed_sql
+        if sql.startswith('UPDATE storage_conversation_turns SET')
+    ]
+    assert len(turn_updates) == 1
+    assert 'projection_json' not in turn_updates[0]
+    after = session.fetch_one(
+        "SELECT projection_json,projection_revision "
+        "FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert after['projection_json'] == before['projection_json']
+    assert after['projection_revision'] == before['projection_revision'] + 1
+    stored_event = session.fetch_one(
+        "SELECT payload_json FROM storage_attempt_events "
+        "WHERE attempt_id=? ORDER BY sequence DESC LIMIT 1",
+        (attempt_id,),
+    )
+    assert _load(stored_event['payload_json'])['payload'][
+        'projectionPatch']['operations'] == []
+
+
+def test_turn_event_record_repairs_non_mapping_legacy_projection(session):
+    """A decoded fallback must not masquerade as canonical stored equality."""
+    from lib.storage_sidecar.operations_pkg._common import _dump, _load
+    from lib.storage_sidecar.operations_pkg._turns import (
+        _turn_create_pair,
+        _turn_event_record,
+    )
+
+    created = _turn_create_pair(session, {
+        'conversation_id': 'conv-d', 'user_id': 1,
+        'command_id': 'legacy-projection-create',
+        'input_projection': {'content': 'question'},
+        'config': {},
+    })
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('legacy-projection-task', attempt_id),
+    )
+    session.execute(
+        "UPDATE storage_conversation_turns SET projection_json=? "
+        "WHERE turn_id=?",
+        (_dump(['legacy-non-mapping']), turn_id),
+    )
+
+    executed_sql = []
+    original_execute = session.execute
+
+    def capture_execute(sql, params=()):
+        executed_sql.append(sql)
+        return original_execute(sql, params)
+
+    session.execute = capture_execute
+    result = _turn_event_record(session, {
+        'attempt_id': attempt_id,
+        'user_id': 1,
+        'task_id': 'legacy-projection-task',
+        'status': 'running',
+        'terminal': False,
+        'projection': {},
+        'event_type': 'projection_updated',
+        'event_payload': {'updateKind': 'phase'},
+    })
+
+    assert result['applied'] is True
+    turn_updates = [
+        sql for sql in executed_sql
+        if sql.startswith('UPDATE storage_conversation_turns SET')
+    ]
+    assert len(turn_updates) == 1
+    assert 'projection_json' in turn_updates[0]
+    stored = session.fetch_one(
+        "SELECT projection_json FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    )
+    assert _load(stored['projection_json']) == {}
+
+
 def test_turn_search_indexes_submission_and_terminal_projection_only(session):
     """Draft deltas must not leak into search; terminal settlement replaces
     the per-turn fragment without rewriting a conversation-sized blob."""
@@ -438,8 +1408,13 @@ def test_turn_search_indexes_submission_and_terminal_projection_only(session):
     assert _search_ids(session, 'question needle') == ['conv-d']
 
     attempt_id = created['attempt']['attemptId']
+    session.execute(
+        "UPDATE storage_generation_attempts SET task_id=? WHERE attempt_id=?",
+        ('search-index-task', attempt_id),
+    )
     _turn_event_record(session, {
         'attempt_id': attempt_id, 'user_id': 1,
+        'task_id': 'search-index-task',
         'status': 'running', 'terminal': False,
         'projection': {'content': 'private draft needle'},
     })
@@ -447,6 +1422,7 @@ def test_turn_search_indexes_submission_and_terminal_projection_only(session):
 
     _turn_event_record(session, {
         'attempt_id': attempt_id, 'user_id': 1,
+        'task_id': 'search-index-task',
         'status': 'completed', 'terminal': True,
         'projection': {'content': 'settled answer needle'},
         'settlement': {'outcome': 'completed'},

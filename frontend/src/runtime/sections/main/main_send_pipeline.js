@@ -16,10 +16,10 @@
  * while it's open (liveCheck), so a moot choice never lingers on screen.
  *
  * @param {string} convId
- * @returns {Promise<'steer'|'queue'>}
+ * @returns {Promise<'steer'|'queue'|'cancel'>}
  */
 async function _promptInjectMode(convId) {
-  if (typeof showChoice !== 'function') return 'queue';  // dialog base not loaded
+  if (typeof showChoice !== 'function') return 'cancel';
   const _tt = (k, d) => (typeof t === 'function' ? (t(k) !== k ? t(k) : d) : d);
   // Inline SVGs (§3.4 — no emoji). steer = pen-to-line (interject into the
   // live reply); queue = stacked lines (a fresh turn in line).
@@ -43,18 +43,24 @@ async function _promptInjectMode(convId) {
         subtitle: _tt('inject.subQueue', '当前回复结束后作为新一轮自动发送'),
         icon: queueIcon,
       },
+      {
+        value: 'cancel',
+        label: _tt('common.cancel', '取消'),
+        subtitle: _tt('inject.subCancel', '保留输入内容,暂不发送'),
+      },
     ],
-    dismissValue: 'queue',
+    dismissValue: 'cancel',
     liveCheck: () => {
       const c = conversations.find((x) => x.id === convId);
       return Boolean(runtimeScope.ConversationTurnRead?.activeMainAttemptId?.(c));
     },
   });
-  return choice === 'steer' ? 'steer' : 'queue';
+  return choice === 'steer' || choice === 'queue' ? choice : 'cancel';
 }
 if (typeof window !== 'undefined') runtimeScope._promptInjectMode = _promptInjectMode;
 
 let _composerSendLocked = false;
+let _composerSendRequestedWhileLocked = false;
 let _retryableComposerCommand = null;
 
 function _sameCapturedItems(left, right) {
@@ -141,14 +147,24 @@ function _restoreCapturedComposerDraft(draft) {
   const input = document.getElementById('userInput');
   if (input && draft.inputValue) {
     input.value = input.value
-      ? draft.inputValue + '\n' + input.value
+      ? input.value + '\n\n' + draft.inputValue
       : draft.inputValue;
     input.style.height = 'auto';
   }
-  const restoreItems = (current, captured) => [
-    ...(captured || []).filter((item) => !(current || []).includes(item)),
-    ...(current || []),
-  ];
+  const stableItemId = (item) => item && typeof item === 'object'
+    ? (item.attachmentId || item.id || item._msgId || item.url || item.path || item)
+    : item;
+  const restoreItems = (current, captured) => {
+    const restored = [...(current || [])];
+    const present = new Set(restored.map(stableItemId));
+    for (const item of captured || []) {
+      const stableId = stableItemId(item);
+      if (present.has(stableId)) continue;
+      present.add(stableId);
+      restored.push(item);
+    }
+    return restored;
+  };
   pendingImages = restoreItems(pendingImages, draft.images);
   pendingPdfTexts = restoreItems(pendingPdfTexts, draft.pdfTexts);
   pendingVideos = restoreItems(pendingVideos, draft.videos);
@@ -178,6 +194,14 @@ function _commandIsVisibleInAuthority(conv, commandId) {
     && runtimeScope.ConversationTurnStore
       ?.hasAuthoritativeCommand?.(conv.id, commandId));
 }
+
+function _isLaneBusySendError(error) {
+  const code = error?.body?.error?.code
+    || error?.body?.code
+    || error?.response?.error?.code
+    || error?.code;
+  return code === 'lane_busy' || code === 'turn_in_progress';
+}
 /**
  * Paint the submitted user message IMMEDIATELY as a transient overlay Turn.
  * The durable TurnStore stays untouched; the acknowledgement swaps in the
@@ -185,29 +209,52 @@ function _commandIsVisibleInAuthority(conv, commandId) {
  * removes this echo exactly once.
  */
 function _showOptimisticUserTurn(conv, draftProjection) {
-  if (typeof createOptimisticUserTurn !== 'function'
+  if (typeof createOptimisticTurnPair !== 'function'
       || !runtimeScope.ConversationTransientTurns) {
-    return null;
+    return [];
   }
-  const turn = createOptimisticUserTurn({
+  const pair = createOptimisticTurnPair({
     conversationId: conv.id,
     commandId: draftProjection._msgId,
     text: draftProjection.content,
     timestamp: draftProjection.timestamp,
     images: draftProjection.images,
+    attachments: draftProjection.attachments,
     pdfTexts: draftProjection.pdfTexts,
     videos: draftProjection.videos,
     replyQuotes: draftProjection.replyQuotes,
     convRefs: draftProjection.convRefs,
     contextSnapshot: draftProjection._ctx,
   });
-  runtimeScope.ConversationTransientTurns.upsert(conv, turn);
-  return turn.turnId;
+  runtimeScope.ConversationTransientTurns.upsert(conv, pair.inputTurn);
+  runtimeScope.ConversationTransientTurns.upsert(conv, pair.outputTurn);
+  return [pair.inputTurn.turnId, pair.outputTurn.turnId];
 }
 
-function _removeOptimisticUserTurn(conv, turnId) {
-  if (!conv || !turnId || !runtimeScope.ConversationTransientTurns) return;
-  runtimeScope.ConversationTransientTurns.remove(conv, turnId);
+function _removeOptimisticUserTurn(conv, turnIds) {
+  if (!conv || !runtimeScope.ConversationTransientTurns) return;
+  for (const turnId of turnIds || []) {
+    runtimeScope.ConversationTransientTurns.remove(conv, turnId);
+  }
+}
+
+/**
+ * Re-label the optimistic assistant container in place as the send command
+ * advances (connecting → translating), so preparation never stacks a second
+ * agent bubble. Returns false when this send has no optimistic pair (steer),
+ * letting the caller fall back to the standalone status bubble.
+ */
+function _updateOptimisticAssistantPhase(conv, turnId, phase, label) {
+  if (!conv || !turnId
+      || typeof withOptimisticAssistantPreparation !== 'function'
+      || typeof runtimeScope.ConversationTransientTurns?.get !== 'function') {
+    return false;
+  }
+  const current = runtimeScope.ConversationTransientTurns.get(conv.id, turnId);
+  if (!current) return false;
+  runtimeScope.ConversationTransientTurns.upsert(
+    conv, withOptimisticAssistantPreparation(current, phase, label));
+  return true;
 }
 
 function _applyAcceptedConversationTitle(conv, draft) {
@@ -234,7 +281,7 @@ async function sendMessage() {
   /* A stale restore can carry both flags. Plan wins so direct artifact
    * generation cannot bypass the backend's read-only authority. */
   if (imageGenMode && !planMode) {
-    generateImageDirect();
+    runtimeScope.generateImageDirect?.();
     return;
   }
   if (typeof isBranchModeActive === 'function' && isBranchModeActive()) {
@@ -254,11 +301,24 @@ async function sendMessage() {
       return;
     }
   }
-  if (_composerSendLocked) return;
+  if (_composerSendLocked) {
+    /* A click or Enter press is a command intent, not a disposable event.
+     * Collapse repeated presses into one trailing attempt while the current
+     * draft waits for preprocessing/ACK. The active owner drains it only
+     * after an authoritative acceptance, so failures still stop and restore
+     * the draft instead of silently auto-retrying an uncertain command. */
+    _composerSendRequestedWhileLocked = true;
+    return;
+  }
   _composerSendLocked = true;
   try {
-    await _submitComposerDraft();
+    let previousCommandAccepted = false;
+    do {
+      _composerSendRequestedWhileLocked = false;
+      previousCommandAccepted = Boolean(await _submitComposerDraft());
+    } while (previousCommandAccepted && _composerSendRequestedWhileLocked);
   } finally {
+    _composerSendRequestedWhileLocked = false;
     _composerSendLocked = false;
   }
 }
@@ -309,7 +369,18 @@ async function _submitComposerDraft() {
     if (!runtimeScope.ConversationTurnStore) {
       throw new Error('Conversation turn runtime is unavailable.');
     }
-    await runtimeScope.ConversationTurnStore.hydrateConversation(conv);
+    try {
+      await runtimeScope.ConversationTurnStore.hydrateConversation(conv);
+    } catch (hydrateError) {
+      /* Snapshot reads are bounded, so a stalled server rejects here instead
+       * of latching the composer lock until reload. Keep the draft and
+       * continue: submitConversation re-hydrates cold stores itself, and a
+       * repeat failure lands in the send catch path with the draft kept. */
+      console.warn(
+        '[sendMessage] pre-submit hydration failed:',
+        hydrateError?.message || hydrateError,
+      );
+    }
   }
   if (!conv) {
     const now = Date.now();
@@ -355,21 +426,46 @@ async function _submitComposerDraft() {
     convRefs: capturedConvRefs,
     shouldSetTitle: !runtimeScope.ConversationTurnRead?.hasActor?.(conv, 'human'),
   };
+  let injectMode;
+  if (runtimeScope.ConversationTurnRead?.activeMainAttemptId?.(conv)) {
+    injectMode = await _promptInjectMode(convId);
+    if (injectMode === 'cancel') return false;
+  }
   draft.commandId = _composerCommandId(draft);
 
-  const readyVideos = draft.videos.filter((video) => video && !video._status);
+  const referencedDocuments = draft.pdfTexts.filter(
+    (documentAttachment) => documentAttachment?.attachmentId,
+  );
+  const legacyDocuments = draft.pdfTexts.filter(
+    (documentAttachment) => !documentAttachment?.attachmentId,
+  );
+  const referencedVideos = draft.videos.filter(
+    (video) => video?.attachmentId,
+  );
+  const readyLegacyVideos = draft.videos.filter(
+    (video) => video && !video.attachmentId && !video._status,
+  );
   const msgPayload = {
     text: finalText,
     images: [...draft.images],
-    pdfTexts: [...draft.pdfTexts],
     timestamp: Date.now(),
     _msgId: draft.commandId,
   };
+  const mediaAttachments = [
+    ...referencedDocuments.map((documentAttachment) =>
+      typeof _documentPayloadForSend === 'function'
+        ? _documentPayloadForSend(documentAttachment) : documentAttachment),
+    ...referencedVideos.map((video) =>
+      typeof _videoPayloadForSend === 'function'
+        ? _videoPayloadForSend(video) : video),
+  ];
+  if (mediaAttachments.length > 0) msgPayload.attachments = mediaAttachments;
+  if (legacyDocuments.length > 0) msgPayload.pdfTexts = legacyDocuments;
   const turnContext = typeof runtimeScope.buildTurnCtxSnapshot === 'function'
     ? runtimeScope.buildTurnCtxSnapshot() : null;
   if (turnContext) msgPayload.ctx = turnContext;
-  if (readyVideos.length > 0) {
-    msgPayload.videos = readyVideos.map((video) =>
+  if (readyLegacyVideos.length > 0) {
+    msgPayload.videos = readyLegacyVideos.map((video) =>
       typeof _videoPayloadForSend === 'function'
         ? _videoPayloadForSend(video) : video);
   }
@@ -383,10 +479,11 @@ async function _submitComposerDraft() {
     role: 'user',
     content: finalText,
     images: msgPayload.images,
-    pdfTexts: msgPayload.pdfTexts,
     timestamp: msgPayload.timestamp,
     _msgId: msgPayload._msgId,
   };
+  if (msgPayload.attachments) draftProjection.attachments = msgPayload.attachments;
+  if (msgPayload.pdfTexts) draftProjection.pdfTexts = msgPayload.pdfTexts;
   if (msgPayload.replyQuotes) draftProjection.replyQuotes = msgPayload.replyQuotes;
   if (msgPayload.convRefs) draftProjection.convRefs = msgPayload.convRefs;
   if (msgPayload.videos) draftProjection.videos = msgPayload.videos;
@@ -396,33 +493,59 @@ async function _submitComposerDraft() {
   let willTranslate = false;
   let accepted = false;
   let userStopped = false;
-  /* Optimistic echo: clear the composer and paint the user bubble NOW,
-   * before the config-resolve and turn-command round trips. The
-   * acknowledgement swaps in the authoritative turn; a failed or
-   * pre-commit-stopped command restores the captured draft below. */
+  /* Optimistic pair: an ordinary/queued command paints the user input and
+   * its stable assistant container before the round trip. A steer is an
+   * injection block on the already-live assistant Turn, so it must never
+   * manufacture even a provisional transcript Turn. */
   _clearCapturedComposerDraft(draft);
-  const optimisticTurnId = _showOptimisticUserTurn(conv, draftProjection);
-  let optimisticEchoCleared = false;
+  let optimisticTurnIds = [];
+  let optimisticEchoCleared = true;
   const clearOptimisticEcho = () => {
     if (optimisticEchoCleared) return;
     optimisticEchoCleared = true;
-    _removeOptimisticUserTurn(conv, optimisticTurnId);
+    _removeOptimisticUserTurn(conv, optimisticTurnIds);
   };
+  const showOptimisticEcho = (deliveryMode) => {
+    if (deliveryMode === 'steer') {
+      optimisticTurnIds = [];
+      optimisticEchoCleared = true;
+      return;
+    }
+    optimisticTurnIds = _showOptimisticUserTurn(conv, draftProjection);
+    optimisticEchoCleared = false;
+  };
+  const showSendPreparation = (phase, label) => {
+    if (_updateOptimisticAssistantPhase(conv, optimisticTurnIds[1], phase, label)) {
+      return;
+    }
+    /* Steer sends paint no optimistic pair; keep the standalone bubble. */
+    if (activeConvId !== convId) return;
+    if (phase === 'translating') {
+      _renderTranslatingBubble();
+    } else {
+      _renderTranslatingBubble(label);
+    }
+  };
+  showOptimisticEcho(injectMode);
   if (activeConvId === convId) {
     const welcome = document.getElementById('welcome');
     if (welcome) welcome.remove();
-    _renderTranslatingBubble(t('sidebar.connecting'));
   }
+  showSendPreparation('connecting', t('sidebar.connecting'));
   updateSendButton();
   renderConversationList();
 
   try {
     await _waitForVlmParsing(draftProjection, convId, sendStart.signal);
     if (sendStart.signal.aborted) throw _sendAbortError();
-    msgPayload.pdfTexts = draftProjection.pdfTexts;
+    if (draftProjection.pdfTexts) {
+      msgPayload.pdfTexts = draftProjection.pdfTexts;
+    }
 
-    const sendConfig = await _buildConvConfig(conv);
-    const sendSettings = await _buildConvSettings(conv);
+    const {
+      config: sendConfig,
+      settings: sendSettings,
+    } = await _buildConvSubmission(conv);
     sendConfig.assistantMsgId = (typeof _newClientMsgId === 'function')
       ? _newClientMsgId()
       : ('tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
@@ -434,13 +557,11 @@ async function _submitComposerDraft() {
       conv._translating = true;
       conv._translateAborted = false;
       conv._translateAbortCtrl = sendStart.controller;
-      if (activeConvId === convId) _renderTranslatingBubble();
+      showSendPreparation('translating', t('sidebar.translating'));
       updateSendButton();
       renderConversationList();
     }
 
-    const injectMode = runtimeScope.ConversationTurnRead?.activeMainAttemptId?.(conv)
-      ? await _promptInjectMode(convId) : 'queue';
     if (sendStart.signal.aborted) throw _sendAbortError();
     if (typeof runtimeScope.updateContextBar === 'function') {
       runtimeScope.updateContextBar();
@@ -448,15 +569,40 @@ async function _submitComposerDraft() {
     if (!runtimeScope.ConversationTurnStore) {
       throw new Error('Turn runtime unavailable — reload the page.');
     }
-    const turnExtra = buildTurnSubmissionExtra({
-      commandId: draft.commandId,
-      settings: sendSettings,
-      config: sendConfig,
-      signal: sendStart.signal,
-      injectMode,
-    });
-    const acknowledgement = await runtimeScope.ConversationTurnStore
-      .submitConversation(conv, msgPayload, sendConfig, turnExtra);
+    let acknowledgement;
+    let selectedInjectMode = injectMode;
+    for (let submissionAttempt = 0; submissionAttempt < 2; submissionAttempt += 1) {
+      const turnExtra = buildTurnSubmissionExtra({
+        commandId: draft.commandId,
+        settings: sendSettings,
+        config: sendConfig,
+        signal: sendStart.signal,
+        injectMode: selectedInjectMode,
+      });
+      try {
+        acknowledgement = await runtimeScope.ConversationTurnStore
+          .submitConversation(conv, msgPayload, sendConfig, turnExtra);
+        break;
+      } catch (submissionError) {
+        if (submissionAttempt > 0 || selectedInjectMode
+            || !_isLaneBusySendError(submissionError)) {
+          throw submissionError;
+        }
+        /* The lane became busy after the idle preflight. Return the timeline
+         * and composer to their exact pre-send state before asking for new
+         * authority; retry then reuses the same idempotency command identity. */
+        clearOptimisticEcho();
+        _restoreCapturedComposerDraft(draft);
+        const racedChoice = await _promptInjectMode(convId);
+        if (racedChoice === 'cancel') {
+          _forgetComposerCommand(draft.commandId);
+          return false;
+        }
+        selectedInjectMode = racedChoice;
+        _clearCapturedComposerDraft(draft);
+        showOptimisticEcho(selectedInjectMode);
+      }
+    }
 
     if (acknowledgement?.aborted) {
       clearOptimisticEcho();
@@ -574,6 +720,10 @@ async function _submitComposerDraft() {
     renderConversationList();
     updateSendButton();
   }
+  /* The outer serializer may drain one send intent received while this
+   * command was in flight. A user stop or uncertain/non-committed failure is
+   * a hard boundary: leave the restored draft for an explicit retry. */
+  return accepted && !userStopped;
 }
 
 // ══════════════════════════════════════════════════════
@@ -591,12 +741,11 @@ async function _submitComposerDraft() {
  * Count of DISPATCHABLE queued messages for a conversation.
  *
  * Mirrors the backend's `_get_queue_depth` (lib/message_queue.py), which
- * excludes the autopilot armed-marker sentinel (kind='autopilot').  That
- * sentinel is a persistent flag consumed by the end-of-turn autopilot hook,
- * NOT a turn that ever gets dequeued & dispatched as a task.  Every frontend
+ * excludes the legacy autopilot marker (kind='autopilot'). That compatibility
+ * row is not dispatchable; the new ``goal_continuation`` command is. Every frontend
  * gate that means "is there pending work the backend will start next?" MUST
  * use this — using the raw Map length instead makes an armed-but-idle
- * autopilot look like a permanently stuck queued message (ghost "Dispatching…"
+ * legacy marker look like a permanently stuck queued message (ghost "Dispatching…"
  * bubble + a doomed ~15s _checkForQueuedTask retry loop).
  */
 function _dispatchableQueueCount(convId) {
@@ -681,105 +830,42 @@ async function _waitForVlmParsing(userMsg, convId, signal) {
   }
 }
 
-/* ── Queue item sources + collapse state ────────────────────────────
- * Every queued row has exactly ONE source, distinguished visually by a
- * tinted left edge + number badge + (for non-human sources) an attribution
- * line above the preview:
- *   own       — typed here, queued behind the running turn (neutral accent)
- *   agent     — project_message/intervene from a SIBLING agent conversation
- *   operator  — a HUMAN operator nudge delivered through the peer channel
- *   workflow  — a Project-Brain autonomous epic kickoff (KIND_WORKFLOW)
- *   autopilot — the armed sentinel (not a message; cancel = DISARM)
+/* ── Input-area queue bar ───────────────────────────────────────────────
+ * Regular queued messages are rendered INLINE in the transcript by the
+ * ConversationSurface (``conversation-queue-item``), so this bar must NOT
+ * repeat them. The only queue entry the transcript view-model deliberately
+ * excludes is the legacy AUTOPILOT sentinel. New Goal Mode continuations are
+ * regular turn-native queue rows and render inline with other pending turns.
  */
-function _queueSourceOf(item) {
-  if (item.kind === 'autopilot') return 'autopilot';
-  if (item.kind === 'workflow_step') return 'workflow';
-  if (item.isPeerMessage) return item.isPeerHuman ? 'operator' : 'agent';
-  return 'own';
-}
-
-/* Per-source SVG glyphs (no emoji / unicode-glyph icons — CLAUDE.md §3.4). */
-const _QUEUE_SRC_ICONS = {
-  autopilot: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg>`,
-  agent: `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V5"/><circle cx="12" cy="3.5" r="1"/><path d="M9 13.5h.01M15 13.5h.01"/><path d="M9.5 17h5"/></svg>`,
-  operator: `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c0-4 3.4-6.5 7.5-6.5s7.5 2.5 7.5 6.5"/></svg>`,
-  workflow: `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="7" r="2.2"/><path d="M6 7.2v9.6"/><path d="M18 9.4c0 4.6-6.8 3.2-10.2 6.4"/></svg>`,
-};
-const _QUEUE_ICON_CHEVRON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
+const _QUEUE_ICON_AUTOPILOT = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg>`;
 const _QUEUE_ICON_X = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19"/></svg>`;
-const _QUEUE_ICON_CLOUD = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 18.5a4.3 4.3 0 0 0 .8-8.5 5.5 5.5 0 0 0-10.8 1.4A3.8 3.8 0 0 0 7 18.5h10.5z"/></svg>`;
-
-/* Preview text for one queued item (shared by the row and the collapsed
- * "next up" header line). */
-function _queueItemPreview(item) {
-  return item.text
-    ? item.text
-    : (item.hasImages ? t('queue.imagesCount', { n: 1 }) : t('queue.attachment'));
-}
-
-/* Collapse preference — persisted per-conv because renderPendingQueueUI
- * rebuilds the bar's innerHTML on every poll, so the state cannot live in
- * the DOM. null = the user never toggled → the auto-collapse rule decides. */
-const QUEUE_AUTO_COLLAPSE_MIN = 4;
-
-function _queueCollapseRead(convId) {
-  try {
-    if (typeof localStorage === 'undefined') return null;
-    const v = localStorage.getItem('tofu.queueCollapsed.' + convId);
-    return v === null ? null : v === '1';
-  } catch (e) {
-    console.debug('[Queue] collapse pref read failed:', e);
-    return null;
-  }
-}
-
-function _queueCollapseWrite(convId, collapsed) {
-  try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem('tofu.queueCollapsed.' + convId, collapsed ? '1' : '0');
-  } catch (e) {
-    console.debug('[Queue] collapse pref write failed:', e);
-  }
-}
-
-/* Effective collapse state: the explicit toggle wins; otherwise a queue of
- * QUEUE_AUTO_COLLAPSE_MIN+ dispatchable items starts collapsed so a flooded
- * queue cannot bury the ConversationSurface behind the input bar. */
-function _queueCollapsedNow(convId, realCount) {
-  const pref = _queueCollapseRead(convId);
-  return pref !== null ? pref : realCount >= QUEUE_AUTO_COLLAPSE_MIN;
-}
-
-/* Header chevron handler (inline onclick) — flips + persists the state. */
-function togglePendingQueueCollapsed(convId) {
-  const queue = _queueItemsForConversation(convId);
-  const realCount = queue.filter((it) => _queueSourceOf(it) !== 'autopilot').length;
-  _queueCollapseWrite(convId, !_queueCollapsedNow(convId, realCount));
-  renderPendingQueueUI(convId);
-}
-if (typeof window !== 'undefined') runtimeScope.togglePendingQueueCollapsed = togglePendingQueueCollapsed;
 
 /**
- * Render the pending queue indicator above the input area.
+ * Render a legacy autopilot marker above the input area.
  *
- * CROSS-CONV BLEED GUARD — the input-bar queue is a SINGLE shared DOM node
+ * Real queued messages appear inline in the transcript (ConversationSurface);
+ * this bar only paints the autopilot sentinel, which the transcript
+ * view-model filters out.
+ *
+ * CROSS-CONV BLEED GUARD — the input-bar marker is a SINGLE shared DOM node
  * (``#pendingQueueBar`` in ``#pendingQueueContainer``), while TurnStore owns
  * one queue per conversation. Every DOM mutation must therefore be gated on
  * ``convId === activeConvId``: queue refresh, autopilot arm/disarm, and
  * TurnStore hydration run asynchronously, so work for conversation A can finish after the
- * user switched to conv B and unconditionally paint A's queue into B's visible
+ * user switched to conv B and unconditionally paint A's marker into B's visible
  * bar. The normalized store is still updated for the inactive conversation;
  * only its paint is suppressed.
  *
  * The removal branch (``queue-removing``+timeout) is likewise gated so a stale
- * empty-queue render for an inactive conv can't tear down the bar that
+ * empty render for an inactive conv can't tear down the bar that
  * currently belongs to the active conv.
  */
 function renderPendingQueueUI(convId) {
   const _isActive = (typeof activeConvId !== 'undefined') && convId === activeConvId;
   let container = document.getElementById("pendingQueueBar");
-  const queue = _queueItemsForConversation(convId);
-  if (!queue || queue.length === 0) {
+  const sentinels = _queueItemsForConversation(convId)
+    .filter((item) => item && item.kind === 'autopilot');
+  if (sentinels.length === 0) {
     if (container && _isActive) {
       container.classList.add('queue-removing');
       setTimeout(() => {
@@ -802,92 +888,23 @@ function renderPendingQueueUI(convId) {
     if (queueHost) queueHost.appendChild(container);
   }
   container.classList.remove('queue-removing');
-  let _realCount = 0;   // human/workflow items get sequential numbers
-  const items = queue.map((item) => {
-    const _src = _queueSourceOf(item);
-    /* ── Autopilot armed-marker sentinel — always rendered last (priority 90),
-     *   distinct styling, cancel = DISARM (not just queue-remove). ── */
-    if (_src === 'autopilot') {
-      const apLabel = (typeof t === 'function') ? t('autopilot.pendingTakeover') : 'Autopilot will take over';
-      const apCancelTitle = (typeof t === 'function') ? t('autopilot.cancelTakeover') : 'Cancel autopilot';
-      return `<div class="pending-queue-item pending-queue-autopilot">
-        <span class="queue-item-number queue-item-autopilot-icon">${_QUEUE_SRC_ICONS.autopilot}</span>
-        <span class="queue-item-text">${escapeHtml(apLabel)}</span>
-        <button class="queue-item-cancel" data-tofu-action="cancelAutopilotMarker('${convId}')" title="${escapeHtml(apCancelTitle)}">${_QUEUE_ICON_X}</button>
-      </div>`;
-    }
-    const i = _realCount++;
-    const preview = _queueItemPreview(item);
-    // Attachment badges
-    const badges = [];
-    if (item.hasImages) badges.push('<span>img</span>');
-    if (item.hasPdfs) badges.push('<span>pdf</span>');
-    if (item.hasRefs) badges.push('<span>ref</span>');
-    if (item.hasQuotes) badges.push('<span>↩</span>');
-    // ── Source attribution line ──
-    // A peer turn (agent / operator) names the SOURCE conversation by its
-    // TITLE (a raw id is meaningless) and jumps to it on click. A brain
-    // workflow kickoff gets a static label (no conversation to jump to).
-    let srcLine = '';
-    if ((_src === 'agent' || _src === 'operator') && item.fromConv) {
-      const _title = (typeof convTitleById === 'function')
-        ? convTitleById(item.fromConv) : item.fromConv;
-      const _lbl = (typeof t === 'function')
-        ? t(_src === 'operator' ? 'queue.fromOperator' : 'queue.fromConv')
-        : (_src === 'operator' ? 'from operator' : 'from');
-      srcLine = `<div class="queue-item-src" data-tofu-action="loadConversation('${escapeHtml(item.fromConv)}')" `
-        + `title="${escapeHtml(_title)}">${_QUEUE_SRC_ICONS[_src]}<span>${escapeHtml(_lbl)} «${escapeHtml(_title)}»</span></div>`;
-    } else if (_src === 'workflow') {
-      const _wfLbl = (typeof t === 'function') ? t('queue.fromWorkflow') : '项目大脑派发';
-      srcLine = `<div class="queue-item-src queue-item-src-static">${_QUEUE_SRC_ICONS.workflow}<span>${escapeHtml(_wfLbl)}</span></div>`;
-    }
-    return `<div class="pending-queue-item qsrc-${_src}">
-      <span class="queue-item-number">${i + 1}</span>
-      <div class="queue-item-body">
-        ${srcLine}
-        <span class="queue-item-text">${escapeHtml(preview)}</span>
-      </div>
-      ${badges.length ? `<span class="queue-item-attachments">${badges.join('')}</span>` : ''}
-      <button class="queue-item-cancel" data-tofu-action="removePendingQueueItem('${convId}', ${i})" title="${escapeHtml(t('queue.cancelMsg'))}">${_QUEUE_ICON_X}</button>
-      ${item.queueId ? `<span class="queue-item-synced" title="${escapeHtml(t('queue.syncedToServer'))}">${_QUEUE_ICON_CLOUD}</span>` : ''}
-    </div>`;
-  }).join("");
-
-  /* Collapse state — re-applied on every render (polls rebuild innerHTML),
-   * so it is read from localStorage via _queueCollapsedNow, not the DOM. */
-  const _collapsed = _queueCollapsedNow(convId, _realCount);
-  if (_collapsed) container.classList.add('queue-collapsed');
-  else container.classList.remove('queue-collapsed');
-
-  const headerSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>`;
-  /* Header count reflects only dispatchable queue items; the autopilot
-   * sentinel is described by its own row. */
-  const _headerLabel = _realCount > 0
-    ? `${_realCount} ${(typeof t === 'function') ? t('queue.messagesQueued') : '条消息排队中'}`
-    : ((typeof t === 'function') ? t('autopilot.armedShort') : 'Autopilot armed');
-  /* One-line "next up" preview + an autopilot chip — CSS only reveals them
-   * in the collapsed state, where they stand in for the hidden item list. */
-  const _nextItem = queue.find((it) => _queueSourceOf(it) !== 'autopilot');
-  const _nextText = _nextItem ? _queueItemPreview(_nextItem) : '';
-  const _hasAutopilot = queue.some((it) => _queueSourceOf(it) === 'autopilot');
-  const _apTitle = (typeof t === 'function') ? t('autopilot.pendingTakeover') : 'Autopilot will take over';
-  const _toggleTitle = (typeof t === 'function')
-    ? t(_collapsed ? 'queue.expand' : 'queue.collapse')
-    : (_collapsed ? 'Expand queue' : 'Collapse queue');
+  /* Cancel on the sentinel row = DISARM (not just queue-remove). */
+  const apLabel = (typeof t === 'function') ? t('autopilot.pendingTakeover') : 'Autopilot will take over';
+  const apCancelTitle = (typeof t === 'function') ? t('autopilot.cancelTakeover') : 'Cancel autopilot';
+  const headerLabel = (typeof t === 'function') ? t('autopilot.armedShort') : 'Autopilot armed';
+  const rows = sentinels.map(() => `<div class="pending-queue-item pending-queue-autopilot">
+    <span class="queue-item-number queue-item-autopilot-icon">${_QUEUE_ICON_AUTOPILOT}</span>
+    <span class="queue-item-text">${escapeHtml(apLabel)}</span>
+    <button class="queue-item-cancel" data-tofu-action="cancelAutopilotMarker('${convId}')" title="${escapeHtml(apCancelTitle)}">${_QUEUE_ICON_X}</button>
+  </div>`).join("");
   container.innerHTML = `<div class="queue-header">
-    <button class="queue-toggle" data-tofu-action="togglePendingQueueCollapsed('${convId}')" title="${escapeHtml(_toggleTitle)}">${_QUEUE_ICON_CHEVRON}</button>
-    ${headerSvg}
-    <span class="queue-header-label">${escapeHtml(_headerLabel)}</span>
-    ${_hasAutopilot ? `<span class="queue-header-ap" title="${escapeHtml(_apTitle)}">${_QUEUE_SRC_ICONS.autopilot}</span>` : ''}
-    <span class="queue-next-preview" title="${escapeHtml(_nextText)}">${escapeHtml(_nextText)}</span>
-    ${_realCount > 1 ? `<button class="queue-clear-all" data-tofu-action="clearPendingQueue('${convId}')">${(typeof t === 'function') ? t('queue.clearAll') : '全部清空'}</button>` : ''}
-  </div><div class="queue-items">${items}</div>`;
+    <span class="queue-header-label">${escapeHtml(headerLabel)}</span>
+  </div><div class="queue-items">${rows}</div>`;
 }
 
 /**
- * Cancel the autopilot armed-marker (disarm) from the queue bar.
- * Clears the persistent sentinel + flips any live task's autopilot off, and
- * turns the toolbar toggle off to keep the UI consistent.
+ * Cancel a legacy autopilot marker from the queue bar. The disarm endpoint
+ * also cancels current GoalRun/queued-continuation state.
  */
 function cancelAutopilotMarker(convId) {
   if (typeof Api !== 'undefined' && Api.chat && Api.chat.disarmAutopilot) {
@@ -909,28 +926,6 @@ function cancelAutopilotMarker(convId) {
   debugLog('Autopilot canceled — virtual user will not take over', 'info');
 }
 if (typeof window !== 'undefined') runtimeScope.cancelAutopilotMarker = cancelAutopilotMarker;
-
-/**
- * Remove a single item from the pending queue (server-backed).
- */
-function removePendingQueueItem(convId, idx) {
-  const queue = _queueItemsForConversation(convId)
-    .filter((item) => item && item.kind !== 'autopilot');
-  if (!queue.length) return;
-  const removed = queue[idx];
-  const removedPreview = removed?.text ? removed.text.slice(0, 40) : '(attachment)';
-  const queueId = removed?.queueId;
-
-  if (queueId) {
-    Api.chat.queueRemove(convId, queueId)
-      .then(async (resp) => {
-        if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
-        await _refreshServerQueue(convId);
-        debugLog(`已取消排队消息 #${idx + 1}: ${removedPreview}`, 'info');
-      })
-      .catch(err => console.error('[Queue] Server remove error:', err));
-  }
-}
 
 async function _refreshServerQueue(convId) {
   const conv = conversations.find((item) => item && item.id === convId);

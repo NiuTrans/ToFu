@@ -1,11 +1,11 @@
 """Provider-template recipes for catalog offerings.
 
-Provider templates are onboarding recipes, not model-definition authorities.
+Provider templates are first-run onboarding recipes, not routing authorities.
 The authored v1 shape stores provider-scoped model registrations under
 ``offering_recipes``.  Each recipe names one exact logical ``model_id`` and
-keeps provider wire identities in ``request_ids``.  Applying a recipe derives
-the legacy provider ``models`` projection consumed by existing Settings and
-dispatch paths.
+keeps provider wire identities in ``request_ids``. The stdlib bootstrap may
+derive an in-memory ``models`` view while probing, then stages a secret-free
+draft that the full application imports into model-routing v2.
 
 Legacy templates with a top-level ``models`` array remain readable at this
 boundary.  New authored templates must use ``offering_recipes`` so the source
@@ -15,6 +15,8 @@ shape cannot imply that each provider independently owns a logical model.
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 from typing import Any
 
 from lib.model_registration import normalize_model_entry
@@ -84,9 +86,8 @@ def normalize_provider_template(
 ) -> dict:
     """Return one canonical template without mutating its input.
 
-    ``include_legacy_models`` derives a compatibility alias for older browser
-    bundles.  It never changes the authored authority: ``offering_recipes`` is
-    always present and is the only field consumers should edit.
+    ``include_legacy_models`` is retained only for offline legacy-template
+    tooling. Runtime onboarding never persists that projection.
     """
     if not isinstance(raw, dict):
         raise ProviderTemplateRecipeError('provider template must be an object')
@@ -112,10 +113,9 @@ def normalize_provider_template(
 def provider_from_template(raw: Any, provider_id: Any) -> dict:
     """Derive a provider row from an authored template recipe.
 
-    Template-only descriptive fields are retained because Settings uses them
-    for labels and setup hints; only the recipe vocabulary is projected into
-    the legacy ``models`` transport field.  The caller supplies the concrete
-    provider identity created for this installation.
+    This compatibility helper is retained for offline protocol-face audits.
+    Runtime onboarding compiles directly into model-routing v2 and never
+    persists this legacy shape.
     """
     provider_key = str(provider_id or '').strip()
     if not provider_key:
@@ -129,10 +129,108 @@ def provider_from_template(raw: Any, provider_id: Any) -> dict:
     return provider
 
 
+def load_provider_templates() -> list[dict]:
+    """Load normalized onboarding recipes from their package-owned sources."""
+    from lib.model_info._openai_gpt56 import OPENAI_TEMPLATE
+
+    sources: list[dict] = [copy.deepcopy(OPENAI_TEMPLATE)]
+    template_directory = Path(__file__).parents[1] / 'static' / 'provider_templates'
+    if template_directory.is_dir():
+        for path in sorted(template_directory.glob('*.json')):
+            try:
+                sources.append(json.loads(path.read_text(encoding='utf-8')))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ProviderTemplateRecipeError(
+                    f'cannot load provider template {path.name}: {exc}') from exc
+
+    # Deployment-local files intentionally override a package recipe by key.
+    by_key: dict[str, dict] = {}
+    for raw in sources:
+        normalized = normalize_provider_template(raw)
+        if (normalized['offering_recipes']
+                or normalized.get('category') == 'local'):
+            by_key[normalized['key']] = normalized
+    return sorted(
+        by_key.values(),
+        key=lambda row: (
+            str(row.get('category') or ''),
+            str(row.get('name') or row['key']).casefold(),
+        ),
+    )
+
+
+def compile_provider_template_bundle(
+    template_key: Any,
+    *,
+    selected_model_ids: list[str] | None = None,
+) -> dict:
+    """Compile one onboarding recipe into a secret-free v2 access bundle."""
+    key = str(template_key or '').strip()
+    template = next(
+        (row for row in load_provider_templates() if row['key'] == key), None)
+    if template is None:
+        raise ProviderTemplateRecipeError(
+            f'unknown provider template {key!r}')
+
+    recipes = copy.deepcopy(template['offering_recipes'])
+    if selected_model_ids is not None:
+        selected = {
+            str(model_id or '').strip() for model_id in selected_model_ids
+            if str(model_id or '').strip()
+        }
+        available = {row['model_id'] for row in recipes}
+        unknown = sorted(selected - available)
+        if unknown:
+            raise ProviderTemplateRecipeError(
+                'unknown template model IDs: ' + ', '.join(unknown))
+        recipes = [row for row in recipes if row['model_id'] in selected]
+    if not recipes and template.get('category') != 'local':
+        raise ProviderTemplateRecipeError(
+            'at least one template model must be selected')
+
+    legacy = copy.deepcopy(template)
+    legacy['id'] = template['key']
+    legacy['models'] = recipes
+    legacy.pop('offering_recipes', None)
+    legacy.pop('recipe_version', None)
+    # A placeholder selects the API-key credential shape.  It is held only in
+    # the private migration plan and is never returned or persisted.
+    if template.get('category') != 'local':
+        legacy['api_keys'] = ['template-secret-placeholder']
+
+    from lib.model_routing.migration import plan_legacy_migration
+
+    plan = plan_legacy_migration({'providers': [legacy]})
+    if plan.blocking_issues:
+        raise ProviderTemplateRecipeError('; '.join(
+            issue.message for issue in plan.blocking_issues))
+    document = plan.document
+    credentials = copy.deepcopy(document['credentials'])
+    for credential in credentials:
+        credential['secret_reference'] = ''
+        credential['key_hint'] = ''
+    return {
+        'provider': copy.deepcopy(document['providers'][0]),
+        'provider_access': copy.deepcopy(document['provider_accesses'][0]),
+        'connections': copy.deepcopy(document['connections']),
+        'credentials': credentials,
+        'offerings': copy.deepcopy(document['offerings']),
+        'deployments': copy.deepcopy(document['deployments']),
+        'creators': copy.deepcopy(document['creators']),
+        'models': copy.deepcopy(document['models']),
+        # Static recipe headers are folded into the encrypted credential
+        # envelope by the browser together with the user-entered API key.
+        'credential_extra_headers': copy.deepcopy(
+            template.get('extra_headers') or {}),
+    }
+
+
 __all__ = [
     'MAX_TEMPLATE_OFFERINGS',
     'RECIPE_VERSION',
     'ProviderTemplateRecipeError',
+    'compile_provider_template_bundle',
+    'load_provider_templates',
     'normalize_provider_template',
     'offering_recipes',
     'provider_from_template',

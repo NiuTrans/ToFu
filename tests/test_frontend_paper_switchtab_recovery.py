@@ -14,7 +14,8 @@ from a fresh tab open.
 
 Fix: widen the guard to also proceed when a PDF is available
 (``_paperPdfUrl`` / ``_paperPdfFilename``), delegating recovery to
-``_generatePaperReport`` (which already runs ``_ensurePaperText`` on empty text).
+the typed report owner (which runs the retained ``_ensurePaperText`` port on
+empty text before a user-initiated start).
 
 This harness loads the REAL shipped ``static/js/paper-reader.js`` under jsdom,
 stubs ``_loadOrGenerateReport`` as a spy, and asserts that with empty
@@ -177,7 +178,9 @@ def _run_harness(
         f.write(_HARNESS)
     try:
         with compiled_typescript(
-            SESSION_TS, contents=session_source,
+            SESSION_TS,
+            contents=session_source,
+            expose_feature_registry_to_window=True,
         ) as session_js:
             return subprocess.run(
                 ['node', harness, paper_js, ROOT, session_js],

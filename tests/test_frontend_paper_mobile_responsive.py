@@ -215,23 +215,24 @@ def test_paper_responsive_crossing_reasserts_view_and_refits(
 
 
 @pytest.fixture(scope='module')
-def paper_responsive_js(tmp_path_factory):
+def paper_responsive_js():
     if not os.path.isfile(ESBUILD):
         pytest.skip('esbuild dev dependency not installed')
-    built = tmp_path_factory.mktemp('paper-responsive') / 'owner.js'
-    compiled = subprocess.run(
-        [ESBUILD, PAPER_TS, '--bundle', '--format=iife',
-         '--platform=browser', f'--outfile={built}'],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert compiled.returncode == 0, compiled.stderr
-    return str(built)
+    with compiled_typescript(
+        PAPER_TS,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        yield built
 
 
 def _run_neuter(patched_src: str, tag: str, tmp_path) -> str:
     """Compile a patched TypeScript COPY and run the real-owner harness."""
     del tmp_path
-    with compiled_typescript(PAPER_TS, contents=patched_src) as built:
+    with compiled_typescript(
+        PAPER_TS,
+        contents=patched_src,
+        expose_feature_registry_to_window=True,
+    ) as built:
         proc = _run_harness(built)
     assert proc.returncode == 0, f'node crashed ({tag}): {proc.stderr}\n{proc.stdout}'
     return proc.stdout.strip()

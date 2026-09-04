@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -9,8 +10,34 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.standalone_model_routing import (
+    standalone_model_routing_envelope,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _access(**kwargs):
+    from tofu_agent import ModelRoutingConfig
+
+    return ModelRoutingConfig.from_mapping(
+        standalone_model_routing_envelope(**kwargs))
+
+
+def _patch_route_slot(monkeypatch, *, disposed=None):
+    import lib.model_routing.dispatch_adapter as adapter
+
+    handle = SimpleNamespace(slot=SimpleNamespace())
+    monkeypatch.setattr(
+        adapter, 'mint_ephemeral_slot', lambda **_kwargs: handle)
+    monkeypatch.setattr(
+        adapter,
+        'dispose_ephemeral_slot',
+        lambda value: (
+            disposed.append(value) if disposed is not None else None) or True,
+    )
+    return handle
 
 
 @pytest.mark.unit
@@ -33,90 +60,86 @@ def test_pure_conversation_contract_does_not_boot_storage_repository():
 
 
 @pytest.mark.unit
-def test_provider_config_accepts_three_fields_and_redacts_secret():
-    from tofu_agent import ProviderConfig
+def test_model_routing_config_validates_full_envelope_and_redacts_secrets():
+    from tofu_agent import AgentConfigurationError, ModelRoutingConfig
 
-    provider = ProviderConfig.from_mapping({
-        'endpoint': 'https://models.example/v1/',
-        'api_key': 'sk-never-print-this',
-        'model': 'model-a',
+    access = _access(secret='sk-never-print-this')
+    assert access.model == {
+        'creator_id': 'test-creator', 'model_id': 'model-a'}
+    assert access.model_id == 'model-a'
+    assert 'sk-never-print-this' not in repr(access)
+    assert 'sk-never-print-this' not in str(access.public_dict())
+    assert access.public_dict()['credential_secret_hints'] == {
+        'provider-a-secret': 'configured'}
+
+    missing = standalone_model_routing_envelope()
+    missing['credential_secrets'] = {}
+    with pytest.raises(AgentConfigurationError, match='missing enabled'):
+        ModelRoutingConfig.from_mapping(missing)
+    with pytest.raises(AgentConfigurationError, match='structured object'):
+        ModelRoutingConfig.from_mapping({
+            **standalone_model_routing_envelope(),
+            'model': 'model-a',
+        })
+
+
+@pytest.mark.unit
+def test_model_routing_env_uses_one_exact_json_authority():
+    from tofu_agent import AgentConfigurationError, ModelRoutingConfig
+
+    envelope = standalone_model_routing_envelope()
+    access = ModelRoutingConfig.from_env({
+        'TOFU_AGENT_MODEL_ROUTING': json.dumps(envelope),
+        'TOFU_AGENT_PROVIDER_API_KEY': 'legacy-must-not-be-read',
     })
-
-    assert provider.base_url == 'https://models.example/v1'
-    assert provider.model == 'model-a'
-    assert 'sk-never-print-this' not in repr(provider)
-    assert 'sk-never-print-this' not in str(provider.public_dict())
-    assert provider.public_dict()['has_api_key'] is True
-
-    header_secret = ProviderConfig.from_mapping({
-        'endpoint': 'https://models.example/v1',
-        'api_key': 'sk-hidden',
-        'model': 'model-a',
-        'extra_headers': {'X-Gateway-Secret': 'also-hidden'},
-    })
-    assert 'also-hidden' not in repr(header_secret)
+    assert access is not None
+    assert access.model_id == 'model-a'
+    assert ModelRoutingConfig.from_env({
+        'TOFU_AGENT_PROVIDER_API_KEY': 'legacy-only',
+    }) is None
+    with pytest.raises(AgentConfigurationError, match='valid JSON'):
+        ModelRoutingConfig.from_env({'TOFU_AGENT_MODEL_ROUTING': '{bad'})
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize('field,value', [
-    ('provider', 'not-an-object'),
+    ('model', 'plain-model'),
+    ('routing', []),
+    ('model_routing', 'not-an-object'),
     ('config', []),
     ('capabilities', []),
-    ('tools', {}),
+    ('custom_tools', {}),
 ])
-def test_public_request_rejects_invalid_shapes(field, value):
+def test_public_request_rejects_removed_or_invalid_shapes(field, value):
     from tofu_agent import AgentConfigurationError, AgentRequest
 
     arguments = {
         'messages': [{'role': 'user', 'content': 'hello'}],
+        field: value,
     }
-    request_field = 'custom_tools' if field == 'tools' else field
-    arguments[request_field] = value
     with pytest.raises(AgentConfigurationError):
         AgentRequest(**arguments)
 
 
 @pytest.mark.unit
-def test_provider_env_precedence_and_openai_default():
-    from tofu_agent import ProviderConfig
-
-    provider = ProviderConfig.from_env({
-        'TOFU_AGENT_PROVIDER_API_KEY': 'new-key',
-        'TOFU_AGENT_PROVIDER_MODEL': 'new-model',
-        'LLM_BASE_URL': 'https://legacy.example/v1',
-        'LLM_API_KEY': 'legacy-key',
-        'LLM_MODEL': 'legacy-model',
-    })
-    assert provider is not None
-    assert provider.base_url == 'https://legacy.example/v1'
-    assert provider.api_key == 'new-key'
-    assert provider.model == 'new-model'
-
-    openai = ProviderConfig.from_env({
-        'TOFU_AGENT_PROVIDER_API_KEY': 'key',
-        'TOFU_AGENT_PROVIDER_MODEL': 'gpt-example',
-    })
-    assert openai is not None
-    assert openai.base_url == 'https://api.openai.com/v1'
-
-
-@pytest.mark.unit
-def test_runtime_submits_explicit_principal_as_transient(monkeypatch):
-    """The public composition must never accidentally enter durable paths."""
+def test_runtime_submits_explicit_principal_as_transient(
+    monkeypatch,
+):
     from lib.agent_core.admission import fire_terminal_callbacks
     import lib.tasks_pkg.manager as task_manager
     import lib.tasks_pkg.spawn as task_spawn
-    from tofu_agent import AgentRuntime, ProviderConfig
+    from tofu_agent import AgentRuntime
 
-    captured: dict = {}
+    captured = {}
+    _patch_route_slot(monkeypatch)
 
     def fake_create(conversation_id, messages, config, **kwargs):
-        captured.update({
-            'conversation_id': conversation_id,
-            'messages': messages,
-            'config': config,
-            'kwargs': kwargs,
-        })
+        captured.update(
+            conversation_id=conversation_id,
+            messages=messages,
+            config=config,
+            kwargs=kwargs,
+        )
         return {
             'id': 'task-public-1',
             '_userId': kwargs['principal'].owner_user_id,
@@ -126,20 +149,18 @@ def test_runtime_submits_explicit_principal_as_transient(monkeypatch):
         }
 
     def fake_spawn(task):
-        task.update({
-            'status': 'done',
-            'content': 'ready',
-            'finishReason': 'stop',
-            'usage': {'total_tokens': 3},
-        })
+        task.update(
+            status='done',
+            content='ready',
+            finishReason='stop',
+            usage={'total_tokens': 3},
+        )
         fire_terminal_callbacks(task['id'])
 
     monkeypatch.setattr(task_manager, 'create_task', fake_create)
     monkeypatch.setattr(task_spawn, 'spawn_task', fake_spawn)
-    monkeypatch.setattr(
-        ProviderConfig, 'from_env', classmethod(lambda cls, **_kw: None))
 
-    runtime = AgentRuntime.local(default_model='model-a')
+    runtime = AgentRuntime.local(model_routing=_access())
     try:
         result = runtime.run([{'role': 'user', 'content': 'hello'}])
     finally:
@@ -147,34 +168,30 @@ def test_runtime_submits_explicit_principal_as_transient(monkeypatch):
 
     assert result.ok is True
     assert result.content == 'ready'
+    assert result.model == 'model-a'
+    assert result.provider_id == 'provider-a'
     assert captured['kwargs']['transient'] is True
     assert captured['kwargs']['supersede'] is False
     assert captured['config']['_storageFreeRuntime'] is True
     assert captured['config']['memoryEnabled'] is False
     assert captured['config']['schedulerEnabled'] is False
-    principal = captured['kwargs']['principal']
-    assert principal.subject_id == 'local:developer'
-    assert principal.owner_user_id is not None
+    assert captured['kwargs']['principal'].subject_id == 'local:developer'
     assert runtime.in_flight == 0
 
 
 @pytest.mark.unit
-def test_runtime_disposes_one_shot_provider(monkeypatch):
+def test_runtime_disposes_request_route_exactly_once(monkeypatch):
     from lib.agent_core.admission import fire_terminal_callbacks
-    from lib.llm_dispatch import ephemeral
     import lib.tasks_pkg.manager as task_manager
     import lib.tasks_pkg.spawn as task_spawn
-    from tofu_agent import AgentRuntime, ProviderConfig
+    from tofu_agent import AgentRuntime
 
-    disposed: list[object] = []
-    handle = SimpleNamespace(slot=SimpleNamespace(provider_id='ephemeral-1'))
-    monkeypatch.setattr(ephemeral, 'mint_ephemeral_slot', lambda **_kw: handle)
-    monkeypatch.setattr(
-        ephemeral, 'dispose_ephemeral_slot', lambda value: disposed.append(value))
+    disposed = []
+    handle = _patch_route_slot(monkeypatch, disposed=disposed)
 
     def fake_create(_conversation_id, _messages, _config, **kwargs):
         return {
-            'id': 'task-provider-1',
+            'id': 'task-route-1',
             '_userId': kwargs['principal'].owner_user_id,
             'status': 'queued',
             'events': [],
@@ -187,13 +204,17 @@ def test_runtime_disposes_one_shot_provider(monkeypatch):
 
     monkeypatch.setattr(task_manager, 'create_task', fake_create)
     monkeypatch.setattr(task_spawn, 'spawn_task', fake_spawn)
-    provider = ProviderConfig(
-        base_url='https://models.example/v1', api_key='secret', model='m')
-    runtime = AgentRuntime.local(provider=provider)
+    runtime = AgentRuntime.local(model_routing=_access())
     try:
-        assert runtime.run([{'role': 'user', 'content': 'hi'}]).ok
+        result = runtime.run(
+            [{'role': 'user', 'content': 'hello'}],
+            model={'creator_id': 'test-creator', 'model_id': 'model-a'},
+            routing={'preferred_provider_id': 'provider-a'},
+        )
     finally:
         runtime.close()
+
+    assert result.ok
     assert disposed == [handle]
 
 
@@ -203,18 +224,14 @@ def test_storage_free_runtime_omits_durable_tool_families():
         _build_conv_ref,
         _build_knowledge,
         _build_memory,
-        _build_project_brain,
-        _build_project_brain_write,
+        _build_project_integration,
         _build_scheduler,
         _build_search_settings,
     )
     from lib.tools.registry._spec import ToolContext
 
     context = ToolContext(
-        cfg={
-            '_storageFreeRuntime': True,
-            'memoryEnabled': True,
-        },
+        cfg={'_storageFreeRuntime': True, 'memoryEnabled': True},
         task_id='public-tools',
         project_path='/workspace',
         project_enabled=True,
@@ -227,13 +244,11 @@ def test_storage_free_runtime_omits_durable_tool_families():
     )
     context.current_count = 3
     context.has_base_tools = True
-
     for builder in (
         _build_conv_ref,
         _build_knowledge,
         _build_memory,
-        _build_project_brain,
-        _build_project_brain_write,
+        _build_project_integration,
         _build_scheduler,
         _build_search_settings,
     ):
@@ -253,26 +268,24 @@ def test_custom_tool_mode_is_strict_and_exclusive_requires_a_catalog():
 
 @pytest.mark.unit
 def test_runtime_exclusive_custom_tools_use_exact_explicit_authority(
-        monkeypatch):
+    monkeypatch,
+):
     from lib.agent_core.admission import fire_terminal_callbacks
     import lib.tasks_pkg.manager as task_manager
     import lib.tasks_pkg.spawn as task_spawn
-    from tofu_agent import AgentRuntime, ProviderConfig
+    from tofu_agent import AgentRuntime
 
+    _patch_route_slot(monkeypatch)
     schema = {
         'type': 'function',
         'function': {
             'name': 'custom__run_command',
-            'description': 'Run one command in the caller environment.',
-            'parameters': {
-                'type': 'object',
-                'properties': {'command': {'type': 'string'}},
-                'required': ['command'],
-            },
+            'description': 'Run one command.',
+            'parameters': {'type': 'object'},
         },
         'execution': {'mode': 'client'},
     }
-    captured: dict = {}
+    captured = {}
 
     def fake_create(_conversation_id, _messages, config, **kwargs):
         captured['config'] = config
@@ -291,10 +304,7 @@ def test_runtime_exclusive_custom_tools_use_exact_explicit_authority(
 
     monkeypatch.setattr(task_manager, 'create_task', fake_create)
     monkeypatch.setattr(task_spawn, 'spawn_task', fake_spawn)
-    monkeypatch.setattr(
-        ProviderConfig, 'from_env', classmethod(lambda cls, **_kw: None))
-
-    runtime = AgentRuntime.local(default_model='model-a')
+    runtime = AgentRuntime.local(model_routing=_access())
     try:
         result = runtime.run(
             [{'role': 'user', 'content': 'change the project'}],
@@ -309,7 +319,6 @@ def test_runtime_exclusive_custom_tools_use_exact_explicit_authority(
     assert captured['config']['_explicitToolSchemas'] == [clean]
     assert captured['config']['_customToolSchemas'] == [clean]
     assert captured['config']['_customToolsMode'] == 'exclusive'
-    assert 'execution' not in captured['config']['_explicitToolSchemas'][0]
 
 
 @pytest.mark.unit
@@ -318,21 +327,29 @@ def test_execution_resolves_custom_call_with_its_owner(monkeypatch):
     from tofu_agent import AgentExecution, AgentRequest, AgentRuntime
     import lib.tools.tool_env as tool_env
 
-    principal = PrincipalContext.user(
-        subject_id='evaluation:owner', owner_user_id=73)
     runtime = AgentRuntime(
-        principal=principal, default_model='model-a', max_inflight=1)
+        principal=PrincipalContext.user(
+            subject_id='evaluation:owner', owner_user_id=73),
+        model_routing=_access(),
+        max_inflight=1,
+    )
     task = {
-        'id': 'task-client-call', '_userId': 73, 'status': 'running',
-        'events': [], 'toolRounds': [],
+        'id': 'task-client-call',
+        '_userId': 73,
+        'status': 'running',
+        'events': [],
+        'toolRounds': [],
     }
     request = AgentRequest(
         messages=[{'role': 'user', 'content': 'hello'}],
-        model='model-a', request_id='run-client-call')
+        model={'creator_id': 'test-creator', 'model_id': 'model-a'},
+        request_id='run-client-call',
+    )
     execution = AgentExecution(
-        runtime, task, request, model='model-a', public_provider_id='')
+        runtime, task, request, model='model-a',
+        public_provider_id='provider-a')
     runtime._executions[task['id']] = execution
-    captured: dict = {}
+    captured = {}
 
     def fake_resolve(call_id, content, **kwargs):
         captured.update(call_id=call_id, content=content, **kwargs)
@@ -362,7 +379,7 @@ def test_execution_evidence_snapshot_is_versioned_and_credential_free():
     runtime = AgentRuntime(
         principal=PrincipalContext.user(
             subject_id='evaluation:owner', owner_user_id=19),
-        default_model='model-a',
+        model_routing=_access(secret='must-not-be-projected'),
     )
     clean_schema = {
         'type': 'function',
@@ -384,20 +401,12 @@ def test_execution_evidence_snapshot_is_versioned_and_credential_free():
         'usage': {'prompt_tokens': 11, 'completion_tokens': 3},
         'apiRounds': [{'round': 1, 'usage': {
             'prompt_tokens': 11,
-            '_wire_private': 'must-not-be-projected-either',
             '_dispatch': {
                 'key': 'private-key-name',
-                'key_tail': 'cret',
-                'provider_id': 'inline',
+                'provider_id': 'provider-a',
                 'latency_ms': 12,
-                'ttft_ms': 3,
-                'queue_wait_ms': 1.5,
-                'queue_wait_measurement': 'dispatcher_backpressure_only',
             },
         }}],
-        '_contextTelemetryRounds': [{'round': 1, 'toolSchemaTokens': 42}],
-        '_contextCompactionEvents': [],
-        '_toolExposureTelemetry': {'exposedTools': 1},
         'config': {
             'model': 'model-a',
             '_explicitToolSchemas': [clean_schema],
@@ -409,9 +418,12 @@ def test_execution_evidence_snapshot_is_versioned_and_credential_free():
     }
     request = AgentRequest(
         messages=[{'role': 'user', 'content': 'hello'}],
-        model='model-a', request_id='run-evidence')
+        model={'creator_id': 'test-creator', 'model_id': 'model-a'},
+        request_id='run-evidence',
+    )
     execution = AgentExecution(
-        runtime, task, request, model='model-a', public_provider_id='inline')
+        runtime, task, request, model='model-a',
+        public_provider_id='provider-a')
     try:
         evidence = execution.evidence_snapshot()
     finally:
@@ -423,13 +435,6 @@ def test_execution_evidence_snapshot_is_versioned_and_credential_free():
     assert evidence['createdAtUnixMs'] == 10250
     assert evidence['finishedAtUnixMs'] == 12500
     assert evidence['output']['content'] == 'verified answer'
-    assert evidence['output']['charCount'] == len('verified answer')
-    dispatch = evidence['apiRounds'][0]['usage']['_dispatch']
-    assert dispatch == {
-        'provider_id': 'inline', 'latency_ms': 12, 'ttft_ms': 3,
-        'queue_wait_ms': 1.5,
-        'queue_wait_measurement': 'dispatcher_backpressure_only',
-    }
     rendered = repr(evidence)
     assert 'must-not-be-projected' not in rendered
     assert 'must not enter evaluation evidence' not in rendered

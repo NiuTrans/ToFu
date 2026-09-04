@@ -446,3 +446,24 @@ def test_finalize_seam_verdict_rules(rec):
     _finalize_tool_round(task, 4, r4, [{'toolName': 't'}],
                          status='whatever-future')
     assert r4['status'] == 'done'
+
+
+def test_finalize_preserves_settled_tEnd(rec):
+    """A late finalize must not clobber the completion time a settle already
+    stamped — ``_settle_tool_result`` preserves an existing truthy ``tEnd``,
+    and ``_finalize_tool_round`` must follow the same rule."""
+    from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+
+    task = _mk_task()
+    original_end = int(time.time() * 1000) - 7000
+    round_entry = {
+        'query': 'q-tEnd', 'toolCallId': 'tc-tEnd', 'status': 'searching',
+        'tStart': original_end - 1500, 'tEnd': original_end,
+    }
+    _finalize_tool_round(task, 1, round_entry, [{'toolName': 't'}])
+
+    assert round_entry['tEnd'] == original_end, (
+        'late finalize overwrote the settled tEnd; got %r'
+        % (round_entry['tEnd'],))
+    assert rec.find('tc-tEnd', 'tool_result')['tEnd'] == original_end, (
+        'the wire frame must carry the preserved clock')

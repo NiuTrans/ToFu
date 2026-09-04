@@ -19,6 +19,10 @@ from lib.turn_activity_timeline import normalize_activity_timeline
 
 PROJECTION_PATCH_VERSION = 1
 
+
+class ProjectionPatchError(ValueError):
+    """A projection patch is malformed or incompatible with its base."""
+
 # Identity belongs to the turn/attempt columns and the client runtime, never
 # inside ``projection`` itself.  Keep this list beside the projection wire
 # helpers so every persistence path (lifecycle edits, manual compaction,
@@ -38,16 +42,28 @@ _PROJECTION_IDENTITY_KEYS = frozenset({
 # ownership boundary.
 PUBLIC_PROJECTION_FIELDS = frozenset({
     'content', 'thinking', 'toolRounds', 'segments', 'usage', 'apiRounds',
-    'lastRoundUsage', 'model', 'preset', 'providerId', 'thinkingDepth',
+    'cost',
+    'lastRoundUsage', 'model', 'preset', 'providerId', 'routeSnapshot',
+    'thinkingDepth',
     'modifiedFiles', 'modifiedFileList', 'fileChanges', 'todoState',
+    'waitingOn',
     'fallbackModel', 'fallbackFrom', 'fallbackReason', 'fallbackKind',
     'translatedContent', 'originalContent', 'translation', 'timestamp',
-    'images', 'videos', 'pdfTexts', 'convRefs', 'replyQuotes', '_branchLanes',
+    'images', 'attachments', 'videos', 'pdfTexts', 'convRefs', 'replyQuotes',
+    '_branchLanes',
     'orchestration', 'provenance', '_inboxInjects', '_peerInjects',
     '_userSteerInjects', '_stallNudges', 'origin', 'contextSnapshot',
     'compaction', 'imageGeneration', 'proposedPlan', 'planExecution',
-    'activityTimeline',
+    'activityTimeline', 'timingTrace', 'rolledBack',
 })
+
+# Rewind history lane: each entry preserves one interrupted attempt's
+# discarded terminal text so a resume never silently erases rendered
+# history. Bounded: only the newest entries survive a resume chain.
+_ROLLED_BACK_FIELDS = frozenset({
+    'blockId', 'attemptId', 'at', 'content', 'thinking',
+})
+_ROLLED_BACK_MAX_ENTRIES = 4
 
 _VALID_INITIATORS = frozenset({
     'human', 'autopilot', 'proactive', 'timer', 'brain', 'peer', 'operator',
@@ -358,6 +374,41 @@ def _normalize_tool_rounds(value: Any) -> Any:
     return normalized
 
 
+def _normalize_rolled_back(value: Any) -> list[dict[str, Any]] | None:
+    """Fail-closed repair of the rolledBack lane.
+
+    Entries with neither lane text are dropped entirely; scalar fields are
+    coerced to their canonical types; unknown keys are stripped.
+    """
+    if not isinstance(value, list):
+        return None
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        entry = _copy_named_mapping(item, _ROLLED_BACK_FIELDS)
+        content = entry.get('content')
+        if not isinstance(content, str) or not content:
+            entry.pop('content', None)
+        thinking = entry.get('thinking')
+        if not isinstance(thinking, str) or not thinking:
+            entry.pop('thinking', None)
+        if 'content' not in entry and 'thinking' not in entry:
+            continue
+        entry['blockId'] = str(entry.get('blockId') or 'rolled-back')
+        if entry.get('attemptId') is not None:
+            entry['attemptId'] = str(entry['attemptId'])
+        else:
+            entry.pop('attemptId', None)
+        at = entry.get('at')
+        if (isinstance(at, bool) or not isinstance(at, int) or at <= 0):
+            entry.pop('at', None)
+        normalized.append(entry)
+    if not normalized:
+        return None
+    return normalized[-_ROLLED_BACK_MAX_ENTRIES:]
+
+
 def normalize_projection_document(raw: Any) -> dict[str, Any]:
     """Return the canonical JSON document stored in a turn projection.
 
@@ -380,6 +431,16 @@ def normalize_projection_document(raw: Any) -> dict[str, Any]:
     if 'content' not in result and 'text' in result:
         result['content'] = result.get('text') or ''
     result.setdefault('content', '')
+    if not isinstance(result.get('routeSnapshot'), Mapping):
+        model_id = str(result.get('model') or '').strip()
+        provider_id = str(result.get('providerId') or '').strip()
+        if model_id or provider_id:
+            from lib.model_routing import legacy_route_snapshot
+            result['routeSnapshot'] = legacy_route_snapshot(
+                model_id=model_id,
+                provider_id=provider_id,
+                route_id='',
+            )
     if 'toolRounds' in result:
         result['toolRounds'] = _normalize_tool_rounds(result['toolRounds'])
     origin = _normalize_origin(source)
@@ -420,6 +481,11 @@ def normalize_projection_document(raw: Any) -> dict[str, Any]:
         result['planExecution'] = plan_execution
     else:
         result.pop('planExecution', None)
+    rolled_back = _normalize_rolled_back(source.get('rolledBack'))
+    if rolled_back is not None:
+        result['rolledBack'] = rolled_back
+    else:
+        result.pop('rolledBack', None)
     return {
         key: value for key, value in result.items()
         if key in PUBLIC_PROJECTION_FIELDS
@@ -452,6 +518,146 @@ def build_projection_patch(
         "targetRevision": int(target_revision),
         "operations": operations,
     }
+
+
+def apply_projection_patch(
+    projection: Mapping[str, Any] | None,
+    raw_patch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply one versioned patch without mutating the prior projection.
+
+    This is the storage-side twin of
+    ``frontend/src/core/projection-patch.ts::applyProjectionPatch``.  Storage
+    callers validate the named revisions against their locked row; this pure
+    helper owns only operation/path validation and copy-on-write application.
+    """
+    if not isinstance(raw_patch, Mapping):
+        raise ProjectionPatchError("Projection patch must be an object")
+    version = raw_patch.get("version")
+    operations = raw_patch.get("operations")
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or version != PROJECTION_PATCH_VERSION
+            or not isinstance(operations, list)):
+        raise ProjectionPatchError("Projection patch version is unsupported")
+
+    next_projection: Any = dict(projection or {})
+    for raw_operation in operations:
+        if not isinstance(raw_operation, Mapping):
+            raise ProjectionPatchError("Projection patch operation must be an object")
+        path = raw_operation.get("path")
+        if not isinstance(path, list) or not all(
+            (isinstance(part, str)
+             or (isinstance(part, int) and not isinstance(part, bool)
+                 and part >= 0))
+            for part in path
+        ):
+            raise ProjectionPatchError("Projection patch path is invalid")
+        operation = raw_operation.get("op")
+        if operation == "set":
+            next_projection = _update_at_path(
+                next_projection, path,
+                lambda _current: raw_operation.get("value"),
+            )
+        elif operation == "remove":
+            next_projection = _remove_at_path(next_projection, path)
+        elif operation == "append_text":
+            value = raw_operation.get("value")
+            if not isinstance(value, str):
+                raise ProjectionPatchError(
+                    "Projection text append value must be a string")
+
+            def _append_text(current: Any) -> str:
+                if not isinstance(current, str):
+                    raise ProjectionPatchError(
+                        "Projection text append target must be a string")
+                return current + value
+
+            next_projection = _update_at_path(
+                next_projection, path, _append_text)
+        elif operation == "append":
+            value = raw_operation.get("value")
+            if not isinstance(value, list):
+                raise ProjectionPatchError(
+                    "Projection list append value must be an array")
+
+            def _append_list(current: Any) -> list[Any]:
+                if not isinstance(current, list):
+                    raise ProjectionPatchError(
+                        "Projection list append target must be an array")
+                return [*current, *value]
+
+            next_projection = _update_at_path(
+                next_projection, path, _append_list)
+        elif operation == "truncate":
+            length = raw_operation.get("length")
+            if (not isinstance(length, int) or isinstance(length, bool)
+                    or length < 0):
+                raise ProjectionPatchError(
+                    "Projection list truncation length is invalid")
+
+            def _truncate(current: Any) -> list[Any]:
+                if not isinstance(current, list) or length > len(current):
+                    raise ProjectionPatchError(
+                        "Projection list truncation target is invalid")
+                return current[:length]
+
+            next_projection = _update_at_path(
+                next_projection, path, _truncate)
+        else:
+            raise ProjectionPatchError("Projection patch operation is unsupported")
+
+    if not isinstance(next_projection, dict):
+        raise ProjectionPatchError("Projection patch result must be an object")
+    return next_projection
+
+
+def _update_at_path(
+    value: Any,
+    path: list[str | int],
+    update: Any,
+    depth: int = 0,
+) -> Any:
+    if depth >= len(path):
+        return update(value)
+    part = path[depth]
+    if isinstance(value, list):
+        if not isinstance(part, int) or isinstance(part, bool) or part >= len(value):
+            raise ProjectionPatchError("Projection patch array path is out of bounds")
+        next_value = list(value)
+        next_value[part] = _update_at_path(
+            next_value[part], path, update, depth + 1)
+        return next_value
+    if not isinstance(value, Mapping) or not isinstance(part, str):
+        raise ProjectionPatchError("Projection patch object path is invalid")
+    next_value = dict(value)
+    next_value[part] = _update_at_path(
+        next_value.get(part), path, update, depth + 1)
+    return next_value
+
+
+def _remove_at_path(value: Any, path: list[str | int]) -> Any:
+    if not path:
+        raise ProjectionPatchError("Projection patch cannot remove its root")
+    parent_path = path[:-1]
+    leaf = path[-1]
+
+    def _remove(container: Any) -> Any:
+        if isinstance(container, list):
+            if (not isinstance(leaf, int) or isinstance(leaf, bool)
+                    or leaf >= len(container)):
+                raise ProjectionPatchError(
+                    "Projection patch array removal is out of bounds")
+            next_container = list(container)
+            next_container.pop(leaf)
+            return next_container
+        if not isinstance(container, Mapping) or not isinstance(leaf, str):
+            raise ProjectionPatchError(
+                "Projection patch object removal is invalid")
+        next_container = dict(container)
+        next_container.pop(leaf, None)
+        return next_container
+
+    return _update_at_path(value, parent_path, _remove)
 
 
 def _diff_value(
@@ -518,6 +724,8 @@ def _is_json_sequence(value: Any) -> bool:
 __all__ = [
     "PUBLIC_PROJECTION_FIELDS",
     "PROJECTION_PATCH_VERSION",
+    "ProjectionPatchError",
+    "apply_projection_patch",
     "build_projection_patch",
     "normalize_projection_document",
 ]
