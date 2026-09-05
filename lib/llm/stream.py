@@ -289,8 +289,15 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             # ── Desktop-egress branch (S3): when the server's own egress to
             # this host is geo-blocked / dead, open the stream through the
             # user's desktop agent instead. Probe is per-host cached (300s).
-            from lib.desktop import egress as _eg
-            if adapter:
+            try:
+                from lib.desktop import egress as _eg
+            except ModuleNotFoundError:
+                # Headless wheels exclude lib.storage (a server-persistence
+                # concern), which lib.desktop.egress imports at module top.
+                # Without it no desktop relay can exist, so every route
+                # resolves to direct.
+                _eg = None
+            if adapter and _eg is not None:
                 # ── Subscription-adapter branch (E4): the provider IS a
                 # CLIProxyAPI sidecar on the user's desktop agent; its
                 # base_url is loopback-ON-THE-AGENT, which the server can
@@ -326,11 +333,14 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 _network_latency_ms = (
                     time.monotonic() - _conn_t0) * 1000.0
             else:
-                try:
-                    _egress_route = _eg.route_request(
-                        plan.url, user_id=_owner_scope)
-                except _eg.EgressUnavailable as e:
-                    raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+                if _eg is None:
+                    _egress_route = 'direct'
+                else:
+                    try:
+                        _egress_route = _eg.route_request(
+                            plan.url, user_id=_owner_scope)
+                    except _eg.EgressUnavailable as e:
+                        raise EndpointUnreachableError(str(e), base_url=plan.url) from e
                 if _egress_route != 'direct':
                     _set_network_route({
                         'routeId': 'desktop:egress',

@@ -300,13 +300,21 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
     # Desktop-agent fallback still uses the proven sync bridge reader.  Keep
     # it off the event loop; server-side direct/proxy routes stay native async
     # below and share the same health plan as the sync transport.
-    from lib.desktop import egress as _eg
     try:
-        egress_route = await asyncio.to_thread(
-            _eg.route_request, plan.url, user_id=_owner_scope)
-    except _eg.EgressUnavailable as e:
-        _close_abandoned_raw_dumper(plan, log_prefix, 'egress failure')
-        raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+        from lib.desktop import egress as _eg
+    except ModuleNotFoundError:
+        # Headless wheels exclude lib.storage (see stream.py); no desktop
+        # relay exists there, so routing resolves to direct.
+        _eg = None
+    if _eg is None:
+        egress_route = 'direct'
+    else:
+        try:
+            egress_route = await asyncio.to_thread(
+                _eg.route_request, plan.url, user_id=_owner_scope)
+        except _eg.EgressUnavailable as e:
+            _close_abandoned_raw_dumper(plan, log_prefix, 'egress failure')
+            raise EndpointUnreachableError(str(e), base_url=plan.url) from e
     if egress_route != 'direct':
         # The sync bridge attempt prepares its own plan; close this abandoned
         # async plan first so debug raw-dump file descriptors never leak.
